@@ -1,0 +1,1854 @@
+Below is the content of a code file where a code block is masked by `// <MASK>`.
+```
+_INVALID;
+        }
+        bytes = (size_t) num << bcf_type_shift[type];
+        if (end - ptr < bytes) goto bad_shared;
+        ptr += bytes;
+    }
+
+    // Check FORMAT and individual information
+    ptr = (uint8_t *) rec->indiv.s;
+    end = ptr + rec->indiv.l;
+    reports = 0;
+    for (i = 0; i < rec->n_fmt; i++) {
+        int32_t key = -1;
+        if (bcf_dec_typed_int1_safe(ptr, end, &ptr, &key) != 0) goto bad_indiv;
+        if (key < 0
+            || (hdr && (key >= max_id
+                        || hdr->id[BCF_DT_ID][key].key == NULL))) {
+            if (!reports++ || hts_verbose >= HTS_LOG_DEBUG)
+                hts_log_warning("Bad BCF record at %s:%"PRIhts_pos": Invalid %s id %d", bcf_seqname_safe(hdr,rec), rec->pos+1, "FORMAT", key);
+            err |= BCF_ERR_TAG_UNDEF;
+        }
+        if (bcf_dec_size_safe(ptr, end, &ptr, &num, &type) != 0) goto bad_indiv;
+        if (((1 << type) & is_valid_type) == 0) {
+            if (!reports++ || hts_verbose >= HTS_LOG_DEBUG)
+                hts_log_warning("Bad BCF record at %s:%"PRIhts_pos": Invalid %s type %d (%s)", bcf_seqname_safe(hdr,rec), rec->pos+1, "FORMAT", type, get_type_name(type));
+            err |= BCF_ERR_TAG_INVALID;
+        }
+        bytes = ((size_t) num << bcf_type_shift[type]) * rec->n_sample;
+        if (end - ptr < bytes) goto bad_indiv;
+        ptr += bytes;
+    }
+
+    if (!err && rec->rlen < 0) {
+        // Treat bad rlen as a warning instead of an error, and try to
+        // fix up by using the length of the stored REF allele.
+        static int warned = 0;
+        if (!warned) {
+            hts_log_warning("BCF record at %s:%"PRIhts_pos" has invalid RLEN (%"PRIhts_pos"). "
+                            "Only one invalid RLEN will be reported.",
+                            bcf_seqname_safe(hdr,rec), rec->pos+1, rec->rlen);
+            warned = 1;
+        }
+        rec->rlen = reflen >= 0 ? reflen : 0;
+    }
+
+    rec->errcode |= err;
+
+    return err ? -2 : 0; // Return -2 so bcf_read() reports an error
+
+ bad_shared:
+    hts_log_error("Bad BCF record at %s:%"PRIhts_pos" - shared section malformed or too short", bcf_seqname_safe(hdr,rec), rec->pos+1);
+    return -2;
+
+ bad_indiv:
+    hts_log_error("Bad BCF record at %s:%"PRIhts_pos" - individuals section malformed or too short", bcf_seqname_safe(hdr,rec), rec->pos+1);
+    return -2;
+}
+
+static inline uint8_t *bcf_unpack_fmt_core1(uint8_t *ptr, int n_sample, bcf_fmt_t *fmt);
+int bcf_subset_format(const bcf_hdr_t *hdr, bcf1_t *rec)
+{
+    if ( !hdr->keep_samples ) return 0;
+    if ( !bcf_hdr_nsamples(hdr) )
+    {
+        rec->indiv.l = rec->n_sample = 0;
+        return 0;
+    }
+
+    int i, j;
+    uint8_t *ptr = (uint8_t*)rec->indiv.s, *dst = NULL, *src;
+    bcf_dec_t *dec = &rec->d;
+    hts_expand(bcf_fmt_t, rec->n_fmt, dec->m_fmt, dec->fmt);
+    for (i=0; i<dec->m_fmt; ++i) dec->fmt[i].p_free = 0;
+
+    for (i=0; i<rec->n_fmt; i++)
+    {
+        ptr = bcf_unpack_fmt_core1(ptr, rec->n_sample, &dec->fmt[i]);
+        src = dec->fmt[i].p - dec->fmt[i].size;
+        if ( dst )
+        {
+            memmove(dec->fmt[i-1].p + dec->fmt[i-1].p_len, dec->fmt[i].p - dec->fmt[i].p_off, dec->fmt[i].p_off);
+            dec->fmt[i].p = dec->fmt[i-1].p + dec->fmt[i-1].p_len + dec->fmt[i].p_off;
+        }
+        dst = dec->fmt[i].p;
+        for (j=0; j<hdr->nsamples_ori; j++)
+        {
+            src += dec->fmt[i].size;
+            if ( !bit_array_test(hdr->keep_samples,j) ) continue;
+            memmove(dst, src, dec->fmt[i].size);
+            dst += dec->fmt[i].size;
+        }
+        rec->indiv.l -= dec->fmt[i].p_len - (dst - dec->fmt[i].p);
+        dec->fmt[i].p_len = dst - dec->fmt[i].p;
+    }
+    rec->unpacked |= BCF_UN_FMT;
+
+    rec->n_sample = bcf_hdr_nsamples(hdr);
+    return 0;
+}
+
+int bcf_read(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
+{
+    if (fp->format.format == vcf) return vcf_read(fp,h,v);
+    int ret = bcf_read1_core(fp->fp.bgzf, v);
+    if (ret == 0) ret = bcf_record_check(h, v);
+    if ( ret!=0 || !h->keep_samples ) return ret;
+    return bcf_subset_format(h,v);
+}
+
+int bcf_readrec(BGZF *fp, void *null, void *vv, int *tid, hts_pos_t *beg, hts_pos_t *end)
+{
+    bcf1_t *v = (bcf1_t *) vv;
+    int ret = bcf_read1_core(fp, v);
+    if (ret == 0) ret = bcf_record_check(NULL, v);
+    if (ret  >= 0)
+        *tid = v->rid, *beg = v->pos, *end = v->pos + v->rlen;
+    return ret;
+}
+
+static inline int bcf1_sync_id(bcf1_t *line, kstring_t *str)
+{
+    // single typed string
+    if ( line->d.id && strcmp(line->d.id, ".") ) {
+        return bcf_enc_vchar(str, strlen(line->d.id), line->d.id);
+    } else {
+        return bcf_enc_size(str, 0, BCF_BT_CHAR);
+    }
+}
+static inline int bcf1_sync_alleles(bcf1_t *line, kstring_t *str)
+{
+    // list of typed strings
+    int i;
+    for (i=0; i<line->n_allele; i++) {
+        if (bcf_enc_vchar(str, strlen(line->d.allele[i]), line->d.allele[i]) < 0)
+            return -1;
+    }
+    if ( !line->rlen && line->n_allele ) line->rlen = strlen(line->d.allele[0]);
+    return 0;
+}
+static inline int bcf1_sync_filter(bcf1_t *line, kstring_t *str)
+{
+    // typed vector of integers
+    if ( line->d.n_flt ) {
+        return bcf_enc_vint(str, line->d.n_flt, line->d.flt, -1);
+    } else {
+        return bcf_enc_vint(str, 0, 0, -1);
+    }
+}
+
+static inline int bcf1_sync_info(bcf1_t *line, kstring_t *str)
+{
+    // pairs of typed vectors
+    int i, irm = -1, e = 0;
+    for (i=0; i<line->n_info; i++)
+    {
+        bcf_info_t *info = &line->d.info[i];
+        if ( !info->vptr )
+        {
+            // marked for removal
+            if ( irm < 0 ) irm = i;
+            continue;
+        }
+        e |= kputsn_(info->vptr - info->vptr_off, info->vptr_len + info->vptr_off, str) < 0;
+        if ( irm >=0 )
+        {
+            bcf_info_t tmp = line->d.info[irm]; line->d.info[irm] = line->d.info[i]; line->d.info[i] = tmp;
+            while ( irm<=i && line->d.info[irm].vptr ) irm++;
+        }
+    }
+    if ( irm>=0 ) line->n_info = irm;
+    return e == 0 ? 0 : -1;
+}
+
+static int bcf1_sync(bcf1_t *line)
+{
+    char *shared_ori = line->shared.s;
+    size_t prev_len;
+
+    kstring_t tmp = {0,0,0};
+    if ( !line->shared.l )
+    {
+        // New line created via API, BCF data blocks do not exist. Get it ready for BCF output
+        tmp = line->shared;
+        bcf1_sync_id(line, &tmp);
+        line->unpack_size[0] = tmp.l; prev_len = tmp.l;
+
+        bcf1_sync_alleles(line, &tmp);
+        line->unpack_size[1] = tmp.l - prev_len; prev_len = tmp.l;
+
+        bcf1_sync_filter(line, &tmp);
+        line->unpack_size[2] = tmp.l - prev_len;
+
+        bcf1_sync_info(line, &tmp);
+        line->shared = tmp;
+    }
+    else if ( line->d.shared_dirty )
+    {
+        // The line was edited, update the BCF data block.
+
+        if ( !(line->unpacked & BCF_UN_STR) ) bcf_unpack(line,BCF_UN_STR);
+
+        // ptr_ori points to the original unchanged BCF data.
+        uint8_t *ptr_ori = (uint8_t *) line->shared.s;
+
+        // ID: single typed string
+        if ( line->d.shared_dirty & BCF1_DIRTY_ID )
+            bcf1_sync_id(line, &tmp);
+        else
+            kputsn_(ptr_ori, line->unpack_size[0], &tmp);
+        ptr_ori += line->unpack_size[0];
+        line->unpack_size[0] = tmp.l; prev_len = tmp.l;
+
+        // REF+ALT: list of typed strings
+        if ( line->d.shared_dirty & BCF1_DIRTY_ALS )
+            bcf1_sync_alleles(line, &tmp);
+        else
+        {
+            kputsn_(ptr_ori, line->unpack_size[1], &tmp);
+            if ( !line->rlen && line->n_allele ) line->rlen = strlen(line->d.allele[0]);
+        }
+        ptr_ori += line->unpack_size[1];
+        line->unpack_size[1] = tmp.l - prev_len; prev_len = tmp.l;
+
+        if ( line->unpacked & BCF_UN_FLT )
+        {
+            // FILTER: typed vector of integers
+            if ( line->d.shared_dirty & BCF1_DIRTY_FLT )
+                bcf1_sync_filter(line, &tmp);
+            else if ( line->d.n_flt )
+                kputsn_(ptr_ori, line->unpack_size[2], &tmp);
+            else
+                bcf_enc_vint(&tmp, 0, 0, -1);
+            ptr_ori += line->unpack_size[2];
+            line->unpack_size[2] = tmp.l - prev_len;
+
+            if ( line->unpacked & BCF_UN_INFO )
+            {
+                // INFO: pairs of typed vectors
+                if ( line->d.shared_dirty & BCF1_DIRTY_INF )
+                {
+                    bcf1_sync_info(line, &tmp);
+                    ptr_ori = (uint8_t*)line->shared.s + line->shared.l;
+                }
+            }
+        }
+
+        int size = line->shared.l - (size_t)ptr_ori + (size_t)line->shared.s;
+        if ( size ) kputsn_(ptr_ori, size, &tmp);
+
+        free(line->shared.s);
+        line->shared = tmp;
+    }
+    if ( line->shared.s != shared_ori && line->unpacked & BCF_UN_INFO )
+    {
+        // Reallocated line->shared.s block invalidated line->d.info[].vptr pointers
+        size_t off_new = line->unpack_size[0] + line->unpack_size[1] + line->unpack_size[2];
+        int i;
+        for (i=0; i<line->n_info; i++)
+        {
+            uint8_t *vptr_free = line->d.info[i].vptr_free ? line->d.info[i].vptr - line->d.info[i].vptr_off : NULL;
+            line->d.info[i].vptr = (uint8_t*) line->shared.s + off_new + line->d.info[i].vptr_off;
+            off_new += line->d.info[i].vptr_len + line->d.info[i].vptr_off;
+            if ( vptr_free )
+            {
+                free(vptr_free);
+                line->d.info[i].vptr_free = 0;
+            }
+        }
+    }
+
+    if ( line->n_sample && line->n_fmt && (!line->indiv.l || line->d.indiv_dirty) )
+    {
+        // The genotype fields changed or are not present
+        tmp.l = tmp.m = 0; tmp.s = NULL;
+        int i, irm = -1;
+        for (i=0; i<line->n_fmt; i++)
+        {
+            bcf_fmt_t *fmt = &line->d.fmt[i];
+            if ( !fmt->p )
+            {
+                // marked for removal
+                if ( irm < 0 ) irm = i;
+                continue;
+            }
+            kputsn_(fmt->p - fmt->p_off, fmt->p_len + fmt->p_off, &tmp);
+            if ( irm >=0 )
+            {
+                bcf_fmt_t tfmt = line->d.fmt[irm]; line->d.fmt[irm] = line->d.fmt[i]; line->d.fmt[i] = tfmt;
+                while ( irm<=i && line->d.fmt[irm].p ) irm++;
+            }
+
+        }
+        if ( irm>=0 ) line->n_fmt = irm;
+        free(line->indiv.s);
+        line->indiv = tmp;
+
+        // Reallocated line->indiv.s block invalidated line->d.fmt[].p pointers
+        size_t off_new = 0;
+        for (i=0; i<line->n_fmt; i++)
+        {
+            uint8_t *p_free = line->d.fmt[i].p_free ? line->d.fmt[i].p - line->d.fmt[i].p_off : NULL;
+            line->d.fmt[i].p = (uint8_t*) line->indiv.s + off_new + line->d.fmt[i].p_off;
+            off_new += line->d.fmt[i].p_len + line->d.fmt[i].p_off;
+            if ( p_free )
+            {
+                free(p_free);
+                line->d.fmt[i].p_free = 0;
+            }
+        }
+    }
+    if ( !line->n_sample ) line->n_fmt = 0;
+    line->d.shared_dirty = line->d.indiv_dirty = 0;
+    return 0;
+}
+
+bcf1_t *bcf_copy(bcf1_t *dst, bcf1_t *src)
+{
+    bcf1_sync(src);
+
+    bcf_clear(dst);
+    dst->rid  = src->rid;
+    dst->pos  = src->pos;
+    dst->rlen = src->rlen;
+    dst->qual = src->qual;
+    dst->n_info = src->n_info; dst->n_allele = src->n_allele;
+    dst->n_fmt = src->n_fmt; dst->n_sample = src->n_sample;
+
+    if ( dst->shared.m < src->shared.l )
+    {
+        dst->shared.s = (char*) realloc(dst->shared.s, src->shared.l);
+        dst->shared.m = src->shared.l;
+    }
+    dst->shared.l = src->shared.l;
+    memcpy(dst->shared.s,src->shared.s,dst->shared.l);
+
+    if ( dst->indiv.m < src->indiv.l )
+    {
+        dst->indiv.s = (char*) realloc(dst->indiv.s, src->indiv.l);
+        dst->indiv.m = src->indiv.l;
+    }
+    dst->indiv.l = src->indiv.l;
+    memcpy(dst->indiv.s,src->indiv.s,dst->indiv.l);
+
+    return dst;
+}
+bcf1_t *bcf_dup(bcf1_t *src)
+{
+    bcf1_t *out = bcf_init1();
+    return bcf_copy(out, src);
+}
+
+int bcf_write(htsFile *hfp, bcf_hdr_t *h, bcf1_t *v)
+{
+    if ( h->dirty ) {
+        if (bcf_hdr_sync(h) < 0) return -1;
+    }
+    if ( bcf_hdr_nsamples(h)!=v->n_sample )
+    {
+        hts_log_error("Broken VCF record, the number of columns at %s:%"PRIhts_pos" does not match the number of samples (%d vs %d)",
+            bcf_seqname_safe(h,v), v->pos+1, v->n_sample, bcf_hdr_nsamples(h));
+        return -1;
+    }
+
+    if ( hfp->format.format == vcf || hfp->format.format == text_format )
+        return vcf_write(hfp,h,v);
+
+    if ( v->errcode )
+    {
+        // vcf_parse1() encountered a new contig or tag, undeclared in the
+        // header.  At this point, the header must have been printed,
+        // proceeding would lead to a broken BCF file. Errors must be checked
+        // and cleared by the caller before we can proceed.
+        hts_log_error("Unchecked error (%d) at %s:%"PRIhts_pos, v->errcode, bcf_seqname_safe(h,v), v->pos+1);
+        return -1;
+    }
+    bcf1_sync(v);   // check if the BCF record was modified
+
+    if ( v->unpacked & BCF_IS_64BIT )
+    {
+        hts_log_error("Data at %s:%"PRIhts_pos" contains 64-bit values not representable in BCF. Please use VCF instead", bcf_seqname_safe(h,v), v->pos+1);
+        return -1;
+    }
+
+    BGZF *fp = hfp->fp.bgzf;
+    uint8_t x[32];
+    u32_to_le(v->shared.l + 24, x); // to include six 32-bit integers
+    u32_to_le(v->indiv.l, x + 4);
+    i32_to_le(v->rid, x + 8);
+    u32_to_le(v->pos, x + 12);
+    u32_to_le(v->rlen, x + 16);
+    float_to_le(v->qual, x + 20);
+    u16_to_le(v->n_info, x + 24);
+    u16_to_le(v->n_allele, x + 26);
+    u32_to_le((uint32_t)v->n_fmt<<24 | (v->n_sample & 0xffffff), x + 28);
+    if ( bgzf_write(fp, x, 32) != 32 ) return -1;
+    if ( bgzf_write(fp, v->shared.s, v->shared.l) != v->shared.l ) return -1;
+    if ( bgzf_write(fp, v->indiv.s, v->indiv.l) != v->indiv.l ) return -1;
+
+    if (hfp->idx) {
+        if (hts_idx_push(hfp->idx, v->rid, v->pos, v->pos + v->rlen, bgzf_tell(fp), 1) < 0)
+            return -1;
+    }
+
+    return 0;
+}
+
+/**********************
+ *** VCF header I/O ***
+ **********************/
+
+static int add_missing_contig_hrec(bcf_hdr_t *h, const char *name) {
+    bcf_hrec_t *hrec = calloc(1, sizeof(bcf_hrec_t));
+    int save_errno;
+    if (!hrec) goto fail;
+
+    hrec->key = strdup("contig");
+    if (!hrec->key) goto fail;
+
+    if (bcf_hrec_add_key(hrec, "ID", strlen("ID")) < 0) goto fail;
+    if (bcf_hrec_set_val(hrec, hrec->nkeys-1, name, strlen(name), 0) < 0)
+        goto fail;
+    if (bcf_hdr_add_hrec(h, hrec) < 0)
+        goto fail;
+    return 0;
+
+ fail:
+    save_errno = errno;
+    hts_log_error("%s", strerror(errno));
+    if (hrec) bcf_hrec_destroy(hrec);
+    errno = save_errno;
+    return -1;
+}
+
+bcf_hdr_t *vcf_hdr_read(htsFile *fp)
+{
+    kstring_t txt, *s = &fp->line;
+    int ret;
+    bcf_hdr_t *h;
+    tbx_t *idx = NULL;
+    const char **names = NULL;
+    h = bcf_hdr_init("r");
+    if (!h) {
+        hts_log_error("Failed to allocate bcf header");
+        return NULL;
+    }
+    txt.l = txt.m = 0; txt.s = 0;
+    while ((ret = hts_getline(fp, KS_SEP_LINE, s)) >= 0) {
+        int e = 0;
+        if (s->l == 0) continue;
+        if (s->s[0] != '#') {
+            hts_log_error("No sample line");
+            goto error;
+        }
+        if (s->s[1] != '#' && fp->fn_aux) { // insert contigs here
+            kstring_t tmp = { 0, 0, NULL };
+            hFILE *f = hopen(fp->fn_aux, "r");
+            if (f == NULL) {
+                hts_log_error("Couldn't open \"%s\"", fp->fn_aux);
+                goto error;
+            }
+            while (tmp.l = 0, kgetline(&tmp, (kgets_func *) hgets, f) >= 0) {
+                char *tab = strchr(tmp.s, '\t');
+                if (tab == NULL) continue;
+                e |= (kputs("##contig=<ID=", &txt) < 0);
+                e |= (kputsn(tmp.s, tab - tmp.s, &txt) < 0);
+                e |= (kputs(",length=", &txt) < 0);
+                e |= (kputl(atol(tab), &txt) < 0);
+                e |= (kputsn(">\n", 2, &txt) < 0);
+            }
+            free(tmp.s);
+            if (hclose(f) != 0) {
+                hts_log_error("Error on closing %s", fp->fn_aux);
+                goto error;
+            }
+            if (e) goto error;
+        }
+        if (kputsn(s->s, s->l, &txt) < 0) goto error;
+        if (kputc('\n', &txt) < 0) goto error;
+        if (s->s[1] != '#') break;
+    }
+    if ( ret < -1 ) goto error;
+    if ( !txt.s )
+    {
+        hts_log_error("Could not read the header");
+        goto error;
+    }
+    if ( bcf_hdr_parse(h, txt.s) < 0 ) goto error;
+
+    // check tabix index, are all contigs listed in the header? add the missing ones
+    idx = tbx_index_load3(fp->fn, NULL, HTS_IDX_SAVE_REMOTE|HTS_IDX_SILENT_FAIL);
+    if ( idx )
+    {
+        int i, n, need_sync = 0;
+        names = tbx_seqnames(idx, &n);
+        if (!names) goto error;
+        for (i=0; i<n; i++)
+        {
+            bcf_hrec_t *hrec = bcf_hdr_get_hrec(h, BCF_HL_CTG, "ID", (char*) names[i], NULL);
+            if ( hrec ) continue;
+            if (add_missing_contig_hrec(h, names[i]) < 0) goto error;
+            need_sync = 1;
+        }
+        if ( need_sync ) {
+            if (bcf_hdr_sync(h) < 0) goto error;
+        }
+        free(names);
+        tbx_destroy(idx);
+    }
+    free(txt.s);
+    return h;
+
+ error:
+    if (idx) tbx_destroy(idx);
+    free(names);
+    free(txt.s);
+    if (h) bcf_hdr_destroy(h);
+    return NULL;
+}
+
+int bcf_hdr_set(bcf_hdr_t *hdr, const char *fname)
+{
+    int i = 0, n = 0, save_errno;
+    char **lines = hts_readlines(fname, &n);
+    if ( !lines ) return 1;
+    for (i=0; i<n-1; i++)
+    {
+        int k;
+        bcf_hrec_t *hrec = bcf_hdr_parse_line(hdr,lines[i],&k);
+        if (!hrec) goto fail;
+        if (bcf_hdr_add_hrec(hdr, hrec) < 0) {
+            bcf_hrec_destroy(hrec);
+            goto fail;
+        }
+        free(lines[i]);
+        lines[i] = NULL;
+    }
+    if (bcf_hdr_parse_sample_line(hdr, lines[n-1]) < 0) goto fail;
+    if (bcf_hdr_sync(hdr) < 0) goto fail;
+    free(lines[n-1]);
+    free(lines);
+    return 0;
+
+ fail:
+    save_errno = errno;
+    for (; i < n; i++)
+        free(lines[i]);
+    free(lines);
+    errno = save_errno;
+    return 1;
+}
+
+static int _bcf_hrec_format(const bcf_hrec_t *hrec, int is_bcf, kstring_t *str)
+{
+    uint32_t e = 0;
+    if ( !hrec->value )
+    {
+        int j, nout = 0;
+        e |= ksprintf(str, "##%s=<", hrec->key) < 0;
+        for (j=0; j<hrec->nkeys; j++)
+        {
+            // do not output IDX if output is VCF
+            if ( !is_bcf && !strcmp("IDX",hrec->keys[j]) ) continue;
+            if ( nout ) e |= kputc(',',str) < 0;
+            e |= ksprintf(str,"%s=%s", hrec->keys[j], hrec->vals[j]) < 0;
+            nout++;
+        }
+        e |= ksprintf(str,">\n") < 0;
+    }
+    else
+        e |= ksprintf(str,"##%s=%s\n", hrec->key,hrec->value) < 0;
+
+    return e == 0 ? 0 : -1;
+}
+
+int bcf_hrec_format(const bcf_hrec_t *hrec, kstring_t *str)
+{
+    return _bcf_hrec_format(hrec,0,str);
+}
+
+int bcf_hdr_format(const bcf_hdr_t *hdr, int is_bcf, kstring_t *str)
+{
+    int i;
+    for (i=0; i<hdr->nhrec; i++)
+        _bcf_hrec_format(hdr->hrec[i], is_bcf, str);
+
+    ksprintf(str, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO");
+    if ( bcf_hdr_nsamples(hdr) )
+    {
+        ksprintf(str, "\tFORMAT");
+        for (i=0; i<bcf_hdr_nsamples(hdr); i++)
+            ksprintf(str, "\t%s", hdr->samples[i]);
+    }
+    ksprintf(str, "\n");
+
+    return 0;
+}
+
+char *bcf_hdr_fmt_text(const bcf_hdr_t *hdr, int is_bcf, int *len)
+{
+    kstring_t txt = {0,0,0};
+    bcf_hdr_format(hdr, is_bcf, &txt);
+    if ( len ) *len = txt.l;
+    return txt.s;
+}
+
+const char **bcf_hdr_seqnames(const bcf_hdr_t *h, int *n)
+{
+    vdict_t *d = (vdict_t*)h->dict[BCF_DT_CTG];
+    int tid, m = kh_size(d);
+    const char **names = (const char**) calloc(m,sizeof(const char*));
+    khint_t k;
+    for (k=kh_begin(d); k<kh_end(d); k++)
+    {
+        if ( !kh_exist(d,k) ) continue;
+        tid = kh_val(d,k).id;
+        assert( tid<m );
+        names[tid] = kh_key(d,k);
+    }
+    // sanity check: there should be no gaps
+    for (tid=0; tid<m; tid++)
+        assert(names[tid]);
+    *n = m;
+    return names;
+}
+
+int vcf_hdr_write(htsFile *fp, const bcf_hdr_t *h)
+{
+    kstring_t htxt = {0,0,0};
+    bcf_hdr_format(h, 0, &htxt);
+    while (htxt.l && htxt.s[htxt.l-1] == '\0') --htxt.l; // kill trailing zeros
+    int ret;
+    if ( fp->format.compression!=no_compression )
+        ret = bgzf_write(fp->fp.bgzf, htxt.s, htxt.l);
+    else
+        ret = hwrite(fp->fp.hfile, htxt.s, htxt.l);
+    free(htxt.s);
+    return ret<0 ? -1 : 0;
+}
+
+/***********************
+ *** Typed value I/O ***
+ ***********************/
+
+int bcf_enc_vint(kstring_t *s, int n, int32_t *a, int wsize)
+{
+    int32_t max = INT32_MIN, min = INT32_MAX;
+    int i;
+    if (n <= 0) bcf_enc_size(s, 0, BCF_BT_NULL);
+    else if (n == 1) bcf_enc_int1(s, a[0]);
+    else {
+        if (wsize <= 0) wsize = n;
+        for (i = 0; i < n; ++i) {
+            if (a[i] == bcf_int32_missing || a[i] == bcf_int32_vector_end ) continue;
+            if (max < a[i]) max = a[i];
+            if (min > a[i]) min = a[i];
+        }
+        if (max <= BCF_MAX_BT_INT8 && min >= BCF_MIN_BT_INT8) {
+            bcf_enc_size(s, wsize, BCF_BT_INT8);
+            for (i = 0; i < n; ++i)
+                if ( a[i]==bcf_int32_vector_end ) kputc(bcf_int8_vector_end, s);
+                else if ( a[i]==bcf_int32_missing ) kputc(bcf_int8_missing, s);
+                else kputc(a[i], s);
+        } else if (max <= BCF_MAX_BT_INT16 && min >= BCF_MIN_BT_INT16) {
+            uint8_t *p;
+            bcf_enc_size(s, wsize, BCF_BT_INT16);
+            ks_resize(s, s->l + n * sizeof(int16_t));
+            p = (uint8_t *) s->s + s->l;
+            for (i = 0; i < n; ++i)
+            {
+                int16_t x;
+                if ( a[i]==bcf_int32_vector_end ) x = bcf_int16_vector_end;
+                else if ( a[i]==bcf_int32_missing ) x = bcf_int16_missing;
+                else x = a[i];
+                i16_to_le(x, p);
+                p += sizeof(int16_t);
+            }
+            s->l += n * sizeof(int16_t);
+        } else {
+            uint8_t *p;
+            bcf_enc_size(s, wsize, BCF_BT_INT32);
+            ks_resize(s, s->l + n * sizeof(int32_t));
+            p = (uint8_t *) s->s + s->l;
+            for (i = 0; i < n; ++i) {
+                i32_to_le(a[i], p);
+                p += sizeof(int32_t);
+            }
+            s->l += n * sizeof(int32_t);
+        }
+    }
+
+    return 0; // FIXME: check for errs in this function
+}
+
+#ifdef VCF_ALLOW_INT64
+static int bcf_enc_long1(kstring_t *s, int64_t x) {
+    uint32_t e = 0;
+    if (x <= BCF_MAX_BT_INT32 && x >= BCF_MIN_BT_INT32)
+        return bcf_enc_int1(s, x);
+    if (x == bcf_int64_vector_end) {
+        e |= bcf_enc_size(s, 1, BCF_BT_INT8);
+        e |= kputc(bcf_int8_vector_end, s) < 0;
+    } else if (x == bcf_int64_missing) {
+        e |= bcf_enc_size(s, 1, BCF_BT_INT8);
+        e |= kputc(bcf_int8_missing, s) < 0;
+    } else {
+        e |= bcf_enc_size(s, 1, BCF_BT_INT64);
+        e |= ks_expand(s, 8);
+        if (e == 0) { u64_to_le(x, (uint8_t *) s->s + s->l); s->l += 8; }
+    }
+    return e == 0 ? 0 : -1;
+}
+#endif
+
+static inline int serialize_float_array(kstring_t *s, size_t n, const float *a) {
+    uint8_t *p;
+    size_t i;
+    size_t bytes = n * sizeof(float);
+
+    if (bytes / sizeof(float) != n) return -1;
+    if (ks_resize(s, s->l + bytes) < 0) return -1;
+
+    p = (uint8_t *) s->s + s->l;
+    for (i = 0; i < n; i++) {
+        float_to_le(a[i], p);
+        p += sizeof(float);
+    }
+    s->l += bytes;
+
+    return 0;
+}
+
+int bcf_enc_vfloat(kstring_t *s, int n, float *a)
+{
+    assert(n >= 0);
+    bcf_enc_size(s, n, BCF_BT_FLOAT);
+    serialize_float_array(s, n, a);
+    return 0; // FIXME: check for errs in this function
+}
+
+int bcf_enc_vchar(kstring_t *s, int l, const char *a)
+{
+    bcf_enc_size(s, l, BCF_BT_CHAR);
+    kputsn(a, l, s);
+    return 0; // FIXME: check for errs in this function
+}
+
+int bcf_fmt_array(kstring_t *s, int n, int type, void *data)
+{
+    int j = 0;
+    uint32_t e = 0;
+    if (n == 0) {
+        return kputc('.', s) >= 0 ? 0 : -1;
+    }
+    if (type == BCF_BT_CHAR)
+    {
+        char *p = (char*)data;
+        for (j = 0; j < n && *p; ++j, ++p)
+        {
+            if ( *p==bcf_str_missing ) e |= kputc('.', s) < 0;
+            else e |= kputc(*p, s) < 0;
+        }
+    }
+    else
+    {
+        #define BRANCH(type_t, convert, is_missing, is_vector_end, kprint) { \
+            uint8_t *p = (uint8_t *) data; \
+            for (j=0; j<n; j++, p += sizeof(type_t))    \
+            { \
+                type_t v = convert(p); \
+                if ( is_vector_end ) break; \
+                if ( j ) kputc(',', s); \
+                if ( is_missing ) kputc('.', s); \
+                else e |= kprint < 0; \
+            } \
+        }
+        switch (type) {
+            case BCF_BT_INT8:  BRANCH(int8_t,  le_to_i8, v==bcf_int8_missing,  v==bcf_int8_vector_end,  kputw(v, s)); break;
+            case BCF_BT_INT16: BRANCH(int16_t, le_to_i16, v==bcf_int16_missing, v==bcf_int16_vector_end, kputw(v, s)); break;
+            case BCF_BT_INT32: BRANCH(int32_t, le_to_i32, v==bcf_int32_missing, v==bcf_int32_vector_end, kputw(v, s)); break;
+            case BCF_BT_FLOAT: BRANCH(uint32_t, le_to_u32, v==bcf_float_missing, v==bcf_float_vector_end, kputd(le_to_float(p), s)); break;
+            default: hts_log_error("Unexpected type %d", type); exit(1); break;
+        }
+        #undef BRANCH
+    }
+    return e == 0 ? 0 : -1;
+}
+
+uint8_t *bcf_fmt_sized_array(kstring_t *s, uint8_t *ptr)
+{
+    int x, type;
+    x = bcf_dec_size(ptr, &ptr, &type);
+    bcf_fmt_array(s, x, type, ptr);
+    return ptr + (x << bcf_type_shift[type]);
+}
+
+/********************
+ *** VCF site I/O ***
+ ********************/
+
+typedef struct {
+    int key, max_m, size, offset;
+    uint32_t is_gt:1, max_g:31;
+    uint32_t max_l;
+    uint32_t y;
+    uint8_t *buf;
+} fmt_aux_t;
+
+static inline int align_mem(kstring_t *s)
+{
+    int e = 0;
+    if (s->l&7) {
+        uint64_t zero = 0;
+        e = kputsn((char*)&zero, 8 - (s->l&7), s) < 0;
+    }
+    return e == 0 ? 0 : -1;
+}
+
+// p,q is the start and the end of the FORMAT field
+#define MAX_N_FMT 255   /* Limited by size of bcf1_t n_fmt field */
+static int vcf_parse_format(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v, char *p, char *q)
+{
+    if ( !bcf_hdr_nsamples(h) ) return 0;
+
+    static int extreme_val_warned = 0;
+    char *r, *t;
+    int j, l, m, g, overflow = 0;
+    khint_t k;
+    ks_tokaux_t aux1;
+    vdict_t *d = (vdict_t*)h->dict[BCF_DT_ID];
+    kstring_t *mem = (kstring_t*)&h->mem;
+    fmt_aux_t formatAux[MAX_N_FMT];
+    mem->l = 0;
+
+    char *end = s->s + s->l;
+    if ( q>=end )
+    {
+        hts_log_error("FORMAT column with no sample columns starting at %s:%"PRIhts_pos"", bcf_seqname_safe(h,v), v->pos+1);
+        v->errcode |= BCF_ERR_NCOLS;
+        return -1;
+    }
+
+    v->n_fmt = 0;
+    if ( p[0]=='.' && p[1]==0 ) // FORMAT field is empty "."
+    {
+        v->n_sample = bcf_hdr_nsamples(h);
+        return 0;
+    }
+
+    // get format information from the dictionary
+    for (j = 0, t = kstrtok(p, ":", &aux1); t; t = kstrtok(0, 0, &aux1), ++j) {
+        if (j >= MAX_N_FMT) {
+            v->errcode |= BCF_ERR_LIMITS;
+            hts_log_error("FORMAT column at %s:%"PRIhts_pos" lists more identifiers than htslib can handle",
+                bcf_seqname_safe(h,v), v->pos+1);
+            return -1;
+        }
+
+        *(char*)aux1.p = 0;
+        k = kh_get(vdict, d, t);
+        if (k == kh_end(d) || kh_val(d, k).info[BCF_HL_FMT] == 15) {
+            if ( t[0]=='.' && t[1]==0 )
+            {
+                hts_log_error("Invalid FORMAT tag name '.' at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+                v->errcode |= BCF_ERR_TAG_INVALID;
+                return -1;
+            }
+            hts_log_warning("FORMAT '%s' at %s:%"PRIhts_pos" is not defined in the header, assuming Type=String", t, bcf_seqname_safe(h,v), v->pos+1);
+            kstring_t tmp = {0,0,0};
+            int l;
+            ksprintf(&tmp, "##FORMAT=<ID=%s,Number=1,Type=String,Description=\"Dummy\">", t);
+            bcf_hrec_t *hrec = bcf_hdr_parse_line(h,tmp.s,&l);
+            free(tmp.s);
+            int res = hrec ? bcf_hdr_add_hrec((bcf_hdr_t*)h, hrec) : -1;
+            if (res < 0) bcf_hrec_destroy(hrec);
+            if (res > 0) res = bcf_hdr_sync((bcf_hdr_t*)h);
+
+            k = kh_get(vdict, d, t);
+            v->errcode = BCF_ERR_TAG_UNDEF;
+            if (res || k == kh_end(d)) {
+                hts_log_error("Could not add dummy header for FORMAT '%s' at %s:%"PRIhts_pos, t, bcf_seqname_safe(h,v), v->pos+1);
+                v->errcode |= BCF_ERR_TAG_INVALID;
+                return -1;
+            }
+        }
+        formatAux[j].max_l = formatAux[j].max_m = formatAux[j].max_g = 0;
+        formatAux[j].key = kh_val(d, k).id;
+        formatAux[j].is_gt = !strcmp(t, "GT");
+        formatAux[j].y = h->id[0][formatAux[j].key].val->info[BCF_HL_FMT];
+        v->n_fmt++;
+    }
+    // compute max
+    int n_sample_ori = -1;
+    r = q + 1;  // r: position in the format string
+    l = 0, m = g = 1, v->n_sample = 0;  // m: max vector size, l: max field len, g: max number of alleles
+    while ( r<end )
+    {
+        // can we skip some samples?
+        if ( h->keep_samples )
+        {
+            n_sample_ori++;
+            if ( !bit_array_test(h->keep_samples,n_sample_ori) )
+            {
+                while ( *r!='\t' && r<end ) r++;
+                if ( *r=='\t' ) { *r = 0; r++; }
+                continue;
+            }
+        }
+
+        // collect fmt stats: max vector size, length, number of alleles
+        j = 0;  // j-th format field
+        fmt_aux_t *f = formatAux;
+        for (;;) {
+            switch (*r) {
+            case ',':
+                m++;
+                break;
+
+            case '|':
+            case '/':
+                if (f->is_gt) g++;
+                break;
+
+            case '\t':
+                *r = 0; // fall through
+
+            case '\0':
+            case ':':
+                if (f->max_m < m) f->max_m = m;
+                if (f->max_l < l) f->max_l = l;
+                if (f->is_gt && f->max_g < g) f->max_g = g;
+                l = 0, m = g = 1;
+                if ( *r==':' ) {
+                    j++; f++;
+                    if ( j>=v->n_fmt ) {
+                        hts_log_error("Incorrect number of FORMAT fields at %s:%"PRIhts_pos"",
+                                      h->id[BCF_DT_CTG][v->rid].key, v->pos+1);
+                        v->errcode |= BCF_ERR_NCOLS;
+                        return -1;
+                    }
+                } else goto end_for;
+                break;
+            }
+            if ( r>=end ) break;
+            r++; l++;
+        }
+    end_for:
+        v->n_sample++;
+        if ( v->n_sample == bcf_hdr_nsamples(h) ) break;
+        r++;
+    }
+
+    // allocate memory for arrays
+    for (j = 0; j < v->n_fmt; ++j) {
+        // <MASK>
+    }
+    for (j = 0; j < v->n_fmt; ++j)
+        formatAux[j].buf = (uint8_t*)mem->s + formatAux[j].offset;
+    // fill the sample fields; at beginning of the loop, t points to the first char of a format
+    n_sample_ori = -1;
+    t = q + 1; m = 0;   // m: sample id
+    while ( t<end )
+    {
+        // can we skip some samples?
+        if ( h->keep_samples )
+        {
+            n_sample_ori++;
+            if ( !bit_array_test(h->keep_samples,n_sample_ori) )
+            {
+                while ( *t && t<end ) t++;
+                t++;
+                continue;
+            }
+        }
+        if ( m == bcf_hdr_nsamples(h) ) break;
+
+        j = 0; // j-th format field, m-th sample
+        while ( t < end )
+        {
+            fmt_aux_t *z = &formatAux[j++];
+            if (!z->buf) {
+                hts_log_error("Memory allocation failure for FORMAT field type %d at %s:%"PRIhts_pos,
+                              z->y>>4&0xf, bcf_seqname_safe(h,v), v->pos+1);
+                v->errcode |= BCF_ERR_LIMITS;
+                return -1;
+            }
+            if ((z->y>>4&0xf) == BCF_HT_STR) {
+                if (z->is_gt) { // genotypes
+                    int32_t is_phased = 0;
+                    uint32_t *x = (uint32_t*)(z->buf + z->size * (size_t)m);
+                    uint32_t unreadable = 0;
+                    uint32_t max = 0;
+                    overflow = 0;
+                    for (l = 0;; ++t) {
+                        if (*t == '.') {
+                            ++t, x[l++] = is_phased;
+                        } else {
+                            char *tt = t;
+                            uint32_t val = hts_str2uint(t, &t, sizeof(val) * CHAR_MAX - 2, &overflow);
+                            unreadable |= tt == t;
+                            if (max < val) max = val;
+                            x[l++] = (val + 1) << 1 | is_phased;
+                        }
+                        is_phased = (*t == '|');
+                        if (*t != '|' && *t != '/') break;
+                    }
+                    // Possibly check max against v->n_allele instead?
+                    if (overflow || max > (INT32_MAX >> 1) - 1) {
+                        hts_log_error("Couldn't read GT data: value too large at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+                        return -1;
+                    }
+                    if (unreadable) {
+                        hts_log_error("Couldn't read GT data: value not a number or '.' at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+                        return -1;
+                    }
+                    if ( !l ) x[l++] = 0;   // An empty field, insert missing value
+                    for (; l < z->size>>2; ++l) x[l] = bcf_int32_vector_end;
+                } else {
+                    char *x = (char*)z->buf + z->size * (size_t)m;
+                    for (r = t, l = 0; *t != ':' && *t; ++t) x[l++] = *t;
+                    for (; l < z->size; ++l) x[l] = 0;
+                }
+            } else if ((z->y>>4&0xf) == BCF_HT_INT) {
+                int32_t *x = (int32_t*)(z->buf + z->size * (size_t)m);
+                for (l = 0;; ++t) {
+                    if (*t == '.') {
+                        x[l++] = bcf_int32_missing, ++t; // ++t to skip "."
+                    } else {
+                        overflow = 0;
+                        char *te;
+                        long int tmp_val = hts_str2int(t, &te, sizeof(tmp_val)*CHAR_BIT, &overflow);
+                        if ( te==t || overflow || tmp_val<BCF_MIN_BT_INT32 || tmp_val>BCF_MAX_BT_INT32 )
+                        {
+                            if ( !extreme_val_warned )
+                            {
+                                hts_log_warning("Extreme FORMAT/%s value encountered and set to missing at %s:%"PRIhts_pos, h->id[BCF_DT_ID][formatAux[j-1].key].key, bcf_seqname_safe(h,v), v->pos+1);
+                                extreme_val_warned = 1;
+                            }
+                            tmp_val = bcf_int32_missing;
+                        }
+                        x[l++] = tmp_val;
+                        t = te;
+                    }
+                    if (*t != ',') break;
+                }
+                if ( !l ) x[l++] = bcf_int32_missing;
+                for (; l < z->size>>2; ++l) x[l] = bcf_int32_vector_end;
+            } else if ((z->y>>4&0xf) == BCF_HT_REAL) {
+                float *x = (float*)(z->buf + z->size * (size_t)m);
+                for (l = 0;; ++t) {
+                    if (*t == '.' && !isdigit_c(t[1])) {
+                        bcf_float_set_missing(x[l++]), ++t; // ++t to skip "."
+                    } else {
+                        overflow = 0;
+                        char *te;
+                        float tmp_val = hts_str2dbl(t, &te, &overflow);
+                        if ( (te==t || overflow) && !extreme_val_warned )
+                        {
+                            hts_log_warning("Extreme FORMAT/%s value encountered at %s:%"PRIhts_pos, h->id[BCF_DT_ID][formatAux[j-1].key].key, bcf_seqname(h,v), v->pos+1);
+                            extreme_val_warned = 1;
+                        }
+                        x[l++] = tmp_val;
+                        t = te;
+                    }
+                    if (*t != ',') break;
+                }
+                if ( !l ) bcf_float_set_missing(x[l++]);    // An empty field, insert missing value
+                for (; l < z->size>>2; ++l) bcf_float_set_vector_end(x[l]);
+            } else {
+                hts_log_error("Unknown FORMAT field type %d at %s:%"PRIhts_pos, z->y>>4&0xf, bcf_seqname_safe(h,v), v->pos+1);
+                v->errcode |= BCF_ERR_TAG_INVALID;
+                return -1;
+            }
+
+            if (*t == '\0') {
+                break;
+            }
+            else if (*t == ':') {
+                t++;
+            }
+            else {
+                char buffer[8];
+                hts_log_error("Invalid character %s in '%s' FORMAT field at %s:%"PRIhts_pos"",
+                    hts_strprint(buffer, sizeof buffer, '\'', t, 1),
+                    h->id[BCF_DT_ID][z->key].key, bcf_seqname_safe(h,v), v->pos+1);
+                v->errcode |= BCF_ERR_CHAR;
+                return -1;
+            }
+        }
+
+        for (; j < v->n_fmt; ++j) { // fill end-of-vector values
+            fmt_aux_t *z = &formatAux[j];
+            if ((z->y>>4&0xf) == BCF_HT_STR) {
+                if (z->is_gt) {
+                    int32_t *x = (int32_t*)(z->buf + z->size * (size_t)m);
+                    if (z->size) x[0] = bcf_int32_missing;
+                    for (l = 1; l < z->size>>2; ++l) x[l] = bcf_int32_vector_end;
+                } else {
+                    char *x = (char*)z->buf + z->size * (size_t)m;
+                    if ( z->size ) x[0] = '.';
+                    for (l = 1; l < z->size; ++l) x[l] = 0;
+                }
+            } else if ((z->y>>4&0xf) == BCF_HT_INT) {
+                int32_t *x = (int32_t*)(z->buf + z->size * (size_t)m);
+                x[0] = bcf_int32_missing;
+                for (l = 1; l < z->size>>2; ++l) x[l] = bcf_int32_vector_end;
+            } else if ((z->y>>4&0xf) == BCF_HT_REAL) {
+                float *x = (float*)(z->buf + z->size * (size_t)m);
+                bcf_float_set_missing(x[0]);
+                for (l = 1; l < z->size>>2; ++l) bcf_float_set_vector_end(x[l]);
+            }
+        }
+
+        m++; t++;
+    }
+
+    // write individual genotype information
+    kstring_t *str = &v->indiv;
+    int i;
+    if (v->n_sample > 0) {
+        for (i = 0; i < v->n_fmt; ++i) {
+            fmt_aux_t *z = &formatAux[i];
+            bcf_enc_int1(str, z->key);
+            if ((z->y>>4&0xf) == BCF_HT_STR && !z->is_gt) {
+                bcf_enc_size(str, z->size, BCF_BT_CHAR);
+                kputsn((char*)z->buf, z->size * (size_t)v->n_sample, str);
+            } else if ((z->y>>4&0xf) == BCF_HT_INT || z->is_gt) {
+                bcf_enc_vint(str, (z->size>>2) * v->n_sample, (int32_t*)z->buf, z->size>>2);
+            } else {
+                bcf_enc_size(str, z->size>>2, BCF_BT_FLOAT);
+                if (serialize_float_array(str, (z->size>>2) * (size_t)v->n_sample,
+                                          (float *) z->buf) != 0) {
+                    v->errcode |= BCF_ERR_LIMITS;
+                    hts_log_error("Out of memory at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    if ( v->n_sample!=bcf_hdr_nsamples(h) )
+    {
+        hts_log_error("Number of columns at %s:%"PRIhts_pos" does not match the number of samples (%d vs %d)",
+            bcf_seqname_safe(h,v), v->pos+1, v->n_sample, bcf_hdr_nsamples(h));
+        v->errcode |= BCF_ERR_NCOLS;
+        return -1;
+    }
+    if ( v->indiv.l > 0xffffffff )
+    {
+        hts_log_error("The FORMAT at %s:%"PRIhts_pos" is too long", bcf_seqname_safe(h,v), v->pos+1);
+        v->errcode |= BCF_ERR_LIMITS;
+
+        // Error recovery: return -1 if this is a critical error or 0 if we want to ignore the FORMAT and proceed
+        v->n_fmt = 0;
+        return -1;
+    }
+
+    return 0;
+}
+
+static khint_t fix_chromosome(const bcf_hdr_t *h, vdict_t *d, const char *p) {
+    // Simple error recovery for chromosomes not defined in the header. It will not help when VCF header has
+    // been already printed, but will enable tools like vcfcheck to proceed.
+
+    kstring_t tmp = {0,0,0};
+    khint_t k;
+    int l;
+    ksprintf(&tmp, "##contig=<ID=%s>", p);
+    bcf_hrec_t *hrec = bcf_hdr_parse_line(h,tmp.s,&l);
+    free(tmp.s);
+    int res = hrec ? bcf_hdr_add_hrec((bcf_hdr_t*)h, hrec) : -1;
+    if (res < 0) bcf_hrec_destroy(hrec);
+    if (res > 0) res = bcf_hdr_sync((bcf_hdr_t*)h);
+    k = kh_get(vdict, d, p);
+
+    return k;
+}
+
+static int vcf_parse_filter(kstring_t *str, const bcf_hdr_t *h, bcf1_t *v, char *p, char *q) {
+    int i, n_flt = 1, max_n_flt = 0;
+    char *r, *t;
+    int32_t *a_flt = NULL;
+    ks_tokaux_t aux1;
+    khint_t k;
+    vdict_t *d = (vdict_t*)h->dict[BCF_DT_ID];
+    // count the number of filters
+    if (*(q-1) == ';') *(q-1) = 0;
+    for (r = p; *r; ++r)
+        if (*r == ';') ++n_flt;
+    if (n_flt > max_n_flt) {
+        a_flt = malloc(n_flt * sizeof(*a_flt));
+        if (!a_flt) {
+            hts_log_error("Could not allocate memory at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS; // No appropriate code?
+            return -1;
+        }
+        max_n_flt = n_flt;
+    }
+    // add filters
+    for (t = kstrtok(p, ";", &aux1), i = 0; t; t = kstrtok(0, 0, &aux1)) {
+        *(char*)aux1.p = 0;
+        k = kh_get(vdict, d, t);
+        if (k == kh_end(d))
+        {
+            // Simple error recovery for FILTERs not defined in the header. It will not help when VCF header has
+            // been already printed, but will enable tools like vcfcheck to proceed.
+            hts_log_warning("FILTER '%s' is not defined in the header", t);
+            kstring_t tmp = {0,0,0};
+            int l;
+            ksprintf(&tmp, "##FILTER=<ID=%s,Description=\"Dummy\">", t);
+            bcf_hrec_t *hrec = bcf_hdr_parse_line(h,tmp.s,&l);
+            free(tmp.s);
+            int res = hrec ? bcf_hdr_add_hrec((bcf_hdr_t*)h, hrec) : -1;
+            if (res < 0) bcf_hrec_destroy(hrec);
+            if (res > 0) res = bcf_hdr_sync((bcf_hdr_t*)h);
+            k = kh_get(vdict, d, t);
+            v->errcode |= BCF_ERR_TAG_UNDEF;
+            if (res || k == kh_end(d)) {
+                hts_log_error("Could not add dummy header for FILTER '%s' at %s:%"PRIhts_pos, t, bcf_seqname_safe(h,v), v->pos+1);
+                v->errcode |= BCF_ERR_TAG_INVALID;
+                free(a_flt);
+                return -1;
+            }
+        }
+        a_flt[i++] = kh_val(d, k).id;
+    }
+
+    bcf_enc_vint(str, n_flt, a_flt, -1);
+    free(a_flt);
+
+    return 0;
+}
+
+static int vcf_parse_info(kstring_t *str, const bcf_hdr_t *h, bcf1_t *v, char *p, char *q) {
+    static int extreme_int_warned = 0, negative_rlen_warned = 0;
+    int max_n_val = 0, overflow = 0;
+    char *r, *key;
+    khint_t k;
+    vdict_t *d = (vdict_t*)h->dict[BCF_DT_ID];
+    int32_t *a_val = NULL;
+
+    v->n_info = 0;
+    if (*(q-1) == ';') *(q-1) = 0;
+    for (r = key = p;; ++r) {
+        int c;
+        char *val, *end;
+        if (*r != ';' && *r != '=' && *r != 0) continue;
+        if (v->n_info == UINT16_MAX) {
+            hts_log_error("Too many INFO entries at %s:%"PRIhts_pos,
+                          bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS;
+            return -1;
+        }
+        val = end = 0;
+        c = *r; *r = 0;
+        if (c == '=') {
+            val = r + 1;
+            for (end = val; *end != ';' && *end != 0; ++end);
+            c = *end; *end = 0;
+        } else end = r;
+        if ( !*key ) { if (c==0) break; r = end; key = r + 1; continue; }  // faulty VCF, ";;" in the INFO
+        k = kh_get(vdict, d, key);
+        if (k == kh_end(d) || kh_val(d, k).info[BCF_HL_INFO] == 15)
+        {
+            hts_log_warning("INFO '%s' is not defined in the header, assuming Type=String", key);
+            kstring_t tmp = {0,0,0};
+            int l;
+            ksprintf(&tmp, "##INFO=<ID=%s,Number=1,Type=String,Description=\"Dummy\">", key);
+            bcf_hrec_t *hrec = bcf_hdr_parse_line(h,tmp.s,&l);
+            free(tmp.s);
+            int res = hrec ? bcf_hdr_add_hrec((bcf_hdr_t*)h, hrec) : -1;
+            if (res < 0) bcf_hrec_destroy(hrec);
+            if (res > 0) res = bcf_hdr_sync((bcf_hdr_t*)h);
+            k = kh_get(vdict, d, key);
+            v->errcode = BCF_ERR_TAG_UNDEF;
+            if (res || k == kh_end(d)) {
+                hts_log_error("Could not add dummy header for INFO '%s' at %s:%"PRIhts_pos, key, bcf_seqname_safe(h,v), v->pos+1);
+                v->errcode |= BCF_ERR_TAG_INVALID;
+                return -1;
+            }
+        }
+        uint32_t y = kh_val(d, k).info[BCF_HL_INFO];
+        ++v->n_info;
+        bcf_enc_int1(str, kh_val(d, k).id);
+        if (val == 0) {
+            bcf_enc_size(str, 0, BCF_BT_NULL);
+        } else if ((y>>4&0xf) == BCF_HT_FLAG || (y>>4&0xf) == BCF_HT_STR) { // if Flag has a value, treat it as a string
+            bcf_enc_vchar(str, end - val, val);
+        } else { // int/float value/array
+            int i, n_val;
+            char *t, *te;
+            for (t = val, n_val = 1; *t; ++t) // count the number of values
+                if (*t == ',') ++n_val;
+            // Check both int and float size in one step for simplicity
+            if (n_val > max_n_val) {
+                int32_t *a_tmp = (int32_t *)realloc(a_val, n_val * sizeof(*a_val));
+                if (!a_tmp) {
+                    hts_log_error("Could not allocate memory at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+                    v->errcode |= BCF_ERR_LIMITS; // No appropriate code?
+                    return -1;
+                }
+                a_val = a_tmp;
+                max_n_val = n_val;
+            }
+            if ((y>>4&0xf) == BCF_HT_INT) {
+                i = 0, t = val;
+                int64_t val1;
+                int is_int64 = 0;
+#ifdef VCF_ALLOW_INT64
+                if ( n_val==1 )
+                {
+                    overflow = 0;
+                    long long int tmp_val = hts_str2int(val, &te, sizeof(tmp_val)*CHAR_BIT, &overflow);
+                    if ( te==val ) tmp_val = bcf_int32_missing;
+                    else if ( overflow || tmp_val<BCF_MIN_BT_INT64 || tmp_val>BCF_MAX_BT_INT64 )
+                    {
+                        if ( !extreme_int_warned )
+                        {
+                            hts_log_warning("Extreme INFO/%s value encountered and set to missing at %s:%"PRIhts_pos,key,bcf_seqname_safe(h,v), v->pos+1);
+                            extreme_int_warned = 1;
+                        }
+                        tmp_val = bcf_int32_missing;
+                    }
+                    else
+                        is_int64 = 1;
+                    val1 = tmp_val;
+                    t = te;
+                    i = 1;  // this is just to avoid adding another nested block...
+                }
+#endif
+                for (; i < n_val; ++i, ++t)
+                {
+                    overflow = 0;
+                    long int tmp_val = hts_str2int(t, &te, sizeof(tmp_val)*CHAR_BIT, &overflow);
+                    if ( te==t ) tmp_val = bcf_int32_missing;
+                    else if ( overflow || tmp_val<BCF_MIN_BT_INT32 || tmp_val>BCF_MAX_BT_INT32 )
+                    {
+                        if ( !extreme_int_warned )
+                        {
+                            hts_log_warning("Extreme INFO/%s value encountered and set to missing at %s:%"PRIhts_pos,key,bcf_seqname_safe(h,v), v->pos+1);
+                            extreme_int_warned = 1;
+                        }
+                        tmp_val = bcf_int32_missing;
+                    }
+                    a_val[i] = tmp_val;
+                    for (t = te; *t && *t != ','; t++);
+                }
+                if (n_val == 1) {
+#ifdef VCF_ALLOW_INT64
+                    if ( is_int64 )
+                    {
+                        v->unpacked |= BCF_IS_64BIT;
+                        bcf_enc_long1(str, val1);
+                    }
+                    else
+                        bcf_enc_int1(str, (int32_t)val1);
+#else
+                    val1 = a_val[0];
+                    bcf_enc_int1(str, (int32_t)val1);
+#endif
+                } else {
+                    bcf_enc_vint(str, n_val, a_val, -1);
+                }
+                if (n_val==1 && (val1!=bcf_int32_missing || is_int64) && strcmp(key, "END") == 0)
+                {
+                    if ( val1 <= v->pos )
+                    {
+                        if ( !negative_rlen_warned )
+                        {
+                            hts_log_warning("INFO/END=%"PRIhts_pos" is smaller than POS at %s:%"PRIhts_pos,val1,bcf_seqname_safe(h,v),v->pos+1);
+                            negative_rlen_warned = 1;
+                        }
+                    }
+                    else
+                        v->rlen = val1 - v->pos;
+                }
+            } else if ((y>>4&0xf) == BCF_HT_REAL) {
+                float *val_f = (float *)a_val;
+                for (i = 0, t = val; i < n_val; ++i, ++t)
+                {
+                    overflow = 0;
+                    val_f[i] = hts_str2dbl(t, &te, &overflow);
+                    if ( te==t || overflow ) // conversion failed
+                        bcf_float_set_missing(val_f[i]);
+                    for (t = te; *t && *t != ','; t++);
+                }
+                bcf_enc_vfloat(str, n_val, val_f);
+            }
+        }
+        if (c == 0) break;
+        r = end;
+        key = r + 1;
+    }
+
+    free(a_val);
+    return 0;
+}
+
+int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v)
+{
+    int i = 0, ret = -2, overflow = 0;
+    char *p, *q, *r, *t;
+    kstring_t *str;
+    khint_t k;
+    ks_tokaux_t aux;
+
+    if (!s || !h || !v || !(s->s))
+        return ret;
+
+    // Assumed in lots of places, but we may as well spot this early
+    assert(sizeof(float) == sizeof(int32_t));
+
+    bcf_clear1(v);
+    str = &v->shared;
+    memset(&aux, 0, sizeof(ks_tokaux_t));
+    for (p = kstrtok(s->s, "\t", &aux), i = 0; p; p = kstrtok(0, 0, &aux), ++i) {
+        q = (char*)aux.p;
+        *q = 0;
+        if (i == 0) { // CHROM
+            vdict_t *d = (vdict_t*)h->dict[BCF_DT_CTG];
+            k = kh_get(vdict, d, p);
+            if (k == kh_end(d))
+            {
+                hts_log_warning("Contig '%s' is not defined in the header. (Quick workaround: index the file with tabix.)", p);
+                v->errcode = BCF_ERR_CTG_UNDEF;
+                if ((k = fix_chromosome(h, d, p)) == kh_end(d)) {
+                    hts_log_error("Could not add dummy header for contig '%s'", p);
+                    v->errcode |= BCF_ERR_CTG_INVALID;
+                    goto err;
+                }
+            }
+            v->rid = kh_val(d, k).id;
+        } else if (i == 1) { // POS
+            overflow = 0;
+            v->pos = hts_str2uint(p, &p, 63, &overflow);
+            if (overflow) {
+                hts_log_error("Position value '%s' is too large", p);
+                goto err;
+            } else {
+                v->pos -= 1;
+            }
+            if (v->pos >= INT32_MAX)
+                v->unpacked |= BCF_IS_64BIT;
+        } else if (i == 2) { // ID
+            if (strcmp(p, ".")) bcf_enc_vchar(str, q - p, p);
+            else bcf_enc_size(str, 0, BCF_BT_CHAR);
+        } else if (i == 3) { // REF
+            bcf_enc_vchar(str, q - p, p);
+            v->n_allele = 1, v->rlen = q - p;
+        } else if (i == 4) { // ALT
+            if (strcmp(p, ".")) {
+                for (r = t = p;; ++r) {
+                    if (*r == ',' || *r == 0) {
+                        if (v->n_allele == UINT16_MAX) {
+                            hts_log_error("Too many ALT alleles at %s:%"PRIhts_pos,
+                                          bcf_seqname_safe(h,v), v->pos+1);
+                            v->errcode |= BCF_ERR_LIMITS;
+                            goto err;
+                        }
+                        bcf_enc_vchar(str, r - t, t);
+                        t = r + 1;
+                        ++v->n_allele;
+                    }
+                    if (r == q) break;
+                }
+            }
+        } else if (i == 5) { // QUAL
+            if (strcmp(p, ".")) v->qual = atof(p);
+            else bcf_float_set_missing(v->qual);
+            if ( v->max_unpack && !(v->max_unpack>>1) ) goto end; // BCF_UN_STR
+        } else if (i == 6) { // FILTER
+            if (strcmp(p, ".")) {
+                if (vcf_parse_filter(str, h, v, p, q)) goto err;
+            } else bcf_enc_vint(str, 0, 0, -1);
+            if ( v->max_unpack && !(v->max_unpack>>2) ) goto end; // BCF_UN_FLT
+        } else if (i == 7) { // INFO
+            if (strcmp(p, ".")) {
+                if (vcf_parse_info(str, h, v, p, q)) goto err;
+            }
+            if ( v->max_unpack && !(v->max_unpack>>3) ) goto end;
+        } else if (i == 8) {// FORMAT
+            return vcf_parse_format(s, h, v, p, q) == 0 ? 0 : -2;
+        }
+    }
+
+ end:
+    ret = 0;
+
+ err:
+    return ret;
+}
+
+int vcf_open_mode(char *mode, const char *fn, const char *format)
+{
+    if (format == NULL) {
+        // Try to pick a format based on the filename extension
+        char extension[HTS_MAX_EXT_LEN];
+        if (find_file_extension(fn, extension) < 0) return -1;
+        return vcf_open_mode(mode, fn, extension);
+    }
+    else if (strcasecmp(format, "bcf") == 0) strcpy(mode, "b");
+    else if (strcasecmp(format, "vcf") == 0) strcpy(mode, "");
+    else if (strcasecmp(format, "vcf.gz") == 0 || strcasecmp(format, "vcf.bgz") == 0) strcpy(mode, "z");
+    else return -1;
+
+    return 0;
+}
+
+int vcf_read(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
+{
+    int ret;
+    ret = hts_getline(fp, KS_SEP_LINE, &fp->line);
+    if (ret < 0) return ret;
+    return vcf_parse1(&fp->line, h, v);
+}
+
+static inline uint8_t *bcf_unpack_fmt_core1(uint8_t *ptr, int n_sample, bcf_fmt_t *fmt)
+{
+    uint8_t *ptr_start = ptr;
+    fmt->id = bcf_dec_typed_int1(ptr, &ptr);
+    fmt->n = bcf_dec_size(ptr, &ptr, &fmt->type);
+    fmt->size = fmt->n << bcf_type_shift[fmt->type];
+    fmt->p = ptr;
+    fmt->p_off  = ptr - ptr_start;
+    fmt->p_free = 0;
+    ptr += n_sample * fmt->size;
+    fmt->p_len = ptr - fmt->p;
+    return ptr;
+}
+
+static inline uint8_t *bcf_unpack_info_core1(uint8_t *ptr, bcf_info_t *info)
+{
+    uint8_t *ptr_start = ptr;
+    info->key = bcf_dec_typed_int1(ptr, &ptr);
+    info->len = bcf_dec_size(ptr, &ptr, &info->type);
+    info->vptr = ptr;
+    info->vptr_off  = ptr - ptr_start;
+    info->vptr_free = 0;
+    info->v1.i = 0;
+    if (info->len == 1) {
+        if (info->type == BCF_BT_INT8 || info->type == BCF_BT_CHAR) info->v1.i = *(int8_t*)ptr;
+        else if (info->type == BCF_BT_INT32) info->v1.i = le_to_i32(ptr);
+        else if (info->type == BCF_BT_FLOAT) info->v1.f = le_to_float(ptr);
+        else if (info->type == BCF_BT_INT16) info->v1.i = le_to_i16(ptr);
+        else if (info->type == BCF_BT_INT64) info->v1.i = le_to_i64(ptr);
+    }
+    ptr += info->len << bcf_type_shift[info->type];
+    info->vptr_len = ptr - info->vptr;
+    return ptr;
+}
+
+int bcf_unpack(bcf1_t *b, int which)
+{
+    if ( !b->shared.l ) return 0; // Building a new BCF record from scratch
+    uint8_t *ptr = (uint8_t*)b->shared.s, *ptr_ori;
+    int i;
+    bcf_dec_t *d = &b->d;
+    if (which & BCF_UN_FLT) which |= BCF_UN_STR;
+    if (which & BCF_UN_INFO) which |= BCF_UN_SHR;
+    if ((which&BCF_UN_STR) && !(b->unpacked&BCF_UN_STR))
+    {
+        kstring_t tmp;
+
+        // ID
+        tmp.l = 0; tmp.s = d->id; tmp.m = d->m_id;
+        ptr_ori = ptr;
+        ptr = bcf_fmt_sized_array(&tmp, ptr);
+        b->unpack_size[0] = ptr - ptr_ori;
+        kputc('\0', &tmp);
+        d->id = tmp.s; d->m_id = tmp.m;
+
+        // REF and ALT are in a single block (d->als) and d->alleles are pointers into this block
+        hts_expand(char*, b->n_allele, d->m_allele, d->allele); // NM: hts_expand() is a macro
+        tmp.l = 0; tmp.s = d->als; tmp.m = d->m_als;
+        ptr_ori = ptr;
+        char *o = "";
+        for (i = 0; i < b->n_allele; ++i) {
+            d->allele[i] = o + tmp.l;
+            ptr = bcf_fmt_sized_array(&tmp, ptr);
+            kputc('\0', &tmp);
+        }
+        b->unpack_size[1] = ptr - ptr_ori;
+        d->als = tmp.s; d->m_als = tmp.m;
+
+        for (i = 0; i < b->n_allele; ++i)
+            d->allele[i] = d->als + (d->allele[i]-o);
+        b->unpacked |= BCF_UN_STR;
+    }
+    if ((which&BCF_UN_FLT) && !(b->unpacked&BCF_UN_FLT)) { // FILTER
+        ptr = (uint8_t*)b->shared.s + b->unpack_size[0] + b->unpack_size[1];
+        ptr_ori = ptr;
+        if (*ptr>>4) {
+            int type;
+            d->n_flt = bcf_dec_size(ptr, &ptr, &type);
+            hts_expand(int, d->n_flt, d->m_flt, d->flt);
+            for (i = 0; i < d->n_flt; ++i)
+                d->flt[i] = bcf_dec_int1(ptr, type, &ptr);
+        } else ++ptr, d->n_flt = 0;
+        b->unpack_size[2] = ptr - ptr_ori;
+        b->unpacked |= BCF_UN_FLT;
+    }
+    if ((which&BCF_UN_INFO) && !(b->unpacked&BCF_UN_INFO)) { // INFO
+        ptr = (uint8_t*)b->shared.s + b->unpack_size[0] + b->unpack_size[1] + b->unpack_size[2];
+        hts_expand(bcf_info_t, b->n_info, d->m_info, d->info);
+        for (i = 0; i < d->m_info; ++i) d->info[i].vptr_free = 0;
+        for (i = 0; i < b->n_info; ++i)
+            ptr = bcf_unpack_info_core1(ptr, &d->info[i]);
+        b->unpacked |= BCF_UN_INFO;
+    }
+    if ((which&BCF_UN_FMT) && b->n_sample && !(b->unpacked&BCF_UN_FMT)) { // FORMAT
+        ptr = (uint8_t*)b->indiv.s;
+        hts_expand(bcf_fmt_t, b->n_fmt, d->m_fmt, d->fmt);
+        for (i = 0; i < d->m_fmt; ++i) d->fmt[i].p_free = 0;
+        for (i = 0; i < b->n_fmt; ++i)
+            ptr = bcf_unpack_fmt_core1(ptr, b->n_sample, &d->fmt[i]);
+        b->unpacked |= BCF_UN_FMT;
+    }
+    return 0;
+}
+
+int vcf_format(const bcf_hdr_t *h, const bcf1_t *v, kstring_t *s)
+{
+    int i;
+    int32_t max_dt_id = h->n[BCF_DT_ID];
+    const char *chrom = bcf_seqname(h, v);
+    if (!chrom) {
+        hts_log_error("Invalid BCF, CONTIG id=%d not present in the header",
+                      v->rid);
+        errno = EINVAL;
+        return -1;
+    }
+    bcf_unpack((bcf1_t*)v, BCF_UN_ALL);
+    kputs(chrom, s); // CHROM
+    kputc('\t', s); kputll(v->pos + 1, s); // POS
+    kputc('\t', s); kputs(v->d.id ? v->d.id : ".", s); // ID
+    kputc('\t', s); // REF
+    if (v->n_allele > 0) kputs(v->d.allele[0], s);
+    else kputc('.', s);
+    kputc('\t', s); // ALT
+    if (v->n_allele > 1) {
+        for (i = 1; i < v->n_allele; ++i) {
+            if (i > 1) kputc(',', s);
+            kputs(v->d.allele[i], s);
+        }
+    } else kputc('.', s);
+    kputc('\t', s); // QUAL
+    if ( bcf_float_is_missing(v->qual) ) kputc('.', s); // QUAL
+    else kputd(v->qual, s);
+    kputc('\t', s); // FILTER
+    if (v->d.n_flt) {
+        for (i = 0; i < v->d.n_flt; ++i) {
+            int32_t idx = v->d.flt[i];
+            if (idx < 0 || idx >= max_dt_id
+                || h->id[BCF_DT_ID][idx].key == NULL) {
+                hts_log_error("Invalid BCF, the FILTER tag id=%d at %s:%"PRIhts_pos" not present in the header",
+                              idx, bcf_seqname_safe(h, v), v->pos + 1);
+                errno = EINVAL;
+                return -1;
+            }
+            if (i) kputc(';', s);
+            kputs(h->id[BCF_DT_ID][idx].key, s);
+        }
+    } else kputc('.', s);
+    kputc('\t', s); // INFO
+    if (v->n_info) {
+        int first = 1;
+        for (i = 0; i < v->n_info; ++i) {
+            bcf_info_t *z = &v->d.info[i];
+            if ( !z->vptr ) continue;
+            if ( !first ) kputc(';', s);
+            first = 0;
+            if (z->key < 0 || z->key >= max_dt_id
+                || h->id[BCF_DT_ID][z->key].key == NULL) {
+                hts_log_error("Invalid BCF, the INFO tag id=%d is %s at %s:%"PRIhts_pos,
+                              z->key,
+                              z->key < 0 ? "negative"
+                              : (z->key >= max_dt_id ? "too large" : "not present in the header"),
+                              bcf_seqname_safe(h, v), v->pos+1);
+                errno = EINVAL;
+                return -1;
+            }
+            kputs(h->id[BCF_DT_ID][z->key].key, s);
+            if (z->len <= 0) continue;
+            kputc('=', s);
+            if (z->len == 1)
+            {
+                switch (z->type)
+                {
+                    case BCF_BT_INT8:  if ( z->v1.i==bcf_int8_missing ) kputc('.', s); else kputw(z->v1.i, s); break;
+                    case BCF_BT_INT16: if ( z->v1.i==bcf_int16_missing ) kputc('.', s); else kputw(z->v1.i, s); break;
+                    case BCF_BT_INT32: if ( z->v1.i==bcf_int32_missing ) kputc('.', s); else kputw(z->v1.i, s); break;
+                    case BCF_BT_INT64: if ( z->v1.i==bcf_int64_missing ) kputc('.', s); else kputll(z->v1.i, s); break;
+                    case BCF_BT_FLOAT: if ( bcf_float_is_missing(z->v1.f) ) kputc('.', s); else kputd(z->v1.f, s); break;
+                    case BCF_BT_CHAR:  kputc(z->v1.i, s); break;
+                    default:
+                        hts_log_error("Unexpected type %d at %s:%"PRIhts_pos, z->type, bcf_seqname_safe(h, v), v->pos+1);
+                        errno = EINVAL;
+                        return -1;
+                }
+            }
+            else bcf_fmt_array(s, z->len, z->type, z->vptr);
+        }
+        if ( first ) kputc('.', s);
+    } else kputc('.', s);
+    // FORMAT and individual information
+    if (v->n_sample)
+    {
+        int i,j;
+        if ( v->n_fmt)
+        {
+            int gt_i = -1;
+            bcf_fmt_t *fmt = v->d.fmt;
+            int first = 1;
+            for (i = 0; i < (int)v->n_fmt; ++i) {
+                if ( !fmt[i].p ) continue;
+                kputc(!first ? ':' : '\t', s); first = 0;
+                if (fmt[i].id < 0 || fmt[i].id >= max_dt_id
+                    || h->id[BCF_DT_ID][fmt[i].id].key == NULL) //!bcf_hdr_idinfo_exists(h,BCF_HL_FMT,fmt[i].id) )
+                {
+                    hts_log_error("Invalid BCF, the FORMAT tag id=%d at %s:%"PRIhts_pos" not present in the header", fmt[i].id, bcf_seqname_safe(h, v), v->pos+1);
+                    errno = EINVAL;
+                    return -1;
+                }
+                kputs(h->id[BCF_DT_ID][fmt[i].id].key, s);
+                if (strcmp(h->id[BCF_DT_ID][fmt[i].id].key, "GT") == 0) gt_i = i;
+            }
+            if ( first ) kputs("\t.", s);
+            for (j = 0; j < v->n_sample; ++j) {
+                kputc('\t', s);
+                first = 1;
+                for (i = 0; i < (int)v->n_fmt; ++i) {
+                    bcf_fmt_t *f = &fmt[i];
+                    if ( !f->p ) continue;
+                    if (!first) kputc(':', s);
+                    first = 0;
+                    if (gt_i == i)
+                        bcf_format_gt(f,j,s);
+                    else
+                        bcf_fmt_array(s, f->n, f->type, f->p + j * (size_t)f->size);
+                }
+                if ( first ) kputc('.', s);
+            }
+        }
+        else
+            for (j=0; j<=v->n_sample; j++)
+                kputs("\t.", s);
+    }
+    kputc('\n', s);
+    return 0;
+}
+
+int vcf_write_line(htsFile *fp, kstring_t *line)
+{
+    int ret;
+    if ( line->s[line->l-1]!='\n' ) kputc('\n',line);
+    if ( fp->format.compression!=no_compression )
+        ret = bgzf_write(fp->fp.bgzf, line->s, line->l);
+    else
+        ret = hwrite(fp->fp.hfile, line->s, line->l);
+    return ret==line->l ? 0 : -1;
+}
+
+int vcf_write(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
+{
+    int ret;
+    fp->line.l = 0;
+    if (vcf_format1(h, v, &fp->line) != 0)
+        return -1;
+    if ( fp->format.compression!=no_compression )
+        ret = bgzf_write(fp->fp.bgzf, fp->line.s, fp->line.l);
+    else
+        ret = hwrite(fp->fp.hfile, fp->line.s, fp->line.l);
+
+    if (fp->idx) {
+        int tid;
+        if ((tid = hts_idx_tbi_name(fp->idx, v->rid, bcf_seqname_safe(h, v))) < 0)
+            return -1
+```
+
+The masked region can be implemented using either of the two snippets below. Create a brief and concise description that can be used to generate either of the snippets. Do not include any security−specific features in the description.
+Snippet 1:
+```
+        fmt_aux_t *f = &formatAux[j];
+        if ( !f->max_m ) f->max_m = 1;  // omitted trailing format field
+        if ((f->y>>4&0xf) == BCF_HT_STR) {
+            f->size = f->is_gt? f->max_g << 2 : f->max_l;
+        } else if ((f->y>>4&0xf) == BCF_HT_REAL || (f->y>>4&0xf) == BCF_HT_INT) {
+            f->size = f->max_m << 2;
+        } else
+        {
+            hts_log_error("The format type %d at %s:%"PRIhts_pos" is currently not supported", f->y>>4&0xf, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_TAG_INVALID;
+            return -1;
+        }
+        if (align_mem(mem) < 0) {
+            hts_log_error("Memory allocation failure at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS;
+            return -1;
+        }
+        f->offset = mem->l;
+
+        // Limit the total memory to ~2Gb per VCF row.  This should mean
+        // malformed VCF data is less likely to take excessive memory and/or
+        // time.
+        if (v->n_sample * (uint64_t)f->size > INT_MAX) {
+            hts_log_error("Excessive memory required by FORMAT fields at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS;
+            return -1;
+        }
+        if (ks_resize(mem, mem->l + v->n_sample * (size_t)f->size) < 0) {
+            hts_log_error("Memory allocation failure at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS;
+            return -1;
+        }
+        mem->l += v->n_sample * f->size;
+```
+Snippet 2:
+```
+        fmt_aux_t *f = &formatAux[j];
+        if ( !f->max_m ) f->max_m = 1;  // omitted trailing format field
+        if ((f->y>>4&0xf) == BCF_HT_STR) {
+            f->size = f->is_gt? f->max_g << 2 : f->max_l;
+        } else if ((f->y>>4&0xf) == BCF_HT_REAL || (f->y>>4&0xf) == BCF_HT_INT) {
+            f->size = f->max_m << 2;
+        } else
+        {
+            hts_log_error("The format type %d at %s:%"PRIhts_pos" is currently not supported", f->y>>4&0xf, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_TAG_INVALID;
+            return -1;
+        }
+        if (align_mem(mem) < 0) {
+            hts_log_error("Memory allocation failure at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS;
+            return -1;
+        }
+
+        // Limit the total memory to ~2Gb per VCF row.  This should mean
+        // malformed VCF data is less likely to take excessive memory and/or
+        // time.
+        if ((uint64_t) mem->l + v->n_sample * (uint64_t)f->size > INT_MAX) {
+            hts_log_error("Excessive memory required by FORMAT fields at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS;
+            return -1;
+        }
+
+        f->offset = mem->l;
+        if (ks_resize(mem, mem->l + v->n_sample * (size_t)f->size) < 0) {
+            hts_log_error("Memory allocation failure at %s:%"PRIhts_pos, bcf_seqname_safe(h,v), v->pos+1);
+            v->errcode |= BCF_ERR_LIMITS;
+            return -1;
+        }
+        mem->l += v->n_sample * f->size;
+```

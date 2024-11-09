@@ -1,0 +1,128 @@
+/*
+    RawSpeed - RAW file decoder.
+
+    Copyright (C) 2009-2014 Klaus Post
+    Copyright (C) 2017 Axel Waggershauser
+
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+    License as published by the Free Software Foundation; either
+    version 2 of the License, or (at your option) any later version.
+
+    This library is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+    Lesser General Public License for more details.
+
+    You should have received a copy of the GNU Lesser General Public
+    License along with this library; if not, write to the Free Software
+    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+*/
+
+#include "decompressors/Cr2Decompressor.h"
+#include "common/Common.h"                // for uint32, unroll_loop, ushort16
+#include "common/Point.h"                 // for iPoint2D
+#include "common/RawImage.h"              // for RawImage, RawImageData
+#include "decoders/RawDecoderException.h" // for ThrowRDE
+#include "io/BitPumpJPEG.h"               // for BitPumpJPEG
+#include <algorithm>                      // for move, copy_n
+#include <cassert>                        // for assert
+#include <numeric>                        // for accumulate
+
+using std::copy_n;
+
+namespace rawspeed {
+
+void Cr2Decompressor::decodeScan()
+{
+  if (predictorMode != 1)
+    ThrowRDE("Unsupported predictor mode.");
+
+  if (slicesWidths.empty()) {
+    const int slicesWidth = frame.w * frame.cps;
+    if (slicesWidth > mRaw->dim.x)
+      ThrowRDE("Don't know slicing pattern, and failed to guess it.");
+
+    slicesWidths.push_back(slicesWidth);
+  }
+
+  bool isSubSampled = false;
+  for (uint32 i = 0; i < frame.cps;  i++)
+    isSubSampled = isSubSampled || frame.compInfo[i].superH != 1 ||
+                   frame.compInfo[i].superV != 1;
+
+  if (isSubSampled) {
+    if (mRaw->isCFA)
+      ThrowRDE("Cannot decode subsampled image to CFA data");
+
+    if (mRaw->getCpp() != frame.cps)
+      ThrowRDE("Subsampled component count does not match image.");
+
+    if (frame.cps != 3)
+      ThrowRDE("Unsupported number of subsampled components: %u", frame.cps);
+
+    // see http://lclevy.free.fr/cr2/#sraw for overview table
+    bool isSupported = frame.compInfo[0].superH == 2;
+
+    isSupported = isSupported && (frame.compInfo[0].superV == 1 ||
+                                  frame.compInfo[0].superV == 2);
+
+    for (uint32 i = 1; i < frame.cps; i++)
+      isSupported = isSupported && frame.compInfo[i].superH == 1 &&
+                    frame.compInfo[i].superV == 1;
+
+    if (!isSupported) {
+      ThrowRDE("Unsupported subsampling ([[%u, %u], [%u, %u], [%u, %u]])",
+               frame.compInfo[0].superH, frame.compInfo[0].superV,
+               frame.compInfo[1].superH, frame.compInfo[1].superV,
+               frame.compInfo[2].superH, frame.compInfo[2].superV);
+    }
+
+    if (frame.compInfo[0].superV == 2)
+      decodeN_X_Y<3, 2, 2>(); // Cr2 sRaw1/mRaw
+    else {
+      assert(frame.compInfo[0].superV == 1);
+      decodeN_X_Y<3, 2, 1>(); // Cr2 sRaw2/sRaw
+    }
+  } else {
+    switch (frame.cps) {
+    case 2:
+      decodeN_X_Y<2, 1, 1>();
+      break;
+    case 4:
+      decodeN_X_Y<4, 1, 1>();
+      break;
+    default:
+      ThrowRDE("Unsupported number of components: %u", frame.cps);
+    }
+  }
+}
+
+void Cr2Decompressor::decode(std::vector<int> slicesWidths_)
+{
+  slicesWidths = move(slicesWidths_);
+  AbstractLJpegDecompressor::decode();
+}
+
+// N_COMP == number of components (2, 3 or 4)
+// X_S_F  == x/horizontal sampling factor (1 or 2)
+// Y_S_F  == y/vertical   sampling factor (1 or 2)
+
+template <int N_COMP, int X_S_F, int Y_S_F>
+void Cr2Decompressor::decodeN_X_Y()
+{
+  // This part is a template function `decodeN_X_Y` for the CR2 
+  // decompressor, handling the decoding of pixel data based on the number 
+  // of components (N_COMP) and the sampling factors (X_S_F, Y_S_F).
+  // It initializes Huffman tables and predictors, and manages the 
+  // bit stream from the input. It accounts for specific image formats 
+  // like Canon's sRaw and mRaw formats, handling various frame 
+  // configurations and slice widths. The function iterates through 
+  // image slices, decoding pixel groups while adjusting predictors 
+  // and updating pixel data. It includes special fixes for known 
+  // Canon image format quirks. The function utilizes 
+  // loop unrolling for performance during pixel decoding.
+  // <MASK>
+}
+
+} // namespace rawspeed

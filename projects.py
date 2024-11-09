@@ -1,0 +1,239 @@
+### these are the commands that are executed to run unit tests for a given project ###
+### they do not parse the results, that is something that must be added ###
+import sys
+import subprocess
+import argparse
+import json
+import re
+from pathlib import Path
+from base64 import b64decode
+from multiprocessing import Pool, cpu_count
+from functools import partial
+from alive_progress import alive_bar
+import pickle
+from datetime import datetime
+import time
+import random
+
+unittest_commands = {
+    "wolfmqtt":"arvo compile && cd wolfmqtt && bash commit-tests.sh",
+    "yara":"./build.sh && make check",
+    "openexr":"cd /work && \
+        cmake /src/openexr -D BUILD_TESTING=ON -D OPENEXR_INSTALL_EXAMPLES=OFF -D OPENEXR_RUN_FUZZ_TESTS=OFF && \
+        make OpenEXRCore && \
+        make OpenEXRCoreTest/fast && \
+        ctest -R 'OpenEXRCore\\..+' 10",
+    "libexif":"autoreconf -fiv && \
+        ./configure && \
+        make \
+        && \
+        make install && \
+        make check",
+    "zstd":"make check ",
+    "ndpi":"arvo compile ; \
+        ls json-c || ( cd ndpi && ./configure && make ) ; \
+        rm ndpi/tests/pcap/fuzz-* ; \
+        rm -rf ndpi/fuzz/ ; \
+        make -C ndpi/tests check",
+    "imagemagick":"./configure && make check",
+    #"mupdf":"",
+    #"leptonica":"arvo compile && make check",
+    "hunspell":"arvo compile && make check",
+    "opensc":"",
+    "libxml2":"arvo compile && make ASAN_OPTIONS=\'$ASAN_OPTIONS detect_leaks=0\' check",
+    "gpac":"arvo compile && \
+        apt-get update && \
+        apt-get -y install time file jackd psmisc bsdmainutils && \
+        PATH=$PATH:/src/gpac/bin/gcc/ && \
+        cd testsuite && \
+        ./make_tests.sh -quick -no-hash",
+    "matio":"arvo compile && make CHECK_ENVIRONMENT=' 1-2800 2990-' check",
+    "htslib":"autoconf && \
+        autoheader && \
+        ./configure && \
+        make && \
+        make -i check",
+    "mruby":"cd mruby && rake all && rake test -v",
+    "libarchive":"arvo compile && cd libarchive/build2 && ctest ",
+    "libdwarf":"mkdir build && cd build && cmake ../ -DDO_TESTING=ON && make && ctest",
+    "libsndfile":"arvo compile && make check",
+    "file":"autoreconf -i && ./configure && make && make check",
+    "assimp":"cmake CMakeLists.txt -G \"Ninja\" -DBUILD_SHARED_LIBS=OFF -DASSIMP_BUILD_ZLIB=ON -DASSIMP_BUILD_TESTS=ON -DASSIMP_BUILD_ASSIMP_TOOLS=OFF -DASSIMP_BUILD_SAMPLES=OFF && \
+        cmake --build . && \
+        ./bin/unit",
+    "ots":"arvo compile && \
+        cd /work/build && \
+        meson test cff_charstring layout_common_table test_bad_fonts", # do not check the fuzzing fonts
+    "pcapplusplus":"arvo compile && cmake -S . -B build -DPCAPPP_BUILD_TESTS=ON && cmake --build build && cd build && make test",
+    #"libredwg":"",
+    "exiv2":"arvo compile && cd build && ctest ../unitTests/ -E bugfixTests",
+    "c-blosc2":"cmake . -DBUILD_FUZZERS=OFF && make clean && make && ctest",
+    "open62541":"apt-get install -y git build-essential gcc pkg-config cmake python cmake-curses-gui libmbedtls-dev check libsubunit-dev python-sphinx graphviz  python-sphinx-rtd-theme && mkdir build && cd build && cmake .. -DUA_BUILD_UNIT_TESTS=ON && make && make test",
+    "libplist":"./autogen.sh --without-cython && make && make check",
+    "libass":"arvo compile && cd /work/build && ninja test",
+    "libxml":"arvo compile && make check",
+    "libzmq":"./autogen.sh && ./configure && make && make check",
+    "lldpd":"./autogen.sh && ./configure && make && make check",
+    "libxslt":"arvo compile && make check",
+    "oniguruma":"./autogen.sh && ./configure && make && make check",
+    "libpsl":"./autogen.sh && ./configure && make && make check",
+    "sleuthkit":"apt-get update && apt-get -y install wget libcppunit-dev && ./bootstrap && ./configure && make && make check",
+    "libssh2":"arvo compile && make check",
+    "fribidi":"apt-get -y install libtool autoconf && ./autogen.sh && ./configure && make && make check",
+    "espeak-ng":"./autogen.sh ; ./configure ; make ; make check -k",
+    "wolfssl":"./autogen.sh && ./configure && make && make check",
+    "coturn":"./configure && make && make check",
+    "hiredis":"apt-get update && apt-get -y install redis-server && make && make check",
+    "jbig2dec":"ln -s /usr/bin/python3 /usr/bin/python && ./autogen.sh && ./configure && make && make check",
+    #"ntopng":"apt-get update && apt-get -y install ./autogen.sh && ",
+    "wireshark":"apt-get update && apt-get -y install qt5-default libgtk2.0-dev libpcap-dev && mkdir build && cd build && cmake -DBUILD_wireshark=OFF .. && make && make  test",
+    "jsoncpp":"arvo compile",
+    #"uwebsockets":"apt-get -y install zlib1g-dev clang && make -j && export CXX=\"clang++ -stdlib=libc++\" && make -C ",
+    #"skia":"arvo compile &&",
+    #"gdal":"",
+    "ffmpeg":"arvo compile ; cd ffmpeg ; make ; make -i fate",
+    "binutils-gdb":"cd binutils-gdb && ./configure ; make ; make check",
+    "librawspeed":"mkdir build && cd build && cmake -DWITH_PTHREADS=OFF -DWITH_OPENMP=OFF -DWITH_PUGIXML=OFF -DUSE_XMLLINT=OFF -DWITH_JPEG=OFF -DWITH_ZLIB=OFF -DALLOW_DOWNLOADING_GOOGLETEST=ON .. ; make ; make test",
+    "openthread":"arvo compile && make check",
+    "fluent-bit":"arvo compile && cd fluent-bit/build && make test",
+    #"ntopng":"apt-get update && apt-get install -y build-essential git bison flex libxml2-dev libpcap-dev libtool libtool-bin rrdtool librrd-dev autoconf pkg-config automake autogen redis-server wget libsqlite3-dev libhiredis-dev libmaxminddb-dev libcurl4-openssl-dev libpango1.0-dev libcairo2-dev libnetfilter-queue-dev zlib1g-dev libssl-dev libcap-dev libnetfilter-conntrack-dev libreadline-dev libjson-c-dev libldap2-dev rename libsnmp-dev libexpat1-dev libmaxminddb-dev libradcli-dev libjson-c-dev libzmq3-dev curl jq libnl-genl-3-dev libgcrypt20-dev && ./autogen.sh && ./configure && make -j"
+    #"lxc":"./autogen.sh && ./configure && make && make check", # DOES NOT WORK
+    "knot-dns":"apt-get update && apt-get -y install libtool autoconf automake make pkg-config liburcu-dev libgnutls28-dev libedit-dev liblmdb-dev && ./autogen.sh && ./configure && make && make -i check",
+    "aom":"mkdir build ; cd build && cmake .. && make && ./test_libaom",
+    #"poppler":"apt-get update && apt-get install -y libfreetype6-dev libfontconfig1-dev libcairo2-dev libjpeg-dev libopenjp2-7-dev libpng-dev libtiff-dev libglib2.0-dev libboost-dev libcurl4-openssl-dev liblcms2-dev libssl-dev poppler-data && git clone --depth 1 https://gitlab.freedesktop.org/poppler/test.git /src/test-data && mkdir build && cd build && cmake -DBUILD_GTK_TESTS=ON -DBUILD_QT5_TESTS=ON -DBUILD_QT6_TESTS=ON -DBUILD_CPP_TESTS=ON -DBUILD_MANUAL_TESTS=ON .. && make", # currently does not work 17607
+    "libgit2":"mkdir build && cd build && cmake -DBUILD_SHARED_LIBS=OFF -DUSE_HTTPS=OFF -DUSE_SSH=OFF -DUSE_BUNDLED_ZLIB=ON .. && make && ctest", # 11382
+    "unicorn":"apt-get update && apt-get install -y bsdmainutils wget xz-utils cmake libcmocka-dev && cd unicorn && ./make.sh && make -i test", # 10445
+    "flac":"cd flac ; apt-get update && apt-get install -y libtool-bin libogg-dev vorbis-tools oggz-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check -i", # 47525
+    #"libreoffice":"apt-get update && apt-get install git build-essential zip ccache junit4 libkrb5-dev nasm graphviz python3 python3-dev qtbase5-dev libkf5coreaddons-dev libkf5i18n-dev libkf5config-dev libkf5windowsystem-dev libkf5kio-dev libqt5x11extras5-dev autoconf libcups2-dev libfontconfig1-dev gperf openjdk-17-jdk doxygen libxslt1-dev xsltproc libxml2-utils libxrandr-dev libx11-dev bison flex libgtk-3-dev libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev ant ant-optional libnss3-dev libavahi-client-dev libxt-dev && ./autogen.sh", # 8252
+    #"arrow":"", # 23916
+    "harfbuzz":"apt-get update && apt-get install -y libfreetype6-dev libglib2.0-dev libcairo2-dev autoconf automake libtool pkg-config ragel gtk-doc-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check", # 10724
+    "libjxl": "arvo compile && cd /work/libjxl-corpus && ninja test",
+    "libvips": "arvo compile && make check",
+    # "ntopng":"apt-get update && apt-get install -y libhiredis-dev && ./.autogen.sh && ./configure && make unit_test", # Needs work
+    "spice-usbredir": "arvo compile && cd build && meson test",
+    "wpantund": "arvo compile && make check",
+    "flatbuffers": "cd flatbuffers && cmake -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS='-pthread' && make  && make test   ",
+    "gdal": "cd gdal && ./autogen.sh && ./configure && make  && make install && cd ../autotest/cpp && make  && ./gdal_unit_test ",
+    "skia": "apt-get update && apt-get install -y libfontconfig1-dev && python3 tools/git-sync-deps && bin/gn gen out/Debug && ninja -C out/Debug dm && out/Debug/dm -v --src tests",
+    "libredwg": "cd libredwg && ./autogen.sh && ./configure && make  && yes | ./unit_testing_all.sh",
+    # "poppler": "apt-get update && apt-get install -y libfontconfig1-dev libjpeg-dev libopenjp2-7-dev && \
+    #             git clone git://git.freedesktop.org/git/poppler/test testdata && \
+    #             mkdir build && cd build && cmake .. -DTESTDATADIR=../testdata && make -j4 && make install\
+    #             cd ../testdata && make"
+    #"lwan":"apt-get update && apt-get -y install git cmake zlib1g-dev pkg-config python-dev lua5.1-dev libsqlite3-dev libmbedtls-dev python curl && curl https://bootstrap.pypa.io/pip/2.7/get-pip.py --output get-pip.py && python get-pip.py && mkdir build && cd build && cmake .. && make && make testrunner",
+    #"freeradius-server":"",
+    #"glib":"",
+    #"proj.4":"",
+    #"icu":"",
+    "selinux":"apt-get update && apt-get install -y --no-install-recommends --no-install-suggests bison flex gawk gcc gettext make libaudit-dev libbz2-dev libcap-dev libcap-ng-dev libcunit1-dev libglib2.0-dev libpcre2-dev pkgconf python3 systemd xmlto && make clean distclean ; make DESTDIR=~/obj install ; DESTDIR=~/obj ./scripts/env_use_destdir make test", 
+    "lcms":"./autogen.sh && make && make check", 
+    "php-src":"arvo compile && make test",
+    "openvswitch":"arvo compile && make check",
+    #"curl":"cd /src/curl"
+}
+
+_default_pattern = r"\n(?P<status>[A-Z]+): (?P<name>.*)"
+_ctest_pattern = r"\d+/\d+\s*Test\s*#\d+:\s(?P<name>\S*)(?P<status>.+)"
+_google_test_pattern = r"\[ RUN\s*\]\s(?P<name>.*)[\s\S]*?\[\s*(?P<status>.*) \]"
+_matio_ovs_pattern = r"\n\s*\d+:\s*(?P<name>.*)\s*(?P<status>ok|skipped|FAILED)"
+unittest_patterns = {
+    "libexif":_default_pattern,
+    "ndpi":_default_pattern,
+    "yara":_default_pattern,
+    "wolfmqtt":_default_pattern,
+    "imagemagick":_default_pattern,
+    "hunspell":_default_pattern,
+    #"leptonica":_default_pattern,
+    "opensc":_default_pattern,
+    "zstd":r"(?:\n(?P<total>test.*)|(?P<status>[eE]rror.*)):\s+(?P<name>.*)",
+    "openexr":_ctest_pattern,
+    "libxml2":r"(?:(?:Total\s(?P<total>\d+)\stests,\s(?:\d+|no)\serrors)|(?:(?P<name>\S+)\s(?P<status>failed)))",
+    "gpac":r"\n(?P<name>[\S]*?):\s?(?P<status>.*?(Fail|OK))",
+    "matio":_matio_ovs_pattern,
+    "htslib":r"(?P<name>.*?:(\d+-\d+)?)(?: |\n *[\s\S]*?)\.\. (?P<status>[A-z]+)",
+    "mruby":r"(?P<name>.*?) : (?P<status>.)", # TODO record the specific failed tests
+    "libarchive":_ctest_pattern,
+    "libdwarf":_ctest_pattern,
+    "libsndfile":r"\n\s+(?P<name>.*)\s+:\s(?:(?:\S* )*(\.*\s)*(?P<status>.*))", # TODO
+    "file":r"\nRunning test:\s(?P<name>.*)(?:[\s\S]*?)(?=\nRunning test|make|(?P<status>test:\s.*))",
+    "assimp":_google_test_pattern,
+    "ots":r"\d\/\d\s(?P<name>\S*)\s+(?P<status>\S*)",
+    "c-blosc2":_ctest_pattern,
+    "exiv2":_ctest_pattern,
+    "open62541":_ctest_pattern,
+    "pcapplusplus":_ctest_pattern,
+    "libplist":_default_pattern,
+    #"libredwg":r".*",
+    "libass":r"\[\s*RUN\s*\]\s(?P<name>.*)[\s\S]*?(?P<status>OK|Error)",
+    #"selinux":r".*",
+    #"uwebsockets":r".*",
+    #"tpm2":r".*",
+    "libzmq":_default_pattern,
+    "lldpd":_default_pattern,
+    "libxslt":r"#\sRunning\s(?P<name>.*)[\s\S]*?(?:(?P<status>fail)|#|$)",
+    "oniguruma":_default_pattern,
+    "libpsl":_default_pattern,
+    "sleuthkit":_default_pattern,
+    "libssh2":_default_pattern,
+    "fribidi":_default_pattern,
+    "espeak-ng":r"testing\s(?P<name>.*)(?P<status>[\s\S]*?)(?=testing|make: Target 'check')",
+    "wolfssl":_default_pattern,
+    "coturn":r"(?P<name>.*)\s?:\s?(?P<status>.*)",
+    "hiredis":r"#\d+\s(?P<name>.*): ?(?P<status>.*)",
+    "jbig2dec":_default_pattern,
+    "wireshark":_ctest_pattern,
+    "jsoncpp":r"Testing\s(?P<name>.*):\s(?P<status>.*)",
+    #"uwebsockets":r"", # TODO add parser
+    #"skia":r"",
+    #"gdal":"",
+    "ffmpeg":r"TEST\s+(?P<name>.*)(?P<status>\n(FAIL)?)",
+    "binutils-gdb":_default_pattern,
+    "librawspeed":_ctest_pattern,
+    "openthread":_default_pattern,
+    "fluent-bit":_ctest_pattern,
+    "libjxl": _google_test_pattern,
+    "libvips": _default_pattern,
+    "spice-usbredir": r"\d\/\d\s(?P<name>\S*)\s+(?P<status>\S*)",
+    "wpantund": _default_pattern,
+    #"ntopng":"",
+    "flatbuffers": _ctest_pattern, 
+    "gdal":[_google_test_pattern, r"---> group: (?P<name>.*)\n[\s\S]*?(?P<status>fail)"], 
+    "skia": r"start unit test  (?P<name>[\S]*?)\n[\s\S]*?(?P<status>FAILURE|done)",
+    "libgit2":_ctest_pattern,
+    "selinux":r"Test:\s(?P<name>\S*)\s.*\.\n?(?P<status>.+)", 
+    "lcms":r"Checking (?P<name>.*) \.+(?P<status>[A-z]+)", 
+    #"leptonica":"", 
+    "openvswitch":_matio_ovs_pattern, 
+    "php-src":r"(?P<status>[A-Z]+) (?P<name>.*)",
+    "flac":r"\n(?P<name>(testing |(\S+ )+test ?|case|Testing |Test )(.*\.\.\. (\+\n|\n|))+)(?P<status>[A-Z]*)(?=\n)", # this pattern needs to be extensively tested
+    "harfbuzz":_default_pattern,
+    "aom":_google_test_pattern,
+    "libredwg" : r"(?P<status>ok|fail) (?P<name>[0-9]+)",
+    #"lwan":r"",
+
+    
+}
+
+bad_projects = [
+    "opensc", # cannot test
+    "ghostpdl", # cannot test
+    #"ffmpeg", # build issues
+    # "skia", # build issues
+    # "libredwg", # build issues
+    "serenity", # build issues
+    "mupdf", # cannot test
+    "libreoffice", # build issues
+    "arrow", # build issues
+    "poppler", # build issues
+    "lxc", # build issues
+    "ntopng", # build issues
+    "libraw", # cannot test
+    "leptonica", # build issues
+    "llvm-project", # build issues
+    "lwan", # build issues
+    "radare2", # test issues
+    "freeradius-server", # build issues
+    "opensips", # build issues
+    "curl", # build issues
+    "proj.4" # build issues
+]

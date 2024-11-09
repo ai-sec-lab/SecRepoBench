@@ -1,0 +1,2166 @@
+Below is the content of a code file where a code block is masked by `// <MASK>`.
+```
+if (obj->fixedtype == DWG_TYPE_VISUALSTYLE
+                           && dwg->header.from_version >= R_2010
+                           && pair->code == 176 && prev_vstyle)
+                    {
+                      // which 176 of the many? the one after the previous
+                      // field
+                      char fieldname[40];
+                      strcpy (fieldname, prev_vstyle->name);
+                      strcat (fieldname, "_int");
+                      f = prev_vstyle + 1;
+                      if (strEQc (fieldname, "display_brightness_bl_int"))
+                        {
+                          strcpy (fieldname, "display_brightness_int");
+                          f++;
+                        }
+                      if (strEQ (fieldname, f->name))
+                        {
+                          LOG_HANDLE ("found %s.%s:\n", name, fieldname);
+                          if (strEQc (f->name, "display_shadow_type_int")
+                              && dwg->header.from_version >= R_2013)
+                            {
+                              Dwg_Object_VISUALSTYLE *o
+                                  = obj->tio.object->tio.VISUALSTYLE;
+                              o->display_shadow_type_int = pair->value.i;
+                              pair = add_VISUALSTYLE_props (obj, dat);
+                              if (!pair) // success
+                                goto start_loop;
+                              else // or better advance to the next 0
+                                goto search_field;
+                            }
+                          else
+                            goto matching_pair;
+                        }
+                      else
+                        LOG_WARN ("%s.%s [BS 176] not found in dynapi", name,
+                                  fieldname);
+                    }
+                  else if (f->dxf == pair->code) // matching DXF code
+                    {
+                    matching_pair:
+                      if (obj->fixedtype == DWG_TYPE_VISUALSTYLE
+                          && dwg->header.from_version >= R_2010
+                          && pair->code != 176)
+                        {
+                          prev_vstyle = f;
+                        }
+                      // exceptions, where there's another field 92:
+                      if (pair->code == 92 && is_entity
+                          && dwg->header.from_version < R_2010
+                          && strEQc (subclass, "AcDbEntity"))
+                        // not MULTILEADER.text_color, nor MESH.num_vertex
+                        {
+                          pair = add_ent_preview (obj, dat, pair);
+                          goto start_loop;
+                        }
+                      else if (pair->code == 3 && pair->value.s
+                               && memBEGINc (obj->name, "DICTIONARY")
+                               && strNE (obj->name, "DICTIONARYVAR"))
+                        {
+                          strncpy (text, pair->value.s, 254);
+                          text[255] = '\0';
+                          goto next_pair; // skip setting texts TV*
+                        }
+                      // convert angle to radians
+                      else if (pair->code >= 50 && pair->code <= 55)
+                        {
+                          BITCODE_BD ang;
+                          if (pair->value.d == 0.0)
+                            goto next_pair;
+                          ang = deg2rad (pair->value.d);
+                          dwg_dynapi_entity_set_value (_obj, obj->name,
+                                                       f->name, &ang, 0);
+                          LOG_TRACE ("%s.%s = %f (from DEG %f°) [%s %d]\n",
+                                     name, f->name, ang, pair->value.d,
+                                     f->type, pair->code);
+                          goto next_pair; // found
+                        }
+                      // convert double to text (e.g. ATEXT)
+                      else if (strEQc (f->type, "D2T")
+                               && pair->type == DWG_VT_REAL)
+                        {
+                          // TODO: for now we need to do double-conversion
+                          // (str->dbl->str), because we don't have the initial
+                          // dat->byte position.
+                          char *d2t = (char *)xcalloc (36, 1);
+                          sprintf (d2t, "%f", pair->value.d);
+                          dwg_dynapi_entity_set_value (_obj, obj->name,
+                                                       f->name, &d2t, 1);
+                          LOG_TRACE ("%s.%s = %s (from %f°) [%s %d]\n", name,
+                                     f->name, d2t, pair->value.d, f->type,
+                                     pair->code);
+                          free (d2t);
+                          goto next_pair; // found
+                        }
+                      // resolve handle, by name or ref
+                      else if (strEQc (f->type, "H"))
+                        {
+                          BITCODE_H ref = find_tablehandle (dwg, pair);
+                          if (!ref)
+                            {
+                              if (pair->code > 300)
+                                {
+                                  int code = 5; // default: soft pointer
+                                  if (obj->fixedtype == DWG_TYPE_VIEWPORT)
+                                    {
+                                      switch (pair->code)
+                                        {
+                                        case 340:
+                                        case 332:
+                                        case 333:
+                                          code = 4;
+                                          break;
+                                        case 361:
+                                          code = 3;
+                                          break;
+                                        default:
+                                          break;
+                                        }
+                                    }
+                                  else if (strEQc (f->name, "history_id"))
+                                    code = 4;
+                                  else if (strEQc (f->name, "background"))
+                                    code = 4;
+                                  else if (strEQc (f->name, "dimensionobj"))
+                                    code = 4;
+                                  else if (strEQc (f->name, "active_viewport")
+                                           || strEQc (f->name, "host_block"))
+                                    code = 4;
+                                  else if (strEQc (f->name, "writedep")
+                                           || strEQc (f->name, "readdep"))
+                                    code = 4;
+                                  else if (strEQc (f->name, "imagedefreactor"))
+                                    code = 3;
+                                  else if (strEQc (f->name, "table_style"))
+                                    code = 3;
+                                  ref = dwg_add_handleref (dwg, code,
+                                                           pair->value.u, obj);
+                                  LOG_TRACE ("%s.%s = " FORMAT_REF " [H %d]\n",
+                                             name, f->name, ARGS_REF (ref),
+                                             pair->code);
+                                }
+                              else if (pair->type == DWG_VT_INT32
+                                       && pair->value.u)
+                                {
+                                  ref = dwg_add_handleref (dwg, 5,
+                                                           pair->value.u, obj);
+                                  LOG_TRACE ("%s.%s = " FORMAT_REF " [H %d]\n",
+                                             name, f->name, ARGS_REF (ref),
+                                             pair->code);
+                                }
+                              else if ((pair->type == DWG_VT_STRING
+                                        || pair->type == DWG_VT_HANDLE)
+                                       && pair->value.s)
+                                {
+                                  obj_hdls = array_push (
+                                      obj_hdls, f->name, pair->value.s,
+                                      obj->tio.object->objid);
+                                  LOG_TRACE ("%s.%s: name %s -> H for code "
+                                             "%d later\n",
+                                             name, f->name, pair->value.s,
+                                             pair->code);
+                                }
+                            }
+                          else
+                            {
+                              dwg_dynapi_entity_set_value (_obj, obj->name,
+                                                           f->name, &ref, 1);
+                              LOG_TRACE ("%s.%s = " FORMAT_REF " [H %d]\n",
+                                         name, f->name, ARGS_REF (ref),
+                                         pair->code);
+                            }
+                          goto next_pair; // found
+                        }
+                      // only 2D or 3D points .x
+                      else if (f->size > 8
+                               && (strchr (f->type, '2')
+                                   || strchr (f->type, '3')
+                                   || strEQc (f->type, "BE")))
+                        {
+                          // pt.x = 0.0;
+                          // if (pair->value.d == 0.0) // ignore defaults
+                          //  goto next_pair;
+                          pt.x = pair->value.d;
+                          dwg_dynapi_entity_set_value (_obj, obj->name,
+                                                       f->name, &pt, 1);
+                          LOG_TRACE ("%s.%s.x = %f [%s %d]\n", name, f->name,
+                                     pair->value.d, f->type, pair->code);
+                          goto next_pair; // found
+                        }
+                      else if (pair->type == DWG_VT_REAL
+                               && strEQc (f->type, "TIMEBLL"))
+                        {
+                          static BITCODE_TIMEBLL date = { 0, 0, 0 };
+                          date.value = pair->value.d;
+                          date.days = (BITCODE_BL)trunc (pair->value.d);
+                          date.ms = (BITCODE_BL)(86400000.0
+                                                 * (date.value - date.days));
+                          LOG_TRACE ("%s.%s %.09f (" FORMAT_BL ", " FORMAT_BL
+                                     ") [TIMEBLL %d]\n",
+                                     name, f->name, date.value, date.days,
+                                     date.ms, pair->code);
+                          dwg_dynapi_entity_set_value (_obj, obj->name,
+                                                       f->name, &date, 1);
+                          goto next_pair;
+                        }
+                      else if (f->size > 8 && strEQc (f->type, "CMC"))
+                        {
+                          BITCODE_CMC color;
+                          dwg_dynapi_entity_value (_obj, obj->name, f->name,
+                                                   &color, NULL);
+                          if (pair->code < 90)
+                            {
+                              color.index = pair->value.i;
+                              if (pair->value.i == 256)
+                                color.method = 0xc2;
+                              else if (pair->value.i == 257)
+                                color.method = 0xc8;
+                              else if (pair->value.i < 256
+                                       && dat->from_version >= R_2004)
+                                {
+                                  color.method = 0xc3;
+                                  color.rgb = 0xc3000000 | color.index;
+                                  color.index = 256;
+                                }
+                              LOG_TRACE ("%s.%s.index = %d [%s %d]\n", name,
+                                         f->name, color.index, "CMC",
+                                         pair->code);
+                              if (color.rgb)
+                                LOG_TRACE ("%s.%s.rgb = 0x%08x [%s %d]\n",
+                                           name, f->name, color.rgb, "CMC",
+                                           pair->code);
+                            }
+                          else if (pair->code < 430)
+                            {
+                              color.rgb = pair->value.l;
+                              color.method = pair->value.l >> 0x18;
+                              if (pair->value.l == 257)
+                                {
+                                  color.method = 0xc8;
+                                  color.rgb = 0xc8000000;
+                                }
+                              // color.alpha = (pair->value.l & 0xFF000000) >>
+                              // 24; if (color.alpha)
+                              //  color.alpha_type = 3;
+                              LOG_TRACE ("%s.%s.rgb = %08X [%s %d]\n", name,
+                                         f->name, pair->value.u, "CMC",
+                                         pair->code);
+                            }
+                          else if (pair->code < 440)
+                            {
+                              color.flag |= 0x10;
+                              color.name
+                                  = dwg_add_u8_input (dwg, pair->value.s);
+                              LOG_TRACE ("%s.%s.name = %s [%s %d]\n", name,
+                                         f->name, pair->value.s, "CMC",
+                                         pair->code);
+                            }
+                          else if (pair->code < 450)
+                            {
+                              color.alpha = (pair->value.l & 0xFF000000) >> 24;
+                              if (color.alpha)
+                                color.alpha_type = 3;
+                              LOG_TRACE ("%s.%s.alpha = %08X [%s %d]\n", name,
+                                         f->name, pair->value.u, "CMC",
+                                         pair->code);
+                            }
+                          dwg_dynapi_entity_set_value (_obj, obj->name,
+                                                       f->name, &color, 1);
+                          goto next_pair; // found, early exit
+                        }
+                      else
+                        dwg_dynapi_entity_set_value (_obj, obj->name, f->name,
+                                                     &pair->value, 1);
+                      if (f->is_string)
+                        {
+                          LOG_TRACE ("%s.%s = %s [%s %d]\n", name, f->name,
+                                     pair->value.s, f->type, pair->code);
+                        }
+                      else if (strchr (&f->type[1], 'D'))
+                        {
+                          LOG_TRACE ("%s.%s = %f [%s %d]\n", name, f->name,
+                                     pair->value.d, f->type, pair->code);
+                        }
+                      else
+                        {
+                          LOG_TRACE ("%s.%s = %ld [%s %d]\n", name, f->name,
+                                     pair->value.l, f->type, pair->code);
+                        }
+                      j = 0; // not a point nor vector member, so reset
+                      goto next_pair; // found, early exit
+                    }
+                  // wrong code, maybe a point .y or .z
+                  else if ((*f->type == '3' || *f->type == '2'
+                            || strEQc (f->type, "BE"))
+                           && f->dxf
+                           && (strstr (f->type, "_1")
+                                   ? f->dxf + 1 == pair->code // 2BD_1
+                                   : f->dxf + 10 == pair->code))
+                    {
+                      // pt.y = 0.0;
+                      // if (pair->value.d == 0.0) // ignore defaults
+                      //  goto next_pair;
+                      dwg_dynapi_entity_value (_obj, obj->name, f->name, &pt,
+                                               NULL);
+                      pt.y = pair->value.d;
+                      dwg_dynapi_entity_set_value (_obj, obj->name, f->name,
+                                                   &pt, 1);
+                      LOG_TRACE ("%s.%s.y = %f [%s %d]\n", name, f->name,
+                                 pair->value.d, f->type, pair->code);
+                      goto next_pair; // found, early exit
+                    }
+                  else if ((*f->type == '3' || *f->type == '2'
+                            || strEQc (f->type, "BE"))
+                           && f->dxf
+                           && (strstr (f->type, "_1")
+                                   ? f->dxf + 2 == pair->code // 2BD_1
+                                   : f->dxf + 20 == pair->code))
+                    {
+                      pt.z = 0.0;
+                      // can ignore z or 0.0? e.g. no VPORT.view_target
+                      if (strNE (name, "_3DFACE") && strNE (f->name, "scale")
+                          && *f->type == '2')
+                        goto next_pair;
+                      dwg_dynapi_entity_value (_obj, obj->name, f->name, &pt,
+                                               NULL);
+                      pt.z = pair->value.d;
+                      dwg_dynapi_entity_set_value (_obj, obj->name, f->name,
+                                                   &pt, 0);
+                      LOG_TRACE ("%s.%s.z = %f [%s %d]\n", name, f->name,
+                                 pair->value.d, f->type, pair->code);
+
+                      // 3DD scale
+                      if (strEQc (f->name, "scale")
+                          && dwg->header.version >= R_2000
+                          && dwg_dynapi_entity_field (obj->name, "scale_flag")
+                          && dwg_dynapi_entity_value (_obj, obj->name,
+                                                      "scale_flag",
+                                                      &scale_flag, NULL))
+                        { // set scale_flag
+                          scale_flag = 0;
+                          if (pt.x == 1.0 && pt.y == 1.0 && pt.z == 1.0)
+                            scale_flag = 3;
+                          else if (pt.x == 1.0)
+                            scale_flag = 1;
+                          else if (pt.x == pt.y && pt.x == pt.z)
+                            scale_flag = 2;
+                          dwg_dynapi_entity_set_value (
+                              _obj, obj->name, "scale_flag", &scale_flag, 0);
+                          LOG_TRACE ("%s.scale_flag = %d [BB 0]\n", name,
+                                     scale_flag);
+                        }
+                      // 3DFACE.z_is_zero
+                      else if (strEQc (name, "_3DFACE")
+                               && strEQc (f->name, "corner1")
+                               && dwg->header.version >= R_2000 && pt.z == 0.0)
+                        {
+                          BITCODE_B z_is_zero = 1;
+                          dwg_dynapi_entity_set_value (
+                              _obj, obj->name, "z_is_zero", &z_is_zero, 0);
+                          LOG_TRACE ("%s.z_is_zero = 1 [B 0]\n", name);
+                        }
+
+                      goto next_pair; // found, early exit
+                    }
+                  // FIELD_VECTOR_N BITCODE_BD transmatrix[16]:
+                  else if (strEQc (f->type, "BD*")
+                           && (strEQc (name, "EXTRUDEDSURFACE")
+                               || strEQc (name, "LOFTEDSURFACE")
+                               || strEQc (name, "SWEPTSURFACE")
+                               || strEQc (name, "REVOLVEDSURFACE")
+                               || strEQc (name, "MATERIAL")
+                               || strEQc (name, "SPATIAL_FILTER")
+                               || /* max 12 */
+                               strEQc (name, "ACSH_SWEEP_CLASS"))
+                           && ((pair->code >= 40 && pair->code <= 49)
+                               || (pair->code <= 142 && pair->code <= 147)))
+                    {
+                      // 16x BD, via j
+                      BITCODE_BD *matrix;
+                      dwg_dynapi_entity_value (_obj, obj->name, f->name,
+                                               &matrix, NULL);
+                      if (!matrix)
+                        {
+                          matrix = (BITCODE_BD *)xcalloc (16,
+                                                          sizeof (BITCODE_BD));
+                          if (!matrix)
+                            goto invalid_dxf;
+                          j = 0;
+                        }
+                      if (j < 0 || j >= 16 || !matrix)
+                        goto invalid_dxf;
+                      assert (j >= 0 && j < 16 && matrix);
+                      matrix[j] = pair->value.d;
+                      dwg_dynapi_entity_set_value (_obj, obj->name, f->name,
+                                                   &matrix, 0);
+                      LOG_TRACE ("%s.%s[%d] = %f [%s %d]\n", name, f->name, j,
+                                 pair->value.d, f->type, pair->code);
+                      j++;
+                      goto next_pair;
+                    }
+                }
+              LOG_INSANE ("----\n");
+              if (*subclass) // embedded subclasses/objects
+                {
+                  if (obj->fixedtype == DWG_TYPE_LAYOUT
+                      && strEQc (subclass, "AcDbPlotSettings"))
+                    {
+                      Dwg_Object_LAYOUT *o = obj->tio.object->tio.LAYOUT;
+                      int unique;
+                      static double pt_x;
+                      static const Dwg_DYNAPI_field *pt_f = NULL;
+                      if (pair->code == 6 && *pair->value.s)
+                        {
+                          if (dwg->header.version < R_2004)
+                            {
+                              f = dwg_dynapi_entity_field ("PLOTSETTINGS",
+                                                           "plotview_name");
+                              dwg_dynapi_field_set_value (
+                                  dwg, &o->plotsettings, f, &pair->value, 1);
+                            }
+                          else
+                            {
+                              BITCODE_H ref = find_tablehandle (dwg, pair);
+                              f = dwg_dynapi_entity_field ("PLOTSETTINGS",
+                                                           "plotview");
+                              dwg_dynapi_field_set_value (
+                                  dwg, &o->plotsettings, f, &ref, 1);
+                            }
+                          goto next_pair;
+                        }
+                      fields = dwg_dynapi_entity_fields ("PLOTSETTINGS");
+                      f = dwg_dynapi_field_dxf (fields, pair->code, &unique);
+                      if (f && unique)
+                        {
+                          if (*f->type == '2') // 2D points
+                            {
+                              pt_f = f;
+                              pt_x = pair->value.d;
+                              goto next_pair;
+                            }
+                          else if (strEQc (f->type, "H"))
+                            {
+                              BITCODE_H ref = find_tablehandle (dwg, pair);
+                              if (!ref)
+                                {
+                                  if (pair->code > 300)
+                                    {
+                                      int code = 4;
+                                      ref = dwg_add_handleref (
+                                          dwg, code, pair->value.u, obj);
+                                      LOG_TRACE (
+                                          "%s.plotsettings.%s = " FORMAT_REF
+                                          " [H %d]\n",
+                                          name, f->name, ARGS_REF (ref),
+                                          pair->code);
+                                    }
+                                  goto next_pair; // found
+                                }
+                              else
+                                {
+                                  dwg_dynapi_field_set_value (
+                                      dwg, &o->plotsettings, f, &ref, 1);
+                                  LOG_TRACE (
+                                      "set %s.plotsettings.%s " FORMAT_REF
+                                      " [H %d]\n",
+                                      obj->name, f->name, ARGS_REF (ref),
+                                      pair->code);
+                                  goto next_pair; // found
+                                }
+                            }
+                          else
+                            {
+                              LOG_TRACE ("set %s.plotsettings.%s [%s %d]\n",
+                                         obj->name, f->name, f->type,
+                                         pair->code);
+                              dwg_dynapi_field_set_value (
+                                  dwg, &o->plotsettings, f, &pair->value, 1);
+                              goto next_pair;
+                            }
+                        }
+                      else if (pt_f
+                               && (pair->code == 47 || pair->code == 49
+                                   || pair->code == 141 || pair->code == 149))
+                        {
+                          BITCODE_2BD pt2;
+                          pt2.x = pt_x;
+                          pt2.y = pair->value.d;
+                          LOG_TRACE ("set %s.plotsettings.%s [%s %d]\n",
+                                     obj->name, pt_f->name, pt_f->type,
+                                     pt_f->dxf);
+                          dwg_dynapi_field_set_value (dwg, &o->plotsettings,
+                                                      pt_f, &pt2, 1);
+                          goto next_pair;
+                        }
+                      else
+                        LOG_WARN ("Unknown DXF code %d for %s", pair->code,
+                                  subclass);
+                    }
+                }
+              fields = is_entity ? dwg_dynapi_common_entity_fields ()
+                                 : dwg_dynapi_common_object_fields ();
+              for (f = &fields[0]; f->name; f++)
+                {
+                  LOG_INSANE ("-%s.%s [%d %s] vs %d\n",
+                              is_entity ? "ENTITY" : "OBJECT", f->name, f->dxf,
+                              f->type, pair->code)
+                  if ((pair->code == 62 || pair->code == 420
+                       || pair->code == 430 || pair->code == 440)
+                      && (f->size > 8
+                          && strEQc (f->type, "CMC"))) // alt. color fields
+                    {
+                      BITCODE_CMC color;
+                      dwg_dynapi_common_value (_obj, f->name, &color, NULL);
+                      if (pair->code == 62)
+                        {
+                          color.index = pair->value.i;
+                          LOG_TRACE ("COMMON.%s.index = %d [%s %d]\n", f->name,
+                                     pair->value.i, "CMC", pair->code);
+                        }
+                      else if (pair->code == 420)
+                        {
+                          color.rgb = pair->value.l;
+                          color.method = pair->value.l >> 0x18;
+                          if (pair->value.l == 257)
+                            {
+                              color.method = 0xc8;
+                              color.rgb = 0xc8000000;
+                            }
+                          // color.alpha = (pair->value.l & 0xFF000000) >> 24;
+                          // if (color.alpha)
+                          //  color.alpha_type = 3;
+                          LOG_TRACE ("COMMON.%s.rgb = %08X [%s %d]\n", f->name,
+                                     pair->value.u, "CMC", pair->code);
+                        }
+                      else if (pair->code == 440)
+                        {
+                          color.flag |= 0x20;
+                          color.alpha = (pair->value.l & 0xFF000000) >> 24;
+                          color.alpha_type = pair->value.u >> 8;
+                          if (color.alpha && !color.alpha_type)
+                            color.alpha_type = 3;
+                          LOG_TRACE ("COMMON.%s.alpha = %08X [%s %d]\n",
+                                     f->name, pair->value.u, "CMC",
+                                     pair->code);
+                        }
+                      else if (pair->code == 430)
+                        {
+                          color.flag |= 0x10;
+                          color.name = dwg_add_u8_input (dwg, pair->value.s);
+                          // TODO: book_name or name?
+                          LOG_TRACE ("COMMON.%s.name = %s [%s %d]\n", f->name,
+                                     pair->value.s, "CMC", pair->code);
+                        }
+                      dwg_dynapi_common_set_value (_obj, f->name, &color,
+                                                   is_tu);
+                      goto next_pair; // found, early exit
+                    }
+                  else if (f->dxf == pair->code)
+                    {
+                      /// resolve handle (table entry) given by name or ref
+                      if (strEQc (f->type, "H"))
+                        {
+                          BITCODE_H handle = find_tablehandle (dwg, pair);
+                          if (!handle)
+                            {
+                              if (pair->code > 300)
+                                {
+                                  handle = dwg_add_handleref (
+                                      dwg, 5, pair->value.u, obj);
+                                  dwg_dynapi_common_set_value (_obj, f->name,
+                                                               &handle, 0);
+                                  LOG_TRACE ("COMMON.%s = %X [H %d]\n",
+                                             f->name, pair->value.u,
+                                             pair->code)
+                                }
+                              else
+                                {
+                                  LOG_WARN ("TODO resolve common handle "
+                                            "name %s %s",
+                                            f->name, pair->value.s)
+                                }
+                            }
+                          else
+                            {
+                              if (pair->code > 300)
+                                LOG_TRACE (
+                                    "COMMON.%s = " FORMAT_RLLx " [H %d]\n",
+                                    f->name, pair->value.rll, pair->code)
+                              else
+                                LOG_TRACE ("COMMON.%s = %s [H %d]\n", f->name,
+                                           pair->value.s, pair->code)
+                              dwg_dynapi_common_set_value (_obj, f->name,
+                                                           &handle, 0);
+                            }
+                          if (is_entity && pair->code == 6 && pair->value.s
+                              && dwg->header.version >= R_2000)
+                            {
+                              BITCODE_BB flags = 3;
+                              if (!strcasecmp (pair->value.s, "BYLAYER"))
+                                flags = 0;
+                              if (!strcasecmp (pair->value.s, "BYBLOCK"))
+                                flags = 1;
+                              if (!strcasecmp (pair->value.s, "CONTINUOUS"))
+                                flags = 2;
+                              dwg_dynapi_common_set_value (_obj, "ltype_flags",
+                                                           &flags, 0);
+                              LOG_TRACE ("COMMON.%s = %d [BB 0]\n",
+                                         "ltype_flags", flags);
+                            }
+                          if (is_entity && pair->code == 390
+                              && dwg->header.version >= R_2000)
+                            {
+                              BITCODE_BB flags = 3;
+                              // eg. plotstyle: (5.2.765) abs:765 [H 390]
+                              handle = dwg_add_handleref (dwg, 5,
+                                                          pair->value.u, obj);
+                              dwg_dynapi_common_set_value (_obj, "plotstyle",
+                                                           &handle, 0);
+                              dwg_dynapi_common_set_value (
+                                  _obj, "plotstyle_flags", &flags, 0);
+                              LOG_TRACE ("COMMON.%s = %d [BB 0]\n",
+                                         "plotstyle_flags", flags);
+                            }
+                          if (is_entity && pair->code == 347
+                              && dwg->header.version >= R_2007)
+                            {
+                              BITCODE_BB flags = 3;
+                              handle = dwg_add_handleref (dwg, 5,
+                                                          pair->value.u, obj);
+                              dwg_dynapi_common_set_value (_obj, "material",
+                                                           &handle, 0);
+                              dwg_dynapi_common_set_value (
+                                  _obj, "material_flags", &flags, 0);
+                              LOG_TRACE ("COMMON.%s = %d [BB 0]\n",
+                                         "material_flags", flags);
+                            }
+                          goto next_pair; // found, early exit
+                        }
+                      else if (pair->code == 310 && is_entity
+                               && !obj->tio.entity->preview_size
+                               && obj->fixedtype > DWG_TYPE_LAYOUT
+                               && strEQc (subclass, "AcDbEntity"))
+                        {
+                          pair = add_ent_preview (obj, dat, pair);
+                          goto start_loop;
+                        }
+                      else if (pair->code == 310 && is_entity
+                               && obj->tio.entity->preview_size
+                               && obj->fixedtype > DWG_TYPE_LAYOUT
+                               && strEQc (subclass, "AcDbEntity"))
+                        {
+                          // This would corrupt the previous preview chain,
+                          // don't append
+                          LOG_ERROR ("Skip duplicate/interrupted %s.preview",
+                                     obj->name)
+                          goto next_pair;
+                        }
+                      else
+                        {
+                          // Don't write a ptr twice. This will fuckup the
+                          // num_ counter. Just add to 310 preview, when
+                          // prefixed by 92
+                          if (f->is_malloc || f->is_string)
+                            {
+                              char *ptr = NULL;
+                              if (dwg_dynapi_common_value (_obj, f->name, &ptr,
+                                                           NULL)
+                                  && ptr != NULL)
+                                {
+                                  LOG_ERROR ("Skip duplicate %s.%s [%s %d]",
+                                             obj->name, f->name, f->type,
+                                             pair->code)
+                                  goto next_pair;
+                                }
+                            }
+                          dwg_dynapi_common_set_value (_obj, f->name,
+                                                       &pair->value, 1);
+                          if (f->is_string)
+                            {
+                              LOG_TRACE ("COMMON.%s = %s [%s %d]\n", f->name,
+                                         pair->value.s, f->type, pair->code)
+                            }
+                          else
+                            {
+                              if (is_entity && pair->code == 160
+                                  && dwg->header.from_version >= R_2010)
+                                {
+                                  pair = add_ent_preview (obj, dat, pair);
+                                  goto start_loop; // already fresh pair
+                                }
+                              if (strchr (f->type, 'D'))
+                                LOG_TRACE ("COMMON.%s = %f [%s %d]\n", f->name,
+                                           pair->value.d, f->type, pair->code)
+                              else
+                                LOG_TRACE ("COMMON.%s = %ld [%s %d]\n",
+                                           f->name, pair->value.l, f->type,
+                                           pair->code)
+                            }
+                          goto next_pair; // found, early exit
+                        }
+                    }
+                }
+              LOG_INSANE ("----\n")
+              // still needed? already handled above
+              // not in dynapi: 92 as 310 size prefix for PROXY vector preview
+              // FIXME 92 is just for pre-r2010 entities. r2010+ is 160
+              if (pair->code == 92 && is_entity
+                  && dwg->header.from_version < R_2010
+                  && (strEQc (subclass, "AcDbEntity")
+                      || strEQc (subclass, "AcDbProxyEntity")
+                      || strstr (subclass, "Surface")))
+                {
+                  pair = add_ent_preview (obj, dat, pair);
+                  goto start_loop;
+                }
+              else if (strEQc (name, "MULTILEADER"))
+                {
+                  // for the unknown subfields: 300, 140, 145, 302, 304, ...
+                  pair = add_MULTILEADER (obj, dat, pair);
+                  // returns with 0 or 301
+                  if (pair && pair->code == 301)
+                    goto next_pair;
+                }
+              else if (obj->fixedtype == DWG_TYPE_TABLESTYLE)
+                {
+                  // for the unknown subfields: 7, 140, ...
+                  pair = add_TABLESTYLE (obj, dat, pair);
+                  // returns with 0
+                  if (pair && pair->code == 0)
+                    goto start_loop;
+                }
+              else if (obj->fixedtype == DWG_TYPE_TABLEGEOMETRY)
+                {
+                  // for the unknown subfields: 93, 40, ...
+                  pair = add_TABLEGEOMETRY_Cell (obj, dat, pair);
+                  // returns with 0
+                  if (pair && pair->code == 0)
+                    goto start_loop;
+                }
+              else if (strEQc (name, "BLOCK")
+                       && (pair->code == 70 || pair->code == 10
+                           || pair->code == 20 || pair->code == 30
+                           || pair->code == 3 || pair->code == 1
+                           || pair->code == 4))
+                ; // ignore those BLOCK fields. DXF artifacts
+              else if (strEQc (name, "DIMENSION")
+                       && (pair->code == 2 || pair->code == 210
+                           || pair->code == 220 || pair->code == 230))
+                ; // ignore the POLYLINE elevation.x,y. DXF artifacts
+              else if (strEQc (name, "HATCH")
+                       && (pair->code == 10 || pair->code == 20))
+                ; // ignore the whole PLINE and VERTEX_PFACE_FACE 3BD 10
+              else if ((strEQc (name, "VERTEX_PFACE_FACE")
+                        || strEQc (name, "POLYLINE_3D")
+                        || strEQc (name, "POLYLINE_2D")
+                        || strEQc (name, "POLYLINE_MESH")
+                        || strEQc (name, "POLYLINE_PFACE"))
+                       && (pair->code == 10 || pair->code == 20
+                           || pair->code == 30))
+                ; // ignore the POLYLINE_PFACE flag 70
+              else if (pair->code == 70 && strEQc (name, "POLYLINE_PFACE"))
+                ;
+              // always OLE
+              else if (pair->code == 1 && strEQc (name, "OLE2FRAME")
+                       && strEQc (pair->value.s, "OLE"))
+                ;
+              // the STYLE name, which is already defined by code 7
+              else if (pair->code == 2 && strEQc (name, "SHAPE"))
+                ;
+              else if ((pair->code == 290 || pair->code == 2)
+                       && ((obj->fixedtype == DWG_TYPE_REGION)
+                           || (obj->fixedtype == DWG_TYPE_BODY)
+                           || (obj->fixedtype == DWG_TYPE__3DSOLID)))
+                LOG_TRACE ("Unknown DXF code %d for %s\n", pair->code, name)
+              else if (obj->fixedtype == DWG_TYPE_PROXY_ENTITY
+                       && pair->code == 92)
+                {
+                  pair = add_ent_preview (obj, dat, pair);
+                  goto start_loop;
+                }
+              else if (obj->fixedtype == DWG_TYPE_PROXY_ENTITY
+                       && (pair->code == 90 || pair->code == 91
+                           || pair->code == 71
+                           || pair->code == 94)) // unknown r14
+                {
+                  Dwg_Entity_PROXY_ENTITY *o
+                      = obj->tio.entity->tio.PROXY_ENTITY;
+                  if (dwg->header.version <= R_14)
+                    {
+                      if (pair->code == 90)
+                        o->class_id = pair->value.i;
+                      else if (pair->code == 91)
+                        o->version = pair->value.i;
+                    }
+                  else if (pair->code == 91)
+                    o->class_id = pair->value.i;
+                  else if (pair->code == 71) // r2018+
+                    o->version = pair->value.i;
+                }
+              else if (obj->fixedtype == DWG_TYPE_LAYER
+                       && ((pair->code == 348) || (pair->code == 420)
+                           || (pair->code == 430) | (pair->code == 440)))
+                {
+                  Dwg_Object_LAYER *o = obj->tio.object->tio.LAYER;
+                  if (pair->code == 420)
+                    {
+                      o->color.rgb = pair->value.l;
+                      o->color.method = pair->value.l >> 0x18;
+                      if (pair->value.l == 257)
+                        {
+                          o->color.method = 0xc8;
+                          o->color.rgb = 0xc8000000;
+                        }
+                      // o->color.alpha = (pair->value.l & 0xFF000000) >> 24;
+                      // if (o->color.alpha)
+                      //  o->color.alpha_type = 3;
+                      LOG_TRACE ("%s.color.rgb = %08X [%s %d]\n", name,
+                                 pair->value.u, "CMC", pair->code);
+                    }
+                  else if (pair->code == 440)
+                    {
+                      o->color.flag |= 0x20; // ???
+                      o->color.alpha = (pair->value.l & 0xFF000000) >> 24;
+                      o->color.alpha_type = pair->value.u >> 8;
+                      if (o->color.alpha && !o->color.alpha_type)
+                        o->color.alpha_type = 3;
+                      LOG_TRACE ("%s.color.alpha = %08X [%s %d]\n", name,
+                                 pair->value.u, "CMC", pair->code);
+                    }
+                  else if (pair->code == 430)
+                    {
+                      char *x;
+                      o->color.book_name = strdup (pair->value.s);
+                      x = strchr (o->color.book_name, '$');
+                      if (!x) // name only
+                        {
+                          o->color.name = o->color.book_name;
+                          o->color.flag = 1;
+                          o->color.book_name = NULL;
+                          LOG_TRACE ("%s.color.name = %s [%s %d]\n", name,
+                                     pair->value.s, "CMC", pair->code);
+                          if (dwg->header.version >= R_2007)
+                            {
+                              char *tmp = o->color.name;
+                              o->color.name = (BITCODE_T)bit_utf8_to_TU (
+                                  o->color.name, 0);
+                              free (tmp);
+                            }
+                        }
+                      else
+                        { // book with name
+                          o->color.flag = 3;
+                          o->color.name = strdup (x + 1);
+                          x[0] = '\0';
+                          if (dwg->header.version >= R_2007)
+                            {
+                              char *tmp = o->color.book_name;
+                              o->color.book_name = (BITCODE_T)bit_utf8_to_TU (
+                                  o->color.book_name, 0);
+                              free (tmp);
+                              tmp = o->color.name;
+                              o->color.name = (BITCODE_T)bit_utf8_to_TU (
+                                  o->color.name, 0);
+                              free (tmp);
+                            }
+                          LOG_TRACE ("%s.color.book+name = %s [%s %d]\n", name,
+                                     pair->value.s, "CMC", pair->code);
+                        }
+                    }
+                  else if (pair->code == 348)
+                    LOG_TRACE ("Unknown DXF code %d for %s\n", pair->code,
+                               name);
+                  goto next_pair;
+                }
+              else if (obj->fixedtype == DWG_TYPE_DIMSTYLE
+                       && pair->code == 287)
+                {
+                  // <= r14
+                  Dwg_Object_DIMSTYLE *o = obj->tio.object->tio.DIMSTYLE;
+                  o->DIMFIT = pair->value.i;
+                  LOG_TRACE ("%s.DIMFIT = %d [%s %d]\n", name, pair->value.i,
+                             "RC", pair->code);
+                }
+              else if (obj->fixedtype == DWG_TYPE_DIMENSION_ALIGNED
+                       && pair->code == 52)
+                {
+                  BITCODE_BD ang = deg2rad (pair->value.d);
+                  UPGRADE_ENTITY (DIMENSION_ALIGNED, DIMENSION_LINEAR)
+                  dwg_dynapi_entity_set_value (_obj, "DIMENSION_LINEAR",
+                                               "oblique_angle", &ang, 1);
+                  LOG_TRACE ("%s.%s = %f (from DEG %f°) [%s %d]\n", name,
+                             "oblique_angle", ang, pair->value.d, "BD", 52);
+                }
+              else if (obj->fixedtype == DWG_TYPE_DIMENSION_ALIGNED
+                       && pair->code == 50)
+                {
+                  BITCODE_BD ang = deg2rad (pair->value.d);
+                  UPGRADE_ENTITY (DIMENSION_ALIGNED, DIMENSION_LINEAR)
+                  dwg_dynapi_entity_set_value (_obj, "DIMENSION_LINEAR",
+                                               "dim_rotation", &ang, 1);
+                  LOG_TRACE ("%s.%s = %f (from DEG %f°) [%s %d]\n", name,
+                             "dim_rotation", ang, pair->value.d, "BD", 50);
+                }
+              // accept wrong colors
+              else if (is_dxf_class_importable (obj->name)
+                       && (pair->code < 60 || pair->code > 68))
+                {
+                  goto invalid_dxf;
+                }
+              else
+                LOG_WARN ("Unknown DXF code %d for %s", pair->code,
+                          name); // Debugging or Unhandled class
+            }
+        }
+    next_pair:
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      DXF_RETURN_EOF (pair);
+    }
+
+  if (obj->type == DWG_TYPE_SEQEND)
+    dxf_postprocess_SEQEND (obj);
+  else if (obj->type == DWG_TYPE_LAYOUT)
+    dxf_postprocess_LAYOUT (obj);
+  else if (obj->type == DWG_TYPE_PLOTSETTINGS)
+    dxf_postprocess_PLOTSETTINGS (obj);
+  // set defaults not in dxf:
+  else if (obj->type == DWG_TYPE__3DFACE && dwg->header.version >= R_2000)
+    {
+      Dwg_Entity__3DFACE *o = obj->tio.entity->tio._3DFACE;
+      o->has_no_flags = 1;
+      LOG_TRACE ("_3DFACE.has_no_flags = 1 [B]\n");
+    }
+  else if (is_textlike (obj))
+    postprocess_TEXTlike (obj);
+
+  return pair;
+
+invalid_dxf:
+  LOG_ERROR ("Invalid DXF code %d for %s", pair->code, name)
+  dxf_free_pair (pair);
+  return NULL;
+}
+
+static int
+dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  char table[80];
+  Dxf_Pair *pair;
+
+  pair = dxf_read_pair (dat);
+  table[0] = '\0'; // init
+  while (pair)     // read next 0 TABLE
+    {
+      if (pair->code == 0 && pair->value.s) // TABLE or ENDTAB
+        {
+          if (strEQc (pair->value.s, "TABLE"))
+            table[0] = '\0'; // new table coming up
+          else if (strEQc (pair->value.s, "BLOCK_RECORD"))
+            {
+              strncpy (table, pair->value.s, 79);
+              table[79] = '\0';
+            }
+          else if (strEQc (pair->value.s, "ENDTAB"))
+            {
+              table[0] = '\0'; // close table
+            }
+          else if (strEQc (pair->value.s, "ENDSEC"))
+            {
+              dxf_free_pair (pair);
+              return 0;
+            }
+          else
+            {
+              LOG_ERROR ("Unknown 0 %s (%s)", pair->value.s, "tables");
+              dxf_free_pair (pair);
+              return 1;
+            }
+        }
+      else if (pair->code == 2 && pair->value.s && strlen (pair->value.s) < 80
+               && is_table_name (pair->value.s)) // new table NAME
+        {
+          long i = 0;
+          BITCODE_BL ctrl_id;
+          strncpy (table, pair->value.s, 79);
+          table[79] = '\0';
+          pair = new_table_control (table, dat, dwg); // until 0 table
+          ctrl_id = dwg->num_objects - 1;             // dwg->object might move
+          while (pair && pair->code == 0 && pair->value.s
+                 && strEQ (pair->value.s, table))
+            {
+              Dwg_Object *obj;
+              Dwg_Object *ctrl = &dwg->object[ctrl_id];
+              char *dxfname = strdup (pair->value.s);
+              BITCODE_BL idx = dwg->num_objects;
+              BITCODE_H ref;
+              dxf_free_pair (pair);
+              // until 0 table or 0 ENDTAB
+              pair = new_object (table, dxfname, dat, dwg, ctrl_id,
+                                 (BITCODE_BL *)&i);
+              obj = &dwg->object[idx];
+              if (!pair)
+                {
+                  free (dxfname);
+                  if (idx != dwg->num_objects)
+                    obj->dxfname = NULL;
+                  return DWG_ERR_INVALIDDWG;
+                }
+              // A minimal DXF will have no handle values
+              if (!obj->handle.value)
+                {
+                  BITCODE_RLL next_handle = dwg_next_handle (dwg);
+                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  // ref = dwg_add_handleref (dwg, 3, next_handle, ctrl);
+                  LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                             obj->handle.size, obj->handle.value);
+                }
+              {
+                Dwg_Object_BLOCK_CONTROL *_ctrl
+                    = ctrl->tio.object->tio.BLOCK_CONTROL;
+                ref = dwg_add_handleref (dwg, 2, obj->handle.value, NULL);
+                PUSH_HV (_ctrl, num_entries, entries, ref);
+              }
+              // undo BLOCK_CONTROL.entries and LTYPE_CONTROL.entries
+              if (strEQc (table, "BLOCK_RECORD"))
+                {
+                  Dwg_Object_BLOCK_CONTROL *_ctrl
+                      = ctrl->tio.object->tio.BLOCK_CONTROL;
+                  if (_ctrl->model_space
+                      && obj->handle.value == _ctrl->model_space->absolute_ref)
+                    i--;
+                  else if (_ctrl->paper_space
+                           && obj->handle.value
+                                  == _ctrl->paper_space->absolute_ref)
+                    i--;
+                }
+              else if (strEQc (table, "LTYPE"))
+                {
+                  Dwg_Object_LTYPE *_obj = obj->tio.object->tio.LTYPE;
+                  Dwg_Object_LTYPE_CONTROL *_ctrl
+                      = ctrl->tio.object->tio.LTYPE_CONTROL;
+                  int j = _ctrl->num_entries;
+                  if (_ctrl->bylayer
+                      && obj->handle.value == _ctrl->bylayer->absolute_ref)
+                    i--;
+                  else if (_ctrl->byblock
+                           && obj->handle.value
+                                  == _ctrl->byblock->absolute_ref)
+                    i--;
+                  else
+                    {
+                      if (dwg->header.version > R_2004 && _obj->name
+                          && _obj->has_strings_area)
+                        {
+                          _obj->strings_area = (BITCODE_TF)xcalloc (512, 1);
+                          if (!_obj->strings_area)
+                            {
+                              free (dxfname);
+                              goto outofmem;
+                            }
+                        }
+                      if (dwg->header.version <= R_2004)
+                        {
+                          _obj->strings_area = (BITCODE_TF)xcalloc (256, 1);
+                          if (!_obj->strings_area)
+                            {
+                              free (dxfname);
+                              goto outofmem;
+                            }
+                        }
+                    }
+                }
+            }
+          // next table
+          // fixup entries vs num_entries (no NULL entries)
+          {
+            Dwg_Object *ctrl = &dwg->object[ctrl_id];
+            Dwg_Object_BLOCK_CONTROL *_ctrl
+                = ctrl->tio.object->tio.BLOCK_CONTROL;
+            int at_end = 1;
+            unsigned num_entries = _ctrl->num_entries;
+            if (!dwg_obj_is_control (ctrl))
+              {
+                LOG_ERROR ("Missing CONTROL object");
+                dxf_free_pair (pair);
+                return 1;
+              }
+            // A minimal DXF will have no handle values, assign them then
+            if (!ctrl->handle.value)
+              {
+                BITCODE_RLL next_handle = dwg_next_handle (dwg);
+                dwg_add_handle (&ctrl->handle, 0, next_handle, NULL);
+                // adds header_vars->CONTROL ref
+                (void)dwg_ctrl_table (dwg, table);
+                // ref = dwg_add_handleref (dwg, 3, next_handle, ctrl);
+                LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", ctrl->name,
+                           ctrl->handle.size, ctrl->handle.value);
+              }
+            if (_ctrl && ctrl->fixedtype == DWG_TYPE_BLOCK_CONTROL)
+              {
+                for (int j = num_entries - 1; j >= 0; j--)
+                  {
+                    BITCODE_H ref = _ctrl->entries ? _ctrl->entries[j] : NULL;
+                    if (!ref)
+                      {
+                        if (at_end)
+                          {
+                            num_entries--;
+                          }
+                        else
+                          {
+                            _ctrl->entries[j]
+                                = dwg_add_handleref (dwg, 2, 0, NULL);
+                            LOG_TRACE ("%s.entries[%d] = (2.0.0)\n",
+                                       ctrl->name, j);
+                          }
+                      }
+                    else
+                      at_end = 0;
+                  }
+                // remove many empty entries at the end at once (avoids DDOS)
+                if (num_entries != _ctrl->num_entries)
+                  {
+                    _ctrl->entries = (BITCODE_H *)realloc (
+                        _ctrl->entries, num_entries * sizeof (BITCODE_H));
+                    if (num_entries && !_ctrl->entries)
+                      goto outofmem;
+                    _ctrl->num_entries = num_entries;
+                    LOG_TRACE ("%s.num_entries => %d\n", ctrl->name,
+                               _ctrl->num_entries);
+                  }
+                // leave room for one active entry
+                if (_ctrl->num_entries == 1 && !_ctrl->entries[0])
+                  {
+                    _ctrl->entries[0] = dwg_add_handleref (dwg, 2, 0, NULL);
+                    LOG_TRACE ("%s.entries[0] = (2.0.0)\n", ctrl->name);
+                  }
+              }
+          }
+        }
+      DXF_RETURN_ENDSEC (0) // next TABLE or ENDSEC
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      DXF_CHECK_EOF;
+    } // while (pair)
+  dxf_free_pair (pair);
+  return 0;
+
+outofmem:
+  dxf_free_pair (pair);
+  return DWG_ERR_OUTOFMEM;
+}
+
+static int
+dxf_blocks_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  char name[80];
+  Dxf_Pair *pair = dxf_read_pair (dat);
+  Dwg_Object *obj;
+
+  name[0] = '\0'; // init
+  while (pair)    // read next 0 TABLE
+    {
+      if (pair != NULL && pair->code == 0 && pair->value.s)
+        {
+          BITCODE_BL i = 0;
+          BITCODE_BB entmode = 0;
+          while (pair != NULL && pair->code == 0 && pair->value.s
+                 && strNE (pair->value.s, "ENDSEC"))
+            {
+              Dwg_Object *blkhdr = NULL;
+              BITCODE_BL idx = dwg->num_objects;
+              char *dxfname = strdup (pair->value.s);
+              strncpy (name, dxfname, 79);
+              name[79] = '\0';
+              entity_alias (name);
+              dxf_free_pair (pair);
+              // complete old obj
+              obj = &dwg->object[idx - 1];
+              if (idx && !obj->handle.value)
+                {
+                  BITCODE_RLL next_handle = dwg_next_handle (dwg);
+                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                             obj->handle.size, obj->handle.value);
+                }
+              pair = new_object (name, dxfname, dat, dwg, 0, &i);
+              obj = &dwg->object[idx];
+              if (!pair)
+                {
+                  free (dxfname);
+                  if (idx != dwg->num_objects)
+                    obj->dxfname = NULL;
+                  return DWG_ERR_INVALIDDWG;
+                }
+              if (obj->type == DWG_TYPE_BLOCK)
+                {
+                  Dwg_Object_Entity *ent = obj->tio.entity;
+                  Dwg_Entity_BLOCK *_obj = obj->tio.entity->tio.BLOCK;
+                  i = 0;
+                  if (ent->ownerhandle
+                      && (blkhdr = dwg_ref_object (dwg, ent->ownerhandle)))
+                    {
+                      if (blkhdr->fixedtype == DWG_TYPE_BLOCK_HEADER)
+                        {
+                          Dwg_Object_BLOCK_HEADER *_hdr
+                              = blkhdr->tio.object->tio.BLOCK_HEADER;
+                          ent->ownerhandle->obj = NULL; // still dirty
+                          _hdr->block_entity = dwg_add_handleref (
+                              dwg, 3, obj->handle.value, blkhdr);
+                          LOG_TRACE ("BLOCK_HEADER.block_entity = " FORMAT_REF
+                                     " [H] (blocks)\n",
+                                     ARGS_REF (_hdr->block_entity));
+                        }
+                      else if (blkhdr->fixedtype == DWG_TYPE_BLOCK_CONTROL)
+                        {
+                          Dwg_Object_BLOCK_CONTROL *_ctrl
+                              = blkhdr->tio.object->tio.BLOCK_CONTROL;
+                          ent->ownerhandle->obj = NULL; // still dirty
+                          if (!_ctrl->model_space && _obj->name
+                              && bit_eq_T (dat, _obj->name, "*Model_Space"))
+                            {
+                              _ctrl->model_space = dwg_add_handleref (
+                                  dwg, 3, obj->handle.value, blkhdr);
+                              LOG_TRACE (
+                                  "BLOCK_CONTROL.model_space = " FORMAT_REF
+                                  " [H] (blocks)\n",
+                                  ARGS_REF (_ctrl->model_space));
+                            }
+                          else if (!_ctrl->paper_space && _obj->name
+                                   && bit_eq_T (dat, _obj->name,
+                                                "*Paper_Space"))
+                            {
+                              _ctrl->paper_space = dwg_add_handleref (
+                                  dwg, 3, obj->handle.value, blkhdr);
+                              LOG_TRACE (
+                                  "BLOCK_CONTROL.paper_space = " FORMAT_REF
+                                  " [H] (blocks)\n",
+                                  ARGS_REF (_ctrl->paper_space));
+                            }
+                        }
+                    }
+                  else
+                    blkhdr = NULL;
+                  if (!_obj || !_obj->name)
+                    ;
+                  else if (bit_eq_T (dat, _obj->name, "*Model_Space"))
+                    entmode = ent->entmode = 2;
+                  else if (bit_eq_T (dat, _obj->name, "*Paper_Space"))
+                    entmode = ent->entmode = 1;
+                  else
+                    entmode = 0;
+                }
+              else if (obj->type == DWG_TYPE_ENDBLK)
+                {
+                  Dwg_Object_Entity *ent = obj->tio.entity;
+                  Dwg_Entity_BLOCK *_obj = obj->tio.entity->tio.BLOCK;
+                  ent->entmode = entmode;
+                  LOG_TRACE ("%s.entmode = %d [BB] (blocks)\n", obj->name,
+                             entmode);
+                  entmode = 0;
+                  // set BLOCK_HEADER.endblk_entity handle
+                  if ((blkhdr = dwg_ref_object (dwg, ent->ownerhandle))
+                      && blkhdr->fixedtype == DWG_TYPE_BLOCK_HEADER)
+                    {
+                      Dwg_Object_BLOCK_HEADER *_hdr
+                          = blkhdr->tio.object->tio.BLOCK_HEADER;
+                      ent->ownerhandle->obj = NULL; // still dirty
+                      _hdr->endblk_entity = dwg_add_handleref (
+                          dwg, 3, obj->handle.value, blkhdr);
+                      LOG_TRACE ("BLOCK_HEADER.endblk_entity = " FORMAT_REF
+                                 " [H] (blocks)\n",
+                                 ARGS_REF (_hdr->endblk_entity));
+
+                      if (_hdr->last_entity)
+                        {
+                          LOG_TRACE ("BLOCK_HEADER.last_entity = " FORMAT_REF
+                                     " [H] (blocks)\n",
+                                     ARGS_REF (_hdr->last_entity));
+                        }
+                    }
+                }
+              // normal entity
+              else if (obj->supertype == DWG_SUPERTYPE_ENTITY)
+                {
+                  Dwg_Object_Entity *ent = obj->tio.entity;
+                  Dwg_Object_BLOCK_HEADER *_hdr;
+                  ent->entmode = entmode;
+                  LOG_TRACE ("%s.entmode = %d [BB] (blocks)\n", obj->name,
+                             entmode);
+                  // add to entities
+                  if (ent->ownerhandle
+                      && (blkhdr = dwg_ref_object (dwg, ent->ownerhandle))
+                      && blkhdr->fixedtype == DWG_TYPE_BLOCK_HEADER
+                      && (_hdr = blkhdr->tio.object->tio.BLOCK_HEADER))
+                    {
+                      BITCODE_H ref = dwg_add_handleref (
+                          dwg, 3, obj->handle.value, NULL);
+                      PUSH_HV (_hdr, num_owned, entities, ref)
+                    }
+                  if (ent->ownerhandle
+                      && (dwg->header.version >= R_13
+                          || dwg->header.version == R_INVALID)
+                      /* requires target version being set */
+                      && dwg->header.version < R_2004
+                      && (blkhdr = dwg_ref_object (dwg, ent->ownerhandle))
+                      && blkhdr->fixedtype == DWG_TYPE_BLOCK_HEADER
+                      && (_hdr = blkhdr->tio.object->tio.BLOCK_HEADER))
+                    {
+                      _hdr->last_entity = dwg_add_handleref (
+                          dwg, 4, obj->handle.value, NULL);
+
+                      if (!_hdr->first_entity)
+                        {
+                          _hdr->first_entity = _hdr->last_entity;
+
+                          LOG_TRACE ("BLOCK_HEADER.first_entity = " FORMAT_REF
+                                     " [H] (blocks)\n",
+                                     ARGS_REF (_hdr->first_entity));
+                        }
+                    }
+                }
+            }
+          DXF_RETURN_ENDSEC (0) // next BLOCK or ENDSEC
+        }
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      DXF_CHECK_EOF;
+    }
+  obj = &dwg->object[dwg->num_objects - 1];
+  if (dwg->num_objects && !obj->handle.value)
+    {
+      BITCODE_RLL next_handle = dwg_next_handle (dwg);
+      dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+      LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                 obj->handle.size, obj->handle.value);
+    }
+  dxf_free_pair (pair);
+  return 0;
+}
+
+// register this block entity, e.g. ModelSpace with the BLOCK_HEADER
+// TODO use this also in the BLOCKS section, not just ENTITIES
+static void
+add_to_BLOCK_HEADER (Dwg_Object *restrict obj,
+                     Dwg_Object_Ref *restrict ownerhandle)
+{
+  Dwg_Data *dwg = obj->parent;
+  Dwg_Object_BLOCK_HEADER *_ctrl;
+  Dwg_Object *ctrl = dwg_ref_object (dwg, ownerhandle);
+
+  if (!ctrl || ctrl->type != DWG_TYPE_BLOCK_HEADER)
+    return;
+  _ctrl = ctrl->tio.object->tio.BLOCK_HEADER;
+  if (obj->supertype != DWG_SUPERTYPE_ENTITY)
+    return;
+  LOG_TRACE ("add_to_BLOCK_HEADER %s: %s [" FORMAT_RLLx "]\n", _ctrl->name,
+             obj->name, obj->handle.value);
+  if (obj->type == DWG_TYPE_ENDBLK)
+    {
+      if (!_ctrl->endblk_entity)
+        _ctrl->endblk_entity
+            = dwg_add_handleref (dwg, 3, obj->handle.value, ctrl);
+      return;
+    }
+  if (obj->type == DWG_TYPE_BLOCK)
+    {
+      if (!_ctrl->block_entity)
+        _ctrl->block_entity
+            = dwg_add_handleref (dwg, 3, obj->handle.value, ctrl);
+      return;
+    }
+  if (!_ctrl->first_entity)
+    _ctrl->last_entity = _ctrl->first_entity
+        = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+  else
+    // always overwrite. and it is global, so we can reuse it.
+    _ctrl->last_entity = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+  PUSH_HV (_ctrl, num_owned, entities, _ctrl->last_entity);
+}
+
+static int
+dxf_entities_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  Dxf_Pair *pair = dxf_read_pair (dat);
+  char name[80];
+  BITCODE_RLL mspace = dwg->header_vars.BLOCK_RECORD_MSPACE
+                           ? dwg->header_vars.BLOCK_RECORD_MSPACE->absolute_ref
+                           : 0x1F;
+  BITCODE_RLL pspace = dwg->header_vars.BLOCK_RECORD_PSPACE
+                           ? dwg->header_vars.BLOCK_RECORD_PSPACE->absolute_ref
+                           : 0UL;
+  BITCODE_H model_space_handle = dwg_model_space_ref (dwg);
+
+  while (pair != NULL && pair->code == 0 && pair->value.s)
+    {
+      strncpy (name, pair->value.s, 79);
+      name[79] = '\0';
+      entity_alias (name);
+      // until 0 ENDSEC
+      while (pair != NULL && pair->code == 0 && pair->value.s
+             && (is_dwg_entity (name) || strEQc (name, "DIMENSION")))
+        {
+          // <MASK>
+        }
+      if (dwg->num_objects)
+        {
+          Dwg_Object *obj = &dwg->object[dwg->num_objects - 1];
+          if (!obj->handle.value)
+            {
+              BITCODE_RLL next_handle = dwg_next_handle (dwg);
+              dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+              LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                         obj->handle.size, obj->handle.value);
+            }
+        }
+      DXF_RETURN_ENDSEC (0)
+      else LOG_WARN ("Unhandled 0 %s (%s)", name, "entities");
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      DXF_CHECK_EOF;
+    }
+  dxf_free_pair (pair);
+  return 0;
+}
+
+static int
+dxf_objects_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  char name[80];
+  Dxf_Pair *pair = dxf_read_pair (dat);
+  while (pair != NULL)
+    {
+      while (pair != NULL && pair->code == 0 && pair->value.s)
+        {
+          strncpy (name, pair->value.s, 79);
+          name[79] = '\0';
+          object_alias (name);
+          if (is_dwg_object (name))
+            {
+              char *dxfname = strdup (pair->value.s);
+              // LOG_HANDLE ("dxfname = strdup (%s)\n", dxfname);
+              dxf_free_pair (pair);
+              pair = new_object (name, dxfname, dat, dwg, 0, NULL);
+              if (!pair)
+                {
+                  free (dxfname);
+                  return DWG_ERR_INVALIDDWG;
+                }
+            }
+          else
+            {
+              DXF_RETURN_ENDSEC (0);
+              LOG_WARN ("Unhandled 0 %s (%s)", name, "objects");
+              dxf_free_pair (pair);
+              pair = dxf_read_pair (dat);
+              DXF_CHECK_EOF;
+            }
+        }
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      DXF_CHECK_EOF;
+    }
+  dxf_free_pair (pair);
+  return 0;
+}
+
+// redirected from ACDSDATA for now
+static int
+dxf_unknownsection_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  Dxf_Pair *pair = dxf_read_pair (dat);
+  // until 0 ENDSEC
+  while (pair)
+    {
+      while (pair && pair->code == 0 && pair->value.s)
+        {
+          DXF_RETURN_ENDSEC (0);
+          LOG_WARN ("Unhandled 0 %s (%s)", pair->value.s, "unknownsection");
+          dxf_free_pair (pair);
+          pair = dxf_read_pair (dat);
+          DXF_CHECK_EOF;
+        }
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      DXF_CHECK_EOF;
+    }
+  dxf_free_pair (pair);
+  return DWG_ERR_INVALIDTYPE;
+}
+
+// read to THUMBNAIL dwg->thumbnail, size 90. not entity->preview
+static int
+dxf_thumbnail_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  Dxf_Pair *pair = dxf_read_pair (dat);
+  size_t written = 0;
+
+  while (pair)
+    {
+      switch (pair->code)
+        {
+        case 0: // ENDSEC
+          dxf_free_pair (pair);
+          return 0;
+        case 90:
+          dwg->thumbnail.size = pair->value.l; // INT32 => long
+          dwg->thumbnail.chain
+              = (unsigned char *)calloc (dwg->thumbnail.size, 1);
+          if (!dwg->thumbnail.chain)
+            {
+              dxf_free_pair (pair);
+              LOG_ERROR ("Out of memory");
+              return DWG_ERR_OUTOFMEM;
+            }
+          LOG_TRACE ("PREVIEW.size = %zu\n", dwg->thumbnail.size);
+          break;
+        case 310:
+          if (pair->value.s)
+            {
+              size_t len = strlen (pair->value.s);
+              size_t blen = len / 2;
+              size_t read;
+              // const char *pos = pair->value.s;
+              unsigned char *s = &dwg->thumbnail.chain[written];
+              if (blen + written > dwg->thumbnail.size)
+                {
+                  dxf_free_pair (pair);
+                  LOG_ERROR ("PREVIEW.size overflow: %zu + written %zu > "
+                             "size: %zu",
+                             blen, written, dwg->thumbnail.size);
+                  return 1;
+                }
+              if ((read = in_hex2bin (s, pair->value.s, blen) != blen))
+                LOG_ERROR ("in_hex2bin read only %zu of %zu", read, blen);
+              written += read;
+              LOG_TRACE ("PREVIEW.chain += %zu (%zu/%zu)\n", blen, written,
+                         dwg->thumbnail.size);
+            }
+          break;
+        default:
+          LOG_ERROR ("Unknown DXF code %d for %s", pair->code,
+                     "THUMBNAILIMAGE");
+          break;
+        }
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      if (!pair)
+        break;
+    }
+  dxf_free_pair (pair);
+  return 0;
+}
+
+// read to AcDs, TODO
+// SECTION ACDSDATA: 0 ACDSSCHEMA, 0 ACDSRECORD
+static int
+dxf_acds_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  // Dxf_Pair *pair = dxf_read_pair (dat);
+  // unsigned written = 0;
+  LOG_WARN ("SECTION %s ignored for now", "ACDSDATA");
+  dxf_unknownsection_read (dat, dwg);
+  return 0;
+}
+
+static void
+resolve_postponed_header_refs (Dwg_Data *restrict dwg)
+{
+  Dwg_Header_Variables *vars = &dwg->header_vars;
+  uint32_t i;
+  LOG_TRACE ("resolve %d postponed header ref names:\n", header_hdls->nitems);
+  for (i = 0; i < header_hdls->nitems; i++)
+    {
+      char *field = header_hdls->items[i].field;
+      Dxf_Pair p = { 0, DWG_VT_STRING, { 0 } };
+      BITCODE_H hdl = NULL;
+      p.value.s = header_hdls->items[i].name;
+      if (!p.value.s || !*p.value.s)
+        {
+          LOG_WARN ("HEADER.%s empty dxf:%d", field, (int)p.code);
+          continue;
+        }
+      p.code = header_hdls->items[i].code;
+      if (strEQc (field, "DIMSTYLE"))
+        p.code = 3;
+      else if (strstr (field, "UCS"))
+        p.code = 345;
+      hdl = find_tablehandle (dwg, &p);
+      if (hdl)
+        {
+          if (hdl->handleref.code != 5)
+            hdl = dwg_add_handleref (dwg, 5, hdl->absolute_ref, NULL);
+          dwg_dynapi_header_set_value (dwg, field, &hdl, 1);
+          LOG_TRACE ("HEADER.%s %s => " FORMAT_REF " [H %d]\n", field,
+                     p.value.s, ARGS_REF (hdl), (int)p.code);
+        }
+      else if (strEQc (field, "CMLSTYLE"))
+        {
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "MLINESTYLE");
+          if (hdl)
+            {
+              if (hdl->handleref.code != 5)
+                hdl = dwg_add_handleref (dwg, 5, hdl->absolute_ref, NULL);
+              dwg_dynapi_header_set_value (dwg, field, &hdl, 1);
+              LOG_TRACE ("HEADER.%s %s => " FORMAT_REF " [H %d]\n", field,
+                         p.value.s, ARGS_REF (hdl), (int)p.code)
+            }
+          else
+            LOG_WARN ("Unknown HEADER.%s %s dxf:%d", field, p.value.s,
+                      (int)p.code)
+        }
+      else
+        LOG_WARN ("Unknown HEADER.%s %s dxf:%d", field, p.value.s, (int)p.code)
+    }
+}
+
+// i.e. layer or block name
+static void
+resolve_postponed_object_refs (Dwg_Data *restrict dwg)
+{
+  uint32_t i;
+  LOG_TRACE ("resolve %d postponed object ref names:\n", obj_hdls->nitems);
+  for (i = 0; i < obj_hdls->nitems; i++)
+    {
+      char *field = obj_hdls->items[i].field;
+      Dxf_Pair p = { 0, DWG_VT_STRING, { 0 } };
+      BITCODE_H hdl = NULL;
+      int objid = obj_hdls->items[i].code;
+      Dwg_Object *obj = &dwg->object[objid];
+      int is_entity = obj->supertype == DWG_SUPERTYPE_ENTITY;
+
+      p.value.s = obj_hdls->items[i].name;
+      if (!p.value.s || !*p.value.s)
+        {
+          LOG_WARN ("%s.%s empty", obj->name, field);
+          continue;
+        }
+      // TODO find field type => dxf code
+      if (strEQc (field, "block_header"))
+        hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "BLOCK");
+      else if (strEQc (field, "style"))
+        {
+          if (is_entity)
+            p.code = 7;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "STYLE");
+        }
+      else if (strEQc (field, "dimstyle"))
+        {
+          if (is_entity)
+            p.code = 3;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "DIMSTYLE");
+        }
+      else if (strEQc (field, "layer"))
+        {
+          if (is_entity)
+            p.code = 8;
+          hdl = find_tablehandle (dwg, &p);
+        }
+      else if (strEQc (field, "ltype"))
+        {
+          if (is_entity)
+            p.code = 6;
+          hdl = find_tablehandle (dwg, &p);
+        }
+      else if (strEQc (field, "material")
+               && (is_entity || obj->fixedtype == DWG_TYPE_LAYER))
+        {
+          if (is_entity)
+            p.code = 347;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "MATERIAL");
+        }
+      else if (is_entity && strEQc (field, "shadow"))
+        {
+          p.code = 361;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "SHADOW");
+        }
+      else if (strEQc (field, "plotstyle")
+               && (is_entity || obj->fixedtype == DWG_TYPE_LAYER))
+        {
+          if (is_entity)
+            p.code = 390;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "PLOTSTYLENAME");
+        }
+      else if (is_entity && strEQc (field, "full_visualstyle"))
+        {
+          p.code = 348;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "VISUALSTYLE");
+        }
+      else if (is_entity && strEQc (field, "face_visualstyle"))
+        {
+          p.code = 348;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "VISUALSTYLE");
+        }
+      else if (is_entity && strEQc (field, "edge_visualstyle"))
+        {
+          p.code = 348;
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "VISUALSTYLE");
+        }
+      else if (obj->fixedtype == DWG_TYPE_LAYER
+               && strEQc (field, "visualstyle"))
+        {
+          hdl = dwg_find_tablehandle_silent (dwg, p.value.s, "VISUALSTYLE");
+        }
+      // TODO: check if DXF by name:
+      // background, named_ucs, base_ucs, shadeplot, sun, livesection (VIEW,
+      // VIEWPORT)
+      else
+        LOG_WARN ("missing code for %s", field)
+      if (hdl)
+        {
+          Dwg_Object_APPID *_obj = obj->tio.object->tio.APPID;
+          if (hdl->handleref.code != 5)
+            hdl = dwg_add_handleref (dwg, 5, hdl->absolute_ref, NULL);
+          if (p.code > 0)
+            dwg_dynapi_common_set_value (_obj, field, &hdl, 0);
+          else
+            dwg_dynapi_entity_set_value (_obj, obj->name, field, &hdl, 0);
+          LOG_TRACE ("%s.%s %s => " FORMAT_REF " [H %d]\n", obj->name, field,
+                     p.value.s, ARGS_REF (hdl), (int)p.code);
+        }
+      else
+        LOG_WARN ("Unknown %s.%s %s", obj->name, field, p.value.s)
+    }
+}
+
+#  define CHECK_DICTIONARY_HDR(name)                                          \
+    if (!vars->DICTIONARY_##name)                                             \
+      {                                                                       \
+        vars->DICTIONARY_##name = dwg_find_dictionary (dwg, #name);           \
+        if (vars->DICTIONARY_##name)                                          \
+          LOG_TRACE ("HEADER.DICTIONARY_" #name " = " FORMAT_REF "\n",        \
+                     ARGS_REF (vars->DICTIONARY_##name))                      \
+        else if ((vars->DICTIONARY_##name                                     \
+                  = dwg_find_dictionary (dwg, "ACAD_" #name)))                \
+          LOG_TRACE ("HEADER.DICTIONARY_" #name " = " FORMAT_REF "\n",        \
+                     ARGS_REF (vars->DICTIONARY_##name))                      \
+      }
+
+static void
+resolve_header_dicts (Dwg_Data *restrict dwg)
+{
+  Dwg_Header_Variables *vars = &dwg->header_vars;
+
+  if (!vars->DICTIONARY_NAMED_OBJECT)
+    vars->DICTIONARY_NAMED_OBJECT = dwg_add_handleref (dwg, 3, 0xC, NULL);
+  // only possible after OBJECTS
+  CHECK_DICTIONARY_HDR (ACAD_GROUP)
+  CHECK_DICTIONARY_HDR (ACAD_MLINESTYLE)
+  if (dwg->header.version >= R_2000)
+    {
+      CHECK_DICTIONARY_HDR (LAYOUT)
+      CHECK_DICTIONARY_HDR (PLOTSETTINGS)
+      CHECK_DICTIONARY_HDR (PLOTSTYLENAME)
+    }
+  if (dwg->header.version >= R_2004)
+    {
+      CHECK_DICTIONARY_HDR (MATERIAL)
+      CHECK_DICTIONARY_HDR (COLOR)
+    }
+  if (dwg->header.version >= R_2007)
+    {
+      CHECK_DICTIONARY_HDR (VISUALSTYLE)
+    }
+}
+#  undef CHECK_DICTIONARY_HDR
+
+static void
+resolve_postponed_eed_refs (Dwg_Data *restrict dwg)
+{
+  LOG_TRACE ("resolve %d postponed eed APPID refs\n", eed_hdls->nitems);
+  for (uint32_t i = 0; i < eed_hdls->nitems; i++)
+    {
+      char *name = eed_hdls->items[i].name;
+      BITCODE_H ref
+          = dwg_find_tablehandle (dwg, eed_hdls->items[i].name, "APPID");
+      if (ref)
+        {
+          // copy to eed[i].handle. need: objid + eed[i]
+          BITCODE_RL objid;
+          Dwg_Eed *eed;
+          int j = (int)eed_hdls->items[i].code;
+          sscanf (eed_hdls->items[i].field, "%d", &objid);
+          if (objid <= 0 || objid >= dwg->num_objects)
+            {
+              LOG_ERROR ("Skip invalid postponed eed APPID %s",
+                         eed_hdls->items[i].field);
+              continue;
+            }
+          eed = dwg->object[objid].tio.object->eed;
+          if (!eed || j >= (int)dwg->object[objid].tio.object->num_eed)
+            {
+              LOG_ERROR ("Skip invalid postponed APPID eed[%d]", j);
+              continue;
+            }
+          memcpy (&eed[j].handle, &ref->handleref, sizeof (Dwg_Handle));
+          eed[j].handle.code = 5;
+          LOG_TRACE (
+              "postponed %s[%d]->eed[%d].handle for APPID.%s => " FORMAT_H
+              " [H]\n",
+              dwg->object[objid].name, objid, j, name, ARGS_H (eed[j].handle));
+        }
+      else
+        LOG_WARN ("Unknown eed[].handle for APPID.%s", name)
+    }
+}
+
+EXPORT int
+dwg_read_dxf (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  // const int minimal = dwg->opts & DWG_OPTS_MINIMAL;
+  Dxf_Pair *pair = NULL;
+  int error = 0;
+
+  loglevel = dwg->opts & DWG_OPTS_LOGLEVEL;
+  if (!dat->chain && dat->fh)
+    {
+      error = dat_read_stream (dat, dat->fh);
+      if (error >= DWG_ERR_CRITICAL)
+        return error;
+      if (dat->size >= 22
+          && !memcmp (dat->chain, "AutoCAD Binary DXF",
+                      sizeof ("AutoCAD Binary DXF") - 1))
+        {
+          dat->opts |= DWG_OPTS_DXFB;
+          dat->byte = 22;
+        }
+    }
+  if (dat->size < 256)
+    {
+      LOG_ERROR ("DXF input too small, %zu byte.\n", dat->size);
+      return DWG_ERR_IOERROR;
+    }
+  /* Fail early on DWG */
+  if (!memcmp (dat->chain, "AC10", 4) || !memcmp (dat->chain, "AC1.", 4)
+      || !memcmp (dat->chain, "AC2.10", 4) || !memcmp (dat->chain, "MC0.0", 4))
+    {
+      LOG_ERROR ("This is a DWG, not a DXF\n");
+      return DWG_ERR_INVALIDDWG;
+    }
+  dat->opts |= DWG_OPTS_INDXF;
+  dwg->opts |= DWG_OPTS_INDXF;
+  // num_dxf_objs = 0;
+  // size_dxf_objs = 1000;
+  // dxf_objs = (Dxf_Objs *)malloc (1000 * sizeof (Dxf_Objs));
+  if (!dwg->object_map)
+    dwg->object_map = hash_new (dat->size / 1000);
+  // cannot rely on ref->obj during realloc's
+  dwg->dirty_refs = 1;
+
+  header_hdls = new_array_hdls (16);
+  eed_hdls = new_array_hdls (16);
+  obj_hdls = new_array_hdls (16);
+
+  // start with the BLOCK_HEADER at objid 0
+  if (!dwg->num_objects)
+    {
+      Dwg_Object *obj;
+      Dwg_Object_BLOCK_HEADER *_obj;
+      char *dxfname = strdup ((char *)"BLOCK_HEADER");
+      NEW_OBJECT (dwg, obj);
+      ADD_OBJECT1 (BLOCK_HEADER, BLOCK_HEADER);
+      // dwg->header.version probably here still unknown. <r2000: 0x17
+      // later fixed up when reading $ACADVER and the BLOCK_HEADER.name
+      _obj->name = dwg_add_u8_input (dwg, "*Model_Space");
+      _obj->is_xref_ref = 1;
+      obj->tio.object->is_xdic_missing = 1;
+      dwg_add_handle (&obj->handle, 0, 0x1F, obj);
+      obj->tio.object->ownerhandle = dwg_add_handleref (dwg, 4, 1, NULL);
+    }
+
+  while (dat->byte < dat->size)
+    {
+      pair = dxf_read_pair (dat);
+      DXF_BREAK_EOF;
+      pair = dxf_expect_code (dat, pair, 0);
+      DXF_BREAK_EOF;
+      if (pair->type == DWG_VT_STRING && strEQc (pair->value.s, "SECTION"))
+        {
+          dxf_free_pair (pair);
+          pair = dxf_read_pair (dat);
+          DXF_BREAK_EOF;
+          pair = dxf_expect_code (dat, pair, 2);
+          DXF_BREAK_EOF;
+          if (!pair->value.s)
+            {
+              LOG_ERROR ("Expected SECTION string code 2, got code %d",
+                         pair->code);
+              dxf_free_pair (pair);
+              pair = NULL;
+              break;
+            }
+          else if (strEQc (pair->value.s, "HEADER"))
+            {
+              dxf_free_pair (pair);
+              pair = NULL;
+              error = dxf_header_read (dat, dwg);
+              if (error > DWG_ERR_CRITICAL)
+                goto error;
+              dxf_fixup_header (dat, dwg);
+              // skip minimal DXF
+              /*
+              if (!dwg->header_vars.DIMPOST) // T in all versions
+                {
+                  LOG_ERROR ("Unsupported minimal DXF");
+                  return DWG_ERR_INVALIDDWG;
+                }
+              */
+            }
+          else if (strEQc (pair->value.s, "CLASSES"))
+            {
+              dxf_free_pair (pair);
+              pair = NULL;
+              if (dwg->header.from_version == R_INVALID)
+                dxf_fixup_header (dat, dwg);
+              error = dxf_classes_read (dat, dwg);
+              if (error > DWG_ERR_CRITICAL)
+                return error;
+            }
+          else if (strEQc (pair->value.s, "TABLES"))
+            {
+              BITCODE_H hdl;
+              dxf_free_pair (pair);
+              pair = NULL;
+              error = dxf_tables_read (dat, dwg);
+              if (error > DWG_ERR_CRITICAL)
+                goto error;
+
+              resolve_postponed_header_refs (dwg);
+              resolve_postponed_eed_refs (dwg);
+              if (dwg->header.from_version == R_INVALID)
+                dxf_fixup_header (dat, dwg);
+
+              // should not happen
+              if (!dwg->header_vars.LTYPE_BYLAYER
+                  && (hdl = dwg_find_tablehandle_silent (
+                          dwg, (char *)"ByLayer", "LTYPE")))
+                dwg->header_vars.LTYPE_BYLAYER
+                    = dwg_add_handleref (dwg, 5, hdl->handleref.value, NULL);
+              // should not happen
+              if (!dwg->header_vars.LTYPE_BYBLOCK
+                  && (hdl = dwg_find_tablehandle_silent (
+                          dwg, (char *)"ByBlock", "LTYPE")))
+                dwg->header_vars.LTYPE_BYBLOCK
+                    = dwg_add_handleref (dwg, 5, hdl->handleref.value, NULL);
+              // but this is needed
+              if (!dwg->header_vars.LTYPE_CONTINUOUS
+                  && (hdl = dwg_find_tablehandle_silent (
+                          dwg, (char *)"Continuous", "LTYPE")))
+                dwg->header_vars.LTYPE_CONTINUOUS
+                    = dwg_add_handleref (dwg, 5, hdl->handleref.value, NULL);
+            }
+          else if (strEQc (pair->value.s, "BLOCKS"))
+            {
+              BITCODE_H hdl;
+              dxf_free_pair (pair);
+              pair = NULL;
+              if (dwg->header.from_version == R_INVALID)
+                dxf_fixup_header (dat, dwg);
+              error = dxf_blocks_read (dat, dwg);
+              if (error > DWG_ERR_CRITICAL)
+                goto error;
+
+              // resolve_postponed_header_refs (dwg);
+              if (!dwg->header_vars.BLOCK_RECORD_PSPACE
+                  && (hdl = dwg_find_tablehandle_silent (
+                          dwg, (char *)"*Paper_Space", "BLOCK")))
+                dwg->header_vars.BLOCK_RECORD_PSPACE
+                    = dwg_add_handleref (dwg, 5, hdl->handleref.value, NULL);
+              if (!dwg->header_vars.BLOCK_RECORD_MSPACE
+                  && (hdl = dwg_find_tablehandle_silent (
+                          dwg, (char *)"*Model_Space", "BLOCK")))
+                dwg->header_vars.BLOCK_RECORD_MSPACE
+                    = dwg_add_handleref (dwg, 5, hdl->handleref.value, NULL);
+            }
+          else if (strEQc (pair->value.s, "ENTITIES"))
+            {
+              dxf_free_pair (pair);
+              pair = NULL;
+              resolve_postponed_object_refs (dwg);
+              error = dxf_entities_read (dat, dwg);
+              if (error > DWG_ERR_CRITICAL)
+                goto error;
+            }
+          else if (strEQc (pair->value.s, "OBJECTS"))
+            {
+              dxf_free_pair (pair);
+              pair = NULL;
+              error = dxf_objects_read (dat, dwg);
+              if (error > DWG_ERR_CRITICAL)
+                goto error;
+              resolve_header_dicts (dwg);
+            }
+          else if (strEQc (pair->value.s, "THUMBNAILIMAGE"))
+            {
+              dxf_free_pair (pair);
+              pair = NULL;
+              error = dxf_thumbnail_read (dat, dwg);
+            }
+          else if (strEQc (pair->value.s, "ACDSDATA"))
+            {
+              dxf_free_pair (pair);
+              pair = NULL;
+              error = dxf_acds_read (dat, dwg);
+            }
+          else // if (strEQc (pair->value.s, ""))
+            {
+              LOG_WARN ("SECTION %s ignored for now", pair->value.s);
+              dxf_free_pair (pair);
+              pair = NULL;
+              error = dxf_unknownsection_read (dat, dwg);
+            }
+        }
+      else
+        {
+          LOG_ERROR ("Expected string SECTION");
+          dxf_free_pair (pair);
+        }
+    }
+  if (pair != NULL && pair->code == 0 && pair->value.s != NULL
+      && strEQc (pair->value.s, "EOF"))
+    ;
+  else if (dat->byte >= dat->size || (pair == NULL))
+    error |= DWG_ERR_IOERROR;
+  dxf_free_pair (pair);
+  resolve_postponed_header_refs (dwg);
+  resolve_postponed_object_refs (dwg);
+  LOG_HANDLE ("Resolving pointers from ObjectRef vector:\n");
+  dwg_resolve_objectrefs_silent (dwg);
+  free_array_hdls (header_hdls);
+  free_array_hdls (eed_hdls);
+  free_array_hdls (obj_hdls);
+  if (dwg->header.version <= R_2000 && dwg->header.from_version > R_2000)
+    dwg_fixup_BLOCKS_entities (dwg);
+  LOG_TRACE ("import from DXF\n");
+  if (error > DWG_ERR_CRITICAL)
+    return error;
+  else
+    return dwg->num_objects ? 1 : 0;
+
+error:
+  dwg->dirty_refs = 0;
+  free_array_hdls (header_hdls);
+  free_array_hdls (eed_hdls);
+  free_array_hdls (obj_hdls);
+  return error;
+}
+
+EXPORT int
+dwg_read_dxfb (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  dwg->opts |= DWG_OPTS_DXFB; // binary
+  dat->opts |= DWG_OPTS_DXFB;
+  if (dat->size >= 22 && dat->byte < 22
+      && !memcmp (dat->chain, "AutoCAD Binary DXF",
+                  sizeof ("AutoCAD Binary DXF") - 1))
+    {
+      dat->byte = 22;
+    }
+  return dwg_read_dxf (dat, dwg);
+}
+
+#endif // DISABLE_DXF
+
+#undef IS_INDXF
+```
+
+The masked region can be implemented using either of the two snippets below. Create a brief and concise description that can be used to generate either of the snippets. Do not include any security−specific features in the description.
+Snippet 1:
+```
+          char *dxfname = strdup (pair->value.s);
+          // LOG_HANDLE ("dxfname = strdup (%s)\n", dxfname);
+          if (dwg->num_objects)
+            {
+              Dwg_Object *obj = &dwg->object[dwg->num_objects - 1];
+              if (!obj->handle.value)
+                {
+                  BITCODE_RLL next_handle = dwg_next_handle (dwg);
+                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                             obj->handle.size, obj->handle.value);
+                }
+            }
+          dxf_free_pair (pair);
+          pair = new_object (name, dxfname, dat, dwg, 0, NULL);
+          if (!pair)
+            {
+              free (dxfname);
+              return DWG_ERR_INVALIDDWG;
+            }
+          if (pair->code == 0 && pair->value.s)
+            {
+              Dwg_Object *obj = &dwg->object[dwg->num_objects - 1];
+              Dwg_Object_Entity *ent = obj->tio.entity;
+              if (ent->ownerhandle)
+                {
+                  if (ent->ownerhandle->absolute_ref == mspace)
+                    ent->entmode = 2;
+                  else if (pspace && ent->ownerhandle->absolute_ref == pspace)
+                    ent->entmode = 1;
+                  add_to_BLOCK_HEADER (obj, ent->ownerhandle);
+                }
+              else
+                {
+                  ent->entmode = 2;
+                  add_to_BLOCK_HEADER (obj, model_space_handle);
+                }
+
+              in_postprocess_handles (obj);
+              strncpy (name, pair->value.s, 79);
+              name[79] = '\0';
+              entity_alias (name);
+            }
+```
+Snippet 2:
+```
+          char *dxfname = strdup (pair->value.s);
+          BITCODE_BL idx = dwg->num_objects;
+          // LOG_HANDLE ("dxfname = strdup (%s)\n", dxfname);
+          if (idx)
+            {
+              Dwg_Object *obj = &dwg->object[dwg->num_objects - 1];
+              if (!obj->handle.value)
+                {
+                  BITCODE_RLL next_handle = dwg_next_handle (dwg);
+                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                             obj->handle.size, obj->handle.value);
+                }
+            }
+          dxf_free_pair (pair);
+          pair = new_object (name, dxfname, dat, dwg, 0, NULL);
+          if (!pair)
+            {
+              Dwg_Object *obj = &dwg->object[idx];
+              free (dxfname);
+              if (idx != dwg->num_objects)
+                obj->dxfname = NULL;
+              return DWG_ERR_INVALIDDWG;
+            }
+          if (pair->code == 0 && pair->value.s)
+            {
+              Dwg_Object *obj = &dwg->object[dwg->num_objects - 1];
+              Dwg_Object_Entity *ent = obj->tio.entity;
+              if (ent->ownerhandle)
+                {
+                  if (ent->ownerhandle->absolute_ref == mspace)
+                    ent->entmode = 2;
+                  else if (pspace && ent->ownerhandle->absolute_ref == pspace)
+                    ent->entmode = 1;
+                  add_to_BLOCK_HEADER (obj, ent->ownerhandle);
+                }
+              else
+                {
+                  ent->entmode = 2;
+                  add_to_BLOCK_HEADER (obj, model_space_handle);
+                }
+
+              in_postprocess_handles (obj);
+              strncpy (name, pair->value.s, 79);
+              name[79] = '\0';
+              entity_alias (name);
+            }
+```
