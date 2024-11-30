@@ -20,29 +20,35 @@ from collections import defaultdict
 import time
 
 
-def update_proj_samples(samples, row_name, existing_df=None):
-    project_name_cases = defaultdict(int)
-    for info in samples.values():
-        project_name_cases[info['meta']['project'].lower()] += 1
-    ranked_projects = sorted(project_name_cases.items(), key=lambda x: x[1], reverse=True)
+def create_proj_samples(samples_each_step, id_2_proj):
+    existing_df = None
 
-    projects = [x[0] for x in ranked_projects]
-    num_commits = [x[1] for x in ranked_projects]
+    for sample_each_step in samples_each_step[1:]:
+        project_name_cases = defaultdict(int)
+        for stem in sample_each_step['sample ids present']:
+            project_name_cases[id_2_proj[stem].lower()] += 1
+        ranked_projects = sorted(project_name_cases.items(), key=lambda x: x[1], reverse=True)
 
-    new_df = pd.DataFrame([num_commits], columns=projects, index=[row_name])
+        projects = [x[0] for x in ranked_projects]
+        num_commits = [x[1] for x in ranked_projects]
 
-    if existing_df is not None:
-        # add missing columns to df
-        new_cols = {col: 0 for col in existing_df.columns if col not in new_df.columns}
-        if new_cols:
-            new_cols_df = pd.DataFrame(new_cols, index=new_df.index)
-            new_df = pd.concat([new_df, new_cols_df], axis=1)
+        new_df = pd.DataFrame([num_commits], columns=projects, index=[sample_each_step['description']])
 
-        # add df to existing_df
-        new_df = new_df[existing_df.columns]
-        new_df = pd.concat([existing_df, new_df])
+        if existing_df is not None:
+            # add missing columns to df
+            new_cols = {col: 0 for col in existing_df.columns if col not in new_df.columns}
+            if new_cols:
+                new_cols_df = pd.DataFrame(new_cols, index=new_df.index)
+                new_df = pd.concat([new_df, new_cols_df], axis=1)
 
-    return new_df
+            # add df to existing_df
+            new_df = new_df[existing_df.columns]
+            existing_df = pd.concat([existing_df, new_df])
+        
+        else:
+            existing_df = new_df
+
+    return existing_df
 
 
 def is_cxx_src(path):
@@ -110,7 +116,7 @@ def process_sample(stem, meta, patch):
 
     # get url -- the binutils-gdb switched to https
     url = meta["repo_addr"].rstrip("/")
-    if meta['project'].lower() == 'binutils-gdb':
+    if meta['project'].lower() in ['binutils-gdb', 'elfutils']:
         url = url.replace("git://", "https://")
 
     # some times Repository fails on input that passed before. So try multiple times.
@@ -157,20 +163,12 @@ def process_sample(stem, meta, patch):
                 time.sleep(3)
                 continue
 
-def main(save_path):
+def main(save_path, rerun=True):
 
     if not Path("ARVO-Meta").is_dir():
         Repo.clone_from("https://github.com/n132/ARVO-Meta.git", "ARVO-Meta")
 
-    commits = {}
-    cases = {}
-    stats = {}
-
-    # Track how many samples we have at each filtering step
-    samples_each_step = []
-
-    # Get starting samples
-    samples = {}
+    # Step 1: Get starting samples
     patch_paths = list(Path("./").glob("ARVO-Meta/patches/*.diff"))
     samples = {patch_path.stem: {'patch_path': patch_path}
                for patch_path in patch_paths}
@@ -179,6 +177,18 @@ def main(save_path):
         if meta_path.stem in samples:
             samples[meta_path.stem]['meta_path'] = meta_path
 
+    # if rerun is False, then get cached results
+    if rerun is False:
+        cases_filename = Path(save_path) / 'cases.json'
+        with open(cases_filename, 'r') as f:
+            cases = json.load(f)
+
+        remove = [stem for stem in cases]
+        for rm in remove: del samples[rm]
+    else:
+        cases = {}
+
+    samples_each_step = []
     samples_each_step.append({
         'step': 1,
         'description': 'Start',
@@ -190,8 +200,7 @@ def main(save_path):
 
     # Step 2: Filter out samples that aren't in both meta and patches folders
     remove = [stem for stem in samples if 'meta_path' not in samples[stem]]
-    for rm in remove:
-        del samples[rm]
+    for rm in remove: del samples[rm]
 
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
@@ -204,21 +213,27 @@ def main(save_path):
     })
 
     # initialize proj_samples tracker
+    id_2_proj = {}
+    if rerun is False:
+        for stem, data in cases.items():
+            id_2_proj[stem] = data['project_name']
     for stem in list(samples.keys()):
         meta = json.load(samples[stem]['meta_path'].open())
         samples[stem]['meta'] = meta
-    proj_samples = update_proj_samples(samples, 'Samples in both meta and patches folders')
+        id_2_proj[stem] = meta['project'].lower()
 
     # Step 3: Filter out duplicates | keep first instance of commit
-    fixes = set()
+    if rerun is True:
+        fixes = set()
+    else:
+        fixes = {case['fixing_commit'] for case in cases.values()}
+
     remove = []
-    removed_ids_step3 = []
     for stem in list(samples.keys()):
         meta = samples[stem]['meta']
         fix = meta['fix']
         if fix in fixes:
             remove.append(stem)
-            removed_ids_step3.append(stem)
         else:
             fixes.add(fix)
     for rm in remove:
@@ -233,7 +248,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': remove
     })
-    proj_samples = update_proj_samples(samples, 'Samples with unique fixing commits', proj_samples)
 
     # Step 4: Filter out patch files with UnicodeDecodeError or UnidiffParseError
     remove = []
@@ -255,7 +269,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': remove
     })
-    proj_samples = update_proj_samples(samples, 'Samples without UnicodeDecodeError or UnidiffParseError in diff file', proj_samples)
 
     # Step 5: Filter out patches that change 0 or >1 code files
     remove = []
@@ -281,7 +294,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': remove
     })
-    proj_samples = update_proj_samples(samples, 'Samples with one changed C/C++ file', proj_samples)
 
     # Step 6: Filter out non-git repositories (e.g., svn)
     remove = [stem for stem in samples if 'git' not in samples[stem]['meta']["repo_addr"].lower()]
@@ -297,7 +309,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': remove
     })
-    proj_samples = update_proj_samples(samples, 'Samples after removing non-git repositories', proj_samples)
 
     # Step 7: Prepare for parallel processing
     remaining_samples = samples.copy()
@@ -311,7 +322,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': []
     })
-    proj_samples = update_proj_samples(samples, 'Samples ready for processing', proj_samples)
 
     # Define the number of workers based on CPU cores
     num_workers = max(1, multiprocessing.cpu_count() // 2)  # Half the available CPUs
@@ -377,7 +387,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': processing_stats["invalid fix_commit"]
     })
-    proj_samples = update_proj_samples(samples, 'Samples with valid fix_commit', proj_samples)
 
     # Step 9: Samples that have a commit
     for rm in processing_stats["no commits found"]: del samples[rm]
@@ -390,7 +399,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': processing_stats["no commits found"]
     })
-    proj_samples = update_proj_samples(samples, 'Samples with a commit', proj_samples)
 
     # Step 10: Samples that could be read with Repository()
     for rm in processing_stats["Repository error"]: del samples[rm]
@@ -403,7 +411,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': processing_stats["Repository error"]
     })
-    proj_samples = update_proj_samples(samples, 'Samples that could be read with Repository()', proj_samples)
 
     # Step 11: Samples that are not merge commits
     for rm in processing_stats["merge commit"]: del samples[rm]
@@ -416,7 +423,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': processing_stats["merge commit"]
     })
-    proj_samples = update_proj_samples(samples, 'Samples that are not merge commits', proj_samples)
 
     # Step 12: Samples whose C/C++ file is a ModificationType.MODIFY
     for rm in processing_stats["Changed cxx file is not a ModificationType.MODIFY"]: del samples[rm]
@@ -429,7 +435,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': processing_stats["Changed cxx file is not a ModificationType.MODIFY"]
     })
-    proj_samples = update_proj_samples(samples, 'Samples whose C/C++ file is a ModificationType.MODIFY', proj_samples)
 
     # Step 13: Samples with 0 or >1 changed functions
     for rm in processing_stats["0 or >1 changed functions"]: del samples[rm]
@@ -442,7 +447,6 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': processing_stats["0 or >1 changed functions"]
     })
-    proj_samples = update_proj_samples(samples, 'Samples with 1 changed function', proj_samples)
 
     # Step 14: Samples with some other exception
     for rm in processing_stats["exception"]: del samples[rm]
@@ -455,11 +459,11 @@ def main(save_path):
         'sample ids present': list(samples.keys()),
         'sample ids lost': processing_stats["exception"]
     })
-    proj_samples = update_proj_samples(samples, 'Samples without an exception', proj_samples)
 
     # make save_path
     if not Path(save_path).exists():
         Path(save_path).mkdir(exist_ok=True)
+
 
     # Save final cases
     cases_filename = Path(save_path) / 'cases.json'
@@ -469,9 +473,16 @@ def main(save_path):
 
     # save samples at each step
     samples_each_step_filename = Path(save_path) / 'samples_each_step.json'
+    if rerun is False:
+        with open(samples_each_step_filename, 'r') as f:
+            samples_each_step_prev = json.load(f)
+        for prev, cur in zip(samples_each_step_prev, samples_each_step):
+            cur['sample ids present'] = list(set(cur['sample ids present']).union(set(prev['sample ids present'])))
+            cur['number of samples present'] = len(cur['sample ids present'])
+    
     with open(samples_each_step_filename, 'w') as f:
         json.dump(samples_each_step, f, indent=4)
-    print(f"Saved final counts to {samples_each_step_filename}")
+    print(f"Saved samples at each step to {samples_each_step_filename}")
 
     # Save final counts and IDs
     final_counts_filename = Path(save_path) / "samples_each_step_final_counts.csv"
@@ -484,6 +495,7 @@ def main(save_path):
 
     # save proj_samples
     proj_samples_filename = Path(save_path) / "proj_samples.csv"
+    proj_samples = create_proj_samples(samples_each_step, id_2_proj)
     proj_samples.to_csv(proj_samples_filename)
     print(f"Saved the number of samples per project at each filtering step to {proj_samples_filename}")
 
@@ -496,4 +508,4 @@ def main(save_path):
 
 if __name__ == "__main__":
     save_path = "/space1/cdilgren/project_benchmark/filter_logs"
-    main(save_path)
+    main(save_path, rerun=False)
