@@ -114,10 +114,12 @@ def process_sample(stem, meta, patch):
         if commit_hash is None:
             return stem, "invalid fix_commit", None
 
-    # get url -- the binutils-gdb switched to https
+    # get url -- must be using single thread if using local repos
     url = meta["repo_addr"].rstrip("/")
-    if meta['project'].lower() in ['binutils-gdb', 'elfutils']:
-        url = url.replace("git://", "https://")
+    if meta['project'].lower() == 'binutils-gdb':
+        url = './local_repos/binutils-gdb'
+    elif meta['project'].lower() == 'elfutils':
+        url = './local_repos/elfutils'
 
     # some times Repository fails on input that passed before. So try multiple times.
     max_retries = 3
@@ -125,9 +127,11 @@ def process_sample(stem, meta, patch):
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
                 commits = list(Repository(url, single=commit_hash, clone_repo_to=temp_dir).traverse_commits())
+
                 if not commits:
                     return stem, "no commits found", None
                 commit = commits[0]
+                
                 # Filter out merge commits (have >1 parent)
                 if len(commit.parents) != 1:
                     return stem, "merge commit", None
@@ -163,7 +167,8 @@ def process_sample(stem, meta, patch):
                 time.sleep(3)
                 continue
 
-def main(save_path, rerun=True):
+
+def main(save_path, parallel=True, rerun=True):
 
     if not Path("ARVO-Meta").is_dir():
         Repo.clone_from("https://github.com/n132/ARVO-Meta.git", "ARVO-Meta")
@@ -323,10 +328,6 @@ def main(save_path, rerun=True):
         'sample ids lost': []
     })
 
-    # Define the number of workers based on CPU cores
-    num_workers = max(1, multiprocessing.cpu_count() // 2)  # Half the available CPUs
-    print(num_workers)
-
     # Initialize a separate list to track stats with sample IDs
     processing_stats = {
         "invalid fix_commit": [],
@@ -338,21 +339,57 @@ def main(save_path, rerun=True):
         "exception": []
     }
 
-    # Use ProcessPoolExecutor for parallel processing
-    repository_errors = []
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all tasks
-        future_to_stem = {
-            executor.submit(process_sample, stem, samples[stem]['meta'], samples[stem]['patch']): stem
-            for stem in remaining_samples
-        }
+    if parallel is True:
+        # Define the number of workers based on CPU cores
+        num_workers = max(1, multiprocessing.cpu_count() // 2)  # Half the available CPUs
+        print(num_workers)
 
-        # Use alive_bar to show progress
-        with alive_bar(len(future_to_stem)) as bar:
-            for future in as_completed(future_to_stem):
-                stem = future_to_stem[future]
+        # Use ProcessPoolExecutor for parallel processing
+        repository_errors = []
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_stem = {
+                executor.submit(process_sample, stem, samples[stem]['meta'], samples[stem]['patch']): stem
+                for stem in remaining_samples
+            }
+
+            # Use alive_bar to show progress
+            with alive_bar(len(future_to_stem)) as bar:
+                for future in as_completed(future_to_stem):
+                    stem = future_to_stem[future]
+                    try:
+                        stem, status, case = future.result()
+                        if status == "success":
+                            cases[stem] = case
+                        else:
+                            if status == "invalid fix_commit":
+                                processing_stats["invalid fix_commit"].append(stem)
+                            elif status == "no commits found":
+                                processing_stats["no commits found"].append(stem)
+                            elif status.startswith("Repository error"):
+                                processing_stats["Repository error"].append(stem)
+                                repository_errors.append((stem, status))
+                            elif status == "merge commit":
+                                processing_stats["merge commit"].append(stem)
+                            elif status == "Changed cxx file is not a ModificationType.MODIFY":
+                                processing_stats["Changed cxx file is not a ModificationType.MODIFY"].append(stem)
+                            elif status == "0 or >1 changed functions":
+                                processing_stats["0 or >1 changed functions"].append(stem)
+                            else:
+                                processing_stats.setdefault("other issues", []).append(stem)
+                    except Exception as e:
+                        processing_stats["exception"].append(stem)
+                    bar()
+    
+    else:
+        # Process tasks sequentially and show progress with `alive_bar`
+        repository_errors = []
+        with alive_bar(len(remaining_samples)) as bar:
+            for stem in remaining_samples:
                 try:
-                    stem, status, case = future.result()
+                    # Process the sample
+                    stem, status, case = process_sample(stem, samples[stem]['meta'], samples[stem]['patch'])
+                    
                     if status == "success":
                         cases[stem] = case
                     else:
@@ -508,4 +545,4 @@ def main(save_path, rerun=True):
 
 if __name__ == "__main__":
     save_path = "/space1/cdilgren/project_benchmark/filter_logs"
-    main(save_path, rerun=False)
+    main(save_path, parallel=True, rerun=False)
