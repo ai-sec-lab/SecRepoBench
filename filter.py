@@ -61,6 +61,55 @@ def is_cxx_src(path):
     return False
 
 
+def check_multi_line_comments(diff_parsed):
+    diffs = []
+    in_multi_line_comment = False
+    curr_comment = []
+    for diff in diff_parsed:
+        line_num = diff[0]
+        line = diff[1].strip()
+
+        if in_multi_line_comment:
+            # in a multi line comment
+            if line_num != curr_comment[-1][0] + 1:
+                # multi line comment ended -- lines not sequential
+                in_multi_line_comment = False
+                diffs += curr_comment
+                diffs.append(diff)            
+            elif line.endswith("*/"):
+                # multi line comment ended -- ends with */
+                curr_comment = []
+                in_multi_line_comment = False
+            else:
+                # multi line comment continues
+                curr_comment.append(diff)
+        
+        else:
+            # not in a current comment
+            if line.startswith("/*") and not line.endswith("*/"):
+                # a new multi line comment has started
+                in_multi_line_comment = True
+                curr_comment = [diff]
+            else:
+                # a new comment has not started
+                diffs.append(diff)
+    return diffs
+
+def is_nontrivial_change(file):
+    # remove multi-line comments from diffs
+    diffs = check_multi_line_comments(file.diff_parsed['added'])
+    diffs += check_multi_line_comments(file.diff_parsed['deleted'])
+
+    # non trivial changes are those that are not spacing or single-line comments
+    for diff in diffs:
+        line = diff[1].strip()
+        if not (line.startswith("//") 
+                or (line.startswith("/*") and line.endswith("*/")) 
+                or line == ""):
+            return True
+        
+    return False
+
 def save_samples_each_step(samples_each_step, step_number, save_path):
     """Save the current samples_each_step to CSV files."""
     log_dir = Path(save_path)
@@ -136,13 +185,15 @@ def process_sample(stem, meta, patch):
                 if len(commit.parents) != 1:
                     return stem, "merge commit", None
 
-                # The single cxx file must have ModificationType.MODIFY
+                # Remove samples that change 0 cxx files or non-triviall change 
                 files = []
                 for file in commit.modified_files:
-                    if file.change_type == ModificationType.MODIFY and is_cxx_src(file.old_path.lower()):
+                    if is_cxx_src(file.old_path.lower()) and is_nontrivial_change(file):
                         files.append(file)
-                if len(files) != 1:  # only one file may be modified
-                    return stem, "Changed cxx file is not a ModificationType.MODIFY", None
+                if len(files) == 0:  # needs to have at least one file modified
+                    return stem, "Changed 0 or >1 cxx files", None
+                if len(files) > 1:
+                    return stem, "Changed 0 or >1 cxx files", None
                 file = files[0]
 
                 # Only a single function modified
@@ -275,7 +326,7 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': remove
     })
 
-    # Step 5: Filter out patches that change 0 or >1 code files
+    # REMOVE LATER: ONLY KEEP 0 OR >1 FILES FOR INVESTIGATION
     remove = []
     for stem in list(samples.keys()):
         patch = samples[stem]['patch']
@@ -285,7 +336,7 @@ def main(save_path, parallel=True, rerun=True):
                 continue
             if is_cxx_src(f.path):
                 changed_files.append(f)
-        if len(changed_files) != 1:
+        if len(changed_files) == 1:
             remove.append(stem)
     for rm in remove:
         del samples[rm]
@@ -300,14 +351,14 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': remove
     })
 
-    # Step 6: Filter out non-git repositories (e.g., svn)
+    # Step 5: Filter out non-git repositories (e.g., svn)
     remove = [stem for stem in samples if 'git' not in samples[stem]['meta']["repo_addr"].lower()]
     for rm in remove:
         del samples[rm]
 
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 6,
+        'step': 5,
         'description': 'Samples after removing non-git repositories',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
@@ -315,18 +366,8 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': remove
     })
 
-    # Step 7: Prepare for parallel processing
+    # Prepare for parallel processing
     remaining_samples = samples.copy()
-
-    num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
-    samples_each_step.append({
-        'step': 7,
-        'description': 'Samples ready for processing',
-        'number of samples present': len(samples),
-        'number of samples lost': num_samples_lost,
-        'sample ids present': list(samples.keys()),
-        'sample ids lost': []
-    })
 
     # Initialize a separate list to track stats with sample IDs
     processing_stats = {
@@ -334,7 +375,7 @@ def main(save_path, parallel=True, rerun=True):
         "no commits found": [],
         "Repository error": [],
         "merge commit": [],
-        "Changed cxx file is not a ModificationType.MODIFY": [],
+        "Changed 0 or >1 cxx files": [],
         "0 or >1 changed functions": [],
         "exception": []
     }
@@ -371,8 +412,8 @@ def main(save_path, parallel=True, rerun=True):
                                 repository_errors.append((stem, status))
                             elif status == "merge commit":
                                 processing_stats["merge commit"].append(stem)
-                            elif status == "Changed cxx file is not a ModificationType.MODIFY":
-                                processing_stats["Changed cxx file is not a ModificationType.MODIFY"].append(stem)
+                            elif status == "Changed 0 or >1 cxx files":
+                                processing_stats["Changed 0 or >1 cxx files"].append(stem)
                             elif status == "0 or >1 changed functions":
                                 processing_stats["0 or >1 changed functions"].append(stem)
                             else:
@@ -402,8 +443,8 @@ def main(save_path, parallel=True, rerun=True):
                             repository_errors.append((stem, status))
                         elif status == "merge commit":
                             processing_stats["merge commit"].append(stem)
-                        elif status == "Changed cxx file is not a ModificationType.MODIFY":
-                            processing_stats["Changed cxx file is not a ModificationType.MODIFY"].append(stem)
+                        elif status == "Changed 0 or >1 cxx files":
+                            processing_stats["Changed 0 or >1 cxx files"].append(stem)
                         elif status == "0 or >1 changed functions":
                             processing_stats["0 or >1 changed functions"].append(stem)
                         else:
@@ -413,11 +454,11 @@ def main(save_path, parallel=True, rerun=True):
                 bar()
 
     # Update samples_each_step with the results of parallel processing
-    # Step 8: Samples that have a valid fix_commit
+    # Step 6: Samples that have a valid fix_commit
     for rm in processing_stats["invalid fix_commit"]: del samples[rm]
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 8,
+        'step': 6,
         'description': 'Samples with valid fix_commit',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
@@ -425,11 +466,11 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': processing_stats["invalid fix_commit"]
     })
 
-    # Step 9: Samples that have a commit
+    # Step 7: Samples that have a commit
     for rm in processing_stats["no commits found"]: del samples[rm]
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 9,
+        'step': 7,
         'description': 'Samples with a commit',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
@@ -437,11 +478,11 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': processing_stats["no commits found"]
     })
 
-    # Step 10: Samples that could be read with Repository()
+    # Step 8: Samples that could be read with Repository()
     for rm in processing_stats["Repository error"]: del samples[rm]
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 10,
+        'step': 8,
         'description': 'Samples that could be read with Repository()',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
@@ -449,11 +490,11 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': processing_stats["Repository error"]
     })
 
-    # Step 11: Samples that are not merge commits
+    # Step 9: Samples that are not merge commits
     for rm in processing_stats["merge commit"]: del samples[rm]
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 11,
+        'step': 9,
         'description': 'Samples that are not merge commits',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
@@ -461,23 +502,23 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': processing_stats["merge commit"]
     })
 
-    # Step 12: Samples whose C/C++ file is a ModificationType.MODIFY
-    for rm in processing_stats["Changed cxx file is not a ModificationType.MODIFY"]: del samples[rm]
+    # Step 10: Samples that changed 0 or >1 cxx files
+    for rm in processing_stats["Changed 0 or >1 cxx files"]: del samples[rm]
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 12,
-        'description': 'Samples whose C/C++ file is a ModificationType.MODIFY',
+        'step': 10,
+        'description': 'Samples that changed 0 or >1 cxx files',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
         'sample ids present': list(samples.keys()),
-        'sample ids lost': processing_stats["Changed cxx file is not a ModificationType.MODIFY"]
+        'sample ids lost': processing_stats["Changed 0 or >1 cxx files"]
     })
 
-    # Step 13: Samples with 0 or >1 changed functions
+    # Step 11: Samples with 0 or >1 changed functions
     for rm in processing_stats["0 or >1 changed functions"]: del samples[rm]
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 13,
+        'step': 11,
         'description': 'Samples with 1 changed function',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
@@ -485,11 +526,11 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': processing_stats["0 or >1 changed functions"]
     })
 
-    # Step 14: Samples with some other exception
+    # Step 12: Samples with some other exception
     for rm in processing_stats["exception"]: del samples[rm]
     num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
     samples_each_step.append({
-        'step': 14,
+        'step': 12,
         'description': 'Samples without an exeception',
         'number of samples present': len(samples),
         'number of samples lost': num_samples_lost,
@@ -545,4 +586,4 @@ def main(save_path, parallel=True, rerun=True):
 
 if __name__ == "__main__":
     save_path = "/space1/cdilgren/project_benchmark/filter_logs"
-    main(save_path, parallel=True, rerun=False)
+    main(save_path, parallel=True, rerun=True)
