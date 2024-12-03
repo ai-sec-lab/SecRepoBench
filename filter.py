@@ -188,7 +188,7 @@ def process_sample(stem, meta, patch):
                 # Remove samples that change 0 cxx files or non-triviall change 
                 files = []
                 for file in commit.modified_files:
-                    if is_cxx_src(file.old_path.lower()) and is_nontrivial_change(file):
+                    if file.change_type == ModificationType.MODIFY and is_cxx_src(file.old_path.lower()) and is_nontrivial_change(file):
                         files.append(file)
                 if len(files) == 0:  # needs to have at least one file modified
                     return stem, "Changed 0 or >1 cxx files", None
@@ -287,11 +287,16 @@ def main(save_path, parallel=True, rerun=True):
     remove = []
     for stem in list(samples.keys()):
         meta = samples[stem]['meta']
-        fix = meta['fix']
-        if fix in fixes:
-            remove.append(stem)
+        # Get commit hash
+        fix_commit = meta['fix_commit']
+        if isinstance(fix_commit, str):
+            commit_hash = fix_commit
         else:
-            fixes.add(fix)
+            # Assuming 'fix' field contains the correct commit hash
+            commit_hash = next((fix_can for fix_can in fix_commit if fix_can in meta['fix']), None)
+        if commit_hash in fixes:
+            remove.append(stem)
+        fixes.add(commit_hash)
     for rm in remove:
         del samples[rm]
 
@@ -326,30 +331,30 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': remove
     })
 
-    # REMOVE LATER: ONLY KEEP 0 OR >1 FILES FOR INVESTIGATION
-    remove = []
-    for stem in list(samples.keys()):
-        patch = samples[stem]['patch']
-        changed_files = []
-        for f in patch:
-            if f.source_file == None or f.target_file == None:
-                continue
-            if is_cxx_src(f.path):
-                changed_files.append(f)
-        if len(changed_files) == 1:
-            remove.append(stem)
-    for rm in remove:
-        del samples[rm]
+    # # REMOVE LATER: ONLY KEEP 0 OR >1 FILES FOR INVESTIGATION
+    # remove = []
+    # for stem in list(samples.keys()):
+    #     patch = samples[stem]['patch']
+    #     changed_files = []
+    #     for f in patch:
+    #         if f.source_file == None or f.target_file == None:
+    #             continue
+    #         if is_cxx_src(f.path):
+    #             changed_files.append(f)
+    #     if len(changed_files) == 1:
+    #         remove.append(stem)
+    # for rm in remove:
+    #     del samples[rm]
 
-    num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
-    samples_each_step.append({
-        'step': 5,
-        'description': 'Samples with one changed C/C++ file',
-        'number of samples present': len(samples),
-        'number of samples lost': num_samples_lost,
-        'sample ids present': list(samples.keys()),
-        'sample ids lost': remove
-    })
+    # num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
+    # samples_each_step.append({
+    #     'step': 5,
+    #     'description': 'Samples with one changed C/C++ file',
+    #     'number of samples present': len(samples),
+    #     'number of samples lost': num_samples_lost,
+    #     'sample ids present': list(samples.keys()),
+    #     'sample ids lost': remove
+    # })
 
     # Step 5: Filter out non-git repositories (e.g., svn)
     remove = [stem for stem in samples if 'git' not in samples[stem]['meta']["repo_addr"].lower()]
@@ -586,4 +591,4 @@ def main(save_path, parallel=True, rerun=True):
 
 if __name__ == "__main__":
     save_path = "/space1/cdilgren/project_benchmark/filter_logs"
-    main(save_path, parallel=True, rerun=True)
+    main(save_path, parallel=False, rerun=True)
