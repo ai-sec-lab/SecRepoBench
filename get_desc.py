@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
-os.environ["OPENAI_API_KEY"] = "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"
+os.environ["OPENAI_API_KEY"] = ""
 
 class BaseEvaler(ABC):
     def __init__(self):

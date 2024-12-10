@@ -1,3 +1,4 @@
+# Build Benchmark
 ## Step 1: find cases whose fixing commit only changes one function.
 ```
 python filter.py
@@ -59,3 +60,31 @@ python get_desc.py
 
 ### Step 5.2: Manual work.
 See `descriptions/{id}/desc.txt`
+
+# Inference
+## Step 1: Retrieve cross-file context with BM25.
+```
+python augment_with_cfc.py
+```
+
+## Step 2: Truncate in-file context to 20k tokens.
+### Step 2.1: Run the truncation script.
+```
+python get_file_context.py
+```
+
+### Step 2.2: Manual work.
+If a in-file context is longer than 20k tokens, it will be truncated to 20k - {tokens of maksed func} after running the script. The truncated context will end with a partial function. Therefore, we mannually delete the partial function at the end and append the masked function. This step can be optimized to be automated. The process is manual for now since there are not too many cases, and manual work is much faster than writing a script.
+
+The resulting in-file context is stored in `descriptions/{id}/new-in-file.txt`.
+
+## Step 3: Running inference.
+```
+python api_request.py --model_name {model_name} --prompt_type {prompt_type}
+```
+
+## Step 4: Post-process the generations.
+When the function body is masked, like "int func(int a, int b){//mask}", sometimes LLMs can generate the full function like "int func(int a, int b){return a+b;}" instead of "return a+b;". Directly replacing the mask with the generation will cause errors. Therefore, we need postprocessing.
+```
+python process_completion.py
+```
