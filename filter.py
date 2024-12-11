@@ -151,6 +151,12 @@ def filter_commit(commit):
     return "success", (file.source_code, file.source_code_before, file.changed_methods[0].name)
 
 
+def make_mangled_name(name, full_parameters):
+    param_types = [' '.join(param.strip().split(' ')[:-1]) for param in full_parameters]
+    mangled_name = [name] + param_types
+    return mangled_name
+
+
 def process_sample(stem, meta, patch):
     """Process a single sample and return the result."""
     # Get commit hash
@@ -185,19 +191,44 @@ def process_sample(stem, meta, patch):
                 if len(commit.parents) != 1:
                     return stem, "merge commit", None
 
-                # Remove samples that change 0 cxx files or non-triviall change 
+                # Remove samples that change 0 cxx files or non-trivial change 
                 files = []
                 for file in commit.modified_files:
                     if file.change_type == ModificationType.MODIFY and is_cxx_src(file.old_path.lower()) and is_nontrivial_change(file):
                         files.append(file)
-                if len(files) == 0:  # needs to have at least one file modified
-                    return stem, "Changed 0 or >1 cxx files", None
-                if len(files) > 1:
+                if len(files) != 1:  # needs to have at least one file modified
                     return stem, "Changed 0 or >1 cxx files", None
                 file = files[0]
 
+                # get changed method
+                changed_methods = []
+
+                added_line_nums = [diff[0] for diff in file.diff_parsed['added']]
+                deleted_line_nums = [diff[0] for diff in file.diff_parsed['deleted']]
+                changed_lines = [added_line_nums, deleted_line_nums]
+
+                file_lizard_src = lizard.analyze_file.analyze_source_code(file.filename, file.source_code)
+                file_lizard_src_before = lizard.analyze_file.analyze_source_code(file.filename, file.source_code_before)
+
+                src_after_funcs = file_lizard_src.function_list
+                src_before_funcs = file_lizard_src_before.function_list
+                src_funcs = [src_after_funcs, src_before_funcs]
+
+                mangled_names_after = [make_mangled_name(func.name, func.full_parameters) for func in src_after_funcs]
+                mangled_names_before = [make_mangled_name(func.name, func.full_parameters) for func in src_before_funcs]
+
+                for line_nums, funcs in zip(changed_lines, src_funcs):
+                    for line_num in line_nums:
+                        for func in funcs:
+                            if func.start_line <= line_num <= func.end_line:
+                                # make mangled name
+                                mangled_name = make_mangled_name(func.name, func.full_parameters)
+                                # function should be in src before and after commit
+                                if mangled_name not in changed_methods and mangled_name in mangled_names_after and mangled_name in mangled_names_before:
+                                    changed_methods.append(mangled_name)
+
                 # Only a single function modified
-                if len(file.changed_methods) != 1:
+                if len(changed_methods) != 1:
                     return stem, "0 or >1 changed functions", None
 
                 # Successfully processed the sample
@@ -205,7 +236,7 @@ def process_sample(stem, meta, patch):
                     "project_name": meta["project"].lower(),
                     "fixing_commit": commit.hash,
                     "changed_file": file.new_path,
-                    "changed_function": file.changed_methods[0].name,
+                    "changed_function": file.changed_methods[0],
                     "diff": file.diff_parsed,
                     "source_code_before": file.source_code_before,
                     "source_code": file.source_code
@@ -232,6 +263,9 @@ def main(save_path, parallel=True, rerun=True):
     for meta_path in meta_paths:
         if meta_path.stem in samples:
             samples[meta_path.stem]['meta_path'] = meta_path
+
+    # # REMOVE LATER !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    # samples = {'20944': samples['20944']}
 
     # if rerun is False, then get cached results
     if rerun is False:
@@ -330,31 +364,6 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids present': list(samples.keys()),
         'sample ids lost': remove
     })
-
-    # # REMOVE LATER: ONLY KEEP 0 OR >1 FILES FOR INVESTIGATION
-    # remove = []
-    # for stem in list(samples.keys()):
-    #     patch = samples[stem]['patch']
-    #     changed_files = []
-    #     for f in patch:
-    #         if f.source_file == None or f.target_file == None:
-    #             continue
-    #         if is_cxx_src(f.path):
-    #             changed_files.append(f)
-    #     if len(changed_files) == 1:
-    #         remove.append(stem)
-    # for rm in remove:
-    #     del samples[rm]
-
-    # num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
-    # samples_each_step.append({
-    #     'step': 5,
-    #     'description': 'Samples with one changed C/C++ file',
-    #     'number of samples present': len(samples),
-    #     'number of samples lost': num_samples_lost,
-    #     'sample ids present': list(samples.keys()),
-    #     'sample ids lost': remove
-    # })
 
     # Step 5: Filter out non-git repositories (e.g., svn)
     remove = [stem for stem in samples if 'git' not in samples[stem]['meta']["repo_addr"].lower()]
