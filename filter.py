@@ -61,39 +61,37 @@ def is_cxx_src(path):
     return False
 
 
-def check_multi_line_comments(diff_parsed):
-    diffs = []
-    in_multi_line_comment = False
-    curr_comment = []
-    for diff in diff_parsed:
-        line_num = diff[0]
-        line = diff[1].strip()
+def check_multi_line_comments(diff_parsed, src):
+    # get ranges of multi line comments
+    multi_line_comments = []
 
-        if in_multi_line_comment:
-            # in a multi line comment
-            if line_num != curr_comment[-1][0] + 1:
-                # multi line comment ended -- lines not sequential
-                in_multi_line_comment = False
-                diffs += curr_comment
-                diffs.append(diff)            
-            elif line.endswith("*/"):
-                # multi line comment ended -- ends with */
-                curr_comment = []
-                in_multi_line_comment = False
-            else:
-                # multi line comment continues
-                curr_comment.append(diff)
-        
-        else:
-            # not in a current comment
-            if line.startswith("/*") and not line.endswith("*/"):
+    in_multi_line_comment = False
+
+    for i, line in enumerate(src):
+        line = line.strip()
+
+        if in_multi_line_comment and line.endswith("*/"):
+            # multi line comment ended -- ends with */
+            end_multline_comment = i + 1
+            multi_line_comments.append((start_multline_comment, end_multline_comment))
+            in_multi_line_comment = False
+
+        elif not in_multi_line_comment and line.startswith("/*") and not line.endswith("*/"):
                 # a new multi line comment has started
                 in_multi_line_comment = True
-                curr_comment = [diff]
-            else:
-                # a new comment has not started
-                diffs.append(diff)
-    return diffs
+                start_multline_comment = i + 1
+
+    # remove lines in diff_parsed that fall within these ranges
+    rm_lines = []
+    for diff in diff_parsed:
+        for start_multline_comment, end_multline_comment in multi_line_comments:
+            if start_multline_comment <= diff[0] <= end_multline_comment:
+                rm_lines.append(diff[0])
+    
+    diff_filter = [diff for diff in diff_parsed if diff[0] not in rm_lines]
+
+    return diff_filter
+
 
 def is_nontrivial_change(file):
     # remove multi-line comments from diffs
@@ -109,6 +107,17 @@ def is_nontrivial_change(file):
             return True
         
     return False
+
+
+def diff_rm_trivial_changes(diff_parsed_og, src_before, src_after):
+    diff_parsed = {}
+
+    # remove multi-line comments from diffs
+    diff_parsed['added'] = check_multi_line_comments(diff_parsed_og['added'], src_after)
+    diff_parsed['deleted'] = check_multi_line_comments(diff_parsed_og['deleted'], src_before)
+
+    return diff_parsed
+
 
 def save_samples_each_step(samples_each_step, step_number, save_path):
     """Save the current samples_each_step to CSV files."""
@@ -191,20 +200,25 @@ def process_sample(stem, meta, patch):
                 if len(commit.parents) != 1:
                     return stem, "merge commit", None
 
-                # Remove samples that change 0 cxx files or non-trivial change 
+                # Remove samples that change !=1 cxx files
                 files = []
                 for file in commit.modified_files:
-                    if file.change_type == ModificationType.MODIFY and is_cxx_src(file.old_path.lower()) and is_nontrivial_change(file):
+                    if file.change_type == ModificationType.MODIFY and is_cxx_src(file.old_path.lower()):
                         files.append(file)
                 if len(files) != 1:  # needs to have at least one file modified
                     return stem, "Changed 0 or >1 cxx files", None
                 file = files[0]
 
+                # modify diff to ignore trivial changes
+                src_before = file.source_code_before.split('\n')
+                src_after = file.source_code.split('\n')
+                diff_parsed = diff_rm_trivial_changes(file.diff_parsed, src_before, src_after)
+
                 # get changed method
                 changed_methods = []
 
-                added_line_nums = [diff[0] for diff in file.diff_parsed['added']]
-                deleted_line_nums = [diff[0] for diff in file.diff_parsed['deleted']]
+                added_line_nums = [diff[0] for diff in diff_parsed['added']]
+                deleted_line_nums = [diff[0] for diff in diff_parsed['deleted']]
                 changed_lines = [added_line_nums, deleted_line_nums]
 
                 file_lizard_src = lizard.analyze_file.analyze_source_code(file.filename, file.source_code)
@@ -236,8 +250,8 @@ def process_sample(stem, meta, patch):
                     "project_name": meta["project"].lower(),
                     "fixing_commit": commit.hash,
                     "changed_file": file.new_path,
-                    "changed_function": file.changed_methods[0],
-                    "diff": file.diff_parsed,
+                    "changed_function": changed_methods[0],
+                    "diff": diff_parsed,
                     "source_code_before": file.source_code_before,
                     "source_code": file.source_code
                 }
@@ -264,8 +278,8 @@ def main(save_path, parallel=True, rerun=True):
         if meta_path.stem in samples:
             samples[meta_path.stem]['meta_path'] = meta_path
 
-    # # REMOVE LATER !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    # samples = {'20944': samples['20944']}
+    # REMOVE LATER !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    samples = {'24553': samples['24553']}
 
     # if rerun is False, then get cached results
     if rerun is False:
