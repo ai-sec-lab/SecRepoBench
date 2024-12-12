@@ -62,6 +62,19 @@ def is_cxx_src(path):
     return False
 
 
+def is_nontrivial_change(file):
+    # remove trivial changes
+    src_before = file.source_code_before.split('\n')
+    src_after = file.source_code.split('\n')
+    diff_parsed = diff_rm_trivial_changes(file.diff_parsed, src_before, src_after)
+
+    # remove multi-line comments from diffs
+    if len(diff_parsed['added'] ) > 0 or len(diff_parsed['deleted']) > 0:
+        return True
+        
+    return False
+
+
 def rm_multi_line_comments(diff_parsed, src):
     # get ranges of multi line comments
     multi_line_comments = []
@@ -136,8 +149,8 @@ def clean_diff(diff_parsed):
         matches = [match.start() for match in re.finditer(pattern, line)]
         if len(matches) % 2 == 0:  # if odd something went wrong
             for i in range(len(matches), 0, -2):
-                start_string = matches[i]
-                end_string = matches[i+1]
+                start_string = matches[i-2]
+                end_string = matches[i-1]
                 line = line[:start_string] + line[end_string+1:]
 
         # make spacing consistent
@@ -286,7 +299,7 @@ def process_sample(stem, meta, patch):
                 # Remove samples that change !=1 cxx files
                 files = []
                 for file in commit.modified_files:
-                    if file.change_type == ModificationType.MODIFY and is_cxx_src(file.old_path.lower()):
+                    if file.change_type == ModificationType.MODIFY and is_cxx_src(file.old_path.lower()) and is_nontrivial_change(file):
                         files.append(file)
                 if len(files) != 1:  # needs to have at least one file modified
                     return stem, "Changed 0 or >1 cxx files", None
@@ -693,5 +706,5 @@ def main(save_path, parallel=True, rerun=True):
 
 
 if __name__ == "__main__":
-    save_path = "/space1/cdilgren/project_benchmark/filter_logs"
-    main(save_path, parallel=False, rerun=True)
+    save_path = "/space1/cdilgren/project_benchmark/filter_logs_all"
+    main(save_path, parallel=True, rerun=False)
