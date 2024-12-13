@@ -2,70 +2,70 @@ import sys
 import os
 import re
 import csv
-from tree_sitter import Language, Parser
+import json
+import lizard
 from utils import *
+from filter import make_mangled_name
 
 def main(id):
     print(f"Processing {id}")
-    diff_file = f'/space1/yanjun/ethan/arvo-oss-fuzz-bench/ARVO-Meta/patches/{id}.diff'
-    source_file = f'/data/fyj-oss-fuzz-bench/{id}/patches/vul.txt'
-    destination_file = f'/data/fyj-oss-fuzz-bench/{id}/patches/vul_print.txt'
+    cases_file = f'filter_logs_all/cases.json'
+    source_file = f'/data/cmd-oss-fuzz-bench-ghostpdl/{id}/patches/vul.txt'
+    destination_file = f'/data/cmd-oss-fuzz-bench-ghostpdl/{id}/patches/vul_print.txt'
 
-    # Parse the diff file to get the file name and modified lines
-    file_name, modified_lines = parse_diff_file(diff_file)
+    # Get the modified file name, diff, and modified function from cases file
+    id = str(id)
+    with open(cases_file, 'r') as f:
+        cases = json.load(f)
+    file_name = cases[id]['changed_file']
     if file_name is None:
-        print("Could not find file name in diff file")
+        print("Could not find file name in cases file")
         sys.exit(1)
-    if not modified_lines:
+
+    diff = cases[id]['diff']
+    if len(diff['added']) == 0 and len(diff['deleted']) == 0:
         print("No additions or deletions found in diff file")
         sys.exit(1)
 
-    # Determine the language based on file extension
-    ext = get_file_extension(file_name)
-    language = determine_language(ext)
-    LANGUAGE = C_LANGUAGE if language == 'c' else CPP_LANGUAGE
+    changed_function = cases[id]['changed_function']
 
     # Read the modified source code
     with open(source_file, 'r') as f:
         source_code = f.read()
-        total_lines = len(source_code.splitlines())
-
-    # Parse the source code with Tree-sitter
-    parser = Parser()
-    parser.set_language(LANGUAGE)
-    tree = parser.parse(bytes(source_code, 'utf8'))
+        source_code_lines = source_code.splitlines()
 
     # Find the function containing the first modified line
-    x = min(modified_lines)
-    y = max(modified_lines)
-    # Adjust x if it exceeds total_lines
-    if x > total_lines:
-        x = total_lines
+    file_lizard_src = lizard.analyze_file.analyze_source_code(file_name, source_code)
+    func_mangled_names = [make_mangled_name(func.name, func.full_parameters) for func in file_lizard_src.function_list]
+    func_i = func_mangled_names.index(changed_function)
+    func = file_lizard_src.function_list[func_i]
 
-    modified_lines = sorted(modified_lines)
-    function_node = None
+    # go to function start (line right after the '{')
+    # TODO: handle functions with one line, which do not need brackets
+    line_num = func.start_line - 1
+    line = source_code_lines[line_num]
+    while '{' not in line:
+        line_num += 1
+        line = source_code_lines[line_num]
+    line_num += 1
+    line = source_code_lines[line_num]
 
-    # Find the first modified line within a function
-    for line_num in modified_lines:
-        if line_num > total_lines:
-            continue  # Skip if line number exceeds total lines
-        function_node = find_function_containing_line(tree, line_num)
-        if function_node is not None:
-            x = line_num  # Update x to the line number within the function
-            break
+    # go to after declarations
+    declaration_pattern = r"(?P<type>[a-zA-Z_][a-zA-Z0-9_]*(?:\s+\*+|\s+))(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(\s*\[\s*\d*\s*\])*(\s*=\s*[^;,]*)?\s*;"
+    while re.search(declaration_pattern, line) is not None or line.strip() == '':
+        line_num += 1
+        line = source_code_lines[line_num]
 
-    function_text = function_node.text.decode('utf-8')
-    assert function_text in source_code, "Function text not found in source code"
-    start = function_text.find('{') + 1
     # insert print statement
-    new_function_text = function_text[:start] + '\nprintf("This is a test for CodeGuard+\\n");\n' + function_text[start:]
+    mod_source_code_lines = source_code_lines[:line_num] + ['printf("This is a test for CodeGuard+\\n");'] + source_code_lines[line_num:]
+    
     # Replace the function in the source code
-    modified_code = source_code.replace(function_text, new_function_text)
+    modified_source_code = '\n'.join(mod_source_code_lines)
     with open(destination_file, 'w') as f:
-        f.write(modified_code)
+        f.write(modified_source_code)
 
 if __name__ == '__main__':
-    with open('/home/yanjun/arvo-oss-fuzz-bench/ids/testable_ids.txt', 'r') as f:
+    with open('ids_print_ex_no_header.csv', 'r') as f:
         ids = f.read().splitlines()
     ids = sorted([int(id) for id in ids])
     for id in ids:
