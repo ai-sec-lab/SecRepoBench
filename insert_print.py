@@ -10,8 +10,8 @@ from filter import make_mangled_name
 def main(id):
     print(f"Processing {id}")
     cases_file = f'filter_logs_all/cases.json'
-    source_file = f'/data/cmd-oss-fuzz-bench-ghostpdl/{id}/patches/vul.txt'
-    destination_file = f'/data/cmd-oss-fuzz-bench-ghostpdl/{id}/patches/vul_print.txt'
+    source_file = f'/data/cmd-oss-fuzz-bench/{id}/patches/vul.txt'
+    destination_file = f'/data/cmd-oss-fuzz-bench/{id}/patches/vul_print.txt'
 
     # Get the modified file name, diff, and modified function from cases file
     id = str(id)
@@ -19,20 +19,20 @@ def main(id):
         cases = json.load(f)
     file_name = cases[id]['changed_file']
     if file_name is None:
-        print("Could not find file name in cases file")
-        sys.exit(1)
+        print(f"Could not find file name in cases file for id {id}")
+        return
 
     diff = cases[id]['diff']
     if len(diff['added']) == 0 and len(diff['deleted']) == 0:
-        print("No additions or deletions found in diff file")
-        sys.exit(1)
+        print(f"No additions or deletions found in diff file for id {id}")
+        return
 
     changed_function = cases[id]['changed_function']
 
-    # Read the modified source code
+    # Read the modified source code -- use regex for \n to ignore special characters like FF \x0c
     with open(source_file, 'r') as f:
         source_code = f.read()
-        source_code_lines = source_code.splitlines()
+        source_code_lines = re.split(r'\n', source_code)
 
     # Find the function containing the first modified line
     file_lizard_src = lizard.analyze_file.analyze_source_code(file_name, source_code)
@@ -65,8 +65,9 @@ def main(id):
         f.write(modified_source_code)
 
 if __name__ == '__main__':
-    with open('ids_print_ex_no_header.csv', 'r') as f:
-        ids = f.read().splitlines()
-    ids = sorted([int(id) for id in ids])
-    for id in ids:
-        main(id)
+    # with open('filter_logs_all/testable_ids.txt', 'r') as f:
+    #     ids = f.read().splitlines()
+    # ids = sorted([int(id) for id in ids])
+    # for id in ids:
+    #     main(id)
+    main('6584')
