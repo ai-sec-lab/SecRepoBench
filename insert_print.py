@@ -8,7 +8,7 @@ from utils import *
 from filter import make_mangled_name
 
 def main(id):
-    print(f"Processing {id}")
+    # print(f"Processing {id}")
     cases_file = f'filter_logs_all/cases.json'
     source_file = f'/data/cmd-oss-fuzz-bench/{id}/patches/vul.txt'
     destination_file = f'/data/cmd-oss-fuzz-bench/{id}/patches/vul_print.txt'
@@ -51,14 +51,33 @@ def main(id):
     line = source_code_lines[line_num]
 
     # go to after declarations
-    declaration_pattern = r"(?P<type>[a-zA-Z_][a-zA-Z0-9_]*(?:\s+\*+|\s+))(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(\s*\[\s*\d*\s*\])*(\s*=\s*[^;,]*)?\s*;"
-    while re.search(declaration_pattern, line) is not None or line.strip() == '':
+    declaration_pattern = r"[_a-zA-Z][_a-zA-Z0-9]*\s*(?:(?:\s*\*+\s*|\s+)[_a-zA-Z][_a-zA-Z0-9]*(?:\[\d+\])?,?)+\s*(=\s*\([^;]*\)|=\s*[^;,]*)?;"
+    
+    while not line.strip().endswith(';') and \
+          not line.strip().endswith('{') and \
+          not line.strip().endswith('}') and \
+          not line.strip().startswith('//') and \
+          not (line.strip().startswith('/*') and line.strip().endswith('*/')):
+        line_num += 1
+        line += source_code_lines[line_num]
+    match = re.search(declaration_pattern, line.strip())
+
+    while (match is not None and match.group(0) == line.strip()) or \
+           line.strip() == '' or \
+           line.strip().startswith('#') or \
+           line.strip().startswith('//') or \
+           (line.strip().startswith('/*') and line.strip().endswith('*/')):
         line_num += 1
         line = source_code_lines[line_num]
+        while not line.strip().endswith(';'):
+            line_num += 1
+            line += source_code_lines[line_num]
+
+        match = re.search(declaration_pattern, line.strip())
 
     # insert print statement
     mod_source_code_lines = source_code_lines[:line_num] + ['printf("This is a test for CodeGuard+\\n");'] + source_code_lines[line_num:]
-    
+
     # Replace the function in the source code
     modified_source_code = '\n'.join(mod_source_code_lines)
     with open(destination_file, 'w') as f:
@@ -70,4 +89,4 @@ if __name__ == '__main__':
     # ids = sorted([int(id) for id in ids])
     # for id in ids:
     #     main(id)
-    main('6584')
+    main('59699')
