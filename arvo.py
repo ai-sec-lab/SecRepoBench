@@ -108,16 +108,16 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, ro
     subprocess.run(["chmod", "-R",  "777", str(directory.absolute())])
     return True
 
-def get_targets(local_id, filter_patches, root="./"):
+def get_targets(local_id, filter_patches, tests, patches, root="./"):
 
     directory = Path(root) / str(local_id)
-    patches = [p.stem for p in (directory / "patches").glob("./*.txt") if filter_patches in p.stem]
-    testcase_targets = [["/bin/bash", (directory / "testcase.sh").absolute(), patch] for patch in patches]
-    unittest_targets = [["/bin/bash", (directory / "unittest.sh").absolute(), patch] for patch in patches]
+    patches = [p.stem for p in (directory / "patches").glob("./*.txt") if p.stem in filter_patches]
     targets = []
     for patch in patches:
-        targets.append((local_id, patch, "testcase", ["/bin/bash", (directory / "testcase.sh").absolute(), patch]))
-        targets.append((local_id, patch, "unittest", ["/bin/bash", (directory / "unittest.sh").absolute(), patch]))
+        if 'testcase' in tests:
+            targets.append((local_id, patch, "testcase", ["/bin/bash", (directory / "testcase.sh").absolute(), patch]))
+        if 'unittest' in tests:
+            targets.append((local_id, patch, "unittest", ["/bin/bash", (directory / "unittest.sh").absolute(), patch]))
     return targets
 
 class ParseException(Exception):
@@ -344,8 +344,9 @@ def main():
     parser.add_argument('targets', nargs='+', help='Targets as one or more integers or the string "all".')
     parser.add_argument("-p", "--path", type=str, help="", default="./")
     parser.add_argument("-o", "--output", type=str, help="", default="./")
-    parser.add_argument("-f", "--filter-patches", type=str, help="only evaluate patches including a substring", default="")
+    parser.add_argument("-f", "--filter-patches", nargs='+', help="enter 'sec', 'vul', and/or 'vul_print")
     parser.add_argument("--rerun", action="store_true", help="Rerun targets even if they have cached results")
+    parser.add_argument("--tests", nargs='+', help="enter 'testcase' and/or 'unittest'")
 
     args = parser.parse_args()
 
@@ -402,7 +403,7 @@ def main():
 
         if args.action == "eval":
             int_targets = targets
-            targets = [c for target in targets for c in get_targets(target, args.filter_patches, root=root)]
+            targets = [c for target in targets for c in get_targets(target, args.filter_patches, args.tests, root=root)]
             
             # Load completed targets from a file if it exists
             completed_file = Path(args.output) / "completed_targets.pkl"
@@ -457,7 +458,12 @@ def main():
                     pickle.dump(completed, f)
 
             # Process all targets, including cached ones
-            report = {}
+            report_file = Path(args.output) / "report.json"
+            if report_file.exists():
+                with open(report_file, 'r') as f:
+                    report = json.load(f)
+            else:
+                report = {}
             with alive_bar(len(targets)) as bar:
                 for target in targets:
                     local_id, patch, test_type, _ = target
@@ -480,7 +486,7 @@ def main():
 
                     bar()
 
-            json.dump(report, (Path(args.output) / "report.json").open("w"), indent=4)
+            json.dump(report, report_file.open("w"), indent=4)
             print_report(report)
 
 if __name__ == "__main__":
