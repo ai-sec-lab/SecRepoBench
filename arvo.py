@@ -15,7 +15,8 @@ import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
-from projects import * 
+from projects import *
+from insert_print import insert_print
 
 def load_txt(path):
     """
@@ -64,60 +65,150 @@ def load_txt(path):
     return data
 
 
-def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, root="."):
+def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fixing_commit, root="."):
 
     directory = Path(root) / str(local_id)
     dockerfile_dir = directory / "Dockerfile"
-    testcase_dir = directory / "testcase.sh"
-    unittest_dir = directory / "unittest.sh"
+    testcase_sec_dir = directory / "testcase_sec.sh"
+    testcase_vul_dir = directory / "testcase_vul.sh"
+    unittest_sec_dir = directory / "unittest_sec.sh"
+    unittest_sec_print_dir = directory / "unittest_sec_print.sh"
     vul_dir = directory / "patches" / "vul.txt"
     sec_dir = directory / "patches" / "sec.txt"
-    err_dir = directory / "patches" / "err.txt"
+    sec_print_dir = directory / "patches" / "sec_print.txt"
     diff_dir = directory / "diff.txt"
 
-    proc = subprocess.run(["docker", "pull", f"n132/arvo:{local_id}-fix"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        return False
+    # only pull docker image if we don't already have it
+    image_name = f"n132/arvo:{local_id}-fix"
 
-    scripts_content = (
+    proc_check = subprocess.run(
+        ["docker", "image", "inspect", image_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+
+    if proc_check.returncode != 0:
+        # Image does not exist locally, pull it
+        proc_pull = subprocess.run(
+            ["docker", "pull", image_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        if proc_pull.returncode != 0:
+            return False
+
+    # write testcase, unittest bash scripts
+    scripts_content_sec = (
         f"#!/bin/bash\n"
         f"docker build {directory.absolute()} -t oss-fuzz-bench:{local_id}-$1\n"
-        f"docker run --rm oss-fuzz-bench:{local_id}-$1 /bin/sh -c \""
-        f"mv -f /patches/$1.txt \\$(find /src -type d -iname '{project_name}' | head -n 1)/{patch_path} && "
+        f"docker run --rm oss-fuzz-bench:{local_id}-$1 /bin/sh -c \" \n"
+        # revert to fixing commit and stash changes as necessary
+        f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
+        "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
+        "  if [ -n \\\"\\$(git -C \\$GIT_DIR status --porcelain)\\\" ]; then\n"
+        "    git -C \\$GIT_DIR stash save --include-untracked \\\"Saving my changes\\\"\n"
+        "    CHANGES_STASHED=true\n"
+        "  else\n"
+        "    CHANGES_STASHED=false\n"
+        "  fi\n"
+        f"  git -C \\$GIT_DIR checkout {fixing_commit}\n"
+        "  if [ \\\"$CHANGES_STASHED\\\" = true ]; then\n"
+        "    git -C \\$GIT_DIR stash apply\n"
+        "  fi\n"
     )
+
+    scripts_content_vul = (
+        f"#!/bin/bash\n"
+        f"docker build {directory.absolute()} -t oss-fuzz-bench:{local_id}-$1\n"
+        f"docker run --rm oss-fuzz-bench:{local_id}-$1 /bin/sh -c \" \n"
+        # revert to one before fixing commit and stash changes as necessary
+        f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
+        "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
+        "  if [ -n \\\"\\$(git -C \\$GIT_DIR status --porcelain)\\\" ]; then\n"
+        "    git -C \\$GIT_DIR stash save --include-untracked \\\"Saving my changes\\\"\n"
+        "    CHANGES_STASHED=true\n"
+        "  else\n"
+        "    CHANGES_STASHED=false\n"
+        "  fi\n"
+        f"  git -C \\$GIT_DIR checkout {fixing_commit}^\n"
+        "  if [ \\\"$CHANGES_STASHED\\\" = true ]; then\n"
+        "    git -C \\$GIT_DIR stash apply\n"
+        "  fi\n"
+    )
+
+    scripts_content_sec_print = (
+        f"#!/bin/bash\n"
+        f"docker build {directory.absolute()} -t oss-fuzz-bench:{local_id}-$1\n"
+        f"docker run --rm oss-fuzz-bench:{local_id}-$1 /bin/sh -c \" \n"
+        # revert to one before fixing commit, stash changes as necessary, and move in the vul file with inserted print statement
+        f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
+        "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
+        "  if [ -n \\\"\\$(git -C \\$GIT_DIR status --porcelain)\\\" ]; then\n"
+        "    git -C \\$GIT_DIR stash save --include-untracked \\\"Saving my changes\\\"\n"
+        "    CHANGES_STASHED=true\n"
+        "  else\n"
+        "    CHANGES_STASHED=false\n"
+        "  fi\n"
+        f"  git -C \\$GIT_DIR checkout {fixing_commit}\n"
+        "  if [ \\\"$CHANGES_STASHED\\\" = true ]; then\n"
+        "    git -C \\$GIT_DIR stash apply\n"
+        "  fi\n"
+        # move patch file
+        f"  mv -f /patches/$1.txt \\$GIT_DIR/{patch_path}\n"
+    )
+
+    testcase_content_sec = scripts_content_sec + "  timeout 1500 arvo compile\n  arvo run\n\""
+    testcase_content_vul = scripts_content_vul + "  timeout 1500 arvo compile\n  arvo run\n\""
+
+    unittest_content_sec = scripts_content_sec + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
+    unittest_content_sec_print = scripts_content_sec_print + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
+
     dockerfile_content = (
         f"FROM n132/arvo:{local_id}-fix\n"
         f"ADD patches /patches\n"
     )
-    testcase_content = scripts_content + "arvo compile ; arvo run\""
-    unittest_content = scripts_content + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "echo 'NO UNIT TESTS'") + "\""
-    #err_content = gen_err_patch(diff, vul_content, sec_content)
+
+    # insert print now, since we're already writing the script for sec_print
+    sec_print_content = insert_print(local_id, patch_path, diff, sec_content)
 
     directory.mkdir(exist_ok=True, parents=True)
     (directory / "patches").mkdir(exist_ok=True)
     dockerfile_dir.open("w").write(dockerfile_content)
-    testcase_dir.open("w").write(testcase_content)
-    unittest_dir.open("w").write(unittest_content)
+    testcase_sec_dir.open("w").write(testcase_content_sec)
+    testcase_vul_dir.open("w").write(testcase_content_vul)
+    unittest_sec_dir.open("w").write(unittest_content_sec)
+    unittest_sec_print_dir.open("w").write(unittest_content_sec_print)
     vul_dir.open("w").write(vul_content)
     sec_dir.open("w").write(sec_content)
-    #err_dir.open("w").write(err_content)
+    sec_print_dir.open("w").write(sec_print_content)
     with open(diff_dir, 'w') as f:
         json.dump(diff, f, indent=4)
 
-    
     subprocess.run(["chmod", "-R",  "777", str(directory.absolute())])
     return True
 
-def get_targets(local_id, filter_patches, tests, patches, root="./"):
+def get_targets(local_id, filter_patches, tests, root="./"):
 
     directory = Path(root) / str(local_id)
     patches = [p.stem for p in (directory / "patches").glob("./*.txt") if p.stem in filter_patches]
     targets = []
-    for patch in patches:
-        if 'testcase' in tests:
-            targets.append((local_id, patch, "testcase", ["/bin/bash", (directory / "testcase.sh").absolute(), patch]))
-        if 'unittest' in tests:
-            targets.append((local_id, patch, "unittest", ["/bin/bash", (directory / "unittest.sh").absolute(), patch]))
+
+    # test whether the secure version does not crash given triggering input
+    if 'testcase' in tests and 'sec' in patches:
+        targets.append((local_id, 'sec', "testcase", ["/bin/bash", (directory / "testcase_sec.sh").absolute(), 'sec']))
+
+    # test whether the vulnerable version does crash given triggering input
+    if 'testcase' in tests and 'vul' in patches:
+        targets.append((local_id, 'vul', "testcase", ["/bin/bash", (directory / "testcase_vul.sh").absolute(), 'vul']))
+
+    # test whether there are passing unit tests for the secure version
+    if 'unittest' in tests and 'sec' in patches:
+        targets.append((local_id, 'sec', "unittest", ["/bin/bash", (directory / "unittest_sec.sh").absolute(), 'sec']))
+
+    # test whether there are relevant unit tests for the secure version
+    if 'unittest' in tests and 'sec_print' in patches:
+        targets.append((local_id, 'sec_print', "unittest", ["/bin/bash", (directory / "unittest_sec_print.sh").absolute(), 'sec_print']))
+
     return targets
 
 class ParseException(Exception):
@@ -231,43 +322,34 @@ def parse_output(output, project_name, report={}, root="./"):
             result = parse_unittest((local_id, patch, test_type, type('Proc', (), proc_data)()), project_name)
         except ParseException as e:
             result = "error: " + str(e)
-        
+
     if str(local_id) in report:
-        if patch in report[str(local_id)]:
-            report[str(local_id)][patch][test_type] = result
-        else:
-             report[str(local_id)][patch] = {test_type:result}
+        report[str(local_id)][f"{test_type}_{patch}"] = result
     else:
-        report[str(local_id)] = {patch:{test_type:result}}
+        report[str(local_id)] = {f"{test_type}_{patch}": result}
 
     return report
 
 def print_report(report):
-    for local_id, patches in report.items():
+    for local_id, test_results in report.items():
         print(local_id)
-        for patch_type, results in patches.items():
-            if "unittest" in results:
-                if isinstance(results['unittest'], dict):
-                    if isinstance(results['unittest']['fail'], list):
-                        num_fail = len(results['unittest']['fail'])
-                    else:
-                        num_fail = results['unittest']['fail']
-                
-                    pass_over_total = f"{results['unittest']['total'] - num_fail}/{results['unittest']['total']}"
-                else:
-                    pass_over_total = results['unittest']
-            else:
-                pass_over_total = "N/A"
-            if 'testcase' in results:
-                tcr = results['testcase']
-            else:
-                tcr = "N/A"
-            print(f"{patch_type}\t{tcr}\t{pass_over_total}")
 
+        if 'testcase_sec' in test_results:
+            print(f'testcase_sec\t{test_results['testcase_sec']}')
+        if 'testcase_vul' in test_results:
+            print(f'testcase_vul\t{test_results['testcase_vul']}')
+        if 'unittest_sec' in test_results:
+            num_pass = len(test_results['unittest_sec']['pass'])
+            num_total = test_results['unittest_sec']['total']
+            print(f'unittest_sec\t{num_pass}/{num_total}')
+        if 'unittest_sec_print' in test_results:
+            num_pass = len(test_results['unittest_sec_print']['pass'])
+            num_total = test_results['unittest_sec_print']['total']
+            print(f'unittest_sec_print\t{num_pass}/{num_total}')
 
 def write_output(output, root="./"):
     local_id, patch, test_type, proc = output
-    directory = Path(root) / str(local_id) / str(patch) / test_type
+    directory = Path(root) / str(local_id) / f"{test_type}_{patch}"
     directory.mkdir(exist_ok=True, parents=True)
     (directory / "stdout.txt").open("wb").write(proc["stdout"])
     (directory / "stderr.txt").open("wb").write(proc["stderr"])
@@ -288,7 +370,7 @@ def proc_runner(target_with_output_path_and_rerun):
     print(f"Running {local_id} {patch} {test_type}")
     
     # Check if cached result exists
-    cache_file = Path(output_path) / str(local_id) / str(patch) / test_type / "cache.pkl"
+    cache_file = Path(output_path) / str(local_id) / f"{test_type}_{patch}" / "cache.pkl"
     if cache_file.exists() and not rerun:
         try:
             with cache_file.open("rb") as f:
@@ -344,7 +426,7 @@ def main():
     parser.add_argument('targets', nargs='+', help='Targets as one or more integers or the string "all".')
     parser.add_argument("-p", "--path", type=str, help="", default="./")
     parser.add_argument("-o", "--output", type=str, help="", default="./")
-    parser.add_argument("-f", "--filter-patches", nargs='+', help="enter 'sec', 'vul', and/or 'vul_print")
+    parser.add_argument("-f", "--filter-patches", nargs='+', help="enter 'sec', 'vul', and/or 'sec_print")
     parser.add_argument("--rerun", action="store_true", help="Rerun targets even if they have cached results")
     parser.add_argument("--tests", nargs='+', help="enter 'testcase' and/or 'unittest'")
 
@@ -367,16 +449,9 @@ def main():
             targets = list(data.keys())
         else:
             try:
-                targets = [int(t) for t in args.targets]
+                targets = [str(int(t)) for t in args.targets]
             except ValueError:
                 parser.error('Targets must be integers or "all".')
-
-        # # remove later !!!
-        # with open('filter_logs_all/ids_top40_compilable_testable.csv', 'r') as f:
-        #     targets = f.readlines()
-        # targets = targets[1:]
-        # targets = [t.replace('\n', '') for t in targets]
-        # targets = [id for id in data if data[id]['project_name'] == 'opensc']
 
         if args.action == "setup":
 
@@ -384,7 +459,7 @@ def main():
 
             with ProcessPoolExecutor(max_workers=num_workers) as executor:
                 future_to_stem = {
-                    executor.submit(setup, local_id, data[local_id]["project_name"], data[local_id]["changed_file"], data[local_id]["diff"], data[local_id]["source_code_before"], data[local_id]["source_code"], root=root): local_id
+                    executor.submit(setup, local_id, data[local_id]["project_name"], data[local_id]["changed_file"], data[local_id]["diff"], data[local_id]["source_code_before"], data[local_id]["source_code"], data[local_id]["fixing_commit"], root=root): local_id
                     for local_id in targets
                 }
 
@@ -402,23 +477,24 @@ def main():
                         bar()
 
         if args.action == "eval":
-            int_targets = targets
             targets = [c for target in targets for c in get_targets(target, args.filter_patches, args.tests, root=root)]
             
-            # Load completed targets from a file if it exists
-            completed_file = Path(args.output) / "completed_targets.pkl"
-            if completed_file.exists() and not args.rerun:
-                with completed_file.open("rb") as f:
-                    completed = pickle.load(f)
-            else:
-                completed = set()
+            # Get completed runs from existing report
+            completed = set()
+            all_report_file = Path(args.output) / f"report.json"
+            if all_report_file.exists() and not args.rerun:
+                with open(all_report_file, 'r') as f:
+                    all_report = json.load(f)
+                for id in all_report.keys():
+                    for test_patch in all_report[id].keys():
+                        completed.add((id, test_patch))
 
             # Count cached results and identify rate-limited cases
             cached_count = 0
             rate_limited_count = 0
             for target in targets:
                 local_id, patch, test_type, _ = target
-                cache_file = Path(args.output) / str(local_id) / str(patch) / test_type / "cache.pkl"
+                cache_file = Path(args.output) / str(local_id) / f"{test_type}_{patch}" / "cache.pkl"
                 if cache_file.exists() and not args.rerun:
                     try:
                         with cache_file.open("rb") as f:
@@ -437,7 +513,7 @@ def main():
                 print("Rerunning all targets, including those with cached results.")
 
             procs = []
-            pool_size = min(int(cpu_count() / 3), len(targets))
+            pool_size = min(16, len(targets))
             try:
                 with alive_bar(len(targets)) as bar, Pool(pool_size) as p:
                     remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
@@ -447,27 +523,15 @@ def main():
                         completed.add((proc[0], proc[1], proc[2]))
                         bar()
 
-                        if len(completed) % 10 == 0:
-                            with completed_file.open("wb") as f:
-                                pickle.dump(completed, f)
-
             except KeyboardInterrupt:
                 print("Interrupted. Processing all results...")
-            finally:
-                with completed_file.open("wb") as f:
-                    pickle.dump(completed, f)
 
             # Process all targets, including cached ones
-            report_file = Path(args.output) / "report.json"
-            if report_file.exists():
-                with open(report_file, 'r') as f:
-                    report = json.load(f)
-            else:
-                report = {}
+            report = {}
             with alive_bar(len(targets)) as bar:
                 for target in targets:
                     local_id, patch, test_type, _ = target
-                    cache_file = Path(args.output) / str(local_id) / str(patch) / test_type / "cache.pkl"
+                    cache_file = Path(args.output) / str(local_id) / f"{test_type}_{patch}" / "cache.pkl"
                     
                     if cache_file.exists() and not args.rerun:
                         try:
@@ -486,10 +550,11 @@ def main():
 
                     bar()
 
-            json.dump(report, report_file.open("w"), indent=4)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format the current date and time
+            new_report_file = Path(args.output) / f"report_{timestamp}.json"
+            json.dump(report, new_report_file.open("w"), indent=4)
+
             print_report(report)
 
 if __name__ == "__main__":
     main()
-
-
