@@ -21,5 +21,5 @@ def combine_reports(base_report_path, update_report_path):
 
 if __name__ == "__main__":
     base_report_path = "/data/cmd-oss-fuzz-bench/output/report.json"
-    update_report_path = "/data/cmd-oss-fuzz-bench/output/report_20241223_222821.json"
+    update_report_path = "/data/cmd-oss-fuzz-bench/output/report_20241224_063425.json"
     combine_reports(base_report_path, update_report_path)
