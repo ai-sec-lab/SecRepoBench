@@ -39,7 +39,13 @@ unittest_commands = {
     #"mupdf":"",
     #"leptonica":"arvo compile && make check",
     "hunspell":"arvo compile && make check",
-    "opensc":"",
+    "opensc":"sudo apt-get install -y autoconf libtool pkg-config libglib2.0-dev libeac-dev cmocka && \
+        ./bootstrap && \
+        ./configure --enable-cmocka && \
+        make && \
+        make check && \
+        cd src/tests/unittests && \
+        make check",
     "libxml2":"arvo compile && make ASAN_OPTIONS=\'$ASAN_OPTIONS detect_leaks=0\' check",
     "gpac":"arvo compile && \
         apt-get update && \
@@ -215,7 +221,7 @@ unittest_patterns = {
 }
 
 bad_projects = [
-    "opensc", # cannot test
+    #"opensc", # cannot test
     "ghostpdl", # cannot test
     #"ffmpeg", # build issues
     # "skia", # build issues
