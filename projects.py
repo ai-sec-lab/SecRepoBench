@@ -35,7 +35,7 @@ unittest_commands = {
         rm ndpi/tests/pcap/fuzz-* ; \
         rm -rf ndpi/fuzz/ ; \
         make -C ndpi/tests check",
-    "imagemagick":"./configure && make check",
+    "imagemagick":"apt-get update && apt-get install -y perl build-essential wget tar libperl-dev && apt-get clean && apt-get install -y ghostscript libfreetype6-dev libbz2-dev libtiff5-dev libjpeg-dev libopenjp2-7-dev libx11-dev libxext-dev hp2xx ffmpeg && ./configure --with-perl && make && make install && ldconfig /usr/local/lib && make check ; cd PerlMagick && make test ; perl -I../blib/lib -I../blib/arch t/bzlib/read.t ; perl -I../blib/lib -I../blib/arch t/bzlib/write.t ; perl -I../blib/lib -I../blib/arch t/zlib/read.t ; perl -I../blib/lib -I../blib/arch t/zlib/write.t ; perl -I../blib/lib -I../blib/arch t/tiff/read.t ; perl -I../blib/lib -I../blib/arch t/tiff/write.t ; perl -I../blib/lib -I../blib/arch t/ttf/read.t ; perl -I../blib/lib -I../blib/arch t/jpeg/read.t ; perl -I../blib/lib -I../blib/arch t/jpeg/write.t ; perl -I../blib/lib -I../blib/arch t/jng/read.t ; perl -I../blib/lib -I../blib/arch t/jng/write.t ; perl -I../blib/lib -I../blib/arch t/png/read.t ; perl -I../blib/lib -I../blib/arch t/png/write.t ; perl -I../blib/lib -I../blib/arch t/ps/read.t ; perl -I../blib/lib -I../blib/arch t/ps/write.t ; perl -I../blib/lib -I../blib/arch t/openjp2/read.t ; perl -I../blib/lib -I../blib/arch t/x11/read.t ; perl -I../blib/lib -I../blib/arch t/x11/write.t  ; perl -I../blib/lib -I../blib/arch t/hpgl/read.t ; perl -I../blib/lib -I../blib/arch t/mpeg/read.t",
     #"mupdf":"",
     #"leptonica":"arvo compile && make check",
     "hunspell":"arvo compile && make check",
@@ -89,10 +89,9 @@ unittest_commands = {
     "wireshark":"apt-get update && apt-get -y install qt5-default libgtk2.0-dev libpcap-dev && mkdir build && cd build && cmake -DBUILD_wireshark=OFF .. && make && make  test",
     "jsoncpp":"arvo compile",
     #"uwebsockets":"apt-get -y install zlib1g-dev clang && make -j && export CXX=\"clang++ -stdlib=libc++\" && make -C ",
-    #"skia":"arvo compile &&",
     #"gdal":"",
-    "ffmpeg":"arvo compile ; cd ffmpeg ; make ; make -i fate",
-    "binutils-gdb":"cd binutils-gdb && ./configure ; make ; make check",
+    "ffmpeg":"cd ffmpeg ; export CFLAGS=$(echo $CFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-stdlib=libc++//') ; CC=gcc CXX=g++ ./configure --samples=fate-suite/ ; make ; make fate-rsync ; make fate",
+    "binutils-gdb":"cd binutils-gdb ; apt-get install -y dejagnu ; export CFLAGS=$(echo $CFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-stdlib=libc++//') ; CC=gcc CXX=g++ ./configure ; make ; make install ; make check RUNTESTFLAGS='GDB=/usr/local/bin/gdb gdb.base/a2-run.exp'",
     "librawspeed":"mkdir build && cd build && cmake -DWITH_PTHREADS=OFF -DWITH_OPENMP=OFF -DWITH_PUGIXML=OFF -DUSE_XMLLINT=OFF -DWITH_JPEG=OFF -DWITH_ZLIB=OFF -DALLOW_DOWNLOADING_GOOGLETEST=ON .. ; make ; make test",
     "openthread":"arvo compile && make check",
     "fluent-bit":"arvo compile && cd fluent-bit/build && make test",
@@ -114,7 +113,7 @@ unittest_commands = {
     "wpantund": "arvo compile && make check",
     "flatbuffers": "cd flatbuffers && cmake -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS='-pthread' && make  && make test   ",
     "gdal": "cd gdal && ./autogen.sh && ./configure && make  && make install && cd ../autotest/cpp && make  && ./gdal_unit_test ",
-    "skia": "apt-get update && apt-get install -y libfontconfig1-dev && python3 tools/git-sync-deps && bin/gn gen out/Debug && ninja -C out/Debug dm && out/Debug/dm -v --src tests",
+    "skia": "apt-get update && timeout 300 apt-get install -y software-properties-common && add-apt-repository -y ppa:ubuntu-toolchain-r/test && apt-get update && apt-get install -y gcc-9 g++-9 && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90 && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90 && apt-get update && apt-get install -y libfontconfig1-dev && python tools/git-sync-deps && apt-get install -y clang && rm -rf out/Debug && CC=clang CXX=clang++ bin/gn gen out/Debug --args='cc=\\\"clang\\\" cxx=\\\"clang++\\\"' && timeout 600 ninja -C out/Debug dm && out/Debug/dm -v --src tests",
     "libredwg": "cd libredwg && ./autogen.sh && ./configure && make  && yes | ./unit_testing_all.sh",
     # "poppler": "apt-get update && apt-get install -y libfontconfig1-dev libjpeg-dev libopenjp2-7-dev && \
     #             git clone git://git.freedesktop.org/git/poppler/test testdata && \
@@ -184,7 +183,6 @@ unittest_patterns = {
     "wireshark":_ctest_pattern,
     "jsoncpp":r"Testing\s(?P<name>.*):\s(?P<status>.*)",
     #"uwebsockets":r"", # TODO add parser
-    #"skia":r"",
     #"gdal":"",
     "ffmpeg":r"TEST\s+(?P<name>.*)(?P<status>\n(FAIL)?)",
     "binutils-gdb":_default_pattern,
@@ -198,7 +196,7 @@ unittest_patterns = {
     #"ntopng":"",
     "flatbuffers": _ctest_pattern, 
     "gdal":[_google_test_pattern, r"---> group: (?P<name>.*)\n[\s\S]*?(?P<status>fail)"], 
-    "skia": r"start unit test  (?P<name>[\S]*?)\n[\s\S]*?(?P<status>FAILURE|done)",
+    "skia": r"(?P<status>FAILURE|done)  unit test  (?P<name>[\S]*)",
     "libgit2":_ctest_pattern,
     "selinux":r"Test:\s(?P<name>\S*)\s.*\.\n?(?P<status>.+)", 
     "lcms":r"Checking (?P<name>.*) \.+(?P<status>[A-z]+)", 
@@ -217,8 +215,6 @@ unittest_patterns = {
 bad_projects = [
     "opensc", # cannot test
     "ghostpdl", # cannot test
-    #"ffmpeg", # build issues
-    # "skia", # build issues
     # "libredwg", # build issues
     "serenity", # build issues
     "mupdf", # cannot test
