@@ -423,7 +423,18 @@ static void mpgviddmx_check_pid(GF_Filter *filter, GF_MPGVidDmxCtx *ctx, u32 vos
 		/*remove packed flag if any (VOSH user data)*/
 		ctx->is_packed = ctx->is_vfr = ctx->forced_packed = GF_FALSE;
 		i=0;
-		while (1) {// <MASK>}
+		while (1) {
+			char *frame = dcfg;
+			while ((i+3<vosh_size)  && ((frame[i]!=0) || (frame[i+1]!=0) || (frame[i+2]!=1))) i++;
+			if (i+4>=vosh_size) break;
+			// <MASK>
+			frame = memchr(dcfg + i + 4, 'p', vosh_size - i - 4);
+			if (frame) {
+				ctx->forced_packed = GF_TRUE;
+				frame[0] = 'n';
+			}
+			break;
+		}
 		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_DECODER_CONFIG, & PROP_DATA_NO_COPY(dcfg, vosh_size));
 	}
 

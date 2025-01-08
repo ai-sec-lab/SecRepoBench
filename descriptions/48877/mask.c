@@ -1800,7 +1800,9 @@ int_to_s(mrb_state *mrb, mrb_value self)
 static mrb_int
 cmpnum(mrb_state *mrb, mrb_value v1, mrb_value v2)
 {
-// <MASK>
+#ifdef MRB_USE_BIGINT
+  // <MASK>
+#endif
 
 #ifdef MRB_NO_FLOAT
   mrb_int x, y;

@@ -80,10 +80,10 @@ def get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, di
             start_row -= 1
         if ln_num <= end_row + 1:
             end_row -= 1
-    
+
     for change in diff['deleted']:
         ln_num = change[0]
-        if ln_num <= start_row + 1:
+        if ln_num < start_row + 1:
             start_row += 1
         if ln_num <= end_row + 1:
             end_row += 1
@@ -153,11 +153,6 @@ def find_closest_func(func_lizard, funcs_ts):
 
 
 def get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section):
-    # for single line changes, increase scope +3 lines each side
-    if x == y:
-        x = max(x-3, function_node.start_point[0] + 1)
-        y = min(y+3, function_node.end_point[0] + 1)
-
     # Find the natural code block
     sec_code_block = find_code_block(function_node, x, y, total_lines, modified_section)
 
@@ -266,7 +261,25 @@ def parse_git_diff(diff_content, target_filename):
     return result
 
 
-def main(id, diff_non_trivial, changed_file, base_path):
+def mask_helper(id, diff_non_trivial, changed_file, base_path):
+    delta_x = 0
+    delta_y = 0
+    sec_code_block, vul_code_block = mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y)
+
+    while sec_code_block.strip() == '' or vul_code_block.strip() == '':
+        if delta_x == delta_y:
+            delta_y += 1
+        else:
+            delta_x += 1
+        
+        output = mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y)
+        if output is None:  # range exceeds modified function
+            break
+        else:
+            sec_code_block, vul_code_block = output
+
+
+def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
 
     print(f"Processing {id}")
 
@@ -287,8 +300,14 @@ def main(id, diff_non_trivial, changed_file, base_path):
     language = determine_language(ext)
     if language == 'c':
         LANGUAGE = C_LANGUAGE
+        mask_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/mask.c'
+        sec_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.c'
+        vul_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.c'
     elif language == 'cpp':
         LANGUAGE = CPP_LANGUAGE
+        mask_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/mask.cpp'
+        sec_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.cpp'
+        vul_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.cpp'
     else:
         print(f"Language of modified file not recognized for id {id}")
         return
@@ -344,11 +363,17 @@ def main(id, diff_non_trivial, changed_file, base_path):
     mod_func = mod_funcs[0]
 
     # Get the first and last modified lines in the modified function
+    # Restrict these lines to be in the modified function
+    # Shift by delta_x and delta_y
     modified_lines = [ln for ln in modified_lines 
                       if ln >= mod_func.start_line-1 and ln <= mod_func.end_line-1]
 
-    x = min(modified_lines)
-    y = max(modified_lines)
+    if (min(modified_lines) - delta_x < mod_func.start_line - 1) and (max(modified_lines) + delta_y > mod_func.end_line - 1):
+        print(f'ID {id}: Entire function added, so no vul code block')
+        return
+
+    x = max(min(modified_lines) - delta_x, mod_func.start_line - 1)
+    y = min(max(modified_lines) + delta_y, mod_func.end_line - 1)
 
     modified_section = '\n'.join(source_code_lines[x-1:y])
 
@@ -392,6 +417,8 @@ def main(id, diff_non_trivial, changed_file, base_path):
     with open(vul_code_block_file, 'w') as f:
         f.write(vul_code_block)
 
+    return sec_code_block, vul_code_block
+
 
 if __name__ == "__main__":
     with open('filter_logs_all/analyze_report_unittest_testcase/ids_each_step.json', 'r') as f:
@@ -405,8 +432,7 @@ if __name__ == "__main__":
     if not os.path.exists(base_path):
         os.mkdir(base_path)
 
-    # for id in ids:
-    for id in ['60783']:
+    for id in ids:
         diff_non_trivial = cases[id]['diff']
         changed_file = cases[id]['changed_file']
-        main(id, diff_non_trivial, changed_file, base_path)
+        mask_helper(id, diff_non_trivial, changed_file, base_path)

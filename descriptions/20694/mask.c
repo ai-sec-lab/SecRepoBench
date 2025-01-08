@@ -975,20 +975,7 @@ cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
 
     hdr->content_type = b->content_type;
 
-    if (b->content_type == MAPPED_SLICE) {
-        cp += safe_itf8_get((char *)cp,  (char *)cp_end, &hdr->ref_seq_id);
-#ifdef LARGE_POS
-        cp += safe_ltf8_get((char *)cp,  (char *)cp_end, &hdr->ref_seq_start);
-        cp += safe_ltf8_get((char *)cp,  (char *)cp_end, &hdr->ref_seq_span);
-#else
-        int32_t i32;
-        cp += safe_itf8_get((char *)cp,  (char *)cp_end, &i32);
-        hdr->ref_seq_start = i32;
-        cp += safe_itf8_get((char *)cp,  (char *)cp_end, &i32);
-        hdr->ref_seq_span = i32;
-#endif
-        // <MASK>
-    }
+    if (b->content_type == MAPPED_SLICE) {// <MASK>}
     cp += safe_itf8_get((char *)cp,  (char *)cp_end, &hdr->num_records);
     hdr->record_counter = 0;
     if (CRAM_MAJOR_VERS(fd->version) == 2) {

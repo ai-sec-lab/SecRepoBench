@@ -206,7 +206,9 @@ Scope::Scope(Parser& parser,bool topLevel)
 
         // Element() should stop at the next Key token (or right after a Close token)
         n = parser.CurrentToken();
-        // <MASK>
+        if (n == nullptr) {// <MASK>} else {
+            elements.insert(ElementMap::value_type(str, element));
+        }
     }
 }
 

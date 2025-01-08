@@ -1,4 +1,5 @@
-
+ile_strncmp(const char *s1, const char *s2, size_t len, uint32_t flags)
+{
 	/*
 	 * Convert the source args to unsigned here so that (1) the
 	 * compare will be unsigned as it is in strncmp() and (2) so
