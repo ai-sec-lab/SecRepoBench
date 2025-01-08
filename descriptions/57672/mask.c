@@ -391,7 +391,17 @@ mrb_env_unshare(mrb_state *mrb, struct REnv *e, mrb_bool noraise)
     mrb_free(mrb, p);
     return TRUE;
   }
-  else // <MASK>
+  else if (p) {// <MASK>}
+  else {
+    e->stack = NULL;
+    MRB_ENV_CLOSE(e);
+    MRB_ENV_SET_LEN(e, 0);
+    MRB_ENV_SET_BIDX(e, 0);
+    if (!noraise) {
+      mrb_exc_raise(mrb, mrb_obj_value(mrb->nomem_err));
+    }
+    return FALSE;
+  }
 }
 
 static inline mrb_callinfo*

@@ -3013,7 +3013,145 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
         cram_codec *codec = tm->codec;
         if (!tm->codec) goto_err;
 
-        switch(aux[2]) {// <MASK>}
+        switch(aux[2]) {
+        case 'A': case 'C': case 'c':
+            if (aux_end - aux < 3+1)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3;
+            //codec->encode(s, codec, aux, 1);
+            // Functionally equivalent, but less code.
+            BLOCK_APPEND_CHAR(tm->blk, *aux);
+            aux++;
+            break;
+
+        case 'S': case 's':
+            if (aux_end - aux < 3+2)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3;
+            //codec->encode(s, codec, aux, 2);
+            BLOCK_APPEND(tm->blk, aux, 2);
+            aux+=2;
+            break;
+
+        case 'I': case 'i': case 'f':
+            if (aux_end - aux < 3+4)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3;
+            //codec->encode(s, codec, aux, 4);
+            BLOCK_APPEND(tm->blk, aux, 4);
+            aux+=4;
+            break;
+
+        case 'd':
+            if (aux_end - aux < 3+8)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3; //*tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
+            //codec->encode(s, codec, aux, 8);
+            BLOCK_APPEND(tm->blk, aux, 8);
+            aux+=8;
+            break;
+
+        case 'Z': case 'H': {
+            if (aux_end - aux < 3)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->out = tm->blk;
+            }
+
+            char *aux_s;
+            aux += 3;
+            aux_s = aux;
+            while (aux < aux_end && *aux++);
+            if (codec->encode(s, codec, aux_s, aux - aux_s) < 0)
+                goto err;
+            break;
+        }
+
+        case 'B': {
+            // <MASK>
+
+            int type = aux[3], blen;
+            uint32_t count = (((uint32_t)((unsigned char *)aux)[4]) << 0 |
+                              ((uint32_t)((unsigned char *)aux)[5]) << 8 |
+                              ((uint32_t)((unsigned char *)aux)[6]) <<16 |
+                              ((uint32_t)((unsigned char *)aux)[7]) <<24);
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                if (codec->u.e_byte_array_len.val_codec->codec == E_XDELTA) {
+                    if (!(tm->blk2 = cram_new_block(EXTERNAL, key+128)))
+                        goto err;
+                    codec->u.e_byte_array_len.len_codec->out = tm->blk2;
+                    codec->u.e_byte_array_len.val_codec->u.e_xdelta.sub_codec->out = tm->blk;
+                } else {
+                    codec->u.e_byte_array_len.len_codec->out = tm->blk;
+                    codec->u.e_byte_array_len.val_codec->out = tm->blk;
+                }
+            }
+
+            // skip TN field
+            aux+=3;
+
+            // We use BYTE_ARRAY_LEN with external length, so store that first
+            switch (type) {
+            case 'c': case 'C':
+                blen = count;
+                break;
+            case 's': case 'S':
+                blen = 2*count;
+                break;
+            case 'i': case 'I': case 'f':
+                blen = 4*count;
+                break;
+            default:
+                hts_log_error("Unknown sub-type '%c' for aux type 'B'", type);
+                goto err;
+            }
+
+            blen += 5; // sub-type & length
+            if (aux_end - aux < blen)
+                goto err;
+
+            if (codec->encode(s, codec, aux, blen) < 0)
+                goto err;
+            aux += blen;
+            break;
+        }
+        default:
+            hts_log_error("Unknown aux type '%c'", aux_end - aux < 2 ? '?' : aux[2]);
+            goto err;
+        }
         tm->blk->m = tm->m;
     }
 

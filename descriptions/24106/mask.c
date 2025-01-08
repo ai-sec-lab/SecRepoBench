@@ -2686,7 +2686,22 @@ static MagickBooleanType RenderMVGContent(Image *image,
       case 'C':
       {
         if (LocaleCompare("class",keyword) == 0)
-          {// <MASK>}
+          {
+            const char
+              *mvg_class;
+
+            (void) GetNextToken(q,&q,extent,token);
+            if (*token == '\0')
+              {
+                status=MagickFalse;
+                break;
+              }
+            if (LocaleCompare(token,graphic_context[n]->id) == 0)
+              break;
+            mvg_class=(const char *) GetValueFromSplayTree(macros,token);
+            // <MASK>
+            break;
+          }
         if (LocaleCompare("clip-path",keyword) == 0)
           {
             const char

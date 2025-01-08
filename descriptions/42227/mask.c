@@ -749,7 +749,22 @@ void InStringSymbol(cmsIT8* it8)
         NextCh(it8);
 
     if (it8->ch == '\'' || it8->ch == '\"')
-    {// <MASK>}
+    {
+        int sng;
+
+        sng = it8->ch;
+        StringClear(it8->str);
+
+        NextCh(it8);
+
+        while (it8->ch != sng) {
+
+            // <MASK>
+        }
+
+        it8->sy = SSTRING;
+        NextCh(it8);        
+    }
     else
         SynError(it8, "String expected");
 

@@ -1477,7 +1477,14 @@ MagickExport void LocaleLower(char *string)
 %
 */
 MagickExport int LocaleLowercase(const int c)
-{// <MASK>}
+{
+  // <MASK>
+#if defined(MAGICKCORE_LOCALE_SUPPORT)
+  if (c_locale != (locale_t) NULL)
+    return(tolower_l(c,c_locale));
+#endif
+  return(tolower(c));
+}
 
 /*
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

@@ -1666,7 +1666,16 @@ cmsBool AllocateDataSet(cmsIT8* it8)
 
 static
 char* GetData(cmsIT8* it8, int nSet, int nField)
-{// <MASK>}
+{
+    TABLE* t = GetTable(it8);
+    int nSamples    = t -> nSamples;
+    int nPatches    = t -> nPatches;
+
+    // <MASK>
+
+    if (!t->Data) return NULL;
+    return t->Data [nSet * nSamples + nField];
+}
 
 static
 cmsBool SetData(cmsIT8* it8, int nSet, int nField, const char *Val)

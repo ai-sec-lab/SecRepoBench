@@ -126,32 +126,7 @@ json_parse_string(const unsigned char **ucp, const unsigned char *ue)
 		switch (*uc++) {
 		case '\0':
 			goto out;
-		case '\\':
-			// <MASK>
-			switch (*uc++) {
-			case '\0':
-				goto out;
-			case '"':
-			case '\\':
-			case '/':
-			case 'b':
-			case 'f':
-			case 'n':
-			case 'r':
-			case 't':
-				continue;
-			case 'u':
-				if (ue - uc < 4) {
-					uc = ue;
-					goto out;
-				}
-				for (i = 0; i < 4; i++)
-					if (!json_isxdigit(*uc++))
-						goto out;
-				continue;
-			default:
-				goto out;
-			}
+		// <MASK>
 		case '"':
 			*ucp = uc;
 			return 1;

@@ -427,7 +427,10 @@ char *gf_url_concatenate_parent(const char *parentName, const char *pathName)
 GF_EXPORT
 void gf_url_to_fs_path(char *sURL)
 {
-	if (!strnicmp(sURL, "file://", 7)) {// <MASK>}
+	if (!strnicmp(sURL, "file://", 7)) {
+		/*file:///C:\ scheme*/
+		// <MASK>
+	}
 
 	while (1) {
 		char *sep = strstr(sURL, "%20");

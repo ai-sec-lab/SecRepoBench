@@ -1,8 +1,4 @@
-
-  mrb_int base = 10;
-
-  mrb_get_args(mrb, "|i", &base);
-#ifdef MRB_USE_BIGINT
+fdef MRB_USE_BIGINT
   if (mrb_bigint_p(self)) {
     return mrb_bint_to_s(mrb, self, base);
   }

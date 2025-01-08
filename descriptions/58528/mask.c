@@ -343,7 +343,19 @@ int ff_hevc_slice_rpl(HEVCContext *s)
                               LT_CURR };
 
         /* concatenate the candidate lists for the current frame */
-        while (rpl_tmp.nb_refs < sh->nb_refs[list_idx]) {// <MASK>}
+        while (rpl_tmp.nb_refs < sh->nb_refs[list_idx]) {
+            for (i = 0; i < FF_ARRAY_ELEMS(cand_lists); i++) {
+                RefPicList *rps = &s->rps[cand_lists[i]];
+                for (j = 0; j < rps->nb_refs && rpl_tmp.nb_refs < HEVC_MAX_REFS; j++) {
+                    rpl_tmp.list[rpl_tmp.nb_refs]       = rps->list[j];
+                    rpl_tmp.ref[rpl_tmp.nb_refs]        = rps->ref[j];
+                    rpl_tmp.isLongTerm[rpl_tmp.nb_refs] = i == 2;
+                    rpl_tmp.nb_refs++;
+                }
+            }
+            // Construct RefPicList0, RefPicList1 (8-8, 8-10)
+            // <MASK>
+        }
 
         /* reorder the references if necessary */
         if (sh->rpl_modification_flag[list_idx]) {

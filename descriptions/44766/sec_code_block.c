@@ -1,4 +1,7 @@
-if (ptr->esd) {
+
+			GF_BitStream *mybs = gf_bs_new(data + i, size - i, GF_BITSTREAM_READ);
+			gf_bs_set_cookie(mybs, GF_ISOM_BS_COOKIE_NO_LOGS);
+			if (ptr->esd) {
 
 				gf_list_del_item(ptr->child_boxes, (GF_Box *)ptr->esd);
 
@@ -11,3 +14,17 @@ if (ptr->esd) {
 
 				gf_isom_box_del((GF_Box *)ptr->esd);
 			}
+			ptr->esd = NULL;
+			e = gf_isom_box_parse((GF_Box **)&ptr->esd, mybs);
+			gf_bs_del(mybs);
+
+			if ((e==GF_OK) && ptr->esd && (ptr->esd->type == GF_ISOM_BOX_TYPE_ESDS)) {
+				if (!ptr->child_boxes) ptr->child_boxes = gf_list_new();
+				gf_list_add(ptr->child_boxes, ptr->esd);
+			} else if (ptr->esd) {
+				gf_isom_box_del((GF_Box *)ptr->esd);
+				ptr->esd = NULL;
+			}
+			e = GF_OK;
+			break;
+		
