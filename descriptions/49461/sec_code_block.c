@@ -1,12 +1,4 @@
-
-    cmsUInt32Number j;
-    cmsUInt32Number i;
-    cmsUInt16Number val;
-    cmsUInt32Number nEntries;
-
-    _cmsAssert(Tables != NULL);
-   
-    for (i=0; i < Tables ->nCurves; i++) {
+for (i=0; i < Tables ->nCurves; i++) {
 
         nEntries = Tables->TheCurves[i]->nEntries;
 
@@ -16,6 +8,3 @@
             if (!_cmsWriteUInt16Number(io, val)) return FALSE;
         }
     }
-    return TRUE;
-
-    cmsUNUSED_PARAMETER(ContextID);

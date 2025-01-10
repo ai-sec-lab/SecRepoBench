@@ -57,36 +57,71 @@ def replace_code_block_with_mask(source_code, code_block):
 
 
 def get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, diff):
-    # get mask start and end in sec file (line, column)
-    modified_source_code_lines = re.split(r'\n', modified_source_code)
-    start_row = 0
-    while '// <MASK>' not in modified_source_code_lines[start_row]:
-        start_row += 1
-    start_column = modified_source_code_lines[start_row].find('// <MASK>')
+    # get sec_code_block start (row, col)
+    before_mask = modified_source_code.split('// <MASK>')[0]
+    before_mask_lines = re.split(r'\n', before_mask)
+    start_row = len(before_mask_lines) - 1
+    start_col = len(before_mask_lines[-1])
 
-    up_to_mask_end = modified_source_code_lines[:start_row + 1]
-    up_to_mask_end[start_row] = up_to_mask_end[start_row][:start_column]
-    up_to_mask_end = '\n'.join(up_to_mask_end) + sec_code_block
-    up_to_mask_end = re.split(r'\n', up_to_mask_end)
+    # get sec_code_block end (row, col)
+    up_to_block = before_mask + sec_code_block
+    up_to_block_lines = re.split(r'\n', up_to_block)
+    end_row = len(up_to_block_lines) - 1
+    end_col = len(up_to_block_lines[-1]) - 1
 
-    end_row = len(up_to_mask_end) - 1
-    end_i = modified_source_code_lines[start_row].find('// <MASK>') + len('// <MASK>')
-    end_content = modified_source_code_lines[start_row][end_i:]
+    # get content after mask and on same line as end
+    after_mask = modified_source_code.split('// <MASK>')[1]
+    sec_source_code = up_to_block + after_mask
+    sec_source_code_lines = re.split(r'\n', sec_source_code)
+    post_mask_line = sec_source_code_lines[end_row][end_col+1:]
 
-    # translate mask start and end to vul file using diff
-    for change in reversed(diff['added']):
-        ln_num = change[0]
-        if ln_num < start_row + 1:
-            start_row -= 1
-        if ln_num <= end_row + 1:
-            end_row -= 1
+    # translate sec_code_block start and end to vul_code_block file using diff
+    added_lines = [change[0] for change in diff['added']]
+    deleted_lines = [change[0] for change in diff['deleted']]
 
-    for change in diff['deleted']:
-        ln_num = change[0]
-        if ln_num < start_row + 1:
-            start_row += 1
-        if ln_num <= end_row + 1:
-            end_row += 1
+    while len(added_lines) != 0 or len(deleted_lines) != 0:
+        if len(added_lines) == 0:
+            ln_num = deleted_lines.pop(0)
+            if ln_num < start_row + 1:
+                start_row += 1
+            if ln_num < end_row + 1:
+                end_row += 1
+            elif ln_num == end_row + 1:
+                end_row += 1
+
+        elif len(deleted_lines) == 0:
+            ln_num = added_lines.pop(0)
+            if ln_num < start_row + 1:
+                start_row -= 1
+            if ln_num < end_row + 1:
+                end_row -= 1
+            elif ln_num == end_row + 1:
+                end_row -= 1
+            added_lines = [ln-1 for ln in added_lines]
+
+        elif added_lines[0] == deleted_lines[0]:
+            deleted_lines.pop(0)
+            added_lines.pop(0)
+
+        elif added_lines[0] < deleted_lines[0]:
+            ln_num = added_lines.pop(0)
+            if ln_num < start_row + 1:
+                start_row -= 1
+            if ln_num < end_row + 1:
+                end_row -= 1
+            elif ln_num == end_row + 1:
+                end_row -= 1
+            added_lines = [ln-1 for ln in added_lines]
+
+        else:
+            ln_num = deleted_lines.pop(0)
+            if ln_num < start_row + 1:
+                start_row += 1
+            if ln_num < end_row + 1:
+                end_row += 1
+            elif ln_num == end_row + 1:
+                end_row += 1
+            added_lines = [ln+1 for ln in added_lines]
 
     # Read the vul source code -- use regex for \n to ignore special characters like FF \x0c
     with open(vul_source_file, 'r') as f:
@@ -94,14 +129,15 @@ def get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, di
     vul_source_code_lines = re.split(r'\n', vul_source_code)
 
     # get vul code block
-    vul_code_block = vul_source_code_lines[start_row:end_row+1]
+    vul_code_block_lines = vul_source_code_lines[start_row:end_row+1]
 
-    if len(vul_code_block) > 0:
-        vul_code_block[0] = vul_code_block[0][start_column:]
-        end_column = vul_code_block[-1].rfind(end_content)
-        vul_code_block[-1] = vul_code_block[-1][:end_column]
+    # shift start and end lines
+    if len(vul_code_block_lines) > 0:
+        end_column = vul_code_block_lines[-1].rfind(post_mask_line)
+        vul_code_block_lines[-1] = vul_code_block_lines[-1][:end_column]
+        vul_code_block_lines[0] = vul_code_block_lines[0][start_col:]
 
-    vul_code_block = '\n'.join(vul_code_block)
+    vul_code_block = '\n'.join(vul_code_block_lines)
 
     return vul_code_block
 
@@ -153,6 +189,11 @@ def find_closest_func(func_lizard, funcs_ts):
 
 
 def get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section):
+    # # for single line changes, increase scope +3 lines each side
+    # if x == y:
+    #     x = max(x-3, function_node.start_point[0] + 1)
+    #     y = min(y+3, function_node.end_point[0] + 1)
+    
     # Find the natural code block
     sec_code_block = find_code_block(function_node, x, y, total_lines, modified_section)
 
@@ -267,6 +308,7 @@ def mask_helper(id, diff_non_trivial, changed_file, base_path):
     sec_code_block, vul_code_block = mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y)
 
     while sec_code_block.strip() == '' or vul_code_block.strip() == '':
+        print(f'ID {id} has empty code block, adding surrounding line')
         if delta_x == delta_y:
             delta_y += 1
         else:
@@ -334,11 +376,18 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
         if len(added_lines) == 0:
             line = deleted_lines.pop(0)
             if line not in modified_lines and line in deleted_nt_lines:
+                deleted_nt_lines.remove(line)
                 modified_lines.append(line)
             deleted_lines = [line - 1 for line in deleted_lines]
             deleted_nt_lines = [line - 1 for line in deleted_nt_lines]
         elif len(deleted_lines) == 0:
             break
+        elif added_lines[0] == deleted_lines[0]:
+            added_lines.pop(0)
+            line = deleted_lines.pop(0)
+            if line not in modified_lines and line in deleted_nt_lines:
+                deleted_nt_lines.remove(line)
+                modified_lines.append(line)
         elif added_lines[0] < deleted_lines[0]:
             deleted_lines = [line + 1 for line in deleted_lines]
             deleted_nt_lines = [line + 1 for line in deleted_nt_lines]
@@ -346,6 +395,7 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
         else:
             line = deleted_lines.pop(0)
             if line not in modified_lines and line in deleted_nt_lines:
+                deleted_nt_lines.remove(line)
                 modified_lines.append(line)
             deleted_lines = [line - 1 for line in deleted_lines]
             deleted_nt_lines = [line - 1 for line in deleted_nt_lines]
@@ -409,6 +459,7 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
     # Write the sec code block to file
     with open(sec_code_block_file, 'w') as f:
         f.write(sec_code_block)
+    print(f"Sec code block written to {sec_code_block_file}")
 
     # Get vul code block
     vul_code_block = get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, diff)
@@ -416,14 +467,19 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
     # Write the vul code block to file
     with open(vul_code_block_file, 'w') as f:
         f.write(vul_code_block)
+    print(f"Vul code block written to {vul_code_block_file}")
 
     return sec_code_block, vul_code_block
 
 
 if __name__ == "__main__":
-    with open('filter_logs_all/analyze_report_unittest_testcase/ids_each_step.json', 'r') as f:
-        ids_each_step = json.load(f)
-    ids = ids_each_step['ids_pass_testcase_unittest']
+    # with open('filter_logs_all/analyze_report_unittest_testcase/ids_each_step.json', 'r') as f:
+    #     ids_each_step = json.load(f)
+    # ids = ids_each_step['ids_pass_testcase_unittest']
+
+    with open('ids_good.txt', 'r') as f:
+        ids_good = f.readlines()
+    ids = [id.strip() for id in ids_good[1:]]
 
     with open('filter_logs_all/cases.json', 'r') as f:
         cases = json.load(f)
@@ -433,6 +489,7 @@ if __name__ == "__main__":
         os.mkdir(base_path)
 
     for id in ids:
+        print(id)
         diff_non_trivial = cases[id]['diff']
         changed_file = cases[id]['changed_file']
         mask_helper(id, diff_non_trivial, changed_file, base_path)

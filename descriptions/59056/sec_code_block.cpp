@@ -1,8 +1,1 @@
-
-            if (topLevel) {
-                elements.insert(ElementMap::value_type(str, element));
-                return;
-            }
-            delete_Element(element);
-            ParseError("unexpected end of file",parser.LastToken());
-        
+delete_Element(element);

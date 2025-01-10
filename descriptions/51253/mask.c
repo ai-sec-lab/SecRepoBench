@@ -239,7 +239,22 @@ int av_aes_init(AVAES *a, const uint8_t *key, int key_bits, int decrypt)
     memcpy(tk, key, KC * 4);
     memcpy(a->round_key[0].u8, key, KC * 4);
 
-    for (t = KC * 4; t < (rounds + 1) * 16; t += KC * 4) {// <MASK>}
+    for (t = KC * 4; t < (rounds + 1) * 16; t += KC * 4) {
+        for (i = 0; i < 4; i++)
+            tk[0][i] ^= sbox[tk[KC - 1][(i + 1) & 3]];
+        tk[0][0] ^= rcon[rconpointer++];
+
+        for (j = 1; j < KC; j++) {
+            if (KC != 8 || j != KC >> 1)
+                for (i = 0; i < 4; i++)
+                    tk[j][i] ^= tk[j - 1][i];
+            else
+                for (i = 0; i < 4; i++)
+                    tk[j][i] ^= sbox[tk[j - 1][i]];
+        }
+
+        // <MASK>
+    }
 
     if (decrypt) {
         for (i = 1; i < rounds; i++) {

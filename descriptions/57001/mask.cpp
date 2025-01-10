@@ -282,7 +282,10 @@ void OFFImporter::InternReadFile( const std::string& pFile, aiScene* pScene, IOS
     // load faces with their indices
     faces = mesh->mFaces;
     for (unsigned int i = 0; i < numFaces; ) {
-        if(!GetNextLine(buffer,line)) {// <MASK>}
+        if(!GetNextLine(buffer,line)) {
+            ASSIMP_LOG_ERROR("OFF: The number of faces in the header is incorrect");
+            // <MASK>
+        }
         unsigned int idx;
         sz = line; SkipSpaces(&sz);
         idx = strtoul10(sz,&sz);

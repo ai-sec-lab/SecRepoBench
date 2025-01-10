@@ -2064,7 +2064,19 @@ Error:
 
 static
 cmsBool Write16bitTables(cmsContext ContextID, cmsIOHANDLER* io, _cmsStageToneCurvesData* Tables)
-{// <MASK>}
+{
+    cmsUInt32Number j;
+    cmsUInt32Number i;
+    cmsUInt16Number val;
+    cmsUInt32Number nEntries;
+
+    _cmsAssert(Tables != NULL);
+   
+    // <MASK>
+    return TRUE;
+
+    cmsUNUSED_PARAMETER(ContextID);
+}
 
 static
 void *Type_LUT16_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cmsUInt32Number* nItems, cmsUInt32Number SizeOfTag)
