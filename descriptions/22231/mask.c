@@ -2195,24 +2195,7 @@ int cram_decode_slice(cram_fd *fd, cram_container *c, cram_slice *s,
     embed_ref = s->hdr->ref_base_id >= 0 ? 1 : 0;
 
     if (ref_id >= 0) {
-        if (embed_ref) {
-            cram_block *b;
-            if (s->hdr->ref_base_id < 0) {
-                hts_log_error("No reference specified and no embedded reference is available"
-                              " at #%d:%"PRId64"-%"PRId64, ref_id, s->hdr->ref_seq_start,
-                              s->hdr->ref_seq_start + s->hdr->ref_seq_span-1);
-                return -1;
-            }
-            b = cram_get_block_by_id(s, s->hdr->ref_base_id);
-            if (!b)
-                return -1;
-            if (cram_uncompress_block(b) != 0)
-                return -1;
-            s->ref = (char *)BLOCK_DATA(b);
-            s->ref_start = s->hdr->ref_seq_start;
-            s->ref_end   = s->hdr->ref_seq_start + s->hdr->ref_seq_span-1;
-            // <MASK>
-        } else if (!c->comp_hdr->no_ref) {
+        if (embed_ref) {// <MASK>} else if (!c->comp_hdr->no_ref) {
             //// Avoid Java cramtools bug by loading entire reference seq
             //s->ref = cram_get_ref(fd, s->hdr->ref_seq_id, 1, 0);
             //s->ref_start = 1;

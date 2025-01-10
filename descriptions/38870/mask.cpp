@@ -367,14 +367,7 @@ void ZipArchiveIOSystem::Implement::MapArchive() {
         return;
 
     // Loop over all files
-    do {
-        char filename[FileNameSize];
-        unz_file_info fileInfo;
-
-        if (unzGetCurrentFileInfo(m_ZipFileHandle, &fileInfo, filename, FileNameSize, nullptr, 0, nullptr, 0) == UNZ_OK) {
-            // <MASK>
-        }
-    } while (unzGoToNextFile(m_ZipFileHandle) != UNZ_END_OF_LIST_OF_FILE);
+    do {// <MASK>} while (unzGoToNextFile(m_ZipFileHandle) != UNZ_END_OF_LIST_OF_FILE);
 }
 
 bool ZipArchiveIOSystem::Implement::isOpen() const {

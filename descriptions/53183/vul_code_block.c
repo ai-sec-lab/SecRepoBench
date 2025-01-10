@@ -1,3 +1,8 @@
-if (!mrb_read_int(p, end, &e, &n)) {
+
+  char *e;
+  mrb_int n;
+  if (!mrb_read_int(p, end, &e, &n)) {
     return NULL;
   }
+  *valp = (int)n;
+  return e;
