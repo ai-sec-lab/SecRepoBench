@@ -1801,12 +1801,7 @@ mrb_integer_to_str(mrb_state *mrb, mrb_value x, mrb_int base)
  */
 static mrb_value
 int_to_s(mrb_state *mrb, mrb_value self)
-{
-  mrb_int base = 10;
-
-  mrb_get_args(mrb, "|i", &base);
-  // <MASK>
-}
+{// <MASK>}
 
 /* compare two numbers: (1:0:-1; -2 for error) */
 static mrb_int

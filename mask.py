@@ -189,10 +189,10 @@ def find_closest_func(func_lizard, funcs_ts):
 
 
 def get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section):
-    # # for single line changes, increase scope +3 lines each side
-    # if x == y:
-    #     x = max(x-3, function_node.start_point[0] + 1)
-    #     y = min(y+3, function_node.end_point[0] + 1)
+    # for single line changes, increase scope +3 lines each side
+    if x == y:
+        x = max(x-3, function_node.start_point[0] + 1)
+        y = min(y+3, function_node.end_point[0] + 1)
     
     # Find the natural code block
     sec_code_block = find_code_block(function_node, x, y, total_lines, modified_section)

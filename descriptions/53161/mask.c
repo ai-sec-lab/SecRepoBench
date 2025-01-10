@@ -1303,14 +1303,7 @@ alias:
   /* read suffix [0-9*_!<>] */
   while (tmpl->idx < tlen) {
     ch = tptr[tmpl->idx];
-    if (ISDIGIT(ch)) {
-      char *e;
-      mrb_int n;
-      // <MASK>
-      count = (int)n;
-      tmpl->idx = (int)(e - tptr);
-      continue;
-    } else if (ch == '*')  {
+    if (ISDIGIT(ch)) {// <MASK>} else if (ch == '*')  {
       if (type == PACK_TYPE_NONE)
         count = 0;
       else

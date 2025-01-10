@@ -1,4 +1,17 @@
-if ((mvg_class != (const char *) NULL) && (p > primitive))
+
+            const char
+              *mvg_class;
+
+            (void) GetNextToken(q,&q,extent,token);
+            if (*token == '\0')
+              {
+                status=MagickFalse;
+                break;
+              }
+            if (LocaleCompare(token,graphic_context[n]->id) == 0)
+              break;
+            mvg_class=(const char *) GetValueFromSplayTree(macros,token);
+            if ((mvg_class != (const char *) NULL) && (p > primitive))
               {
                 char
                   *elements;
@@ -19,3 +32,5 @@ if ((mvg_class != (const char *) NULL) && (p > primitive))
                 primitive=elements;
                 q=primitive+offset;
               }
+            break;
+          
