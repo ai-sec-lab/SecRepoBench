@@ -87,9 +87,7 @@ def get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, di
             ln_num = deleted_lines.pop(0)
             if ln_num < start_row + 1:
                 start_row += 1
-            if ln_num < end_row + 1:
-                end_row += 1
-            elif ln_num == end_row + 1:
+            if ln_num <= end_row + 2:  # possible to insert del line after sec code block, see sample 13180
                 end_row += 1
 
         elif len(deleted_lines) == 0:
@@ -120,9 +118,7 @@ def get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, di
             ln_num = deleted_lines.pop(0)
             if ln_num < start_row + 1:
                 start_row += 1
-            if ln_num < end_row + 1:
-                end_row += 1
-            elif ln_num == end_row + 1:
+            if ln_num <= end_row + 2:  # possible to insert del line after sec code block, see sample 13180
                 end_row += 1
             added_lines = [ln+1 for ln in added_lines]
 
@@ -419,14 +415,14 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
     # Restrict these lines to be in the modified function
     # Shift by delta_x and delta_y
     modified_lines = [ln for ln in modified_lines 
-                      if ln >= mod_func.start_line-1 and ln <= mod_func.end_line-1]
+                      if ln >= mod_func.start_line and ln <= mod_func.end_line]
 
-    if (min(modified_lines) - delta_x < mod_func.start_line - 1) and (max(modified_lines) + delta_y > mod_func.end_line - 1):
+    if (min(modified_lines) - delta_x < mod_func.start_line) and (max(modified_lines) + delta_y > mod_func.end_line):
         print(f'ID {id}: Entire function added, so no vul code block')
         return
 
-    x = max(min(modified_lines) - delta_x, mod_func.start_line - 1)
-    y = min(max(modified_lines) + delta_y, mod_func.end_line - 1)
+    x = max(min(modified_lines) - delta_x, mod_func.start_line)
+    y = min(max(modified_lines) + delta_y, mod_func.end_line)
 
     modified_section = '\n'.join(source_code_lines[x-1:y])
 

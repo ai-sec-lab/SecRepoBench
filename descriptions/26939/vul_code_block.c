@@ -54,3 +54,4 @@ register unsigned char
             }
         }
     }
+  return(MagickFalse);
