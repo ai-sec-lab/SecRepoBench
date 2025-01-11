@@ -1689,30 +1689,7 @@ cmsBool OptimizeMatrixShaper(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt3
        IdentityMat = FALSE;
        if (cmsPipelineCheckAndRetreiveStages(Src, 4,
               cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType,
-              &Curve1, &Matrix1, &Matrix2, &Curve2)) {
-
-              // Get both matrices
-              _cmsStageMatrixData* Data1 = (_cmsStageMatrixData*)cmsStageData(Matrix1);
-              _cmsStageMatrixData* Data2 = (_cmsStageMatrixData*)cmsStageData(Matrix2);
-
-              // Only RGB to RGB
-              // <MASK>
-              if (Data1->Offset != NULL) return FALSE;
-
-              // Multiply both matrices to get the result
-              _cmsMAT3per(&res, (cmsMAT3*)Data2->Double, (cmsMAT3*)Data1->Double);
-
-              // Only 2nd matrix has offset, or it is zero 
-              Offset = Data2->Offset;
-
-              // Now the result is in res + Data2 -> Offset. Maybe is a plain identity?
-              if (_cmsMAT3isIdentity(&res) && Offset == NULL) {
-
-                     // We can get rid of full matrix
-                     IdentityMat = TRUE;
-              }
-
-       }
+              &Curve1, &Matrix1, &Matrix2, &Curve2)) {// <MASK>}
        else {
 
               if (cmsPipelineCheckAndRetreiveStages(Src, 3,

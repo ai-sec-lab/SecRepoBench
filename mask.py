@@ -151,6 +151,12 @@ def remove_comments(input_string):
     return result
 
 
+def remove_sl_comments_code_block(code_block):
+    code_block_lines = re.split(r'\n', code_block)
+    code_block_lines = [remove_comments(line) for line in code_block_lines]
+    return '\n'.join(code_block_lines)
+
+
 def find_functions(node, func_pattern, x, y):
     """Recursively finds function definitions and their variable declarations."""
     results = []
@@ -305,8 +311,10 @@ def mask_helper(id, diff_non_trivial, changed_file, base_path):
     delta_x = 0
     delta_y = 0
     sec_code_block, vul_code_block = mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y)
+    sec_code_block_comments_rm = remove_sl_comments_code_block(sec_code_block)
+    vul_code_block_comments_rm = remove_sl_comments_code_block(vul_code_block)
 
-    while sec_code_block.strip() == '' or vul_code_block.strip() == '':
+    while sec_code_block_comments_rm.strip() == '' or vul_code_block_comments_rm.strip() == '':
         print(f'ID {id} has empty code block, adding surrounding line')
         if delta_x == delta_y:
             delta_y += 1
@@ -318,6 +326,8 @@ def mask_helper(id, diff_non_trivial, changed_file, base_path):
             break
         else:
             sec_code_block, vul_code_block = output
+            sec_code_block_comments_rm = remove_sl_comments_code_block(sec_code_block)
+            vul_code_block_comments_rm = remove_sl_comments_code_block(vul_code_block)
 
 
 def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
