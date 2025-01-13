@@ -1249,17 +1249,7 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
     s->last_slice_end = 0;
 
-    if (avctx->codec_id == AV_CODEC_ID_HYMT &&
-        (buf_size > 32 && AV_RL32(avpkt->data + buf_size - 16) == 0)) {
-        slices_info_offset = AV_RL32(avpkt->data + buf_size - 4);
-        slice_height = AV_RL32(avpkt->data + buf_size - 8);
-        nb_slices = AV_RL32(avpkt->data + buf_size - 12);
-        // <MASK>
-            return AVERROR_INVALIDDATA;
-    } else {
-        slice_height = height;
-        nb_slices = 1;
-    }
+    // <MASK>
 
     for (slice = 0; slice < nb_slices; slice++) {
         int y_offset, slice_offset, slice_size;

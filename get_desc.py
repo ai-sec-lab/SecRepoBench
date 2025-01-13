@@ -49,8 +49,8 @@ class BaseEvaler(ABC):
             json.dump(self.responses_cache, f, indent=4)
 
 class APIEvaler(BaseEvaler):
-    def __init__(self, model_name: str):
-        super().__init__(model_name)
+    def __init__(self):
+        super().__init__()
         self.client = self._initialize_client()
         self.create = self._get_create_function()
         self.get_content = self._get_content_function()
@@ -128,8 +128,6 @@ def main():
     evaler = APIEvaler()
     with open('ids/final_ids.txt', 'r') as f:
         ids = f.readlines()
-    
-    ids = [id.strip() for id in ids]
 
     for id in tqdm(ids):
         print(id)
