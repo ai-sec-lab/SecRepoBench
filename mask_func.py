@@ -176,11 +176,13 @@ def mask_func(id, diff_non_trivial, changed_file, base_path):
         sec_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.c'
         mask_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_func.c'
         mask_func_desc_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_func_desc.c'
+        func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_func.c'
     elif language == 'cpp':
         LANGUAGE = CPP_LANGUAGE
         sec_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.cpp'
         mask_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_func.cpp'
         mask_func_desc_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_func_desc.c'
+        func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_func.cpp'
     else:
         print(f"Language of modified file not recognized for id {id}")
         return
@@ -188,7 +190,6 @@ def mask_func(id, diff_non_trivial, changed_file, base_path):
     # get sec_code_block
     with open(sec_code_block_file, 'r') as f:
         sec_code_block = f.read()
-    sec_code_block_lines = re.split(r'\n', sec_code_block)
 
     # Read the modified source code -- use regex for \n to ignore special characters like FF \x0c
     source_code = cases[id]['source_code']
@@ -280,6 +281,10 @@ def mask_func(id, diff_non_trivial, changed_file, base_path):
         function_node = funcs[0]
         func_text = function_node.text.decode('utf-8')
     
+    # save target function by itself
+    with open(func_file, 'w') as f:
+        f.write(func_text)
+
     # get spacing
     leading_spaces = get_leading_whitespace(sec_code_block)
     ending_spaces = get_leading_whitespace(sec_code_block[::-1])[::-1]

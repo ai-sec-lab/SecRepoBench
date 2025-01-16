@@ -1,0 +1,213 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/sksl/SkSLCompiler.cpp
+// static std::unique_ptr<Expression> construct(const Type* type, std::unique_ptr<Expression> v) {
+//     ExpressionArray args;
+//     args.push_back(std::move(v));
+//     std::unique_ptr<Expression> result = std::make_unique<Constructor>(-1, type, std::move(args));
+//     return result;
+// }
+
+// the below code fragment can be found in:
+// src/sksl/SkSLCompiler.cpp
+// static void delete_right(BasicBlock* b,
+//                          std::vector<BasicBlock::Node>::iterator* iter,
+//                          Compiler::OptimizationContext* optimizationContext) {
+//     optimizationContext->fUpdated = true;
+//     std::unique_ptr<Expression>* target = (*iter)->expression();
+//     BinaryExpression& bin = (*target)->as<BinaryExpression>();
+//     std::unique_ptr<Expression>& leftPointer = bin.left();
+//     Expression& right = *bin.right();
+//     SkASSERT(!right.hasSideEffects());
+//     // Remove references within RHS.
+//     optimizationContext->fUsage->remove(&right);
+//     if (!b->tryRemoveExpressionBefore(iter, &right)) {
+//         *target = std::move(leftPointer);
+//         optimizationContext->fNeedsRescan = true;
+//         return;
+//     }
+//     *target = std::move(leftPointer);
+//     if (*iter == b->fNodes.begin()) {
+//         optimizationContext->fNeedsRescan = true;
+//         return;
+//     }
+//     --(*iter);
+//     if ((!(*iter)->isExpression() || (*iter)->expression() != &leftPointer)) {
+//         optimizationContext->fNeedsRescan = true;
+//         return;
+//     }
+//     *iter = b->fNodes.erase(*iter);
+//     SkASSERT((*iter)->expression() == target);
+// }
+
+// the below code fragment can be found in:
+// src/sksl/SkSLMetalCodeGenerator.cpp
+// void MetalCodeGenerator::writeTernaryExpression(const TernaryExpression& t,
+//                                                Precedence parentPrecedence) {
+//     if (kTernary_Precedence >= parentPrecedence) {
+//         this->write("(");
+//     }
+//     this->writeExpression(*t.test(), kTernary_Precedence);
+//     this->write(" ? ");
+//     this->writeExpression(*t.ifTrue(), kTernary_Precedence);
+//     this->write(" : ");
+//     this->writeExpression(*t.ifFalse(), kTernary_Precedence);
+//     if (kTernary_Precedence >= parentPrecedence) {
+//         this->write(")");
+//     }
+// }
+
+// the below code fragment can be found in:
+// src/sksl/SkSLCompiler.cpp
+// bool Compiler::scanCFG(FunctionDefinition& f, ProgramUsage* usage) {
+//     bool madeChanges = false;
+// 
+//     CFG cfg = CFGGenerator().getCFG(f);
+//     this->computeDataFlow(&cfg);
+// 
+//     // check for unreachable code
+//     for (size_t i = 0; i < cfg.fBlocks.size(); i++) {
+//         const BasicBlock& block = cfg.fBlocks[i];
+//         if (!block.fIsReachable && !block.fAllowUnreachable && block.fNodes.size()) {
+//             int offset;
+//             const BasicBlock::Node& node = block.fNodes[0];
+//             if (node.isStatement()) {
+//                 offset = (*node.statement())->fOffset;
+//             } else {
+//                 offset = (*node.expression())->fOffset;
+//                 if ((*node.expression())->is<BoolLiteral>()) {
+//                     // Function inlining can generate do { ... } while(false) loops which always
+//                     // break, so the boolean condition is considered unreachable. Since not being
+//                     // able to reach a literal is a non-issue in the first place, we don't report an
+//                     // error in this case.
+//                     continue;
+//                 }
+//             }
+//             this->error(offset, String("unreachable"));
+//         }
+//     }
+//     if (fErrorCount) {
+//         return madeChanges;
+//     }
+// 
+//     // check for dead code & undefined variables, perform constant propagation
+//     OptimizationContext optimizationContext;
+//     optimizationContext.fUsage = usage;
+//     SkBitSet eliminatedBlockIds(cfg.fBlocks.size());
+//     do {
+//         if (optimizationContext.fNeedsRescan) {
+//             cfg = CFGGenerator().getCFG(f);
+//             this->computeDataFlow(&cfg);
+//             optimizationContext.fNeedsRescan = false;
+//         }
+// 
+//         eliminatedBlockIds.reset();
+//         optimizationContext.fUpdated = false;
+// 
+//         for (BlockId blockId = 0; blockId < cfg.fBlocks.size(); ++blockId) {
+//             if (eliminatedBlockIds.test(blockId)) {
+//                 // We reached a block ID that might have been eliminated. Be cautious and rescan.
+//                 optimizationContext.fUpdated = true;
+//                 optimizationContext.fNeedsRescan = true;
+//                 break;
+//             }
+// 
+//             BasicBlock& b = cfg.fBlocks[blockId];
+//             if (blockId > 0 && !b.fIsReachable) {
+//                 // Block was reachable before optimization, but has since become unreachable. In
+//                 // addition to being dead code, it's broken - since control flow can't reach it, no
+//                 // prior variable definitions can reach it, and therefore variables might look to
+//                 // have not been properly assigned. Kill it by replacing all statements with Nops.
+//                 for (BasicBlock::Node& node : b.fNodes) {
+//                     if (node.isStatement() && !(*node.statement())->is<Nop>()) {
+//                         // Eliminating a node runs the risk of eliminating that node's exits as
+//                         // well. Keep track of this and do a rescan if we are about to access one
+//                         // of these.
+//                         for (BlockId id : b.fExits) {
+//                             eliminatedBlockIds.set(id);
+//                         }
+//                         node.setStatement(std::make_unique<Nop>(), usage);
+//                         madeChanges = true;
+//                     }
+//                 }
+//                 continue;
+//             }
+//             DefinitionMap definitions = b.fBefore;
+// 
+//             for (auto iter = b.fNodes.begin(); iter != b.fNodes.end() &&
+//                 !optimizationContext.fNeedsRescan; ++iter) {
+//                 if (iter->isExpression()) {
+//                     this->simplifyExpression(definitions, b, &iter, &optimizationContext);
+//                 } else {
+//                     this->simplifyStatement(definitions, b, &iter, &optimizationContext);
+//                 }
+//                 if (optimizationContext.fNeedsRescan) {
+//                     break;
+//                 }
+//                 this->addDefinitions(*iter, &definitions);
+//             }
+// 
+//             if (optimizationContext.fNeedsRescan) {
+//                 break;
+//             }
+//         }
+//         madeChanges |= optimizationContext.fUpdated;
+//     } while (optimizationContext.fUpdated);
+//     SkASSERT(!optimizationContext.fNeedsRescan);
+// 
+//     // verify static ifs & switches, clean up dead variable decls
+//     for (BasicBlock& b : cfg.fBlocks) {
+//         for (auto iter = b.fNodes.begin(); iter != b.fNodes.end() &&
+//              !optimizationContext.fNeedsRescan;) {
+//             if (iter->isStatement()) {
+//                 const Statement& s = **iter->statement();
+//                 switch (s.kind()) {
+//                     case Statement::Kind::kIf:
+//                         if (s.as<IfStatement>().isStatic() &&
+//                             !(fFlags & kPermitInvalidStaticTests_Flag)) {
+//                             this->error(s.fOffset, "static if has non-static test");
+//                         }
+//                         ++iter;
+//                         break;
+//                     case Statement::Kind::kSwitch:
+//                         if (s.as<SwitchStatement>().isStatic() &&
+//                             !(fFlags & kPermitInvalidStaticTests_Flag) &&
+//                             optimizationContext.fSilences.find(&s) ==
+//                             optimizationContext.fSilences.end()) {
+//                             this->error(s.fOffset, "static switch has non-static test");
+//                         }
+//                         ++iter;
+//                         break;
+//                     default:
+//                         ++iter;
+//                         break;
+//                 }
+//             } else {
+//                 ++iter;
+//             }
+//         }
+//     }
+// 
+//     // check for missing return
+//     if (f.declaration().returnType() != *fContext->fVoid_Type) {
+//         if (cfg.fBlocks[cfg.fExit].fIsReachable) {
+//             this->error(f.fOffset, String("function '" + String(f.declaration().name()) +
+//                                           "' can exit without returning a value"));
+//         }
+//     }
+// 
+//     return madeChanges;
+// }
+
+// the below code fragment can be found in:
+// src/sksl/SkSLCompiler.cpp
+// static void vectorize_left(BasicBlock* b,
+//                            std::vector<BasicBlock::Node>::iterator* iter,
+//                            Compiler::OptimizationContext* optimizationContext) {
+//     BinaryExpression& bin = (*(*iter)->expression())->as<BinaryExpression>();
+//     // Remove references within RHS. Vectorization of LHS doesn't change reference counts.
+//     optimizationContext->fUsage->remove(bin.right().get());
+//     vectorize(b, iter, bin.right()->type(), &bin.left(), optimizationContext);
+// }
+

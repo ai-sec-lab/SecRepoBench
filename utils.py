@@ -12,7 +12,7 @@ CPP_LANGUAGE = Language(tscpp.language())
 
 def determine_language(file_extension):
     c_extensions = ['.c', '.h']
-    cpp_extensions = ['.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.h']
+    cpp_extensions = ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx']
 
     if file_extension in c_extensions:
         return 'c'

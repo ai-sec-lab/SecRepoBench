@@ -1,0 +1,13 @@
+bool decompile_glyph_variations (hb_subset_context_t *c,
+                                   glyph_variations_t& glyph_vars /* OUT */) const
+  {
+    // The code block initializes a hash map to store glyph variation data for new glyph IDs.
+    // It iterates over a list mapping new glyph IDs to old glyph IDs, setting the glyph variation 
+    // data for each new glyph ID using a helper function to retrieve the data for the corresponding 
+    // old glyph ID. If the first glyph ID is zero and the NOTDEF_OUTLINE flag is not set, it handles 
+    // this special case by associating a default empty data value for the ID zero in the map.
+    // After populating the map, it checks for errors, and then proceeds to call a method to 
+    // create glyph variations using the axis count and shared tuples, along with the plan and the 
+    // populated map of new glyph IDs to variation data.
+    // <MASK>
+  }
