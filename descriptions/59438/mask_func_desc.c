@@ -1,0 +1,13 @@
+static int
+simh_parse(const unsigned char *uc, const unsigned char *ue)
+{
+	// Function to parse SIMH tape files by examining records and tapemarks.
+	// Iterates through the byte data between `uc` and `ue`, extracting
+	// lengths using the `getlen` function and counting records and tapemarks.
+	// Checks for the End of Medium (EOM) marker (0xFFFFFFFF) to terminate
+	// parsing. If a data record length does not match its complementary
+	// length, it returns 0 indicating invalid data. If the number of
+	// tapemarks reaches the predefined limit `SIMH_TAPEMARKS`, it stops
+	// processing further. Returns 1 if valid SIMH data is found, otherwise 0.
+	// <MASK>
+}

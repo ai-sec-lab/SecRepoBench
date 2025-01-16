@@ -1,11 +1,14 @@
 import sys
 import os
 import re
+import tree_sitter_c as tsc
+import tree_sitter_cpp as tscpp
 from tree_sitter import Language
+import argparse
+from nltk.tokenize import word_tokenize
 
-language_path = '/space1/yanjun/instruction_tuning/tree_sitter/my-languages.so'
-C_LANGUAGE = Language(language_path, 'c')
-CPP_LANGUAGE = Language(language_path, 'cpp')
+C_LANGUAGE = Language(tsc.language())
+CPP_LANGUAGE = Language(tscpp.language())
 
 def determine_language(file_extension):
     c_extensions = ['.c', '.h']
@@ -369,3 +372,36 @@ def replace_var_name(root_node, func_node, old_var, new_var):
 
     code = code_bytes.decode('utf8')
     return code
+
+def tokenize_nltk(text):
+    words = word_tokenize(text)
+    output_list = []
+    for w in words:
+        w_list = re.findall(r'\w+', w)
+        output_list.extend(w_list)
+    return output_list
+
+
+def file_distance(src_file, dest_file):
+    distance = -1
+    try:
+        commonpath = os.path.commonpath([src_file, dest_file])
+        rel_file1_path = os.path.relpath(src_file, commonpath)
+        rel_file2_path = os.path.relpath(dest_file, commonpath)
+        distance = rel_file1_path.count(os.sep) + rel_file2_path.count(os.sep)
+    except Exception as e:
+        # print(e, src_file, dest_file)
+        pass
+
+    return distance
+
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
