@@ -1,0 +1,196 @@
+// <MASK>
+mrb_value val = GETARG();
+if (mrb_float_p(val)) {
+    double fval = mrb_float(val);
+    if (isfinite(fval)) {
+        char fbuf[64];
+        int need, n;
+        
+        fmt_setup(fbuf, sizeof(fbuf), *p, flags, width, prec);
+        need = 0;
+        if (*p != 'e' && *p != 'E') {
+            int i;
+            frexp(fval, &i);
+            if (i > 0)
+                need = BIT_DIGITS(i);
+        }
+        if (need > MRB_INT_MAX - ((flags&FPREC) ? prec : 6)) {
+            goto too_big_width;
+        }
+        need += (flags&FPREC) ? prec : 6;
+        if ((flags&FWIDTH) && need < width)
+            need = width;
+        if (need > MRB_INT_MAX - 20) {
+            goto too_big_width;
+        }
+        need += 20;
+        
+        CHECK(need);
+        n = mrb_float_to_cstr(mrb, &buf[blen], need, fbuf, fval);
+        if (n < 0 || n >= need) {
+            mrb_raise(mrb, E_RUNTIME_ERROR, "formatting error");
+        }
+        blen += n;
+    } else if (isnan(fval)) {
+        PUSH("NaN", 3);
+    } else if (isinf(fval)) {
+        if (fval < 0) {
+            PUSH("-Inf", 4);
+        } else {
+            if (flags & FPLUS) {
+                PUSH("+Inf", 4);
+            } else if (flags & FSPACE) {
+                PUSH(" Inf", 4);
+            } else {
+                PUSH("Inf", 3);
+            }
+        }
+    }
+} else {
+    mrb_value int_val = mrb_Integer(mrb, val);
+    if (mrb_fixnum_p(int_val)) {
+        mrb_int int_value = mrb_fixnum(int_val);
+        char nbuf[68], *s;
+        const char *prefix = NULL;
+        int sign = 0, dots = 0;
+        char sc = 0;
+        mrb_int len;
+        
+        if (flags & FSHARP) {
+            switch (*p) {
+                case 'o': prefix = "0"; break;
+                case 'x': prefix = "0x"; break;
+                case 'X': prefix = "0X"; break;
+                case 'b': prefix = "0b"; break;
+                case 'B': prefix = "0B"; break;
+                default: break;
+            }
+        }
+        
+        if (sign) {
+            if (int_value >= 0) {
+                if (flags & FPLUS) {
+                    sc = '+';
+                    width--;
+                } else if (flags & FSPACE) {
+                    sc = ' ';
+                    width--;
+                }
+            } else {
+                sc = '-';
+                width--;
+            }
+            mrb_assert(base == 10);
+            mrb_int2str(nbuf, sizeof(nbuf), int_value);
+            s = nbuf;
+            if (int_value < 0) s++;       /* skip minus sign */
+        } else {
+            s = nbuf;
+            if (int_value < 0) {
+                dots = 1;
+                int_val = mrb_fix2binstr(mrb, mrb_fixnum_value(int_value), base);
+            } else {
+                int_val = mrb_fixnum_to_str(mrb, mrb_fixnum_value(int_value), base);
+            }
+            strncpy(++s, RSTRING_PTR(int_val), sizeof(nbuf)-1);
+            if (int_value < 0) {
+                char d;
+                
+                s = remove_sign_bits(s, base);
+                switch (base) {
+                    case 16: d = 'f'; break;
+                    case 8:  d = '7'; break;
+                    case 2:  d = '1'; break;
+                    default: d = 0; break;
+                }
+                
+                if (d && *s != d) {
+                    *--s = d;
+                }
+            }
+        }
+        
+        {
+            size_t size;
+            size = strlen(s);
+            /* PARANOID: assert(size <= MRB_INT_MAX) */
+            len = (mrb_int)size;
+        }
+        
+        if (*p == 'X') {
+            char *pp = s;
+            int c;
+            while ((c = (int)(unsigned char)*pp) != 0) {
+                *pp = toupper(c);
+                pp++;
+            }
+        }
+        
+        if (prefix && !prefix[1]) { /* octal */
+            if (dots) {
+                prefix = NULL;
+            } else if (len == 1 && *s == '0') {
+                len = 0;
+                if (flags & FPREC) prec--;
+            } else if ((flags & FPREC) && (prec > len)) {
+                prefix = NULL;
+            }
+        } else if (len == 1 && *s == '0') {
+            prefix = NULL;
+        }
+        
+        if (prefix) {
+            size_t size;
+            size = strlen(prefix);
+            /* PARANOID: assert(size <= MRB_INT_MAX).
+             *  this check is absolutely paranoid. */
+            width -= (mrb_int)size;
+        }
+        
+        if ((flags & (FZERO|FMINUS|FPREC)) == FZERO) {
+            prec = width;
+            width = 0;
+        } else {
+            if (prec < len) {
+                if (!prefix && prec == 0 && len == 1 && *s == '0') len = 0;
+                prec = len;
+            }
+            width -= prec;
+        }
+        
+        if (!(flags&FMINUS) && width > 0) {
+            FILL(' ', width);
+            width = 0;
+        }
+        
+        if (sc) PUSH(&sc, 1);
+        
+        if (prefix) {
+            int plen = (int)strlen(prefix);
+            PUSH(prefix, plen);
+        }
+        if (dots) {
+            prec -= 2;
+            width -= 2;
+            PUSH("..", 2);
+        }
+        
+        if (prec > len) {
+            CHECK(prec - len);
+            if ((flags & (FMINUS|FPREC)) != FMINUS) {
+                char c = '0';
+                FILL(c, prec - len);
+            } else if (int_value < 0) {
+                char c = sign_bits(base, p);
+                FILL(c, prec - len);
+            }
+        }
+        PUSH(s, len);
+        if (width > 0) {
+            FILL(' ', width);
+        }
+    } else {
+        mrb_value str_val = mrb_obj_as_string(mrb, int_val);
+        PUSH(RSTRING_PTR(str_val), RSTRING_LEN(str_val));
+    }
+}

@@ -1,0 +1,85 @@
+if (base.arguments().size() == 1 &&
+                    base.arguments()[0]->type().isScalar()) {
+                    // This is a splat, so we can reduce the swizzle size.
+                    ExpressionArray args;
+                    args.reserve_back(swizzleSize);
+                    for (int i = 0; i < swizzleSize; ++i) {
+                        args.push_back(base.arguments()[0]->clone());
+                    }
+                    replacement = std::make_unique<Constructor>(base.fOffset,
+                                                                fContext->fTypes.fFloat.get(),
+                                                                std::move(args));
+                    if (swizzleSize > 1) {
+                        ComponentArray final;
+                        for (int c : s.components()) {
+                            final.push_back(c);
+                        }
+                        replacement = std::make_unique<Swizzle>(*fContext, std::move(replacement),
+                                                                final);
+                    }
+                } else {
+                    // Map arguments of the constructor and count their usage within the swizzle.
+                    ExpressionArray args;
+                    args.reserve_back(swizzleSize);
+                    int8_t* swizzleUsage = new int8_t[base.arguments().size()];
+                    memset(swizzleUsage, 0, base.arguments().size());
+                    for (int c : s.components()) {
+                        ++swizzleUsage[c];
+                    }
+
+                    // Determine if the swizzle can be optimized.
+                    bool canOptimize = true;
+                    for (size_t i = 0; i < base.arguments().size(); ++i) {
+                        const std::unique_ptr<Expression>& arg = base.arguments()[i];
+                        if (swizzleUsage[i] > 1 && !arg->isConstant()) {
+                            // This non-trivial expression is repeated; we can't optimize it.
+                            canOptimize = false;
+                            break;
+                        }
+                        if (swizzleUsage[i] != 0 && arg->hasSideEffects()) {
+                            // This expression has side effects; we can't duplicate or omit it.
+                            canOptimize = std::all_of(swizzleUsage, swizzleUsage + base.arguments().size(),
+                                                     [](int8_t usage) { return usage <= 1; });
+                            break;
+                        }
+                    }
+
+                    if (canOptimize) {
+                        // Reorder and simplify the arguments.
+                        for (int c : s.components()) {
+                            const std::unique_ptr<Expression>& arg = base.arguments()[c];
+                            if (swizzleUsage[c] > 0) {
+                                args.push_back(arg->clone());
+                                swizzleUsage[c] = 0; // Don't add this argument again.
+                            } else {
+                                // This argument was optimized away. Add a default value.
+                                args.push_back(construct(&componentType,
+                                                         std::make_unique<FloatLiteral>(arg->fOffset,
+                                                                                        0.0f)));
+                            }
+                        }
+                        replacement = std::make_unique<Constructor>(base.fOffset,
+                                                                    fContext->fTypes.fFloat.get(),
+                                                                    std::move(args));
+                        if (swizzleSize > 1) {
+                            ComponentArray final;
+                            for (int i = 0; i < swizzleSize; ++i) {
+                                final.push_back(i);
+                            }
+                            replacement = std::make_unique<Swizzle>(*fContext, std::move(replacement),
+                                                                    final);
+                        }
+                    }
+                    delete[] swizzleUsage;
+                }
+                if (replacement) {
+                    // No fUsage change: `float4(a, b, c, d).zyxw` and `float4(c, d, a, b)` have
+                    // equivalent reference counts
+                    optimizationContext->fUpdated = true;
+                    if (!try_replace_expression(&b, iter, &replacement)) {
+                        optimizationContext->fNeedsRescan = true;
+                        return;
+                    }
+                    SkASSERT((*iter)->isExpression());
+                    break;
+                }

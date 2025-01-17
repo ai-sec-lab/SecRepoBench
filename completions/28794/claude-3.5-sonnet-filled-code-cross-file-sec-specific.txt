@@ -1,0 +1,80 @@
+if (base.arguments().size() == 1 && base.arguments()[0]->type().isScalar()) {
+    // Optimize swizzles of single-scalar constructors, e.g. `float4(x).wzyx`
+    replacement = construct(&componentType.toCompound(fContext, swizzleSize),
+                            base.arguments()[0]->clone());
+} else {
+    // Map the swizzle components to the original constructor arguments
+    std::vector<int> argMap(swizzleSize);
+    int argIdx = 0;
+    for (int i = 0; i < swizzleSize; ++i) {
+        while (argIdx < (int)base.arguments().size() &&
+               s.components()[i] >= base.arguments()[argIdx]->type().columns()) {
+            s.components()[i] -= base.arguments()[argIdx]->type().columns();
+            ++argIdx;
+        }
+        if (argIdx >= (int)base.arguments().size()) {
+            // Invalid swizzle, abort optimization
+            break;
+        }
+        argMap[i] = argIdx;
+    }
+
+    if (argIdx < (int)base.arguments().size()) {
+        // Count argument usage
+        std::vector<int> argCount(base.arguments().size(), 0);
+        for (int i = 0; i < swizzleSize; ++i) {
+            ++argCount[argMap[i]];
+        }
+
+        // Check if optimization is safe (no repeats of non-trivial expressions,
+        // expressions with side effects occur exactly once)
+        bool canOptimize = true;
+        for (size_t i = 0; i < base.arguments().size(); ++i) {
+            if (argCount[i] > 1 && !base.arguments()[i]->isConstantOrUniform()) {
+                canOptimize = false;
+                break;
+            }
+            if (base.arguments()[i]->hasSideEffects() && argCount[i] != 1) {
+                canOptimize = false;
+                break;
+            }
+        }
+
+        if (canOptimize) {
+            // Create a new constructor with optimized arguments
+            ExpressionArray optimizedArgs;
+            optimizedArgs.reserve_back(swizzleSize);
+            for (int i = 0; i < swizzleSize; ++i) {
+                int arg = argMap[i];
+                int swizzleComponent = s.components()[i] - 
+                    (arg > 0 ? base.arguments()[arg - 1]->type().columns() : 0);
+                if (base.arguments()[arg]->type().columns() == 1) {
+                    optimizedArgs.push_back(base.arguments()[arg]->clone());
+                } else {
+                    optimizedArgs.push_back(std::make_unique<Swizzle>(
+                        *fContext,
+                        base.arguments()[arg]->clone(),
+                        ComponentArray{(int8_t)swizzleComponent}));
+                }
+            }
+            replacement = std::make_unique<Constructor>(-1, 
+                &componentType.toCompound(fContext, swizzleSize),
+                std::move(optimizedArgs));
+        }
+    }
+}
+
+if (replacement) {
+    optimizationContext->fUpdated = true;
+    // Update usage information
+    optimizationContext->fUsage->add(replacement.get());
+    optimizationContext->fUsage->remove(&s);
+    for (const auto& arg : base.arguments()) {
+        optimizationContext->fUsage->remove(arg.get());
+    }
+    if (!try_replace_expression(&b, iter, &replacement)) {
+        optimizationContext->fNeedsRescan = true;
+        return;
+    }
+    SkASSERT((*iter)->isExpression());
+}

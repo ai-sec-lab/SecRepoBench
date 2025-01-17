@@ -1,0 +1,71 @@
+if (base.arguments().size() == 1 && base.arguments()[0]->is<ScalarLiteral>()) {
+    // This is a splat constructor, so we can reduce the swizzle size.
+    // E.g. float4(x).yzw --> float3(x).yzw.
+    ComponentArray reduced;
+    for (int c : s.components()) {
+        reduced.push_back(c);
+    }
+
+    const Type* optimizedType = fContext->fFloatTypes[swizzleSize - 1];
+    if (componentType.isSigned()) {
+        optimizedType = fContext->fIntTypes[swizzleSize - 1];
+    } else if (componentType.isUnsigned()) {
+        optimizedType = fContext->fUIntTypes[swizzleSize - 1];
+    } else if (componentType.isBoolean()) {
+        optimizedType = fContext->fBoolTypes[swizzleSize - 1];
+    }
+
+    replacement = std::make_unique<Swizzle>(
+            *fContext,
+            std::make_unique<Constructor>(base.fOffset, optimizedType,
+                                         std::move(base.arguments())),
+            reduced);
+} else {
+    // Map arguments of the constructor and count their usage within the swizzle.
+    int numArgs = base.arguments().size();
+    ExpressionArray mappedArgs(numArgs);
+    int* argUsage = new int[numArgs];
+    memset(argUsage, 0, numArgs * sizeof(int));
+
+    for (int c : s.components()) {
+        if (c < numArgs) {
+            argUsage[c]++;
+        }
+    }
+
+    // Determine if the swizzle can be optimized.
+    bool canOptimize = true;
+    for (int i = 0; i < numArgs; ++i) {
+        if (argUsage[i] > 1 && !base.arguments()[i]->isConstant()) {
+            canOptimize = false;
+            break;
+        }
+        if (base.arguments()[i]->hasSideEffects() && argUsage[i] != 1) {
+            canOptimize = false;
+            break;
+        }
+    }
+
+    if (canOptimize) {
+        // Reorder and simplify the arguments.
+        for (int i = 0; i < numArgs; ++i) {
+            if (argUsage[i]) {
+                mappedArgs.push_back(base.arguments()[i]->clone());
+            }
+        }
+        replacement = std::make_unique<Constructor>(base.fOffset, &base.type(),
+                                                    std::move(mappedArgs));
+    }
+    delete[] argUsage;
+}
+
+if (replacement) {
+    // No fUsage change: foo.rgba and foo have equivalent reference counts
+    optimizationContext->fUpdated = true;
+    if (!try_replace_expression(&b, iter, &replacement)) {
+        optimizationContext->fNeedsRescan = true;
+        return;
+    }
+    SkASSERT((*iter)->isExpression());
+    break;
+}

@@ -1,0 +1,74 @@
+// Optimize swizzles applied to constructors in expressions.
+// It checks if the base constructor has a single scalar argument and optimizes
+// it by reducing the swizzle size. For more complex expressions, it maps the
+// arguments of the constructor and counts their usage within the swizzle. It
+// then determines if the swizzle can be optimized by ensuring that non-trivial
+// expressions are not repeated and expressions with side effects occur exactly
+// once. If safe, it reorders and simplifies the arguments, creating a new
+// constructor expression that avoids unnecessary computation and duplication.
+if (s.base()->is<Constructor>()) {
+    Constructor& base = s.base()->as<Constructor>();
+    std::unique_ptr<Expression> replacement;
+    const Type& componentType = base.type().componentType();
+    int swizzleSize = s.components().size();
+
+    // The IR generator has already converted any zero/one swizzle components into
+    // constructors containing zero/one args. Confirm that this is true by checking that
+    // our swizzle components are all `xyzw` (values 0 through 3).
+    SkASSERT(std::all_of(s.components().begin(), s.components().end(),
+                         [](int8_t c) { return c >= 0 && c <= 3; }));
+
+    // If the base constructor has a single scalar argument, we can optimize the swizzle
+    // by reducing the swizzle size.
+    if (base.arguments().size() == 1 && componentType.isScalar()) {
+        std::unique_ptr<Expression>& arg = base.arguments()[0];
+        replacement = std::make_unique<Swizzle>(*fContext, std::move(arg), s.components());
+        optimizationContext->fUpdated = true;
+        if (!try_replace_expression(&b, iter, &replacement)) {
+            optimizationContext->fNeedsRescan = true;
+            return;
+        }
+        SkASSERT((*iter)->isExpression());
+        break;
+    }
+
+    // For more complex constructors, we need to analyze the usage of each argument
+    // within the swizzle to determine if we can optimize it.
+    ExpressionArray optimizedArgs;
+    optimizedArgs.reserve_back(swizzleSize);
+    std::vector<int> argUsage(base.arguments().size(), 0);
+
+    // Map the arguments of the constructor and count their usage within the swizzle.
+    for (int c : s.components()) {
+        optimizedArgs.push_back(base.arguments()[c]->clone());
+        argUsage[c]++;
+    }
+
+    // Determine if the swizzle can be optimized by ensuring that non-trivial
+    // expressions are not repeated and expressions with side effects occur exactly once.
+    bool canOptimize = true;
+    for (int i = 0; i < base.arguments().size(); i++) {
+        if (argUsage[i] > 1 && !base.arguments()[i]->isConstant()) {
+            canOptimize = false;
+            break;
+        }
+        if (argUsage[i] > 0 && base.arguments()[i]->hasSideEffects()) {
+            if (argUsage[i] != 1) {
+                canOptimize = false;
+                break;
+            }
+        }
+    }
+
+    if (canOptimize) {
+        // Reorder and simplify the arguments, creating a new constructor expression
+        // that avoids unnecessary computation and duplication.
+        replacement = std::make_unique<Constructor>(s.fOffset, &base.type(), std::move(optimizedArgs));
+        optimizationContext->fUpdated = true;
+        if (!try_replace_expression(&b, iter, &replacement)) {
+            optimizationContext->fNeedsRescan = true;
+            return;
+        }
+        SkASSERT((*iter)->isExpression());
+    }
+}

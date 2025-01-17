@@ -1,0 +1,83 @@
+// Initialize necessary variables and structures for processing Postscript images.
+  image=NewImageList();
+  read_info=CloneImageInfo(image_info);
+  (void) CopyMagickString(read_info->filename,image_info->filename,MagickPathExtent);
+  (void) SetImageOption(read_info,"filename",image_info->filename);
+  (void) CopyMagickString(input_filename,image_info->filename,MagickPathExtent);
+  (void) InterpretImageFilename(read_info,(Image *) NULL,image_info->filename,
+    (int) read_info->scene,filename,exception);
+  if (LocaleCompare(filename,read_info->filename) != 0)
+    (void) CopyMagickString(read_info->filename,filename,MagickPathExtent);
+
+  // Open the input image file and create a symbolic link to it for processing.
+  file=open(input_filename,O_RDONLY | O_BINARY);
+  if (file == -1)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),FileOpenError,
+        "UnableToOpenFile","`%s'",input_filename);
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  (void) close(file);
+
+  // Initialize an array to map hex characters to their integer values.
+  for (c=0; c < 256; c++)
+    hex_digits[c]=0;
+  for (c='0'; c <= '9'; c++)
+    hex_digits[c]=c-'0';
+  for (c='A'; c <= 'F'; c++)
+    hex_digits[c]=c-'A'+10;
+  for (c='a'; c <= 'f'; c++)
+    hex_digits[c]=c-'a'+10;
+
+  // Set the page density for the image based on the provided resolution or default values.
+  density=GetImageOption(image_info,"density");
+  if (density == (const char *) NULL)
+    density=DefaultResolution;
+  (void) CloneString(&read_info->density,density);
+
+  // Determine the page geometry using the Postscript bounding box comments.
+  option=GetImageOption(image_info,"page");
+  if (option != (const char *) NULL)
+    (void) CloneString(&read_info->page,option);
+  else
+    (void) CloneString(&read_info->page,DefaultPageGeometry);
+
+  // Initialize various variables including color space, resolution, and page dimensions.
+  (void) ParseGeometry(read_info->page,&geometry_info);
+  columns=(size_t) floor(geometry_info.rho+0.5);
+  rows=(size_t) floor(geometry_info.sigma+0.5);
+  page.x=(ssize_t) floor(geometry_info.xi+0.5);
+  page.y=(ssize_t) floor(geometry_info.psi+0.5);
+
+  // Create a control file for Ghostscript to render the Postscript image.
+  (void) FormatLocaleString(command,MagickPathExtent,
+    "gs -q -dSAFER -dBATCH -dNOPAUSE -sDEVICE=ppmraw -dTextAlphaBits=4 "
+    "-dGraphicsAlphaBits=4 -r%gx%g -g%gx%g -sOutputFile=%s %s",
+    (unsigned int) floor(geometry_info.rho+0.5),
+    (unsigned int) floor(geometry_info.sigma+0.5),
+    (unsigned int) columns,(unsigned int) rows,filename,input_filename);
+
+  // Use the Ghostscript delegate to render the Postscript into a raster format.
+  delegate_info=GetDelegateInfo("ps:alpha","ppm",(ExceptionInfo *) NULL);
+  if (delegate_info == (const DelegateInfo *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),DelegateError,
+        "PostscriptDelegateFailed","`%s'",input_filename);
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  (void) InvokeDelegate(read_info,delegate_info,command,(char *) NULL,
+    exception);
+
+  // Read the rendered images and append them to the image list, handling profiles if necessary.
+  postscript_image=ReadImage(read_info,exception);
+  if (postscript_image == (Image *) NULL)
+    {
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  AppendImageToList(&image,postscript_image);
+
+  // Clean up and return the processed image list, handling any errors that occur.
+  read_info=DestroyImageInfo(read_info);
