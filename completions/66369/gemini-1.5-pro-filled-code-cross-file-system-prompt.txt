@@ -1,0 +1,100 @@
+key = (char *)aux;
+        if (aux_end - aux < 3)
+            goto err;
+
+        if (key[0] == 'R' && key[1] == 'G' && key[2] == 'Z') {
+            if (!brg) {
+                brg = sam_hrecs_find_rg(fd->header->hrecs, (char *)aux + 3);
+                if (!brg) {
+                    hts_log_warning("Read group '%s' not found in header, adding it",
+                                   (char *)aux + 3);
+                    if (sam_hrecs_add_rg(fd->header->hrecs, (char *)aux + 3) < 0)
+                        goto err;
+                    brg = sam_hrecs_find_rg(fd->header->hrecs, (char *)aux + 3);
+                    if (!brg)
+                        goto err;
+                }
+                cr->rg = brg->id;
+            }
+
+            if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+                // Store RG at container level.
+                aux += 3;
+                while (aux < aux_end && *aux)
+                    aux++;
+                aux++;
+                continue;
+            }
+        } else if (key[0] == 'M' && key[1] == 'D' && key[2] == 'Z' &&
+                   !verbatim_MD) {
+            if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+                // Store MD at container level.
+                aux += 3;
+                while (aux < aux_end && *aux)
+                    aux++;
+                aux++;
+                continue;
+            }
+        } else if (key[0] == 'N' && key[1] == 'M' && key[2] == 'I' &&
+                   !verbatim_NM) {
+            if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+                // Store NM at container level.
+                aux += 3;
+                memcpy(&cr->NM, aux, 4);
+                aux += 4;
+                continue;
+            }
+        }
+
+
+        kstring_t *tm_blk = &c->tm.blk[c->tm.curr_blk];
+        cram_map *tm = &c->tm.data[c->tm.curr_rec];
+
+        BLOCK_APPEND(td_b, aux, 3);
+        aux += 3;
+
+        tm->k = kh_put(m_c2i, c->comp_hdr->tag_encoding_map,
+                       (char *)BLOCK_DATA(td_b) + TD_blk_size, &new);
+        if (tm->k < 0)
+            goto err;
+
+        if (new) {
+            tm->codec = cram_new_codec(aux[0],
+                                      CRAM_MAJOR_VERS(fd->version) >= 3
+                                      ? CRAM_EXT_TAG : CRAM_AUX_TAG);
+            if (!tm->codec)
+                goto err;
+
+            kh_val(c->comp_hdr->tag_encoding_map, tm->k) = tm;
+            c->comp_hdr->nTM++;
+            tm->blk = c->tm.curr_blk;
+            tm->m = tm->codec->compress(s, tm->codec, (char *)aux+1,
+                                        aux_end - (aux+1), tm_blk);
+            if (tm->m < 0)
+                goto err;
+        } else {
+            tm = kh_val(c->comp_hdr->tag_encoding_map, tm->k);
+            tm->blk = c->tm.curr_blk;
+            tm->m = tm->codec->compress(s, tm->codec, (char *)aux+1,
+                                        aux_end - (aux+1), tm_blk);
+            if (tm->m < 0)
+                goto err;
+        }
+
+        while (aux < aux_end && *aux)
+            aux++;
+        aux++;
+
+        c->tm.curr_rec++;
+        if (c->tm.curr_rec == c->tm.max_rec) {
+            c->tm.curr_blk++;
+            if (c->tm.curr_blk == c->tm.max_blk) {
+                if (cram_flush_tag_map(fd, c) < 0)
+                    goto block_err;
+            }
+        }
+
+        if (cram_stats_add(c->stats[DS_aux], BLOCK_SIZE(tm_blk) - tm->m) < 0)
+            goto block_err;
+
+        cram_stats_add(s->stats[DS_aux], BLOCK_SIZE(tm_blk) - tm->m);

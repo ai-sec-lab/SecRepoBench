@@ -1,0 +1,53 @@
+// Optimize swizzles applied to constructors.
+                if (s.base()->is<Constructor>()) {
+                    Constructor& base = s.base()->as<Constructor>();
+                    std::unique_ptr<Expression> replacement;
+                    const Type& componentType = base.type().componentType();
+                    int swizzleSize = s.components().size();
+
+                    // The IR generator has already converted any zero/one swizzle components into
+                    // constructors containing zero/one args. Confirm that this is true by checking that
+                    // our swizzle components are all `xyzw` (values 0 through 3).
+                    SkASSERT(std::all_of(s.components().begin(), s.components().end(),
+                                         [](int8_t c) { return c >= 0 && c <= 3; }));
+
+                    // Check if the base constructor has a single scalar argument
+                    if (base.arguments().size() == 1) {
+                        // Create a new constructor with the swizzled components
+                        replacement = std::make_unique<Constructor>(base.fOffset, &base.type(), 
+                                                                    std::move(base.arguments()));
+                        optimizationContext->fUpdated = true;
+
+                        // Attempt to replace the current expression with the optimized one
+                        if (!try_replace_expression(&b, iter, &replacement)) {
+                            optimizationContext->fNeedsRescan = true;
+                            return;
+                        }
+                        SkASSERT((*iter)->isExpression());
+                        break;
+                    }
+
+                    // If the base constructor has multiple arguments, we need to flatten them
+                    ExpressionArray flattened;
+                    for (const std::unique_ptr<Expression>& arg : base.arguments()) {
+                        if (arg->is<Constructor>()) {
+                            Constructor& inner = arg->as<Constructor>();
+                            for (const std::unique_ptr<Expression>& innerArg : inner.arguments()) {
+                                flattened.push_back(innerArg->clone());
+                            }
+                        } else {
+                            flattened.push_back(arg->clone());
+                        }
+                    }
+
+                    // Create a new constructor with the flattened arguments
+                    replacement = std::make_unique<Constructor>(base.fOffset, &base.type(), std::move(flattened));
+                    optimizationContext->fUpdated = true;
+
+                    // Attempt to replace the current expression with the optimized one
+                    if (!try_replace_expression(&b, iter, &replacement)) {
+                        optimizationContext->fNeedsRescan = true;
+                        return;
+                    }
+                    SkASSERT((*iter)->isExpression());
+                }
