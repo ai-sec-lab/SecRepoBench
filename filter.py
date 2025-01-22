@@ -19,6 +19,9 @@ import pandas as pd
 from collections import defaultdict
 import time
 import re
+import os
+from projects import *
+from collections import defaultdict
 
 
 def create_proj_samples(samples_each_step, id_2_proj):
@@ -257,7 +260,13 @@ def filter_commit(commit):
 
 
 def make_mangled_name(name, full_parameters):
-    param_types = [' '.join(param.strip().split(' ')[:-1]) for param in full_parameters]
+    param_types = []
+    for param in full_parameters:
+        param = param.strip()
+        if len(param.split(' ')) == 1:
+            param_types.append(param)
+        else:
+            param_types.append(' '.join(param.split(' ')[:-1]))
     mangled_name = [name] + param_types
     return mangled_name
 
@@ -275,18 +284,21 @@ def process_sample(stem, meta, patch):
             return stem, "invalid fix_commit", None
 
     # get url -- must be using single thread if using local repos
-    url = meta["repo_addr"].rstrip("/")
-    if meta['project'].lower() == 'binutils-gdb':
-        url = './local_repos/binutils-gdb'
-    elif meta['project'].lower() == 'elfutils':
-        url = './local_repos/elfutils'
+    local_repos = os.listdir('/home/cdilgren/project_benchmark/repos')
+    if meta['project'] not in local_repos:
+        url = meta["repo_addr"].rstrip("/")
+    else:
+        url = f'/home/cdilgren/project_benchmark/repos/{meta['project']}'
 
     # some times Repository fails on input that passed before. So try multiple times.
     max_retries = 3
     for i in range(max_retries):
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
-                commits = list(Repository(url, single=commit_hash, clone_repo_to=temp_dir).traverse_commits())
+                if meta['project'] in local_repos:
+                    commits = list(Repository(url, single=commit_hash).traverse_commits())
+                else:
+                    commits = list(Repository(url, single=commit_hash, clone_repo_to=temp_dir).traverse_commits())
 
                 if not commits:
                     return stem, "no commits found", None
@@ -426,7 +438,7 @@ def main(save_path, parallel=True, rerun=True):
         fixes = {case['fixing_commit'] for case in cases.values()}
 
     remove = []
-    for stem in list(samples.keys()):
+    for stem in [str(id) for id in sorted([int(id) for id in list(samples.keys())])]:
         meta = samples[stem]['meta']
         # Get commit hash
         fix_commit = meta['fix_commit']
@@ -659,10 +671,53 @@ def main(save_path, parallel=True, rerun=True):
         'sample ids lost': processing_stats["exception"]
     })
 
+    # Step 13: Samples that are in projects.py (we can compile and test)
+    projects_unittest = set(unittest_commands.keys())
+    projects_patterns = set(unittest_patterns.keys())
+    projects_bad = set(bad_projects)
+    projects_valid = projects_unittest.intersection(projects_patterns).difference(projects_bad)
+    projects_valid = [proj.lower() for proj in projects_valid]
+    remove = []
+    for stem in samples:
+        project = samples[stem]['meta']['project'].lower()
+        if project not in projects_valid:
+            remove.append(stem)
+    for rm in remove: del samples[rm]
+    num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
+    samples_each_step.append({
+        'step': 13,
+        'description': 'Samples in projects.py',
+        'number of samples present': len(samples),
+        'number of samples lost': num_samples_lost,
+        'sample ids present': list(samples.keys()),
+        'sample ids lost': remove
+    })
+
+    # Step 14: Samples that are in top 40
+    project_freq = defaultdict(int)
+    for stem in samples:
+        project = samples[stem]['meta']['project'].lower()
+        project_freq[project] += 1
+    sorted_proj = sorted(project_freq.items(), key=lambda item: item[1], reverse=True)
+    top_40 = [proj[0] for proj in sorted_proj[:40]]
+    remove = []
+    for stem in samples:
+        if samples[stem]['meta']['project'].lower() not in top_40:
+            remove.append(stem)
+    for rm in remove: del samples[rm]
+    num_samples_lost = samples_each_step[-1]['number of samples present'] - len(samples)
+    samples_each_step.append({
+        'step': 14,
+        'description': 'Samples in top 40',
+        'number of samples present': len(samples),
+        'number of samples lost': num_samples_lost,
+        'sample ids present': list(samples.keys()),
+        'sample ids lost': remove
+    })
+
     # make save_path
     if not Path(save_path).exists():
         Path(save_path).mkdir(exist_ok=True)
-
 
     # Save final cases
     cases_filename = Path(save_path) / 'cases.json'
@@ -704,7 +759,13 @@ def main(save_path, parallel=True, rerun=True):
         json.dump(repository_errors, f, indent=4)
     print(f"Saved repository read errors to {repo_read_errors}")
 
+    # save top 40 proejcts
+    top_40_projects = Path(save_path) / "top_40.json"
+    with open(top_40_projects, 'w') as f:
+        json.dump(top_40, f, indent=4)
+    print(f"Saved top 40 projects to {top_40_projects}")
+
 
 if __name__ == "__main__":
-    save_path = "/space1/cdilgren/project_benchmark/filter_logs_all"
-    main(save_path, parallel=True, rerun=False)
+    save_path = "filter_logs"
+    main(save_path, parallel=False, rerun=True)
