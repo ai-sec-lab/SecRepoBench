@@ -1,19 +1,51 @@
-import sys
 import os
 import re
-import csv
 import json
-import difflib
+import random
+import tree_sitter_c as tsc
+import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser
 import lizard
 from utils import *
+from get_new_var import APIEvaler
+
+
+def make_mangled_name(name, full_parameters):
+    param_types = []
+    for param in full_parameters:
+        param = param.strip()
+        if len(param.split(' ')) == 1:
+            param_types.append(param)
+        else:
+            param_types.append(' '.join(param.split(' ')[:-1]))
+    mangled_name = [name] + param_types
+    return mangled_name
+
+
+def get_leading_whitespace(text):
+    """
+    Extract the leading whitespace (spaces or tabs) from a string.
+    
+    Args:
+        text (str): The input string to analyze
+        
+    Returns:
+        str: The leading whitespace characters found
+    """
+    leading = ''
+    for char in text:
+        if char.isspace():
+            leading += char
+        else:
+            break
+    return leading
 
 
 def replace_code_block_with_mask(source_code, code_block):
     # Replaces the code in the given range with "// <MASK>"
     if isinstance(code_block, list):
         escaped_strings = [re.escape(block.text.decode('utf-8')) for block in code_block]
-        pattern = r'\s*'.join(escaped_strings)
+        pattern = r'[\s\S]*'.join(escaped_strings) if len(escaped_strings) > 1 else escaped_strings[0]
         start_byte = code_block[0].start_byte
         end_byte = code_block[-1].end_byte
     else:
@@ -51,15 +83,13 @@ def replace_code_block_with_mask(source_code, code_block):
         match = re.search(pattern, search_section)
 
     code_block_text = match.group()
-    code_block_text_start = search_section.find(code_block_text)
-    code_block_text_end = code_block_text_start + len(code_block_text)
 
-    masked_section = search_section[:code_block_text_start] + "// <MASK>" + search_section[code_block_text_end:]
+    masked_section = search_section[:match.span()[0]] + "// <MASK>" + search_section[match.span()[1]:]
     masked_code = source_code[:start_byte] + masked_section + source_code[end_byte:]
     return masked_code, code_block_text
 
 
-def get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, diff):
+def get_vul_code_block(modified_source_code, sec_code_block, vul_source_code, diff):
     # get sec_code_block start (row, col)
     before_mask = modified_source_code.split('// <MASK>')[0]
     before_mask_lines = re.split(r'\n', before_mask)
@@ -127,8 +157,6 @@ def get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, di
             added_lines = [ln+1 for ln in added_lines]
 
     # Read the vul source code -- use regex for \n to ignore special characters like FF \x0c
-    with open(vul_source_file, 'r') as f:
-        vul_source_code = f.read()
     vul_source_code_lines = re.split(r'\n', vul_source_code)
 
     # get vul code block
@@ -211,10 +239,15 @@ def get_code_block(function_node, x, y, total_lines, source_code, mod_func, sour
         # tree sitter failed, use whole function as code block
         print(f"ID {id}: Tree sitter failed to find code block, using whole function as code block")
         modified_source_code, sec_code_block = get_function_content(mod_func, source_code_lines)
-        return modified_source_code, sec_code_block
     else:
         # Replace the identified block with the comment
         modified_source_code, sec_code_block = replace_code_block_with_mask(source_code, sec_code_block)
+
+    # fix spacing - shift leading and trailing spaces in code block to mask
+    leading_spaces = get_leading_whitespace(sec_code_block)
+    ending_spaces = get_leading_whitespace(sec_code_block[::-1])[::-1]
+    modified_source_code = modified_source_code.replace("// <MASK>", f"{leading_spaces}// <MASK>{ending_spaces}")
+    sec_code_block = sec_code_block.strip()
 
     return modified_source_code, sec_code_block
 
@@ -311,10 +344,26 @@ def parse_git_diff(diff_content, target_filename):
     return result
 
 
-def mask_helper(id, diff_non_trivial, changed_file, base_path):
+def get_new_var(function_node, old_var, evaler):
+    # make prompt for LM to make a new_var
+    prompt = f"Below is a C/C++ function. Create a new name for the variable {old_var}. "
+    prompt += "The new variable name should be semantically similar to the original name and variable purpose. "
+    prompt += "For example, a variable called 'dst' that tracks geometric distance can be renamed 'distance'. "
+    prompt += "As another example, a variable called 'start_line can be renamed 's_ln'. "
+    prompt += "Only return the new variable name. "
+    prompt += "DO NOT include any other information, such as a preamble or suffix."
+    prompt += "\n```\n"
+    prompt += function_node.text.decode('utf-8')
+    prompt += "\n```\n"
+
+    new_var = evaler.get_response(prompt)
+    return new_var
+
+
+def mask_helper(id, case, base_path, id2var, evaler):
     delta_x = 0
     delta_y = 0
-    sec_code_block, vul_code_block = mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y)
+    sec_code_block, vul_code_block = mask(id, case, base_path, delta_x, delta_y, id2var, evaler)
     sec_code_block_comments_rm = remove_sl_comments_code_block(sec_code_block)
     vul_code_block_comments_rm = remove_sl_comments_code_block(vul_code_block)
 
@@ -325,7 +374,7 @@ def mask_helper(id, diff_non_trivial, changed_file, base_path):
         else:
             delta_x += 1
         
-        output = mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y)
+        output = mask(id, case, base_path, delta_x, delta_y, id2var, evaler)
         if output is None:  # range exceeds modified function
             break
         else:
@@ -334,42 +383,47 @@ def mask_helper(id, diff_non_trivial, changed_file, base_path):
             vul_code_block_comments_rm = remove_sl_comments_code_block(vul_code_block)
 
 
-def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
+def mask(id, case, base_path, delta_x, delta_y, id2var, evaler):
 
     print(f"Processing {id}")
 
     # set paths
-    sec_source_file = f'/data/cmd-oss-fuzz-bench/{id}/patches/sec.txt'
-    vul_source_file = f'/data/cmd-oss-fuzz-bench/{id}/patches/vul.txt'
-    mask_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/mask.txt'
-    sec_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.txt'
-    vul_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.txt'
-    diff_file = f'/space1/cdilgren/project_benchmark/ARVO-Meta/patches/{id}.diff'
+    diff_file = f'/home/cdilgren/project_benchmark/ARVO-Meta/patches/{id}.diff'
 
     base_path_id = os.path.join(base_path, id)
     if not os.path.exists(base_path_id):
         os.mkdir(base_path_id)
+
+    # unpack case
+    changed_file = case['changed_file']
+    diff_non_trivial = case['diff']
+    source_code = case['source_code']
+    vul_source_code = case['source_code_before']
 
     # Determine the language based on file extension
     ext = get_file_extension(changed_file)
     language = determine_language(ext)
     if language == 'c':
         LANGUAGE = C_LANGUAGE
-        mask_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/mask.c'
-        sec_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.c'
-        vul_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.c'
+        mask_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.c'
+        sec_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.c'
+        vul_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.c'
+        mask_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.c'
+        sec_code_block_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block_perturbed.c'
+        vul_code_block_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_perturbed.c'
     elif language == 'cpp':
         LANGUAGE = CPP_LANGUAGE
-        mask_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/mask.cpp'
-        sec_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.cpp'
-        vul_code_block_file = f'/space1/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.cpp'
+        mask_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.cpp'
+        sec_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.cpp'
+        vul_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.cpp'
+        mask_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.cpp'
+        sec_code_block_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block_perturbed.cpp'
+        vul_code_block_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_perturbed.cpp'
     else:
         print(f"Language of modified file not recognized for id {id}")
         return
 
     # Read the modified source code -- use regex for \n to ignore special characters like FF \x0c
-    with open(sec_source_file, 'r') as f:
-        source_code = f.read()
     source_code_lines = re.split(r'\n', source_code)
     total_lines = len(source_code_lines)
 
@@ -419,9 +473,9 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
     mod_lines = [d[0] for d in diff_non_trivial['added']] + [d[0] for d in diff_non_trivial['deleted']]
     file_lizard_src = lizard.analyze_file.analyze_source_code(changed_file, source_code)
     mod_funcs = []
-    for func in file_lizard_src.function_list:
-        for line_num in mod_lines:
-            if func.start_line <= line_num <= func.end_line:
+    for line_num in mod_lines:
+        for func in file_lizard_src.function_list:
+            if func.start_line <= line_num <= func.end_line and case['changed_function'] == make_mangled_name(func.name, func.full_parameters) and func not in mod_funcs:
                 mod_funcs.append(func)
     mod_func = mod_funcs[0]
 
@@ -441,14 +495,14 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
     modified_section = '\n'.join(source_code_lines[x-1:y])
 
     # Parse the source code with Tree-sitter
-    parser = Parser()
-    parser.set_language(LANGUAGE)
+    parser = Parser(LANGUAGE)
     tree = parser.parse(bytes(source_code, 'utf8'))
     root_node = tree.root_node
 
     # Find the function containing the first modified line (TreeSitter)
     func_pattern = mod_func.long_name.split('::')[-1].replace('*', r'\*').replace('(', r'\s*\(').replace(')', r'\s*\)').replace('[', r'\s*\[').replace(']', r'\s*\]').replace('&', r'\s*&\s*').replace(',', r'\s*,\s*').replace(' ', r'\s*').replace('void', '') + r'\s*[\s\w:\(\),]*{'  # + r'\s*{'
     funcs = find_functions(root_node, func_pattern, x, y)
+    function_node = None
     if len(funcs) == 0:
         print(f"ID {id}: Tree sitter failed to find function node, using whole function as code block")
         modified_source_code, sec_code_block = get_function_content(mod_func, source_code_lines)
@@ -463,7 +517,7 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
     else: 
         function_node = funcs[0]
         modified_source_code, sec_code_block = get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section)
-    
+
     # Write the modified source code back to the file (or write to a new file)
     with open(mask_file, 'w') as f:
         f.write(modified_source_code)
@@ -475,12 +529,94 @@ def mask(id, diff_non_trivial, changed_file, base_path, delta_x, delta_y):
     print(f"Sec code block written to {sec_code_block_file}")
 
     # Get vul code block
-    vul_code_block = get_vul_code_block(modified_source_code, sec_code_block, vul_source_file, diff)
+    vul_code_block = get_vul_code_block(modified_source_code, sec_code_block, vul_source_code, diff)
 
     # Write the vul code block to file
     with open(vul_code_block_file, 'w') as f:
         f.write(vul_code_block)
     print(f"Vul code block written to {vul_code_block_file}")
+
+    # local variable replacement in function
+    if function_node is None:
+        id2var[id] = {
+            'old_var': None,
+            'new_var': None
+        }
+        print("No variables found in the function.")
+        mask_perturbed_content = modified_source_code
+        sec_code_block_perturbed_content = sec_code_block
+        vul_code_block_perturbed_content = vul_code_block
+    else:
+        variables = find_variables(function_node, x)
+
+        if variables:
+            variables_text = [var.text.decode('utf-8') for var in variables]
+
+            if id in id2var.keys():
+                old_var = id2var[id]['old_var']
+                new_var = id2var[id]['new_var']
+                if old_var is not None and new_var is not None and old_var in variables_text:
+                    # use previous var
+                    print(f"Using previous variable found: {old_var}, new var: {new_var}")
+                else:
+                    # mask changed, need to pick a new one
+                    old_var = random.choice(variables_text)
+                    new_var = get_new_var(function_node, old_var, evaler)
+                    id2var[id] = {
+                        'old_var': old_var,
+                        'new_var': new_var
+                    }
+                    print(f"Variable found: {old_var}, new var: {new_var}")
+            else:
+                # get new var
+                old_var = random.choice(variables_text)
+                new_var = get_new_var(function_node, old_var, evaler)
+                id2var[id] = {
+                    'old_var': old_var,
+                    'new_var': new_var
+                }
+                print(f"Variable found: {old_var}, new var: {new_var}")
+
+            # replace var in sec file
+            new_source_code = replace_var_name(tree.root_node, function_node, old_var, new_var)
+
+            # replace var in mask file
+
+
+            # replace var in sec code block
+
+
+            # replace var in vul code block
+        
+
+        else:
+            id2var[id] = {
+            'old_var': None,
+            'new_var': None
+            }
+            print("No variables found in the function.")
+            mask_perturbed_content = modified_source_code
+            sec_code_block_perturbed_content = sec_code_block
+            vul_code_block_perturbed_content = vul_code_block
+
+    # Write the modified source code back to the file (or write to a new file)
+    with open(mask_perturbed_file, 'w') as f:
+        f.write(mask_perturbed_content)
+    print(f"Perturbed code block replaced with // <MASK> in {mask_file}")
+
+    # Write the sec code block to file
+    with open(sec_code_block_perturbed_file, 'w') as f:
+        f.write(sec_code_block_perturbed_content)
+    print(f"Perturbed sec code block written to {sec_code_block_file}")
+
+    # Get vul code block
+    vul_code_block = get_vul_code_block(modified_source_code, sec_code_block, vul_source_code, diff)
+
+    # Write the vul code block to file
+    with open(vul_code_block_perturbed_file, 'w') as f:
+        f.write(vul_code_block_perturbed_content)
+    print(f"Perturbed vul code block written to {vul_code_block_file}")
+
 
     return sec_code_block, vul_code_block
 
@@ -490,22 +626,25 @@ if __name__ == "__main__":
     #     ids_each_step = json.load(f)
     # ids = ids_each_step['ids_pass_testcase_unittest']
 
-    with open('ids_good.txt', 'r') as f:
-        ids_good = f.readlines()
-    ids = [id.strip() for id in ids_good[1:]]
+    with open('ids_top40.txt', 'r') as f:
+        ids = f.read().splitlines()[1:]
 
-    ids_manual = ['9370', '35712', '7123', '27503', '66135', '5646', '53340', '66108']
-    ids = [id for id in ids if id not in ids_manual]
-
-    with open('filter_logs_all/cases.json', 'r') as f:
+    with open('filter_logs/cases.json', 'r') as f:
         cases = json.load(f)
 
-    base_path = '/space1/cdilgren/project_benchmark/descriptions'
+    base_path = '/home/cdilgren/project_benchmark/descriptions'
     if not os.path.exists(base_path):
         os.mkdir(base_path)
 
+    with open('id_oldvar_newvar.json', 'r') as f:
+        id2var = json.load(f)
+
+    evaler = APIEvaler()
+
     for id in ids:
         print(id)
-        diff_non_trivial = cases[id]['diff']
-        changed_file = cases[id]['changed_file']
-        mask_helper(id, diff_non_trivial, changed_file, base_path)
+        case = cases[id]
+        mask_helper(id, case, base_path, id2var, evaler)
+
+    with open('id2var.json', 'w') as f:
+        json.dump(id2var, f, indent=4)

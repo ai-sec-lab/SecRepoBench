@@ -108,7 +108,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
     image_name = f"n132/arvo:{id}-fix"
 
     proc_check = subprocess.run(
-        ["sudo", "docker", "image", "inspect", image_name],
+        ["docker", "image", "inspect", image_name],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
@@ -116,7 +116,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
     if proc_check.returncode != 0:
         # Image does not exist locally, pull it
         proc_pull = subprocess.run(
-            ["sudo", "docker", "pull", image_name],
+            ["docker", "pull", image_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
@@ -124,11 +124,14 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
             return False
 
     # write testcase, unittest bash scripts
-    scripts_content_sec = (
+    testcase_content = (
         f"#!/bin/bash\n"
-        "sudo docker run --rm "
+        "docker run --rm --init "
+        f"--name {id}_{model_name}_{context_type}_{prompt_type}_testcase "
+        "--cpus=1 "
+        "-e MAKEFLAGS=\"-j4\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{id}/patches:/patches "
-        f"n132/arvo:{id}-fix /bin/sh -c \" \n"
+        f"n132/arvo:{id}-fix /bin/sh -c \"\n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
         "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
@@ -139,15 +142,42 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         "    CHANGES_STASHED=false\n"
         "  fi\n"
         f"  git -C \\$GIT_DIR checkout {fixing_commit}\n"
-        "  if [ \\\"$CHANGES_STASHED\\\" = true ]; then\n"
+        "  if [ \\\"\\$CHANGES_STASHED\\\" = true ]; then\n"
         "    git -C \\$GIT_DIR stash apply\n"
         "  fi\n"
         # move patch file
-        f"  mv -f /patches/{patch_file_name} \\$GIT_DIR/{changed_file}\n"
+        f"  cp -f /patches/{patch_file_name} \\$GIT_DIR/{changed_file}\n"
+        "  arvo compile\n"
+        "  arvo run\n"
+        "  exit \\$?\""
     )
 
-    testcase_content = scripts_content_sec + "  timeout 1500 arvo compile\n  arvo run\n\""
-    unittest_content = scripts_content_sec + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
+    unittest_content = (
+        f"#!/bin/bash\n"
+        "docker run --rm --init "
+        f"--name {id}_{model_name}_{context_type}_{prompt_type}_unittest "
+        "--cpus=1 "
+        "-e MAKEFLAGS=\"-j4\" "
+        f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{id}/patches:/patches "
+        f"n132/arvo:{id}-fix /bin/sh -c \"\n"
+        # revert to fixing commit and stash changes as necessary
+        f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
+        "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
+        "  if [ -n \\\"\\$(git -C \\$GIT_DIR status --porcelain)\\\" ]; then\n"
+        "    git -C \\$GIT_DIR stash save --include-untracked \\\"Saving my changes\\\"\n"
+        "    CHANGES_STASHED=true\n"
+        "  else\n"
+        "    CHANGES_STASHED=false\n"
+        "  fi\n"
+        f"  git -C \\$GIT_DIR checkout {fixing_commit}\n"
+        "  if [ \\\"\\$CHANGES_STASHED\\\" = true ]; then\n"
+        "    git -C \\$GIT_DIR stash apply\n"
+        "  fi\n"
+        # move patch file
+        f"  cp -f /patches/{patch_file_name} \\$GIT_DIR/{changed_file}\n"
+        "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\n"
+        "  exit \\$?\""
+    )
 
     with open(testcase_file, 'w') as f:
         f.write(testcase_content)
@@ -328,37 +358,43 @@ def proc_runner(target_with_output_path_and_rerun):
     target, output_path, rerun = target_with_output_path_and_rerun
     local_id, model_name, context_type, prompt_type, test_type, cmd = target
     print(f"Running {local_id} {model_name} {context_type} {prompt_type} {test_type}")
-    
-    # Check if cached result exists
-    cache_file = Path(output_path) / str(local_id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}" / "cache.pkl"
-    if cache_file.exists() and not rerun:
-        try:
-            with cache_file.open("rb") as f:
-                cached_data = pickle.load(f)
-            
-            # Check if the cached result was a rate limit error
-            if "429 Too Many Requests" not in cached_data.get('stderr', b'').decode():
-                print(f"Using cached result for {local_id} {model_name} {context_type} {prompt_type} {test_type}")
-                return local_id, model_name, context_type, prompt_type, test_type, cached_data
-            else:
-                print(f"Retrying rate-limited case: {local_id} {model_name} {context_type} {prompt_type} {test_type}")
-        except:
-            pass
-    
+
+    # get unique container id
+    container_id = f"{local_id}_{model_name}_{context_type}_{prompt_type}_{test_type}"
+
     # If no cache, cached result was a rate limit error, or rerun is True, run the process with retry
     max_retries = 5
     base_delay = 60  # 1 minute
     for attempt in range(max_retries):
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+
         try:
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE, timeout=1500)
+            stdout, stderr = proc.communicate(timeout=3000)
+
         except subprocess.TimeoutExpired:
             print(f"Timeout: {local_id} {model_name} {context_type} {prompt_type} {test_type}")
+
+            try:
+                cleanup_proc = subprocess.run(['docker', 'rm', '-f', container_id], 
+                                              stdout=subprocess.PIPE, 
+                                              stderr=subprocess.PIPE)
+
+            except subprocess.SubprocessError as e:
+                print(f"Failed to clean up the container. It may have already exited or been removed. Error: {e}")
+
+            proc.kill()
+            stdout, stderr = proc.communicate()  # Avoid zombie process
+
+            stdout = stdout or b""
+            stderr = stderr or b""
+
             return local_id, model_name, context_type, prompt_type, test_type, {
-                "stdout": b"",
-                "stderr": b"Timeout",
+                "stdout": stdout,
+                "stderr": b"Timeout\n" + stderr,  # Prepend Timeout message
                 "returncode": -1
             }
-        if "429 Too Many Requests" not in proc.stderr.decode(errors='ignore'):
+
+        if "429 Too Many Requests" not in stderr.decode(errors='ignore'):
             break
         if attempt < max_retries - 1:
             delay = base_delay * (2 ** attempt) + random.uniform(0, 10)
@@ -369,8 +405,8 @@ def proc_runner(target_with_output_path_and_rerun):
 
     print(f"Finished {local_id} {model_name} {context_type} {prompt_type} {test_type}")
     return local_id, model_name, context_type, prompt_type, test_type, {
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
+        "stdout": stdout,
+        "stderr": stderr,
         "returncode": proc.returncode
     }
 
@@ -470,12 +506,16 @@ def main():
                 with open(all_report_file, 'r') as f:
                     all_report = json.load(f)
                 for id in all_report.keys():
-                    for test_patch in all_report[id].keys():
-                        completed.add((id, test_patch))
+                    for model in all_report[id].keys():
+                        for context in all_report[id][model].keys():
+                            for prompt in all_report[id][model][context].keys():
+                                for test in all_report[id][model][context][prompt].keys():
+                                    completed.add((id, model, context, prompt, test))
 
             # Count cached results and identify rate-limited cases
             cached_count = 0
             rate_limited_count = 0
+            time_out_count = 0
             for target in targets:
                 local_id, model_name, context_type, prompt_type, test_type, _ = target
                 cache_file = Path(args.output) / str(local_id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}" / "cache.pkl"
@@ -486,25 +526,27 @@ def main():
                         if "429 Too Many Requests" in cached_data.get('stderr', b'').decode(errors="ignore"):
                             rate_limited_count += 1
                             # Remove from completed set to ensure it's rerun
-                            completed.discard((local_id, test_patch))
+                            completed.discard((id, model, context, prompt, test))
+                        elif cached_data.get('stderr', b'').decode(errors="ignore").startswith("Timeout") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: container ID file found"):
+                            time_out_count += 1
+                            completed.discard((local_id, model_name, context_type, prompt_type, test_type))
                         else:
                             cached_count += 1
                     except:
                         pass
 
-            print(f"Found {cached_count} valid cached results and {rate_limited_count} rate-limited cases out of {len(targets)} total targets.")
+            print(f"Found {cached_count} valid cached results, {rate_limited_count} rate-limited cases, and {time_out_count} time out cases out of {len(targets)} total targets.")
             if args.rerun:
                 print("Rerunning all targets, including those with cached results.")
 
             procs = []
-            pool_size = min(96, len(targets))
+            pool_size = min(96 // 4, len(targets))
             try:
                 with alive_bar(len(targets)) as bar, Pool(pool_size) as p:
                     remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
                     targets_with_output = [(target, args.output, args.rerun) for target in remaining_targets]
                     for proc in p.imap_unordered(proc_runner, targets_with_output):
                         procs.append(proc)
-                        completed.add((proc[0], proc[1], proc[2], proc[3], proc[4]))
                         bar()
 
             except KeyboardInterrupt:
@@ -518,18 +560,7 @@ def main():
             with alive_bar(len(targets)) as bar:
                 for target in targets:
                     local_id, model_name, context_type, prompt_type, test_type, _ = target
-                    cache_file = Path(args.output) / str(local_id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}" / "cache.pkl"
-                    
-                    if cache_file.exists() and not args.rerun:
-                        try:
-                            with cache_file.open("rb") as f:
-                                cached_data = pickle.load(f)
-                            output = ( local_id, model_name, context_type, prompt_type, test_type, cached_data)
-                        except:
-                            output = next((p for p in procs if p[:5] == (local_id, model_name, context_type, prompt_type, test_type)), None)
-                    else:
-                        # Find the corresponding output in procs
-                        output = next((p for p in procs if p[:5] == (local_id, model_name, context_type, prompt_type, test_type)), None)
+                    output = next((p for p in procs if p[:5] == (local_id, model_name, context_type, prompt_type, test_type)), None)
                     
                     if output:
                         parse_output(output, data[str(local_id)]["project_name"], report=report)
@@ -537,9 +568,7 @@ def main():
 
                     bar()
             
-                    json.dump(report, new_report_file.open("w"), indent=4)
-
-            print_report(report)
+            json.dump(report, new_report_file.open("w"), indent=4)
 
 
 if __name__ == "__main__":

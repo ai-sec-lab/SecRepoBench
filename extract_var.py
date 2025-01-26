@@ -2,34 +2,33 @@ import sys
 import os
 import re
 import csv
+import tree_sitter_c as tsc
+import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser
 import random
 import json
 from utils import *
 
-def extract_func(id, id2var):
+def extract_func(id, case, id2var):
     print(f"Processing {id}")
-    diff_file = f'/home/yanjun/ethan/arvo-oss-fuzz-bench/ARVO-Meta/patches/{id}.diff'
-    source_file = f'descriptions/{id}/mask.txt'
-
-    # Parse the diff file to get the file name and modified lines
-    file_name, _ = parse_diff_file(diff_file)
-    if file_name is None:
-        print("Could not find file name in diff file")
-        sys.exit(1)
 
     # Determine the language based on file extension
-    ext = get_file_extension(file_name)
+    changed_file = case['changed_file']
+    ext = get_file_extension(changed_file)
     language = determine_language(ext)
     LANGUAGE = C_LANGUAGE if language == 'c' else CPP_LANGUAGE
 
     # Read the modified source code
+    if language == 'c':
+        source_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.c'
+    else:
+        source_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.cpp'
+
     with open(source_file, 'r') as f:
         source_code = f.read()
 
     # Parse the source code with Tree-sitter
-    parser = Parser()
-    parser.set_language(LANGUAGE)
+    parser = Parser(LANGUAGE)
     tree = parser.parse(bytes(source_code, 'utf8'))
 
     x = None
@@ -41,7 +40,7 @@ def extract_func(id, id2var):
         print("No masked code found in the source file.")
         sys.exit(1)
 
-    function_node = find_function_containing_line(tree, x)
+    function_node = find_function_containing_line(tree, x)  # need to get function node in same way as mask.py
 
     if function_node is None:
         print("No modified lines found within any function.")
@@ -66,14 +65,17 @@ def extract_func(id, id2var):
 
 if __name__ == "__main__":
     random.seed(42)
-    with open('ids/final_ids.txt', 'r') as f:
-        ids = f.readlines()
-        ids = sorted([int(id.strip()) for id in ids])
+    with open('ids_top40.txt', 'r') as f:
+        ids = f.read().splitlines()[1:]
+
+    with open('filter_logs/cases.json', 'r') as f:
+        cases = json.load(f)
 
     id2var = {}
-    
+
     for id in ids:
-        extract_func(id, id2var)
+        case = cases[id]
+        extract_func(id, case, id2var)
 
     with open('id2var.json', 'w') as f:
         json.dump(id2var, f, indent=4)

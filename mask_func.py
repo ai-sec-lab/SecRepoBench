@@ -241,8 +241,8 @@ def mask_func(id, diff_non_trivial, changed_file, base_path):
     mod_lines = [d[0] for d in diff_non_trivial['added']] + [d[0] for d in diff_non_trivial['deleted']]
     file_lizard_src = lizard.analyze_file.analyze_source_code(changed_file, source_code)
     mod_funcs = []
-    for func in file_lizard_src.function_list:
-        for line_num in mod_lines:
+    for line_num in mod_lines:
+        for func in file_lizard_src.function_list:
             if func.start_line <= line_num <= func.end_line:
                 mod_funcs.append(func)
     mod_func = mod_funcs[0]

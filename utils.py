@@ -130,7 +130,7 @@ def find_function_containing_line(tree, line_number):
         find_previous_function(root_node)
         return previous_function
 
-def find_code_block(node, x, y, total_lines, consider_sibling=False):
+def find_code_block(node, x, y, total_lines, modified_section, consider_sibling=False):
     y = min(y, total_lines)
 
     # Start from the function body (compound_statement)
@@ -171,17 +171,17 @@ def find_code_block(node, x, y, total_lines, consider_sibling=False):
     ]
 
     # Recursive function to find the smallest node covering the range
-    def recursive_find(node):
+    def recursive_find(node, modified_section):
         node_start_line = node.start_point[0] + 1
         node_end_line = node.end_point[0] + 1
 
         # Check if the node covers the range
-        if node_start_line <= x and node_end_line >= y:
+        if node_start_line <= x and node_end_line >= y and modified_section in node.text.decode('utf-8'):
             # Try to find a smaller child node
             # if node.type in single_line_statement_types:
             #     return node
             for child in node.children:
-                result = recursive_find(child)
+                result = recursive_find(child, modified_section)
                 if result:
                     return result
             # If no smaller child covers the range, return this node
@@ -190,7 +190,7 @@ def find_code_block(node, x, y, total_lines, consider_sibling=False):
             return None  # This node doesn't cover the range
 
     # Find the smallest node covering the range within the function body
-    minimal_node = recursive_find(function_body_node)
+    minimal_node = recursive_find(function_body_node, modified_section)
 
     if minimal_node is None:
         # If no node covers the range, default to function body
@@ -206,40 +206,25 @@ def find_code_block(node, x, y, total_lines, consider_sibling=False):
             else:
                 statements = minimal_node.children
 
-            min_length = float('inf')
             selected_nodes = None
 
+            # get first node whose start is before x
+            start_node_i = 0
             for i in range(len(statements)):
                 current_start_line = statements[i].start_point[0] + 1
-                current_end_line = statements[i].end_point[0] + 1
+                if current_start_line > x:
+                    start_node_i = i - 1
+                    break
 
-                if current_end_line < x:
-                    continue
+            # get last node whose end is after y
+            end_node_i = len(statements) - 1
+            for j in range(len(statements)-1, i-1, -1):
+                current_end_line = statements[j].end_point[0] + 1
+                if current_end_line < y:
+                    end_node_i = j + 1
+                    break
 
-                temp_nodes = []
-                temp_start_line = current_start_line
-                temp_end_line = current_end_line
-
-                for j in range(i, len(statements)):
-                    stmt = statements[j]
-                    stmt_start_line = stmt.start_point[0] + 1
-                    stmt_end_line = stmt.end_point[0] + 1
-
-                    temp_nodes.append(stmt)
-                    temp_end_line = stmt_end_line
-
-                    if temp_start_line <= x and temp_end_line >= y:
-                        length = temp_end_line - temp_start_line
-                        if length < min_length:
-                            min_length = length
-                            selected_nodes = list(temp_nodes)
-                        break  # Can't get a smaller combination starting at i
-
-                    if temp_end_line > y:
-                        break  # No need to include more statements
-
-                if selected_nodes:
-                    break  # Found the minimal combination
+            selected_nodes = statements[start_node_i:end_node_i+1]
 
             if selected_nodes:
                 return selected_nodes
@@ -303,12 +288,11 @@ def find_mask_comment(node):
             return result
     return None
 
-def find_variables(node):
-    mask_comment = find_mask_comment(node)
+def find_variables(node, mask_start_line):
     variables = []
 
     def recursive_find(current_node):
-        if current_node.start_byte >= mask_comment.start_byte:
+        if current_node.start_point[0] + 1 >= mask_start_line:
             return
 
         if current_node.type == 'declaration':
