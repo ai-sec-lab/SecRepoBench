@@ -326,8 +326,8 @@ def find_variables(node, mask_start_line):
     recursive_find(node)
     return variables
 
-def replace_var_name(root_node, func_node, old_var, new_var):
-    code_bytes = root_node.text
+def replace_var_name(func_node, old_var, new_var, source_code):
+    source_code_lines = re.split(r'\n', source_code)
     variable_nodes = []
 
     def traverse(node):
@@ -341,21 +341,15 @@ def replace_var_name(root_node, func_node, old_var, new_var):
     replacements = []
     for node in variable_nodes:
         if node.text.decode('utf8') == old_var:
-            start = node.start_byte
-            end = node.end_byte
-            assert code_bytes[start:end].decode('utf8') == old_var
-            replacements.append((start, end))
+            assert source_code_lines[node.start_point.row][node.start_point.column:node.end_point.column] == old_var
+            replacements.append((node.start_point.row, node.start_point.column, node.end_point.column))
 
-    offset = 0
-    for start, end in replacements:
-        adj_start = start + offset
-        adj_end = end + offset
-        assert code_bytes[adj_start:adj_end].decode('utf8') == old_var
-        code_bytes = code_bytes[:adj_start] + bytes(new_var, 'utf8') + code_bytes[adj_end:]
-        offset += len(bytes(new_var, 'utf8')) - (end - start)
+    for row, start_col, end_col in reversed(replacements):
+        assert source_code_lines[row][start_col:end_col] == old_var
+        source_code_lines[row] = source_code_lines[row][:start_col] + new_var + source_code_lines[row][end_col:]
 
-    code = code_bytes.decode('utf8')
-    return code
+    source_code = '\n'.join(source_code_lines)
+    return source_code
 
 def tokenize_nltk(text):
     words = word_tokenize(text)

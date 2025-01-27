@@ -15,28 +15,28 @@ from pathlib import Path
 def insert_print(id):
     # makes sec file but with printf statement immediately above code block
     # get mask file base
-    mask_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.c'
-    mask_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.cpp'
+    mask_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.c'
+    mask_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.cpp'
     if Path(mask_file_c).exists():
         mask_file = mask_file_c
     elif Path(mask_file_cpp).exists():
         mask_file = mask_file_cpp
     else:
-        print(f'ID {id}: mask file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
+        print(f'ID {id}: mask_perturbed file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
         return
     
     with open(mask_file, 'r') as f:
         sec_mask_content = f.read()
 
     # get sec code block
-    sec_code_block_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.c'
-    sec_code_block_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block.cpp'
+    sec_code_block_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block_perturbed.c'
+    sec_code_block_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block_perturbed.cpp'
     if Path(sec_code_block_file_c).exists():
         sec_code_block_file = sec_code_block_file_c
     elif Path(sec_code_block_file_cpp).exists():
         sec_code_block_file = sec_code_block_file_cpp
     else:
-        print(f'ID {id}: vul_code_block file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
+        print(f'ID {id}: sec_code_block_perturbed file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
         return
     
     with open(sec_code_block_file, 'r') as f:

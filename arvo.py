@@ -14,6 +14,7 @@ import time
 import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
+import os
 
 from projects import *
 from insert_print import insert_print
@@ -102,7 +103,7 @@ def load_txt(path):
     return data
 
 
-def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fixing_commit, root="."):
+def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
 
     directory = Path(root) / str(local_id)
     testcase_sec_dir = directory / "testcase_sec.sh"
@@ -110,7 +111,6 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
     unittest_sec_dir = directory / "unittest_sec.sh"
     unittest_sec_print_dir = directory / "unittest_sec_print.sh"
     vul_dir = directory / "patches" / "vul.txt"
-    vul_sec_base_dir = directory / "patches" / "vul_sec_base.txt"
     sec_dir = directory / "patches" / "sec.txt"
     sec_print_dir = directory / "patches" / "sec_print.txt"
     diff_dir = directory / "diff.txt"
@@ -141,6 +141,7 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
         f"--name {local_id}_testcase_sec "
         "--cpus=1 "
         "-e MAKEFLAGS=\"-j4\" "
+        f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
@@ -155,6 +156,8 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
         "  if [ \\\"\\$CHANGES_STASHED\\\" = true ]; then\n"
         "    git -C \\$GIT_DIR stash apply\n"
         "  fi\n"
+        # move patch file
+        f"  cp -f /patches/sec.txt \\$GIT_DIR/{patch_path}\n"
         "  arvo compile\n"
         "  arvo run\n"
         "  exit \\$?\""
@@ -182,7 +185,7 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
         "    git -C \\$GIT_DIR stash apply\n"
         "  fi\n"
         # move patch file
-        f"  cp -f /patches/vul_sec_base.txt \\$GIT_DIR/{patch_path}\n"
+        f"  cp -f /patches/vul.txt \\$GIT_DIR/{patch_path}\n"
         "  arvo compile\n"
         "  arvo run\n"
         "  exit \\$?\""
@@ -194,6 +197,7 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
         f"--name {local_id}_unittest_sec_print "
         "--cpus=1 "
         "-e MAKEFLAGS=\"-j4\" "
+        f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
@@ -208,6 +212,8 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
         "  if [ \\\"\\$CHANGES_STASHED\\\" = true ]; then\n"
         "    git -C \\$GIT_DIR stash apply\n"
         "  fi\n"
+        # move patch file
+        f"  cp -f /patches/sec.txt \\$GIT_DIR/{patch_path}\n"
     )
 
     scripts_content_sec_print_unittest = (
@@ -238,11 +244,23 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
     scripts_content_sec_unittest = scripts_content_sec_unittest + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
     scripts_content_sec_print_unittest = scripts_content_sec_print_unittest + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
 
+    # get sec, vul content from descriptions
+    if os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.c'):
+        sec_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.c'
+    elif os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.cpp'):
+        sec_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.cpp'
+    with open(sec_perturbed_file, 'r') as f:
+        sec_content = f.read()
+
+    if os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.c'):
+        vul_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.c'
+    elif os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.cpp'):
+        vul_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.cpp'
+    with open(vul_perturbed_file, 'r') as f:
+        vul_content = f.read()
+
     # insert print now, since we're already writing the script for sec_print
     sec_print_content = insert_print(local_id)
-
-    # make vul_sec_base file
-    vul_sec_base_content = make_vul_sec_base_file(local_id)
 
     directory.mkdir(exist_ok=True, parents=True)
     (directory / "patches").mkdir(exist_ok=True)
@@ -251,7 +269,6 @@ def setup(local_id, project_name, patch_path, diff, vul_content, sec_content, fi
     unittest_sec_dir.open("w").write(scripts_content_sec_unittest)
     unittest_sec_print_dir.open("w").write(scripts_content_sec_print_unittest)
     vul_dir.open("w").write(vul_content)
-    vul_sec_base_dir.open("w").write(vul_sec_base_content)
     sec_dir.open("w").write(sec_content)
     sec_print_dir.open("w").write(sec_print_content)
     with open(diff_dir, 'w') as f:
@@ -539,7 +556,7 @@ def main():
 
             with ProcessPoolExecutor(max_workers=num_workers) as executor:
                 future_to_stem = {
-                    executor.submit(setup, local_id, data[local_id]["project_name"], data[local_id]["changed_file"], data[local_id]["diff"], data[local_id]["source_code_before"], data[local_id]["source_code"], data[local_id]["fixing_commit"], root=root): local_id
+                    executor.submit(setup, local_id, data[local_id]["project_name"], data[local_id]["changed_file"], data[local_id]["diff"], data[local_id]["fixing_commit"], root=root): local_id
                     for local_id in targets
                 }
 
