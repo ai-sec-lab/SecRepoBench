@@ -1,0 +1,18 @@
+if (p->len + 2 > SC_MAX_PATH_SIZE) {
+		sc_file_free(file);
+		return SC_ERROR_INVALID_DATA;
+	}
+	p->value[p->len++] = (u8) (file->id / 256);
+	p->value[p->len++] = (u8) (file->id % 256);
+
+	/* Increment FID until there's no file with such path */
+	r = sc_select_file(sccard, p, NULL);
+	while(r == 0) {
+		file->id++;
+		p->value[p->len - 2] = (u8) (file->id / 256);
+		p->value[p->len - 1] = (u8) (file->id % 256);
+		r = sc_select_file(sccard, p, NULL);
+	}
+
+	*out = file;
+	return 0;

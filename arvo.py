@@ -23,35 +23,35 @@ from insert_print import insert_print
 def make_vul_sec_base_file(id):
     # makes sec file but with masked block replaced with the vul code block
     # get sec file base
-    mask_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.c'
-    mask_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask.cpp'
-    if Path(mask_file_c).exists():
-        mask_file = mask_file_c
-    elif Path(mask_file_cpp).exists():
-        mask_file = mask_file_cpp
+    mask_perturbed_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.c'
+    mask_perturbed_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.cpp'
+    if Path(mask_perturbed_file_c).exists():
+        mask_perturbed_file = mask_perturbed_file_c
+    elif Path(mask_perturbed_file_cpp).exists():
+        mask_perturbed_file = mask_perturbed_file_cpp
     else:
-        print(f'ID {id}: mask file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
+        print(f'ID {id}: mask_perturbed file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
         return
     
-    with open(mask_file, 'r') as f:
-        sec_mask_content = f.read()
+    with open(mask_perturbed_file, 'r') as f:
+        sec_mask_perturbed_content = f.read()
 
     # get vul code block
-    vul_code_block_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.c'
-    vul_code_block_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block.cpp'
-    if Path(vul_code_block_file_c).exists():
-        vul_code_block_file = vul_code_block_file_c
-    elif Path(vul_code_block_file_cpp).exists():
-        vul_code_block_file = vul_code_block_file_cpp
+    vul_code_block_perturbed_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_perturbed.c'
+    vul_code_block_perturbed_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_perturbed.cpp'
+    if Path(vul_code_block_perturbed_file_c).exists():
+        vul_code_block_perturbed_file = vul_code_block_perturbed_file_c
+    elif Path(vul_code_block_perturbed_file_cpp).exists():
+        vul_code_block_perturbed_file = vul_code_block_perturbed_file_cpp
     else:
-        print(f'ID {id}: vul_code_block file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
+        print(f'ID {id}: vul_code_block_perturbed file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
         return
     
-    with open(vul_code_block_file, 'r') as f:
-        vul_code_block = f.read()
+    with open(vul_code_block_perturbed_file, 'r') as f:
+        vul_code_block_perturbed = f.read()
 
     # create mod file (sec file base with the LM patch)
-    mod_file_content = sec_mask_content.replace("// <MASK>", vul_code_block)
+    mod_file_content = sec_mask_perturbed_content.replace("// <MASK>", vul_code_block_perturbed)
     
     return mod_file_content
 
@@ -111,6 +111,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
     unittest_sec_dir = directory / "unittest_sec.sh"
     unittest_sec_print_dir = directory / "unittest_sec_print.sh"
     vul_dir = directory / "patches" / "vul.txt"
+    vul_sec_base_dir = directory / "patches" / "vul_sec_base.txt"
     sec_dir = directory / "patches" / "sec.txt"
     sec_print_dir = directory / "patches" / "sec_print.txt"
     diff_dir = directory / "diff.txt"
@@ -185,7 +186,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "    git -C \\$GIT_DIR stash apply\n"
         "  fi\n"
         # move patch file
-        f"  cp -f /patches/vul.txt \\$GIT_DIR/{patch_path}\n"
+        f"  cp -f /patches/vul_sec_base.txt \\$GIT_DIR/{patch_path}\n"
         "  arvo compile\n"
         "  arvo run\n"
         "  exit \\$?\""
@@ -194,7 +195,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
     scripts_content_sec_unittest = (
         f"#!/bin/bash\n"
         "docker run --rm --init "
-        f"--name {local_id}_unittest_sec_print "
+        f"--name {local_id}_unittest_sec "
         "--cpus=1 "
         "-e MAKEFLAGS=\"-j4\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
@@ -259,6 +260,9 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
     with open(vul_perturbed_file, 'r') as f:
         vul_content = f.read()
 
+    # make sec but with vul code block block as replacement
+    vul_sec_base_content = make_vul_sec_base_file(local_id)
+
     # insert print now, since we're already writing the script for sec_print
     sec_print_content = insert_print(local_id)
 
@@ -269,6 +273,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
     unittest_sec_dir.open("w").write(scripts_content_sec_unittest)
     unittest_sec_print_dir.open("w").write(scripts_content_sec_print_unittest)
     vul_dir.open("w").write(vul_content)
+    vul_sec_base_dir.open("w").write(vul_sec_base_content)
     sec_dir.open("w").write(sec_content)
     sec_print_dir.open("w").write(sec_print_content)
     with open(diff_dir, 'w') as f:
@@ -502,6 +507,14 @@ def proc_runner(target_with_output_path_and_rerun):
             time.sleep(delay)
     else:
         print(f"Failed to run {local_id} {patch} {test_type} after {max_retries} attempts")
+
+    try:
+        cleanup_proc = subprocess.run(['docker', 'rm', '-f', container_id], 
+                                        stdout=subprocess.PIPE, 
+                                        stderr=subprocess.PIPE)
+
+    except subprocess.SubprocessError as e:
+        pass
 
     print(f"Finished {local_id} {patch} {test_type}")
     return local_id, patch, test_type, {

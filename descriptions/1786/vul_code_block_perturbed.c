@@ -1,0 +1,2 @@
+if( !bOK )
+            return FALSE;

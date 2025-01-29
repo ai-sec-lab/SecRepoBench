@@ -1,0 +1,22 @@
+NetworkDataTlv *cur;
+    NetworkDataTlv *end;
+
+    cur = aService.GetSubTlvs();
+    end = aService.GetNext();
+
+    while (cur < end)
+    {
+        VerifyOrExit((cur + 1) <= end && cur->GetNext() <= end, error = OT_ERROR_PARSE);
+
+        switch (cur->GetType())
+        {
+        case NetworkDataTlv::kTypeServer:
+            SuccessOrExit(error = AddServer(aService, *static_cast<ServerTlv *>(cur), aOldTlvs, aOldTlvsLength));
+            break;
+
+        default:
+            break;
+        }
+
+        cur = cur->GetNext();
+    }

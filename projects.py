@@ -35,13 +35,42 @@ unittest_commands = {
     #"mupdf":"",
     #"leptonica":"arvo compile && make check",
     "hunspell":"arvo compile && make check",
-    "opensc":"sudo apt-get install -y autoconf libtool pkg-config libglib2.0-dev libeac-dev cmocka && \
-        ./bootstrap && \
-        ./configure --enable-cmocka && \
-        make && \
-        make check && \
-        cd src/tests/unittests && \
-        make check",
+    "opensc":"apt update && apt install -y softhsm2 libglib2.0-dev\n\
+  git clone https://github.com/clibs/cmocka.git /root/cmocka && \\\n\
+    cd /root/cmocka && \\\n\
+    cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Debug -DUNIT_TESTING=ON && \\\n\
+    cd build && make && make install\n\
+  cd /src/opensc && \\\n\
+    ./bootstrap && \\\n\
+    sed -i '/#include <setjmp.h>/a #include <stdint.h>' configure.ac && \\\n\
+    autoreconf -i && \\\n\
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure --disable-optimization --disable-pcsc --enable-ctapi --enable-cmocka --enable-tests CFLAGS=\\\"-I/usr/local/include\\\" LDFLAGS=\\\"-L/usr/local/lib\\\" && \\\n\
+    grep -rl '#include <cmocka.h>' /src/opensc | while read -r file; do\n\
+      if ! grep -q '#include <stdarg.h>' \\\"\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <stdarg.h>' \\\"\$file\\\"\n\
+      fi\n\
+      if ! grep -q '#include <stddef.h>' \\\"\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <stddef.h>' \\\"\$file\\\"\n\
+      fi\n\
+      if ! grep -q '#include <stdint.h>' \\\"\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <stdint.h>' \\\"\$file\\\"\n\
+      fi\n\
+      if ! grep -q '#include <setjmp.h>' \\\"\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <setjmp.h>' \\\"\$file\\\"\n\
+      fi\n\
+    done\n\
+  make -j && make install\n\
+  export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH && \\\n\
+  cd /src/opensc/src/tests && \\\n\
+    make check\n\
+  if [ -d /src/opensc/src/tests/unittests ]; then\n\
+    find /src/opensc/src/tests/unittests -type f -executable | while read -r test_exec; do\n\
+      echo \\\"Running \$test_exec...\\\"\n\
+      \$test_exec\n\
+    done\n\
+  else\n\
+      echo \\\"No unit tests found in this commit.\\\"\n\
+  fi",
     "libxml2":"arvo compile && make ASAN_OPTIONS=\'$ASAN_OPTIONS detect_leaks=0\' check",
     "gpac":"arvo compile && \
         apt-get update && \

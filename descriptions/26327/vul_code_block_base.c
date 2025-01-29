@@ -1,0 +1,1 @@
+p = flb_strptime(time_ptr, parser->time_fmt, tm);

@@ -24,4 +24,4 @@ fi
 echo "Processing IDs: ${ID_LIST[@]}" >> "$LOG_FILE"
 
 # Run the eval command with all IDs in one go
-python arvo.py eval "${ID_LIST[@]}" --path /data/fyj-oss-fuzz-bench/ --output /data/fyj-oss-fuzz-bench/output/ >> "$LOG_FILE" 2>&1
+python arvo.py eval "${ID_LIST[@]}" --path /home/cdilgren/project_benchmark/oss-fuzz-bench --output /home/cdilgren/project_benchmark/oss-fuzz-bench/output --rerun --filter-patches sec sec_print --tests unittest >> "$LOG_FILE" 2>&1

@@ -1,0 +1,4 @@
+return_trace (c->check_struct (this) &&
+		  likely (format == 0 || format == 1) &&
+		  c->check_array (nameRecordZ.arrayZ, count) &&
+		  c->check_range (this, stringOffset));

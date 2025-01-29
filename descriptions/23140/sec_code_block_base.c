@@ -1,0 +1,7 @@
+for (uint32_t i = 0; i < argc; i++) {
+		ZVAL_UNDEF(&attr->argv[i]);
+	}
+
+	zend_hash_next_index_insert_ptr(*attributes, attr);
+
+	return attr;

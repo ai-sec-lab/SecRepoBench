@@ -1,0 +1,2 @@
+cur = cur->children;
+	    continue;

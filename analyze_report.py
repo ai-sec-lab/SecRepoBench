@@ -32,7 +32,7 @@ def unittest_sec(report):
 def unittest_sec_print(report):
     ids_pass_unittest_sec_print = []
     for id in report.keys():
-        stdout_path = Path(f'/data/cmd-oss-fuzz-bench/output/{id}/unittest_sec_print/stdout.txt')
+        stdout_path = Path(f'/home/cdilgren/project_benchmark/oss-fuzz-bench/output/{id}/unittest_sec_print/stdout.txt')
         if stdout_path.exists():
             with open(stdout_path, "r", encoding="utf-8", errors="ignore") as f:
                 out_text = f.read()
@@ -132,40 +132,6 @@ def save_to_df(ids_each_step_by_proj, existing_df_path, save_path):
     df_singles.to_csv(df_singles_path)
 
 
-def get_covered_ids():
-    with open('/data/fyj-oss-fuzz-bench/output/report.json', 'r') as f:
-        report = json.load(f)          
-    print(len(report))
-
-    covered_ids = []
-    suspect_ids = []
-    for id in report:
-        print(id)
-        case = report[id]
-        set_vul_pass = set([res.strip() for res in case["vul"]["unittest"]["pass"]])
-        set_mask_pass = set([res.strip() for res in case["mask"]["unittest"]["pass"]])
-        set_sec_pass = set([res.strip() for res in case["sec"]["unittest"]["pass"]])
-        if set_vul_pass != set_mask_pass and \
-            not (set_vul_pass <= set_mask_pass) and \
-            len(set_sec_pass) > 0 and len(set_vul_pass) > 0:
-            if set_vul_pass <= set_sec_pass:
-                    covered_ids.append(id)
-            else:
-                suspect_ids.append(id)
-
-
-    print(f'covered_ids: {len(covered_ids)}')
-    with open('ids/covered_ids.txt', 'w') as f:
-        for id in covered_ids:
-            f.write(f'{id}\n')
-    # write to csv, the first row is the header 'ID'
-    with open('ids/covered_ids.csv', 'w') as f:
-        writer = csv.writer(f)
-        writer.writerow(['ID'])
-        for id in covered_ids:
-            writer.writerow([id])
-
-
 def analyze_report(report_path, save_path, cases_path, existing_df_path):
     with open(report_path, 'r') as f:
         report = json.load(f)
@@ -217,7 +183,7 @@ def analyze_report(report_path, save_path, cases_path, existing_df_path):
 
 if __name__ == '__main__':
 
-    analyze_report(report_path="/data/cmd-oss-fuzz-bench/output/report.json",
-                   save_path="filter_logs_all/analyze_report",
-                   cases_path="/space1/cdilgren/project_benchmark/filter_logs_all/cases.json",
-                   existing_df_path="/space1/cdilgren/project_benchmark/filter_logs_all/proj_samples_valid_top_40.csv")
+    analyze_report(report_path="/home/cdilgren/project_benchmark/oss-fuzz-bench/output/report.json",
+                   save_path="analyze_report",
+                   cases_path="/home/cdilgren/project_benchmark/filter_logs/cases.json",
+                   existing_df_path="/home/cdilgren/project_benchmark/filter_logs/proj_samples.csv")

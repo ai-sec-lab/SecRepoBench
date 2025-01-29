@@ -1,0 +1,109 @@
+
+		for(i=0, id=0; i<tot_signature_algorithms_len && sessoffset+i<total_len; i++) {
+		  int rc = ndpi_snprintf(&ja.client.signature_algorithms_str[i*2],
+					 sizeof(ja.client.signature_algorithms_str)-i*2,
+					 "%02X", packet->payload[sessoffset+i]);
+		  ja.client.signature_algorithms[id++] = ntohs(*(u_int16_t*)&packet->payload[sessoffset+i*2]);
+
+		  if(rc < 0) break;
+		}
+
+		for(i=0; i<tot_signature_algorithms_len && sessoffset + (int)i + 2 < packet->payload_packet_len; i+=2) {
+		  u_int16_t signature_algo = (u_int16_t)ntohs(*((u_int16_t*)&packet->payload[sessoffset+i]));
+
+		  if(last_signature == signature_algo) {
+		    /* Consecutive duplication */
+		    duplicate_found = 1;
+		    continue;
+		  } else {
+		    /* Check for other duplications */
+		    u_int all_ok = 1;
+
+		    for(j=0; j<tot_signature_algorithms_len; j+=2) {
+		      if(j != i && sessoffset + (int)j + 2 < packet->payload_packet_len) {
+			u_int16_t j_signature_algo = (u_int16_t)ntohs(*((u_int16_t*)&packet->payload[sessoffset+j]));
+
+			if((signature_algo == j_signature_algo)
+			   && (i < j) /* Don't skip both of them */) {
+#ifdef DEBUG_HEURISTIC
+			  printf("[SIGNATURE] [TLS Signature Algorithm] Skipping duplicate 0x%04X\n", signature_algo);
+#endif
+
+			  duplicate_found = 1, all_ok = 0;
+			  break;
+			}
+		      }
+		    }
+
+		    if(!all_ok)
+		      continue;
+		  }
+
+		  last_signature = signature_algo;
+
+#ifdef DEBUG_HEURISTIC
+		  printf("[SIGNATURE] [TLS Signature Algorithm] 0x%04X\n", signature_algo);
+#endif
+		  switch(signature_algo) {
+		  case ECDSA_SECP521R1_SHA512:
+		    flow->protos.tls_quic.browser_heuristics.is_firefox_tls = 1;
+		    break;
+
+		  case ECDSA_SECP256R1_SHA256:
+		  case ECDSA_SECP384R1_SHA384:
+		  case RSA_PKCS1_SHA256:
+		  case RSA_PKCS1_SHA384:
+		  case RSA_PKCS1_SHA512:
+		  case RSA_PSS_RSAE_SHA256:
+		  case RSA_PSS_RSAE_SHA384:
+		  case RSA_PSS_RSAE_SHA512:
+		    chrome_signature_algorithms++, safari_signature_algorithms++;
+#ifdef DEBUG_HEURISTIC
+		    printf("[SIGNATURE] [Chrome/Safari] Found 0x%04X [chrome: %u][safari: %u]\n",
+			   signature_algo, chrome_signature_algorithms, safari_signature_algorithms);
+#endif
+
+		    break;
+		  }
+		}
+
+#ifdef DEBUG_HEURISTIC
+		printf("[SIGNATURE] [safari_signature_algorithms: %u][chrome_signature_algorithms: %u]\n",
+		       safari_signature_algorithms, chrome_signature_algorithms);
+#endif
+
+		if(flow->protos.tls_quic.browser_heuristics.is_firefox_tls)
+		  flow->protos.tls_quic.browser_heuristics.is_safari_tls = 0,
+		    flow->protos.tls_quic.browser_heuristics.is_chrome_tls = 0;
+
+		if(safari_signature_algorithms != 8)
+		  flow->protos.tls_quic.browser_heuristics.is_safari_tls = 0;
+
+		if((chrome_signature_algorithms != 8) || duplicate_found)
+		  flow->protos.tls_quic.browser_heuristics.is_chrome_tls = 0;
+
+		/* Avoid Chrome and Safari overlaps, thing that cannot happen with Firefox */
+		if(flow->protos.tls_quic.browser_heuristics.is_safari_tls)
+		  flow->protos.tls_quic.browser_heuristics.is_chrome_tls = 0;
+
+		if((flow->protos.tls_quic.browser_heuristics.is_chrome_tls == 0)
+		   && duplicate_found)
+		  flow->protos.tls_quic.browser_heuristics.is_safari_tls = 1; /* Safari */
+
+#ifdef DEBUG_HEURISTIC
+		printf("[SIGNATURE] [is_firefox_tls: %u][is_chrome_tls: %u][is_safari_tls: %u][duplicate_found: %u]\n",
+		       flow->protos.tls_quic.browser_heuristics.is_firefox_tls,
+		       flow->protos.tls_quic.browser_heuristics.is_chrome_tls,
+		       flow->protos.tls_quic.browser_heuristics.is_safari_tls,
+		       duplicate_found);
+#endif
+
+		if(i > 0 && i >= tot_signature_algorithms_len) {
+		  ja.client.signature_algorithms_str[i*2 - 1] = '\0';
+		} else {
+		  ja.client.signature_algorithms_str[i*2] = '\0';
+		}
+
+#ifdef DEBUG_TLS
+		printf("Client TLS [SIGNATURE_ALGORITHMS: %s]\n", ja.client.signature_algorithms_str);
+#endif

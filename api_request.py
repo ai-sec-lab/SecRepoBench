@@ -15,7 +15,7 @@ def main(args):
         evaler = ChatEvaler(args.model_name, args.context_type, args.prompt_type)
 
     with open('final_ids.txt', 'r') as f:
-        ids = f.read().splitlines()
+        ids = f.read().splitlines()[1:]
 
     ids = sorted([int(id) for id in ids])
     num = 0

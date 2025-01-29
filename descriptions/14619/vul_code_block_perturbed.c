@@ -1,0 +1,54 @@
+{
+        size_t objectCount = (size_t)(parserContext->tokenArray[parserContext->index].size);
+        
+        parserContext->index++; /*Object to first Key*/
+        CHECK_TOKEN_BOUNDS;
+        
+        size_t i;
+        for(i = 0; i < objectCount; i++) {
+            
+            CHECK_TOKEN_BOUNDS;
+            if(depth == 0) { /* we search only on first layer */
+                if(jsoneq((char*)ctx->pos, &parserContext->tokenArray[parserContext->index], searchKey) == 0) {
+                    /*found*/
+                    parserContext->index++; /*We give back a pointer to the value of the searched key!*/
+                    *resultIndex = parserContext->index;
+                    ret = UA_STATUSCODE_GOOD;
+                    break;
+                }
+            }
+               
+            parserContext->index++; /* value */
+            CHECK_TOKEN_BOUNDS;
+            
+            if(parserContext->tokenArray[parserContext->index].type == JSMN_OBJECT) {
+               ret = searchObjectForKeyRec(searchKey, ctx, parserContext, resultIndex,
+                                           (UA_UInt16)(depth + 1));
+            } else if(parserContext->tokenArray[parserContext->index].type == JSMN_ARRAY) {
+               ret = searchObjectForKeyRec(searchKey, ctx, parserContext, resultIndex,
+                                           (UA_UInt16)(depth + 1));
+            } else {
+                /* Only Primitive or string */
+                parserContext->index++;
+            }
+        }
+    } else if(parserContext->tokenArray[parserContext->index].type == JSMN_ARRAY) {
+        size_t arraySize = (size_t)(parserContext->tokenArray[parserContext->index].size);
+        
+        parserContext->index++; /*Object to first element*/
+        CHECK_TOKEN_BOUNDS;
+        
+        size_t i;
+        for(i = 0; i < arraySize; i++) {
+            if(parserContext->tokenArray[parserContext->index].type == JSMN_OBJECT) {
+               ret = searchObjectForKeyRec(searchKey, ctx, parserContext, resultIndex,
+                                           (UA_UInt16)(depth + 1));
+            } else if(parserContext->tokenArray[parserContext->index].type == JSMN_ARRAY) {
+               ret = searchObjectForKeyRec(searchKey, ctx, parserContext, resultIndex,
+                                           (UA_UInt16)(depth + 1));
+            } else {
+                /* Only Primitive or string */
+                parserContext->index++;
+            }
+        }
+    }

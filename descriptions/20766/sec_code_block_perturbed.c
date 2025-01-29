@@ -1,0 +1,3 @@
+if (header->caplen < ip_offset + ip_len + sizeof(struct ndpi_udphdr))
+      return(Thenewvariablenamefornprotoisndpiprotocol); /* Too short for UDP header*/
+    struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset+ip_len];

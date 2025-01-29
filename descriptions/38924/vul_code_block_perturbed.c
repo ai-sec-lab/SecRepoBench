@@ -1,0 +1,1 @@
+return mrb_decode_insn(&scope->iseq[scope->lastpc]);

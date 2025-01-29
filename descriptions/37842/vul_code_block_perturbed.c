@@ -1,0 +1,59 @@
+
+#ifdef SHOW_HEADER
+	printf( "vips__read_header_bytes: file bytes:\n" ); 
+	for( index = 0; index < im->sizeof_header; index++ )
+		printf( "%2d - 0x%02x\n", index, from[index] );
+#endif /*SHOW_HEADER*/
+
+	/* The magic number is always written MSB first, we may need to swap.
+	 */
+	vips__copy_4byte( !vips_amiMSBfirst(), 
+		(unsigned char *) &im->magic, from );
+	from += 4;
+	if( im->magic != VIPS_MAGIC_INTEL && 
+		im->magic != VIPS_MAGIC_SPARC ) {
+		vips_error( "VipsImage", 
+			_( "\"%s\" is not a VIPS image" ), im->filename );
+		return( -1 );
+	}
+
+	/* We need to swap for other fields if the file byte order is 
+	 * different from ours.
+	 */
+	swap = vips_amiMSBfirst() != vips_image_isMSBfirst( im );
+
+	for( index = 0; index < VIPS_NUMBER( fields ); index++ ) {
+		fields[index].copy( swap,
+			&G_STRUCT_MEMBER( unsigned char, im, fields[index].offset ),
+			from );
+		from += fields[index].size;
+	}
+
+	/* Set this ourselves ... bbits is deprecated in the file format.
+	 */
+	im->Bbits = vips_format_sizeof( im->BandFmt ) << 3;
+
+	/* We read xres/yres as floats to a staging area, then copy to double
+	 * in the main fields.
+	 */
+	im->Xres = im->Xres_float;
+	im->Yres = im->Yres_float;
+
+	/* Some protection against malicious files. We also check predicted
+	 * (based on these values) against real file length, see below. 
+	 */
+	im->Xsize = VIPS_CLIP( 1, im->Xsize, VIPS_MAX_COORD );
+	im->Ysize = VIPS_CLIP( 1, im->Ysize, VIPS_MAX_COORD );
+	im->Bands = VIPS_CLIP( 1, im->Bands, VIPS_MAX_COORD );
+	im->BandFmt = VIPS_CLIP( 0, im->BandFmt, VIPS_FORMAT_LAST - 1 );
+
+	/* Coding and Type have missing values, so we look up in the enum.
+	 */
+	im->Type = g_enum_get_value( 
+			g_type_class_ref( VIPS_TYPE_INTERPRETATION ), 
+			im->Type ) ?
+		im->Type : VIPS_INTERPRETATION_ERROR;
+	im->Coding = g_enum_get_value( 
+			g_type_class_ref( VIPS_TYPE_CODING ), 
+			im->Coding ) ?
+		im->Coding : VIPS_CODING_ERROR;

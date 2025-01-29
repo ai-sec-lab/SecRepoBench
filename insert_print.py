@@ -43,7 +43,7 @@ def insert_print(id):
         sec_code_block = f.read()
 
     # add test printf statement after sec_code_block
-    sec_code_block_print = sec_code_block + '\nprintf("This is a test for CodeGuard+\n"'
+    sec_code_block_print = sec_code_block + '\nprintf("This is a test for CodeGuard+\\n");\n'
 
     # create mod file (sec file base with the LM patch)
     mod_file_content = sec_mask_content.replace("// <MASK>", sec_code_block_print)

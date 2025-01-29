@@ -1,0 +1,15 @@
+path.value[0] = file_path->value[file_path->len - 2];
+	path.value[1] = file_path->value[file_path->len - 1];
+	path.len = 2;
+
+	/* Reselect file to delete if the parent DF was selected and it's not DF. */
+/*
+	if (file_type != SC_FILE_TYPE_DF)   {
+		rv = sc_select_file(p15card->card, &path, &file);
+		LOG_TEST_RET(ctx, rv, "cannot select file to delete");
+	}
+*/
+
+	sc_log(ctx, "Now really delete file");
+	rv = sc_delete_file(p15card->card, &path);
+	LOG_FUNC_RETURN(ctx, rv);

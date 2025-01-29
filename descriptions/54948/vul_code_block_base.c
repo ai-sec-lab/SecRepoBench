@@ -1,0 +1,82 @@
+if (*ctx->pos != c) {
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("Missing closing quote (%c) at offset %ld\n", c, ctx->pos - ctx->start);
+                ctx->err++;
+                goto err_out;
+            }
+            size_t slen = ctx->pos - p;
+            ctx->pos++; // skip the closing quote
+            char* strbuf = malloc(slen+1);
+            if (num_escapes > 0) {
+                size_t i = 0;
+                size_t o = 0;
+                while (i < slen) {
+                    if (p[i] == '\\') {
+                        /* handle escape sequence */
+                        i++;
+                        switch (p[i]) {
+                            case '0':
+                            case '1':
+                            case '2':
+                            case '3':
+                            case '4':
+                            case '5':
+                            case '6':
+                            case '7': {
+                                // max 3 digits octal
+                                unsigned char chr = 0;
+                                int maxd = 3;
+                                while ((i < slen) && (p[i] >= '0' && p[i] <= '7') && --maxd) {
+                                    chr = (chr << 3) + p[i] - '0';
+                                    i++;
+                                }
+                                strbuf[o++] = (char)chr;
+                            }   break;
+                            case 'U': {
+                                i++;
+                                // max 4 digits hex
+                                uint16_t wchr = 0;
+                                int maxd = 4;
+                                while ((i < slen) && isxdigit(p[i]) && maxd--) {
+                                    wchr = (wchr << 4) + ((p[i] <= '9') ? (p[i] - '0') : ((p[i] <= 'F') ? (p[i] - 'A' + 10) : (p[i] - 'a' + 10)));
+                                    i++;
+                                }
+                                if (wchr >= 0x800) {
+                                    strbuf[o++] = (char)(0xE0 + ((wchr >> 12) & 0xF));
+                                    strbuf[o++] = (char)(0x80 + ((wchr >> 6) & 0x3F));
+                                    strbuf[o++] = (char)(0x80 + (wchr & 0x3F));
+                                } else if (wchr >= 0x80) {
+                                    strbuf[o++] = (char)(0xC0 + ((wchr >> 6) & 0x1F));
+                                    strbuf[o++] = (char)(0x80 + (wchr & 0x3F));
+                                } else {
+                                    strbuf[o++] = (char)(wchr & 0x7F);
+                                }
+                            }   break;
+                            case 'a': strbuf[o++] = '\a'; i++; break;
+                            case 'b': strbuf[o++] = '\b'; i++; break;
+                            case 'f': strbuf[o++] = '\f'; i++; break;
+                            case 'n': strbuf[o++] = '\n'; i++; break;
+                            case 'r': strbuf[o++] = '\r'; i++; break;
+                            case 't': strbuf[o++] = '\t'; i++; break;
+                            case 'v': strbuf[o++] = '\v'; i++; break;
+                            case '"': strbuf[o++] = '"';  i++; break;
+                            case '\'': strbuf[o++] = '\''; i++; break;
+                            default:
+                                break;
+                        }
+                    } else {
+                        strbuf[o++] = p[i++];
+                    }
+                }
+                strbuf[o] = '\0';
+                slen = o;
+            } else {
+                strncpy(strbuf, p, slen);
+                strbuf[slen] = '\0';
+            }
+            data->type = PLIST_STRING;
+            data->strval = strbuf;
+            data->length = slen;
+            *plist = plist_new_node(data);
+            parse_skip_ws(ctx);
+            break;
