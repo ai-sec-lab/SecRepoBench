@@ -1,0 +1,307 @@
+/*	$OpenBSD: strptime.c,v 1.30 2019/05/12 12:49:52 schwarze Exp $ */
+/*	$NetBSD: strptime.c,v 1.12 1998/01/20 21:39:40 mycroft Exp $	*/
+/*-
+ * Copyright (c) 1997, 1998, 2005, 2008 The NetBSD Foundation, Inc.
+ * All rights reserved.
+ *
+ * This code was contributed to The NetBSD Foundation by Klaus Klein.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE NETBSD FOUNDATION, INC. AND CONTRIBUTORS
+ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR CONTRIBUTORS
+ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/*
+ * This file provides a portable implementation of strptime(2), based
+ * on the work of OpenSBD project. Since various platforms implement
+ * strptime differently, this one should work as a fallback.
+ */
+
+#include <ctype.h>
+#include <locale.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <fluent-bit/flb_compat.h>
+#include <fluent-bit/flb_langinfo.h>
+
+#define	_ctloc(x)		(nl_langinfo(x))
+
+/*
+ * We do not implement alternate representations. However, we always
+ * check whether a given modifier is allowed for a certain conversion.
+ */
+#define _ALT_E			0x01
+#define _ALT_O			0x02
+#define	_LEGAL_ALT(x)		{ if (alt_format & ~(x)) return (0); }
+
+/*
+ * Copied from libc/time/private.h and libc/time/tzfile.h
+ */
+#define TM_YEAR_BASE	1900
+#define DAYSPERNYEAR	365
+#define DAYSPERLYEAR	366
+#define DAYSPERWEEK		7
+#define MONSPERYEAR		12
+#define EPOCH_YEAR		1970
+#define EPOCH_WDAY		4	/* Thursday */
+#define SECSPERHOUR		3600
+#define SECSPERMIN  	60
+
+#define isleap(y) (((y) % 4) == 0 && (((y) % 100) != 0 || ((y) % 400) == 0))
+
+/*
+ * We keep track of some of the fields we set in order to compute missing ones.
+ */
+#define FIELD_TM_MON	(1 << 0)
+#define FIELD_TM_MDAY	(1 << 1)
+#define FIELD_TM_WDAY	(1 << 2)
+#define FIELD_TM_YDAY	(1 << 3)
+#define FIELD_TM_YEAR	(1 << 4)
+
+static char gmt[] = { "GMT" };
+static char utc[] = { "UTC" };
+/* RFC-822/RFC-2822 */
+static const char * const nast[5] = {
+       "EST",    "CST",    "MST",    "PST",    "\0\0\0"
+};
+static const char * const nadt[5] = {
+       "EDT",    "CDT",    "MDT",    "PDT",    "\0\0\0"
+};
+
+static const int mon_lengths[2][MONSPERYEAR] = {
+        { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 },
+        { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+};
+
+static nl_item day[] = {
+        DAY_1, DAY_2, DAY_3, DAY_4, DAY_5, DAY_6, DAY_7
+};
+
+static nl_item mon[] = {
+        MON_1, MON_2, MON_3, MON_4, MON_5, MON_6, MON_7, MON_8, MON_9,
+        MON_10, MON_11, MON_12
+};
+
+static nl_item abday[] = {
+        ABDAY_1, ABDAY_2, ABDAY_3, ABDAY_4, ABDAY_5, ABDAY_6, ABDAY_7
+};
+
+static nl_item abmon[] = {
+        ABMON_1, ABMON_2, ABMON_3, ABMON_4, ABMON_5, ABMON_6, ABMON_7,
+        ABMON_8, ABMON_9, ABMON_10, ABMON_11, ABMON_12
+};
+
+static	int _conv_num64(const unsigned char **, int64_t *, int64_t, int64_t);
+static	int _conv_num(const unsigned char **, int *, int, int);
+static	int leaps_thru_end_of(const int y);
+static	char *_flb_strptime(const char *, const char *, struct tm *, int);
+static	const u_char *_find_string(const u_char *, int *, const char * const *,
+	    const char * const *, int);
+
+/*
+ * FreeBSD does not support `timezone` in time.h.
+ * https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=24590
+ */
+#ifdef __FreeBSD__
+int flb_timezone(void)
+{
+    struct tm tm;
+    time_t t = 0;
+    tzset();
+    localtime_r(&t, &tm);
+    return -(tm.tm_gmtoff);
+}
+#define timezone (flb_timezone())
+#endif
+
+char *
+flb_strptime(const char *buf, const char *fmt, struct tm *tm)
+{
+	return(_flb_strptime(buf, fmt, tm, 1));
+}
+
+static char *
+_flb_strptime(const char *buf, const char *fmt, struct tm *tm, int initialize)
+{
+	unsigned char c;
+	const unsigned char *bp, *ep;
+	size_t len = 0;
+	int alt_format, i, offs;
+	int neg = 0;
+	static int century, relyear, parsedfields;
+
+	if (initialize) {
+		century = TM_YEAR_BASE;
+		relyear = -1;
+		parsedfields = 0;
+	}
+
+	bp = (const unsigned char *)buf;
+	while ((c = *fmt) != '\0') {
+		/* Clear `alternate' modifier prior to new conversion. */
+		alt_format = 0;
+
+		/* Eat up white-space. */
+		if (isspace(c)) {
+			while (isspace(*bp))
+				bp++;
+
+			fmt++;
+			continue;
+		}
+
+        /*
+         * Having increased bp we need to ensure we are not
+         * moving beyond bounds.
+         */
+        // <MASK>
+
+
+	}
+
+	/*
+	 * We need to evaluate the two digit year spec (%y)
+	 * last as we can get a century spec (%C) at any time.
+	 */
+	if (relyear != -1) {
+		if (century == TM_YEAR_BASE) {
+			if (relyear <= 68)
+				tm->tm_year = relyear + 2000 - TM_YEAR_BASE;
+			else
+				tm->tm_year = relyear + 1900 - TM_YEAR_BASE;
+		} else {
+			tm->tm_year = relyear + century - TM_YEAR_BASE;
+		}
+		parsedfields |= FIELD_TM_YEAR;
+	}
+
+	/* Compute some missing values when possible. */
+	if (parsedfields & FIELD_TM_YEAR) {
+		const int year = tm->tm_year + TM_YEAR_BASE;
+		const int *mon_lens = mon_lengths[isleap(year)];
+		if (!(parsedfields & FIELD_TM_YDAY) &&
+		    (parsedfields & FIELD_TM_MON) && (parsedfields & FIELD_TM_MDAY)) {
+			tm->tm_yday = tm->tm_mday - 1;
+			for (i = 0; i < tm->tm_mon; i++)
+				tm->tm_yday += mon_lens[i];
+			parsedfields |= FIELD_TM_YDAY;
+		}
+		if (parsedfields & FIELD_TM_YDAY) {
+			int days = tm->tm_yday;
+			if (!(parsedfields & FIELD_TM_WDAY)) {
+				tm->tm_wday = EPOCH_WDAY +
+				    ((year - EPOCH_YEAR) % DAYSPERWEEK) *
+				    (DAYSPERNYEAR % DAYSPERWEEK) +
+				    leaps_thru_end_of(year - 1) -
+				    leaps_thru_end_of(EPOCH_YEAR - 1) +
+				    tm->tm_yday;
+				tm->tm_wday %= DAYSPERWEEK;
+				if (tm->tm_wday < 0)
+					tm->tm_wday += DAYSPERWEEK;
+			}
+			if (!(parsedfields & FIELD_TM_MON)) {
+				tm->tm_mon = 0;
+				while (tm->tm_mon < MONSPERYEAR && days >= mon_lens[tm->tm_mon])
+					days -= mon_lens[tm->tm_mon++];
+			}
+			if (!(parsedfields & FIELD_TM_MDAY))
+				tm->tm_mday = days + 1;
+		}
+	}
+
+	return ((char *)bp);
+}
+
+
+static int
+_conv_num(const unsigned char **buf, int *dest, int llim, int ulim)
+{
+	int result = 0;
+	int rulim = ulim;
+
+	if (**buf < '0' || **buf > '9')
+		return (0);
+
+	/* we use rulim to break out of the loop when we run out of digits */
+	do {
+		result *= 10;
+		result += *(*buf)++ - '0';
+		rulim /= 10;
+	} while ((result * 10 <= ulim) && rulim && **buf >= '0' && **buf <= '9');
+
+	if (result < llim || result > ulim)
+		return (0);
+
+	*dest = result;
+	return (1);
+}
+
+static int
+_conv_num64(const unsigned char **buf, int64_t *dest, int64_t llim, int64_t ulim)
+{
+	int result = 0;
+	int64_t rulim = ulim;
+
+	if (**buf < '0' || **buf > '9')
+		return (0);
+
+	/* we use rulim to break out of the loop when we run out of digits */
+	do {
+		result *= 10;
+		result += *(*buf)++ - '0';
+		rulim /= 10;
+	} while ((result * 10 <= ulim) && rulim && **buf >= '0' && **buf <= '9');
+
+	if (result < llim || result > ulim)
+		return (0);
+
+	*dest = result;
+	return (1);
+}
+
+static const u_char *
+_find_string(const u_char *bp, int *tgt, const char * const *n1,
+		const char * const *n2, int c)
+{
+	int i;
+	unsigned int len;
+
+	/* check full name - then abbreviated ones */
+	for (; n1 != NULL; n1 = n2, n2 = NULL) {
+		for (i = 0; i < c; i++, n1++) {
+			len = strlen(*n1);
+			if (strncasecmp(*n1, (const char *)bp, len) == 0) {
+				*tgt = i;
+				return bp + len;
+			}
+		}
+	}
+
+	/* Nothing matched */
+	return NULL;
+}
+
+static int
+leaps_thru_end_of(const int y)
+{
+	return (y >= 0) ? (y / 4 - y / 100 + y / 400) :
+		-(leaps_thru_end_of(-(y + 1)) + 1);
+}

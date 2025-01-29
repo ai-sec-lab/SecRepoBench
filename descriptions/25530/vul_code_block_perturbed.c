@@ -1,0 +1,1 @@
+pimasize = sizeof (IMA_ADPCM_PRIVATE) + blocksize * psf->sf.channels + 3 * psf->sf.channels * samplesperblock ;

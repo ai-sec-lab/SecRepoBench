@@ -1,0 +1,106 @@
+  // The pixel in (xoff, yoff) is the origin of the downsampling coordinate
+  // system.
+  size_t xoff = PassesDecoderState::kGroupDataXBorder;
+  size_t yoff = PassesDecoderState::kGroupDataYBorder;
+  // This may over-copy, but it should always be safe to do so.
+  size_t y0 = rect.y0() - lf.Padding();
+  size_t y1 = rect.y0() + rect.ysize() + lf.Padding();
+  size_t x0 = rect.x0() - lf.Padding();
+  size_t x1 = rect.x0() + rect.xsize() + lf.Padding();
+  if (hs == 0 && vs == 0) {
+    JXL_CHECK_IMAGE_INITIALIZED(*plane_in, rect);
+    Rect r(x0, y0, x1 - x0, y1 - y0);
+    CopyImageTo(r, *plane_in, r, plane_out);
+    return;
+  }
+  // Prepare padding if we are on a border.
+  // Copy the whole row/column here: it is likely similarly fast and ensures
+  // that we don't forget some parts of padding.
+  if (frame_rect.x0() == 0) {
+    for (size_t y = 0; y < plane_in->ysize(); y++) {
+      plane_in->Row(y)[rect.x0() - 1] = plane_in->Row(y)[rect.x0()];
+    }
+  }
+  if (frame_rect.x0() + frame_rect.xsize() >= frame_dim.xsize_padded) {
+    size_t borderx = ((rect.x0() + rect.xsize() - xoff) >> hs) + xoff;
+    for (size_t y = 0; y < plane_in->ysize(); y++) {
+      plane_in->Row(y)[borderx] = plane_in->Row(y)[borderx - 1];
+    }
+  }
+  if (frame_rect.y0() == 0) {
+    memcpy(plane_in->Row(rect.y0() - 1), plane_in->Row(rect.y0()),
+           plane_in->xsize() * sizeof(float));
+  }
+  if (frame_rect.y0() + frame_rect.ysize() >= frame_dim.ysize_padded) {
+    ssize_t bordery =
+        static_cast<ssize_t>(rect.y0() + rect.ysize() - yoff) / (1 << vs) +
+        yoff;
+    memcpy(plane_in->Row(bordery), plane_in->Row(bordery - 1),
+           plane_in->xsize() * sizeof(float));
+  }
+  if (hs == 1) {
+    // Limited to 4 for Interleave*.
+    HWY_CAPPED(float, 4) d;
+    auto threefour = Set(d, 0.75f);
+    auto onefour = Set(d, 0.25f);
+    size_t orig_y0 = y0;
+    size_t orig_y1 = y1;
+    if (vs != 0) {
+      orig_y0 = (y0 >> 1) + (yoff >> 1) - 1;
+      orig_y1 = (y1 >> 1) + (yoff >> 1) + 1;
+    }
+    for (size_t y = orig_y0; y < orig_y1; y++) {
+      const float* in = plane_in->Row(y);
+      float* out = temp->Row(y);
+      for (size_t x = x0 / (2 * Lanes(d)) * 2 * Lanes(d);
+           x < RoundUpTo(x1, 2 * Lanes(d)); x += 2 * Lanes(d)) {
+        size_t ox = (x >> 1) + (xoff >> 1);
+        auto current = Load(d, in + ox) * threefour;
+        auto prev = LoadU(d, in + ox - 1);
+        auto next = LoadU(d, in + ox + 1);
+        auto left = MulAdd(onefour, prev, current);
+        auto right = MulAdd(onefour, next, current);
+#if HWY_TARGET == HWY_SCALAR
+        Store(left, d, out + x);
+        Store(right, d, out + x + 1);
+#else
+        Store(InterleaveLower(left, right), d, out + x);
+        Store(InterleaveUpper(left, right), d, out + x + Lanes(d));
+#endif
+      }
+    }
+  } else {
+    CopyImageTo(*plane_in, temp);
+  }
+  if (vs == 1) {
+    HWY_FULL(float) d;
+    auto threefour = Set(d, 0.75f);
+    auto onefour = Set(d, 0.25f);
+    for (size_t y = y0; y < y1; y++) {
+      size_t oy1 = (y >> 1) + (yoff >> 1);
+      if ((y & 1) == 1) oy1++;
+      size_t oy0 = oy1 - 1;
+      const float* in0 = temp->Row(oy0);
+      const float* in1 = temp->Row(oy1);
+      float* out = plane_out->Row(y);
+      if ((y & 1) == 1) {
+        for (size_t x = x0 / Lanes(d) * Lanes(d); x < RoundUpTo(x1, Lanes(d));
+             x += Lanes(d)) {
+          auto i0 = Load(d, in0 + x);
+          auto i1 = Load(d, in1 + x);
+          auto o = MulAdd(i0, threefour, i1 * onefour);
+          Store(o, d, out + x);
+        }
+      } else {
+        for (size_t x = x0 / Lanes(d) * Lanes(d); x < RoundUpTo(x1, Lanes(d));
+             x += Lanes(d)) {
+          auto i0 = Load(d, in0 + x);
+          auto i1 = Load(d, in1 + x);
+          auto o = MulAdd(i0, onefour, i1 * threefour);
+          Store(o, d, out + x);
+        }
+      }
+    }
+  } else {
+    CopyImageTo(*temp, plane_out);
+  }

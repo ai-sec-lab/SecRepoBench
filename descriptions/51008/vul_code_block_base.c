@@ -1,0 +1,1 @@
+PRIV (dst_ptr_offsets_count) = loc + 1;

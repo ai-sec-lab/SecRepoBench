@@ -1,0 +1,1 @@
+ASSIMP_LOG_WARN( "Unrecognized nendo file format version, continuing happily ... :", (head+6));

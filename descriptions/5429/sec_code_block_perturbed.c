@@ -1,0 +1,136 @@
+if (image->storage_class == PseudoClass)
+    colormap_index=(ssize_t *) AcquireQuantumMemory(image->colors,
+      sizeof(*colormap_index));
+  else
+    colormap_index=(ssize_t *) AcquireQuantumMemory(MaxColormapSize,
+      sizeof(*colormap_index));
+  if (colormap_index == (ssize_t *) NULL)
+    ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+      image->filename);
+  if (image->storage_class != PseudoClass)
+    {
+      (void) ResetMagickMemory(colormap_index,(-1),MaxColormapSize*
+        sizeof(*colormap_index));
+      if (AcquireImageColormap(image,MaxColormapSize,exception) == MagickFalse)
+        {
+          colormap_index=(ssize_t *) RelinquishMagickMemory(colormap_index);
+          ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+            image->filename);
+        }
+      image->colors=0;
+      status=MagickTrue;
+      image_view=AcquireAuthenticCacheView(image,exception);
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+      #pragma omp parallel for schedule(static,4) shared(status) \
+        magick_number_threads(image,image,image->rows,1)
+#endif
+      for (y=0; y < (ssize_t) image->rows; y++)
+      {
+        register Quantum
+          *magick_restrict q;
+
+        register ssize_t
+          x;
+
+        if (status == MagickFalse)
+          continue;
+        q=GetCacheViewAuthenticPixels(image_view,0,y,image->columns,1,
+          exception);
+        if (q == (Quantum *) NULL)
+          {
+            status=MagickFalse;
+            continue;
+          }
+        for (x=0; x < (ssize_t) image->columns; x++)
+        {
+          register size_t
+            intensity;
+
+          intensity=ScaleQuantumToMap(GetPixelRed(image,q));
+          if (colormap_index[intensity] < 0)
+            {
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+              #pragma omp critical (MagickCore_SetGrayscaleImage)
+#endif
+              if (colormap_index[intensity] < 0)
+                {
+                  colormap_index[intensity]=(ssize_t) image->colors;
+                  image->colormap[image->colors].red=(double)
+                    GetPixelRed(image,q);
+                  image->colormap[image->colors].green=(double)
+                    GetPixelGreen(image,q);
+                  image->colormap[image->colors].blue=(double)
+                    GetPixelBlue(image,q);
+                  image->colors++;
+               }
+            }
+          SetPixelIndex(image,(Quantum) colormap_index[intensity],q);
+          q+=GetPixelChannels(image);
+        }
+        if (SyncCacheViewAuthenticPixels(image_view,exception) == MagickFalse)
+          status=MagickFalse;
+      }
+      image_view=DestroyCacheView(image_view);
+    }
+  for (i=0; i < (ssize_t) image->colors; i++)
+    image->colormap[i].alpha=(double) i;
+  qsort((void *) image->colormap,image->colors,sizeof(PixelInfo),
+    IntensityCompare);
+  colormap=(PixelInfo *) AcquireQuantumMemory(image->colors,sizeof(*colormap));
+  if (colormap == (PixelInfo *) NULL)
+    {
+      colormap_index=(ssize_t *) RelinquishMagickMemory(colormap_index);
+      ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+        image->filename);
+    }
+  colormapposition=0;
+  colormap[colormapposition]=image->colormap[0];
+  for (i=0; i < (ssize_t) image->colors; i++)
+  {
+    if (IsPixelInfoEquivalent(&colormap[colormapposition],&image->colormap[i]) == MagickFalse)
+      {
+        colormapposition++;
+        colormap[colormapposition]=image->colormap[i];
+      }
+    colormap_index[(ssize_t) image->colormap[i].alpha]=colormapposition;
+  }
+  image->colors=(size_t) (colormapposition+1);
+  image->colormap=(PixelInfo *) RelinquishMagickMemory(image->colormap);
+  image->colormap=colormap;
+  status=MagickTrue;
+  image_view=AcquireAuthenticCacheView(image,exception);
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  #pragma omp parallel for schedule(static,4) shared(status) \
+    magick_number_threads(image,image,image->rows,1)
+#endif
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    register Quantum
+      *magick_restrict q;
+
+    register ssize_t
+      x;
+
+    if (status == MagickFalse)
+      continue;
+    q=GetCacheViewAuthenticPixels(image_view,0,y,image->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      {
+        status=MagickFalse;
+        continue;
+      }
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      SetPixelIndex(image,(Quantum) colormap_index[ScaleQuantumToMap(
+        GetPixelIndex(image,q))],q);
+      q+=GetPixelChannels(image);
+    }
+    if (SyncCacheViewAuthenticPixels(image_view,exception) == MagickFalse)
+      status=MagickFalse;
+  }
+  image_view=DestroyCacheView(image_view);
+  colormap_index=(ssize_t *) RelinquishMagickMemory(colormap_index);
+  image->type=GrayscaleType;
+  if (SetImageMonochrome(image,exception) != MagickFalse)
+    image->type=BilevelType;
+  return(status);

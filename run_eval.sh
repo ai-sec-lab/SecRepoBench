@@ -23,12 +23,13 @@ fi
 # Print the list of IDs to the log file
 echo "Processing IDs: ${ID_LIST[@]}" >> "$LOG_FILE"
 
+# claude-3-haiku claude-3.5-sonnet gemini-1.5-flash gemini-1.5-pro gpt-4o-mini gpt-4o
 # Run the eval command with all IDs in one go
 python eval.py eval "${ID_LIST[@]}" \
     --path /home/cdilgren/project_benchmark/oss-fuzz-bench \
     --output /home/cdilgren/project_benchmark/oss-fuzz-bench/output \
+    --rerun \
     --tests testcase unittest \
-    --model_names claude-3-haiku claude-3.5-sonnet gemini-1.5-flash gemini-1.5-pro gpt-4o-mini gpt-4o \
+    --model_names claude-3-haiku gemini-1.5-flash gemini-1.5-pro gpt-4o-mini gpt-4o \
     --context_types cross-file \
-    --prompt_types sec-generic
-    >> "$LOG_FILE" 2>&1
+    --prompt_types sec-generic >> "$LOG_FILE" 2>&1

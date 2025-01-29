@@ -1,0 +1,42 @@
+if ((fabs(maximum_length) < DrawEpsilon) ||
+        (maximum_length > MaxBezierCoordinates))
+      break;
+    if (fabs(length) < DrawEpsilon)
+      {
+        n++;
+        if (fabs(draw_info->dash_pattern[n]) < DrawEpsilon)
+          n=0;
+        length=scale*(draw_info->dash_pattern[n]+(n == 0 ? -0.5 : 0.5));
+      }
+    for (total_length=0.0; (length >= 0.0) && (maximum_length >= (total_length+length)); )
+    {
+      total_length+=length;
+      if ((n & 0x01) != 0)
+        {
+          dash_polygon[0]=primitive_info[0];
+          dash_polygon[0].point.x=(double) (primitive_info[i-1].point.x+dx*
+            total_length/maximum_length);
+          dash_polygon[0].point.y=(double) (primitive_info[i-1].point.y+dy*
+            total_length/maximum_length);
+          j=1;
+        }
+      else
+        {
+          if ((j+1) > (ssize_t) (2*number_vertices))
+            break;
+          dash_polygon[j]=primitive_info[i-1];
+          dash_polygon[j].point.x=(double) (primitive_info[i-1].point.x+dx*
+            total_length/maximum_length);
+          dash_polygon[j].point.y=(double) (primitive_info[i-1].point.y+dy*
+            total_length/maximum_length);
+          dash_polygon[j].coordinates=1;
+          j++;
+          dash_polygon[0].coordinates=(size_t) j;
+          dash_polygon[j].primitive=UndefinedPrimitive;
+          status&=DrawStrokePolygon(image,clone_info,dash_polygon,exception);
+        }
+      n++;
+      if (fabs(draw_info->dash_pattern[n]) < DrawEpsilon)
+        n=0;
+      length=scale*(draw_info->dash_pattern[n]+(n == 0 ? -0.5 : 0.5));
+    }

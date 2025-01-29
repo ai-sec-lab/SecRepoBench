@@ -1,0 +1,1 @@
+return make_lighting(light, material, common.getInput(0), common.cropRect());

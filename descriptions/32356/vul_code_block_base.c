@@ -1,0 +1,1 @@
+parent->size = 0;

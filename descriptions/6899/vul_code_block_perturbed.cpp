@@ -1,0 +1,1 @@
+AbstractLJpegDecompressor::decode();

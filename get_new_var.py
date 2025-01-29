@@ -28,12 +28,13 @@ class BaseEvaler(ABC):
 
     @staticmethod
     def postprocess(response: str) -> str:
-        if '```' in response:
-            start = response.find('```')
-            start = response.find('\n', start) + 1
-            end = response.find('```', start)
-            response = response[start:end]
-        return response.strip()
+        clean_response = ''
+        for char in response:
+            if char.isalpha():
+                clean_response += char
+        if clean_response[0].isnumeric():
+            clean_response[0] = '_'
+        return clean_response
 
     def _get_prompt(self, id: str) -> str:
         with open(f'descriptions/{id}/desc_prompt.txt', 'r') as f:
@@ -111,9 +112,8 @@ class APIEvaler(BaseEvaler):
         except Exception as e:
             print(f"{id}: Error: {e}")
             return ""
-        self.responses_cache[id] = response
 
-        return response
+        return self.postprocess(response)
 
 
 def main():

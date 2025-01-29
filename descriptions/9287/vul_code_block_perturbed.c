@@ -1,0 +1,9 @@
+if (OVS_UNLIKELY(payloadsize < sizeof *nh)) {
+        return false;
+    }
+
+    plen = ntohs(nh->ip6_plen);
+    if (OVS_UNLIKELY(plen > payloadsize)) {
+        return false;
+    }
+    /* Jumbo Payload option not supported yet. */

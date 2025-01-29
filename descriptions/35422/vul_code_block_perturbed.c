@@ -1,0 +1,11 @@
+  infostring->length=length;
+  if (infostring->datum == (unsigned char *) NULL)
+    infostring->datum=(unsigned char *) AcquireQuantumMemory(length+
+      MagickPathExtent,sizeof(*infostring->datum));
+  else
+    infostring->datum=(unsigned char *) ResizeQuantumMemory(
+      infostring->datum,OverAllocateMemory(length+MagickPathExtent),
+      sizeof(*infostring->datum));
+  if (infostring->datum == (unsigned char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  (void) memcpy(infostring->datum+length,source->datum,source->length);
