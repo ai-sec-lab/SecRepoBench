@@ -140,7 +140,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"#!/bin/bash\n"
         "docker run --rm --init "
         f"--name {local_id}_testcase_sec "
-        "--cpus=1 "
+        "--cpus=2 "
         "-e MAKEFLAGS=\"-j4\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
@@ -168,7 +168,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"#!/bin/bash\n"
         "docker run --rm --init "
         f"--name {local_id}_testcase_vul "
-        "--cpus=1 "
+        "--cpus=2 "
         "-e MAKEFLAGS=\"-j4\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
@@ -196,7 +196,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"#!/bin/bash\n"
         "docker run --rm --init "
         f"--name {local_id}_unittest_sec "
-        "--cpus=1 "
+        "--cpus=2 "
         "-e MAKEFLAGS=\"-j4\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
@@ -221,7 +221,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"#!/bin/bash\n"
         "docker run --rm --init "
         f"--name {local_id}_unittest_sec_print "
-        "--cpus=1 "
+        "--cpus=2 "
         "-e MAKEFLAGS=\"-j4\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
@@ -524,7 +524,7 @@ def proc_runner(target_with_output_path_and_rerun):
     }
 
 def get_remaining(targets, completed):
-    return [target for target in targets if (target[0], target[1], target[2]) not in completed]
+    return [target for target in targets if (target[0], f"{target[2]}_{target[1]}") not in completed]
 
 def main():
     cases_fname = "filter_logs/cases.json"
@@ -613,10 +613,10 @@ def main():
                         if "429 Too Many Requests" in cached_data.get('stderr', b'').decode(errors="ignore"):
                             rate_limited_count += 1
                             # Remove from completed set to ensure it's rerun
-                            completed.discard((local_id, patch, test_type))
-                        elif cached_data.get('stderr', b'').decode(errors="ignore").startswith("Timeout") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: container ID file found"):
+                            completed.discard((local_id, f"{test_type}_{patch}"))
+                        elif cached_data.get('stderr', b'').decode(errors="ignore").startswith("Timeout") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: container ID file found") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: Error response from daemon"):
                             time_out_count += 1
-                            completed.discard((local_id, patch, test_type))
+                            completed.discard((local_id, f"{test_type}_{patch}"))
                         else:
                             cached_count += 1
                     except:
@@ -627,7 +627,7 @@ def main():
                 print("Rerunning all targets, including those with cached results.")
 
             procs = []
-            pool_size = min(96 // 4, len(targets))
+            pool_size = min(40, len(targets))
             try:
                 with alive_bar(len(targets)) as bar, Pool(pool_size) as p:
                     remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
