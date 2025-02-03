@@ -24,7 +24,7 @@ def testcase_vul(report):
 def unittest_sec(report):
     ids_pass_unittest_sec = []
     for id, results in report.items():
-        if 'unittest_sec' in results and len(results['unittest_sec']['pass']) > 0:
+        if 'unittest_sec' in results and results['unittest_sec']['total'] > 0:
             ids_pass_unittest_sec.append(id)
     return ids_pass_unittest_sec
 

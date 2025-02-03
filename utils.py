@@ -93,6 +93,20 @@ def get_file_extension(file_name):
     _, ext = os.path.splitext(file_name)
     return ext
 
+def find_opening_bracket(function_node):
+    opening_bracket_nodes = []
+
+    def traverse(node):
+        if node.type == '{':
+            opening_bracket_nodes.append(node)
+        else:
+            for child in node.children:
+                traverse(child)
+
+    traverse(function_node)
+
+    return opening_bracket_nodes[0]
+
 def find_function_containing_line(tree, line_number):
     root_node = tree.root_node
     function_nodes = []

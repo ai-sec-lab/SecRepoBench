@@ -8,6 +8,7 @@ from tree_sitter import Language, Parser
 import lizard
 from utils import *
 from get_new_var import APIEvaler
+from insert_print import insert_print
 
 
 def make_mangled_name(name, full_parameters):
@@ -194,7 +195,7 @@ def find_functions(node, func_pattern, x, y):
     results = []
 
     def traverse(node, x, y):
-        if node.type == 'function_definition' or node.type == 'compound_statement' or node.type == 'labeled_statement':
+        if node.type == 'function_definition':
             text = node.text.decode('utf-8').replace('\n', '').replace('\t', '').replace('void', '')
             text = remove_comments(text)
             if re.search(func_pattern, text) is not None:
@@ -475,6 +476,31 @@ def get_ts_function_node(root_node, version, diff, diff_non_trivial, changed_fil
     return function_node
 
 
+def get_func_text(function_node, mod_func, source_code_lines):
+    if function_node is None:
+        func_text = '\n'.join(source_code_lines[mod_func.start_line-1:mod_func.end_line])
+    else:
+        func_text = function_node.text.decode('utf-8')
+    return func_text
+
+
+def get_mask_func_text(func_text, sec_code_block):
+    # get spacing
+    leading_spaces = get_leading_whitespace(sec_code_block)
+    ending_spaces = get_leading_whitespace(sec_code_block[::-1])[::-1]
+
+    # write mask_func (without description)
+    mask_func = func_text.replace(sec_code_block, f"{leading_spaces}// <MASK>{ending_spaces}")
+
+    return mask_func
+
+
+def make_vul_sec_base_file(mask_content, vul_code_block):
+    # create mod file (sec file base with the LM patch)
+    mod_file_content = mask_content.replace("// <MASK>", vul_code_block)
+    return mod_file_content
+
+
 def mask_helper(id, case, base_path, mod, perturbed_content=None):
     delta_x = 0
     delta_y = 0
@@ -522,6 +548,10 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
         vul_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_{mod}.c'
         sec_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_{mod}.c'
         vul_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_{mod}.c'
+        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_print_{mod}.c'
+        sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_func_{mod}.c'
+        mask_sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_sec_func_{mod}.c'
+        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_sec_base_{mod}.c'
     elif language == 'cpp':
         LANGUAGE = CPP_LANGUAGE
         mask_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_{mod}.cpp'
@@ -529,6 +559,10 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
         vul_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_{mod}.cpp'
         sec_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_{mod}.cpp'
         vul_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_{mod}.cpp'
+        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_print_{mod}.cpp'
+        sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_func_{mod}.cpp'
+        mask_sec_func_file =f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_sec_func_{mod}.cpp'
+        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_sec_base_{mod}.cpp'
     else:
         print(f"Language of modified file not recognized for id {id}")
         return
@@ -602,22 +636,22 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
     function_node = None
     if len(funcs) == 0:
         print(f"ID {id}: Tree sitter failed to find function node, using whole function as code block")
-        modified_source_code, sec_code_block = get_function_content(mod_func, source_code_lines)
+        mask_source_code, sec_code_block = get_function_content(mod_func, source_code_lines)
     elif len(funcs) > 1:
         funcs = find_closest_func(mod_func, funcs)
         if funcs is not None:
             function_node = funcs[0]
-            modified_source_code, sec_code_block = get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section)
+            mask_source_code, sec_code_block = get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section)
         else:
             print(f"ID {id}: Tree sitter failed to find function node, using whole function as code block")
-            modified_source_code, sec_code_block = get_function_content(mod_func, source_code_lines)
+            mask_source_code, sec_code_block = get_function_content(mod_func, source_code_lines)
     else: 
         function_node = funcs[0]
-        modified_source_code, sec_code_block = get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section)
+        mask_source_code, sec_code_block = get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section)
 
     # Write the modified source code back to the file (or write to a new file)
     with open(mask_file, 'w') as f:
-        f.write(modified_source_code)
+        f.write(mask_source_code)
     print(f"Code block {mod} replaced with // <MASK> in {mask_file}")
 
     # Write the sec code block to file
@@ -626,12 +660,36 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
     print(f"Sec code block {mod} written to {sec_code_block_file}")
 
     # Get vul code block
-    vul_code_block = get_vul_code_block(modified_source_code, sec_code_block, vul_source_code, diff)
+    vul_code_block = get_vul_code_block(mask_source_code, sec_code_block, vul_source_code, diff)
 
     # Write the vul code block to file
     with open(vul_code_block_file, 'w') as f:
         f.write(vul_code_block)
     print(f"Vul code block {mod} written to {vul_code_block_file}")
+
+    # write sec version with the inserted print to file
+    sec_print = insert_print(function_node, mod_func, source_code_lines)
+    with open(sec_print_file, 'w') as f:
+        f.write(sec_print)
+    print(f"Sec print {mod} written to {sec_print_file}")
+
+    # write the sec function to file
+    func_text = get_func_text(function_node, mod_func, source_code_lines)
+    with open(sec_func_file, 'w') as f:
+        f.write(func_text)
+    print(f"Sec func {mod} written to {sec_func_file}")
+
+    # write the masked sec function to file
+    mask_func_text = get_mask_func_text(func_text, sec_code_block)
+    with open(mask_sec_func_file, 'w') as f:
+        f.write(mask_func_text)
+    print(f"Sec func {mod} written to {mask_sec_func_file}")
+
+    # write the vul with sec base to file
+    vul_sec_base = make_vul_sec_base_file(mask_source_code, vul_code_block)
+    with open(vul_sec_base_file, 'w') as f:
+        f.write(vul_sec_base)
+    print(f"Vul sec base {mod} written to {vul_sec_base_file}")
 
     return sec_code_block, vul_code_block, x
 
@@ -727,7 +785,7 @@ def local_var_perturbation(id2var, evaler, case, x):
 
 
 if __name__ == "__main__":
-    with open('ids_top40.txt', 'r') as f:
+    with open('ids_125_dup_replaced.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
 
     with open('filter_logs/cases.json', 'r') as f:

@@ -17,12 +17,30 @@ import random
 
 unittest_commands = {
     "wolfmqtt":"arvo compile && cd wolfmqtt && bash commit-tests.sh",
-    "yara":"./build.sh && make check",
+    "yara":"./build.sh && make check\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/yara -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
     "openexr":"cd /work && \
         cmake /src/openexr -D BUILD_TESTING=ON -D OPENEXR_INSTALL_EXAMPLES=OFF -D OPENEXR_RUN_FUZZ_TESTS=OFF && \
         make OpenEXRCore && \
         make OpenEXRCoreTest/fast && \
-        ctest -R 'OpenEXRCore\\..+' 10",
+        ctest -R 'OpenEXRCore\\..+' 10\n\
+  LOG_FILE=\\\"/work/Testing/Temporary/LastTest.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
     "libexif":"autoreconf -fiv && \
         ./configure && \
         make \
@@ -30,11 +48,23 @@ unittest_commands = {
         make install && \
         make check",
     "zstd":"make check ",
-    "ndpi": "apt-get update && apt-get install -y libpcap-dev libjson-c-dev && arvo compile && cd ndpi && ./configure --enable-fuzztargets && make && rm -f tests/pcap/fuzz-* && rm -rf fuzz/ && make -C tests check && cp fuzz/fuzz_ndpi_reader /out/ && cp fuzz/fuzz_process_packet /out/",
+    "ndpi": "cd /src && tar -xvzf libpcap-1.9.1.tar.gz && cd libpcap-1.9.1 && ./configure --disable-shared && make -j\\$(nproc) && make install\n\
+[ -d /src/json-c ] && cd /src/json-c && mkdir -p build && cd build && cmake -DBUILD_SHARED_LIBS=OFF .. && make install\n\
+cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
     "imagemagick":"apt-get update && apt-get install -y perl build-essential wget tar libperl-dev && apt-get clean && apt-get install -y ghostscript libfreetype6-dev libbz2-dev libtiff5-dev libjpeg-dev libopenjp2-7-dev libx11-dev libxext-dev hp2xx ffmpeg && ./configure --with-perl && make && make install && ldconfig /usr/local/lib && make check ; cd PerlMagick && make test ; perl -I../blib/lib -I../blib/arch t/bzlib/read.t ; perl -I../blib/lib -I../blib/arch t/bzlib/write.t ; perl -I../blib/lib -I../blib/arch t/zlib/read.t ; perl -I../blib/lib -I../blib/arch t/zlib/write.t ; perl -I../blib/lib -I../blib/arch t/tiff/read.t ; perl -I../blib/lib -I../blib/arch t/tiff/write.t ; perl -I../blib/lib -I../blib/arch t/ttf/read.t ; perl -I../blib/lib -I../blib/arch t/jpeg/read.t ; perl -I../blib/lib -I../blib/arch t/jpeg/write.t ; perl -I../blib/lib -I../blib/arch t/jng/read.t ; perl -I../blib/lib -I../blib/arch t/jng/write.t ; perl -I../blib/lib -I../blib/arch t/png/read.t ; perl -I../blib/lib -I../blib/arch t/png/write.t ; perl -I../blib/lib -I../blib/arch t/ps/read.t ; perl -I../blib/lib -I../blib/arch t/ps/write.t ; perl -I../blib/lib -I../blib/arch t/openjp2/read.t ; perl -I../blib/lib -I../blib/arch t/x11/read.t ; perl -I../blib/lib -I../blib/arch t/x11/write.t  ; perl -I../blib/lib -I../blib/arch t/hpgl/read.t ; perl -I../blib/lib -I../blib/arch t/mpeg/read.t",
     #"mupdf":"",
     #"leptonica":"arvo compile && make check",
-    "hunspell":"arvo compile && make check",
+    "hunspell":"arvo compile && make check\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in /src/hunspell/tests/*.log; do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
     "opensc":"apt update && apt install -y softhsm2 libglib2.0-dev\n\
   git clone https://github.com/clibs/cmocka.git /root/cmocka && \\\n\
     cd /root/cmocka && \\\n\
@@ -46,47 +76,74 @@ unittest_commands = {
     autoreconf -i && \\\n\
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure --disable-optimization --disable-pcsc --enable-ctapi --enable-cmocka --enable-tests CFLAGS=\\\"-I/usr/local/include\\\" LDFLAGS=\\\"-L/usr/local/lib\\\" && \\\n\
     grep -rl '#include <cmocka.h>' /src/opensc | while read -r file; do\n\
-      if ! grep -q '#include <stdarg.h>' \\\"\$file\\\"; then\n\
-        sed -i '/#include <cmocka.h>/i #include <stdarg.h>' \\\"\$file\\\"\n\
+      if ! grep -q '#include <stdarg.h>' \\\"\\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <stdarg.h>' \\\"\\$file\\\"\n\
       fi\n\
-      if ! grep -q '#include <stddef.h>' \\\"\$file\\\"; then\n\
-        sed -i '/#include <cmocka.h>/i #include <stddef.h>' \\\"\$file\\\"\n\
+      if ! grep -q '#include <stddef.h>' \\\"\\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <stddef.h>' \\\"\\$file\\\"\n\
       fi\n\
-      if ! grep -q '#include <stdint.h>' \\\"\$file\\\"; then\n\
-        sed -i '/#include <cmocka.h>/i #include <stdint.h>' \\\"\$file\\\"\n\
+      if ! grep -q '#include <stdint.h>' \\\"\\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <stdint.h>' \\\"\\$file\\\"\n\
       fi\n\
-      if ! grep -q '#include <setjmp.h>' \\\"\$file\\\"; then\n\
-        sed -i '/#include <cmocka.h>/i #include <setjmp.h>' \\\"\$file\\\"\n\
+      if ! grep -q '#include <setjmp.h>' \\\"\\$file\\\"; then\n\
+        sed -i '/#include <cmocka.h>/i #include <setjmp.h>' \\\"\\$file\\\"\n\
       fi\n\
     done\n\
   make -j && make install\n\
-  export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH && \\\n\
+  export LD_LIBRARY_PATH=/usr/local/lib:\\$LD_LIBRARY_PATH && \\\n\
+  export CMOCKA_MESSAGE_OUTPUT=stdout && \\\n\
   cd /src/opensc/src/tests && \\\n\
     make check\n\
   if [ -d /src/opensc/src/tests/unittests ]; then\n\
     find /src/opensc/src/tests/unittests -type f -executable | while read -r test_exec; do\n\
-      echo \\\"Running \$test_exec...\\\"\n\
-      \$test_exec\n\
+      echo \\\"Running \\$test_exec...\\\"\n\
+      \\$test_exec\n\
     done\n\
   else\n\
       echo \\\"No unit tests found in this commit.\\\"\n\
   fi",
-    "libxml2":"arvo compile && make ASAN_OPTIONS=\'$ASAN_OPTIONS detect_leaks=0\' check",
+    "libxml2":"arvo compile && ASAN_OPTIONS=\'detect_leaks=0\' make check",
     "gpac":"arvo compile && \
         apt-get update && \
         apt-get -y install time file jackd psmisc bsdmainutils && \
-        PATH=$PATH:/src/gpac/bin/gcc/ && \
+        PATH=\\$PATH:/src/gpac/bin/gcc/ && \
         cd testsuite && \
         ./make_tests.sh -quick -no-hash",
-    "matio":"arvo compile && make CHECK_ENVIRONMENT=' 1-2800 2990-' check",
+    "matio":"arvo compile && make CHECK_ENVIRONMENT=' 1-2800 2990-' check\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/matio/test/testsuite.dir -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
     "htslib":"autoconf && \
         autoheader && \
         ./configure && \
         make && \
         make -i check",
     "mruby":"cd mruby && rake all && rake test -v",
-    "libarchive":"arvo compile && cd libarchive/build2 && ctest ",
-    "libdwarf":"mkdir build && cd build && cmake ../ -DDO_TESTING=ON && make && ctest",
+    "libarchive":"arvo compile && cd libarchive/build2 && ctest\n\
+  LOG_FILE=\\\"/src/libarchive/build2/Testing/Temporary/LastTest.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
+    "libdwarf":"mkdir build && cd build && cmake ../ -DDO_TESTING=ON && make && ctest\n\
+  LOG_FILE=\\\"/src/libdwarf/build/Testing/Temporary/LastTest.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
     "libsndfile":"arvo compile && make check",
     "file":"autoreconf -i && ./configure && make && make check",
     "assimp":"cmake CMakeLists.txt -G \"Ninja\" -DBUILD_SHARED_LIBS=OFF -DASSIMP_BUILD_ZLIB=ON -DASSIMP_BUILD_TESTS=ON -DASSIMP_BUILD_ASSIMP_TOOLS=OFF -DASSIMP_BUILD_SAMPLES=OFF && \
@@ -95,12 +152,37 @@ unittest_commands = {
     "ots":"arvo compile && \
         cd /work/build && \
         meson test cff_charstring layout_common_table test_bad_fonts", # do not check the fuzzing fonts
-    "pcapplusplus":"arvo compile && cmake -S . -B build -DPCAPPP_BUILD_TESTS=ON && cmake --build build && cd build && make test",
+    "pcapplusplus":"arvo compile && cmake -S . -B build -DPCAPPP_BUILD_TESTS=ON && cmake --build build && cd build && make test\n\
+  LOG_FILE=\\\"/src/PcapPlusPlus/build/Testing/Temporary/LastTest.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
     #"libredwg":"",
     "exiv2":"arvo compile && cd build && ctest ../unitTests/ -E bugfixTests",
-    "c-blosc2":"cmake . -DBUILD_FUZZERS=OFF && make clean && make && ctest",
+    "c-blosc2":"cmake . -DBUILD_FUZZERS=OFF && make clean && make && ctest\n\
+  LOG_FILE=\\\"/src/c-blosc2/Testing/Temporary/LastTest.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
     "open62541":"apt-get install -y git build-essential gcc pkg-config cmake python cmake-curses-gui libmbedtls-dev check libsubunit-dev python-sphinx graphviz  python-sphinx-rtd-theme && mkdir build && cd build && cmake .. -DUA_BUILD_UNIT_TESTS=ON && make && make test",
-    "libplist":"./autogen.sh --without-cython && make && make check",
+    "libplist":"./autogen.sh --without-cython && make && make check\n\
+  for log in /src/libplist/test/*.log; do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
     "libass":"arvo compile && cd /work/build && ninja test",
     "libxml":"arvo compile && make check",
     "libzmq":"./autogen.sh && ./configure && make && make check",
@@ -112,20 +194,64 @@ unittest_commands = {
     "libssh2":"arvo compile && make check",
     "fribidi":"apt-get -y install libtool autoconf && ./autogen.sh && ./configure && make && make check",
     "espeak-ng":"./autogen.sh ; ./configure ; make ; make check -k",
-    "wolfssl":"./autogen.sh && ./configure && make && make check",
+    "wolfssl":"./autogen.sh && ./configure && make && make check\n\
+  LOG_FILE=\\\"/src/wolfssl/testsuite/testsuite.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
     "coturn":"./configure && make && make check",
     "hiredis":"apt-get update && apt-get -y install redis-server && make && make check",
     "jbig2dec":"ln -s /usr/bin/python3 /usr/bin/python && ./autogen.sh && ./configure && make && make check",
     #"ntopng":"apt-get update && apt-get -y install ./autogen.sh && ",
-    "wireshark":"apt-get update && apt-get -y install qt5-default libgtk2.0-dev libpcap-dev && mkdir build && cd build && cmake -DBUILD_wireshark=OFF .. && make && make  test",
+    "wireshark":"apt-get update && apt-get -y install qt5-default libgtk2.0-dev libpcap-dev && mkdir build && cd build && cmake -DBUILD_wireshark=OFF .. && make && make  test\n\
+  LOG_FILE=\\\"/src/wireshark/build/Testing/Temporary/LastTest.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
     "jsoncpp":"arvo compile",
     #"uwebsockets":"apt-get -y install zlib1g-dev clang && make -j && export CXX=\"clang++ -stdlib=libc++\" && make -C ",
     #"gdal":"",
-    "ffmpeg":"cd ffmpeg ; export CFLAGS=$(echo $CFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-stdlib=libc++//') ; CC=gcc CXX=g++ ./configure --samples=fate-suite/ ; make ; make fate-rsync ; make fate",
-    "binutils-gdb":"cd binutils-gdb ; apt-get install -y dejagnu ; export CFLAGS=$(echo $CFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-gline-tables-only//') ; export CXXFLAGS=$(echo $CXXFLAGS | sed 's/-stdlib=libc++//') ; CC=gcc CXX=g++ ./configure ; make ; make install ; make check RUNTESTFLAGS='GDB=/usr/local/bin/gdb gdb.base/a2-run.exp'",
-    "librawspeed":"mkdir build && cd build && cmake -DWITH_PTHREADS=OFF -DWITH_OPENMP=OFF -DWITH_PUGIXML=OFF -DUSE_XMLLINT=OFF -DWITH_JPEG=OFF -DWITH_ZLIB=OFF -DALLOW_DOWNLOADING_GOOGLETEST=ON .. ; make ; make test",
-    "openthread":"arvo compile && make check",
-    "fluent-bit":"arvo compile && cd fluent-bit/build && make test",
+    "ffmpeg":"cd ffmpeg ; export CFLAGS=\\\"\\$(echo \\\"\\$CFLAGS\\\" | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\\"\\$CXXFLAGS\\\" | sed -e 's/-gline-tables-only//' -e 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure --samples=fate-suite/ ; make ; make fate-rsync ; make fate",
+    "binutils-gdb":"cd binutils-gdb ; apt-get install -y dejagnu ; export CFLAGS=\\\"\\$(echo \\$CFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure ; make ; make install ; make check RUNTESTFLAGS='GDB=/usr/local/bin/gdb gdb.base/a2-run.exp'\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in /src/binutils-gdb/libbacktrace/*.log; do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+    "librawspeed":"mkdir build && cd build && cmake -DWITH_PTHREADS=OFF -DWITH_OPENMP=OFF -DWITH_PUGIXML=OFF -DUSE_XMLLINT=OFF -DWITH_JPEG=OFF -DWITH_ZLIB=OFF -DALLOW_DOWNLOADING_GOOGLETEST=ON .. ; make ; make test\n\
+  LOG_FILE=\\\"/src/librawspeed/build/Testing/Temporary/LastTest.log\\\"\n\
+  if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
+    echo \\\"\\n========== Test Log Output ==========\\\"\n\
+    cat \\\"\\$LOG_FILE\\\"\n\
+    echo \\\"\\n========== End of Test Log ==========\\\"\n\
+  else\n\
+    echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
+  fi\n",
+    "openthread":"arvo compile && make check\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/openthread/src/ncp -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+    "fluent-bit":"arvo compile && cd fluent-bit/build && make test; cat /src/fluent-bit/build/Testing/Temporary/LastTest.log",
     #"ntopng":"apt-get update && apt-get install -y build-essential git bison flex libxml2-dev libpcap-dev libtool libtool-bin rrdtool librrd-dev autoconf pkg-config automake autogen redis-server wget libsqlite3-dev libhiredis-dev libmaxminddb-dev libcurl4-openssl-dev libpango1.0-dev libcairo2-dev libnetfilter-queue-dev zlib1g-dev libssl-dev libcap-dev libnetfilter-conntrack-dev libreadline-dev libjson-c-dev libldap2-dev rename libsnmp-dev libexpat1-dev libmaxminddb-dev libradcli-dev libjson-c-dev libzmq3-dev curl jq libnl-genl-3-dev libgcrypt20-dev && ./autogen.sh && ./configure && make -j"
     #"lxc":"./autogen.sh && ./configure && make && make check", # DOES NOT WORK
     "knot-dns":"apt-get update && apt-get -y install libtool autoconf automake make pkg-config liburcu-dev libgnutls28-dev libedit-dev liblmdb-dev && ./autogen.sh && ./configure && make && make -i check",
@@ -136,20 +262,25 @@ unittest_commands = {
     "flac":"cd flac ; apt-get update && apt-get install -y libtool-bin libogg-dev vorbis-tools oggz-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check -i", # 47525
     #"libreoffice":"apt-get update && apt-get install git build-essential zip ccache junit4 libkrb5-dev nasm graphviz python3 python3-dev qtbase5-dev libkf5coreaddons-dev libkf5i18n-dev libkf5config-dev libkf5windowsystem-dev libkf5kio-dev libqt5x11extras5-dev autoconf libcups2-dev libfontconfig1-dev gperf openjdk-17-jdk doxygen libxslt1-dev xsltproc libxml2-utils libxrandr-dev libx11-dev bison flex libgtk-3-dev libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev ant ant-optional libnss3-dev libavahi-client-dev libxt-dev && ./autogen.sh", # 8252
     #"arrow":"", # 23916
-    "harfbuzz":"apt-get update && apt-get install -y libfreetype6-dev libglib2.0-dev libcairo2-dev autoconf automake libtool pkg-config ragel gtk-doc-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check", # 10724
+    "harfbuzz":"apt-get update && apt-get install -y libfreetype6-dev libglib2.0-dev libcairo2-dev autoconf automake libtool pkg-config ragel gtk-doc-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/harfbuzz/test -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
     "libjxl": "arvo compile && cd /work/libjxl-corpus && ninja test",
     "libvips": "arvo compile && make check",
     # "ntopng":"apt-get update && apt-get install -y libhiredis-dev && ./.autogen.sh && ./configure && make unit_test", # Needs work
     "spice-usbredir": "arvo compile && cd build && meson test",
     "wpantund": "arvo compile && make check",
     "flatbuffers": "cd flatbuffers && cmake -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS='-pthread' && make  && make test   ",
-    "gdal": "apt-get update && apt-get install -y build-essential cmake libsqlite3-dev libz-dev libcurl4-openssl-dev libpng-dev libjpeg-dev libgeos-dev libproj-dev libxerces-c-dev libssl-dev git clang-14 && \
-        git clone https://github.com/OSGeo/gdal.git && \
-        cd gdal && mkdir -p build && cd build && \
-        cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 && \
-        make -j$(nproc) && make install && ldconfig && \
-        cd ../autotest/cpp && make && ./gdal_unit_test",
-    "skia": "apt-get update && timeout 300 apt-get install -y software-properties-common && add-apt-repository -y ppa:ubuntu-toolchain-r/test && apt-get update && apt-get install -y gcc-9 g++-9 && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90 && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90 && apt-get update && apt-get install -y libfontconfig1-dev && python tools/git-sync-deps && apt-get install -y clang && rm -rf out/Debug && CC=clang CXX=clang++ bin/gn gen out/Debug --args='cc=\\\"clang\\\" cxx=\\\"clang++\\\"' && timeout 600 ninja -C out/Debug dm && out/Debug/dm -v --src tests",
+    "gdal": "",
+    "skia": "apt-get update && apt-get install -y software-properties-common && add-apt-repository -y ppa:ubuntu-toolchain-r/test && apt-get update && apt-get install -y gcc-9 g++-9 && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90 && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90 && apt-get update && apt-get install -y libfontconfig1-dev && python tools/git-sync-deps && apt-get install -y clang && rm -rf out/Debug && CC=clang CXX=clang++ bin/gn gen out/Debug --args='cc=\\\"clang\\\" cxx=\\\"clang++\\\"' && ninja -C out/Debug dm && out/Debug/dm -v --src tests",
     "libredwg": "cd libredwg && ./autogen.sh && ./configure && make  && yes | ./unit_testing_all.sh",
     # "poppler": "apt-get update && apt-get install -y libfontconfig1-dev libjpeg-dev libopenjp2-7-dev && \
     #             git clone git://git.freedesktop.org/git/poppler/test testdata && \
@@ -162,9 +293,20 @@ unittest_commands = {
     #"icu":"",
     "selinux":"apt-get update && apt-get install -y --no-install-recommends --no-install-suggests bison flex gawk gcc gettext make libaudit-dev libbz2-dev libcap-dev libcap-ng-dev libcunit1-dev libglib2.0-dev libpcre2-dev pkgconf python3 systemd xmlto && make clean distclean ; make DESTDIR=~/obj install ; DESTDIR=~/obj ./scripts/env_use_destdir make test", 
     "lcms":"./autogen.sh && make && make check", 
-    "php-src":"arvo compile && make test",
+    "php-src":"arvo compile && make test\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/php-src/ext/standard/tests -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
     "openvswitch":"arvo compile && make check",
-    #"curl":"cd /src/curl"
+    #"curl":"cd /src/curl",
+    "ghostpdl":""
 }
 
 _default_pattern = r"\n(?P<status>[A-Z]+): (?P<name>.*)"
@@ -173,7 +315,7 @@ _google_test_pattern = r"\[ RUN\s*\]\s(?P<name>.*)[\s\S]*?\[\s*(?P<status>.*) \]
 _matio_ovs_pattern = r"\n\s*\d+:\s*(?P<name>.*)\s*(?P<status>ok|skipped|FAILED)"
 unittest_patterns = {
     "libexif":_default_pattern,
-    "ndpi":_default_pattern,
+    "ndpi":r"\n(?P<name>\S+\.\S+)\s+(?P<status>OK|FAIL|ERROR|SKIPPED)",
     "yara":_default_pattern,
     "wolfmqtt":_default_pattern,
     "imagemagick":_default_pattern,
@@ -182,7 +324,7 @@ unittest_patterns = {
     "opensc":_default_pattern,
     "zstd":r"(?:\n(?P<total>test.*)|(?P<status>[eE]rror.*)):\s+(?P<name>.*)",
     "openexr":_ctest_pattern,
-    "libxml2":r"(?:(?:Total\s(?P<total>\d+)\stests,\s(?:\d+|no)\serrors)|(?:(?P<name>\S+)\s(?P<status>failed)))",
+    "libxml2":r"(?:(?:Total(?::)?\s(?:\d+\sfunctions,\s)?(?P<total>\d+)\stests,\s(?:\d+|no)\serrors)|(?:(?P<name>\S+)\s(?P<status>failed)))",
     "gpac":r"\n(?P<name>[\S]*?):\s?(?P<status>.*?(Fail|OK))",
     "matio":_matio_ovs_pattern,
     "htslib":r"(?P<name>.*?:(\d+-\d+)?)(?: |\n *[\s\S]*?)\.\. (?P<status>[A-z]+)",
@@ -249,7 +391,6 @@ unittest_patterns = {
 }
 
 bad_projects = [
-    #"opensc", # cannot test
     "ghostpdl", # cannot test
     # "libredwg", # build issues
     "serenity", # build issues

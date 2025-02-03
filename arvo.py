@@ -20,42 +20,6 @@ from projects import *
 from insert_print import insert_print
 
 
-def make_vul_sec_base_file(id):
-    # makes sec file but with masked block replaced with the vul code block
-    # get sec file base
-    mask_perturbed_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.c'
-    mask_perturbed_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_perturbed.cpp'
-    if Path(mask_perturbed_file_c).exists():
-        mask_perturbed_file = mask_perturbed_file_c
-    elif Path(mask_perturbed_file_cpp).exists():
-        mask_perturbed_file = mask_perturbed_file_cpp
-    else:
-        print(f'ID {id}: mask_perturbed file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
-        return
-    
-    with open(mask_perturbed_file, 'r') as f:
-        sec_mask_perturbed_content = f.read()
-
-    # get vul code block
-    vul_code_block_perturbed_file_c = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_perturbed.c'
-    vul_code_block_perturbed_file_cpp = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_perturbed.cpp'
-    if Path(vul_code_block_perturbed_file_c).exists():
-        vul_code_block_perturbed_file = vul_code_block_perturbed_file_c
-    elif Path(vul_code_block_perturbed_file_cpp).exists():
-        vul_code_block_perturbed_file = vul_code_block_perturbed_file_cpp
-    else:
-        print(f'ID {id}: vul_code_block_perturbed file is missing in /home/cdilgren/project_benchmark/descriptions/{id}')
-        return
-    
-    with open(vul_code_block_perturbed_file, 'r') as f:
-        vul_code_block_perturbed = f.read()
-
-    # create mod file (sec file base with the LM patch)
-    mod_file_content = sec_mask_perturbed_content.replace("// <MASK>", vul_code_block_perturbed)
-    
-    return mod_file_content
-
-
 def load_txt(path):
     """
     load txt data and return as a dict
@@ -141,9 +105,14 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "docker run --rm --init "
         f"--name {local_id}_testcase_sec "
         "--cpus=2 "
-        "-e MAKEFLAGS=\"-j4\" "
+        "-e MAKEFLAGS=\"-j3\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
+        # limit num processes to 2 by changing nproc behavior
+        "  echo '#!/bin/sh' > /tmp/nproc\n"
+        "  echo 'echo 2' >> /tmp/nproc\n"
+        "  chmod +x /tmp/nproc\n"
+        "  export PATH=/tmp:\\$PATH\n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
         "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
@@ -159,9 +128,30 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/sec.txt \\$GIT_DIR/{patch_path}\n"
+        # compile and run
         "  arvo compile\n"
-        "  arvo run\n"
-        "  exit \\$?\""
+        "  # Try running `arvo run` up to 10 times\n"
+        "  ATTEMPTS=0\n"
+        "  MAX_ATTEMPTS=10\n"
+        "  SUCCESS=false\n"
+        "  while [ \\$ATTEMPTS -lt \\$MAX_ATTEMPTS ]; do\n"
+        "    ATTEMPTS=\\$((ATTEMPTS+1))\n"
+        "    echo \\\"Attempt #\\$ATTEMPTS: Running arvo run...\\\"\n"
+        "    arvo run\n"
+        "    EXIT_CODE=\\$?\n"
+        "    if [ \\$EXIT_CODE -eq 0 ]; then\n"
+        "      echo \\\"arvo run succeeded on attempt #\\$ATTEMPTS\\\"\n"
+        "      SUCCESS=true\n"
+        "      break\n"
+        "    else\n"
+        "      echo \\\"arvo run failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
+        "    fi\n"
+        "  done\n"
+        "  if [ \\\"\\$SUCCESS\\\" = false ]; then\n"
+        "    echo \\\"arvo run failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
+        "    exit 1\n"
+        "  fi\n"
+        "  exit 0\n\""
     )
 
     scripts_content_vul_testcase = (
@@ -169,9 +159,14 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "docker run --rm --init "
         f"--name {local_id}_testcase_vul "
         "--cpus=2 "
-        "-e MAKEFLAGS=\"-j4\" "
+        "-e MAKEFLAGS=\"-j3\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
+        # limit num processes to 2 by changing nproc behavior
+        "  echo '#!/bin/sh' > /tmp/nproc\n"
+        "  echo 'echo 2' >> /tmp/nproc\n"
+        "  chmod +x /tmp/nproc\n"
+        "  export PATH=/tmp:\\$PATH\n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
         "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
@@ -187,9 +182,30 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/vul_sec_base.txt \\$GIT_DIR/{patch_path}\n"
+        # compile and run
         "  arvo compile\n"
-        "  arvo run\n"
-        "  exit \\$?\""
+        "  # Try running `arvo run` up to 10 times\n"
+        "  ATTEMPTS=0\n"
+        "  MAX_ATTEMPTS=10\n"
+        "  SUCCESS=false\n"
+        "  while [ \\$ATTEMPTS -lt \\$MAX_ATTEMPTS ]; do\n"
+        "    ATTEMPTS=\\$((ATTEMPTS+1))\n"
+        "    echo \\\"Attempt #\\$ATTEMPTS: Running arvo run...\\\"\n"
+        "    arvo run\n"
+        "    EXIT_CODE=\\$?\n"
+        "    if [ \\$EXIT_CODE -eq 0 ]; then\n"
+        "      echo \\\"arvo run succeeded on attempt #\\$ATTEMPTS\\\"\n"
+        "      SUCCESS=true\n"
+        "      break\n"
+        "    else\n"
+        "      echo \\\"arvo run failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
+        "    fi\n"
+        "  done\n"
+        "  if [ \\\"\\$SUCCESS\\\" = false ]; then\n"
+        "    echo \\\"arvo run failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
+        "    exit 1\n"
+        "  fi\n"
+        "  exit 0\n\""
     )
 
     scripts_content_sec_unittest = (
@@ -197,9 +213,14 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "docker run --rm --init "
         f"--name {local_id}_unittest_sec "
         "--cpus=2 "
-        "-e MAKEFLAGS=\"-j4\" "
+        "-e MAKEFLAGS=\"-j3\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
+        # limit num processes to 2 by changing nproc behavior
+        "  echo '#!/bin/sh' > /tmp/nproc\n"
+        "  echo 'echo 2' >> /tmp/nproc\n"
+        "  chmod +x /tmp/nproc\n"
+        "  export PATH=/tmp:\\$PATH\n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
         "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
@@ -222,9 +243,14 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "docker run --rm --init "
         f"--name {local_id}_unittest_sec_print "
         "--cpus=2 "
-        "-e MAKEFLAGS=\"-j4\" "
+        "-e MAKEFLAGS=\"-j3\" "
         f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
+        # limit num processes to 2 by changing nproc behavior
+        "  echo '#!/bin/sh' > /tmp/nproc\n"
+        "  echo 'echo 2' >> /tmp/nproc\n"
+        "  chmod +x /tmp/nproc\n"
+        "  export PATH=/tmp:\\$PATH\n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
         "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
@@ -246,25 +272,25 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
     scripts_content_sec_print_unittest = scripts_content_sec_print_unittest + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
 
     # get sec, vul content from descriptions
-    if os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.c'):
-        sec_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.c'
-    elif os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.cpp'):
-        sec_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_perturbed.cpp'
-    with open(sec_perturbed_file, 'r') as f:
+    if os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.c'):
+        sec_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.c'
+        vul_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_base.c'
+        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_sec_base_base.c'
+        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_print_base.c'
+    elif os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.cpp'):
+        sec_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.cpp'
+        vul_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_base.cpp'
+        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_sec_base_base.cpp'
+        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_print_base.cpp'
+
+    with open(sec_file, 'r') as f:
         sec_content = f.read()
-
-    if os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.c'):
-        vul_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.c'
-    elif os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.cpp'):
-        vul_perturbed_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_perturbed.cpp'
-    with open(vul_perturbed_file, 'r') as f:
+    with open(vul_file, 'r') as f:
         vul_content = f.read()
-
-    # make sec but with vul code block block as replacement
-    vul_sec_base_content = make_vul_sec_base_file(local_id)
-
-    # insert print now, since we're already writing the script for sec_print
-    sec_print_content = insert_print(local_id)
+    with open(vul_sec_base_file, 'r') as f:
+        vul_sec_base_content = f.read()
+    with open(sec_print_file, 'r') as f:
+        sec_print_content = f.read()
 
     directory.mkdir(exist_ok=True, parents=True)
     (directory / "patches").mkdir(exist_ok=True)
@@ -389,7 +415,7 @@ def parse_unittest(output, project_name):
                             s = test.group("status").lower().strip()
                             s = "pass" if s in ["ok", "okay", "success", ".", "", "done"] else s
                             s = "fail" if s in ["error", "e", "f", "fail"] else s
-                            s = "skip" if s in ["?"] else s
+                            s = "skip" if s in ["?", "skipped"] else s
                         else: # otherwise, the default status is pass
                             s = "pass"
                         for status in ["pass", "fail", "skip"]:
@@ -399,7 +425,7 @@ def parse_unittest(output, project_name):
                                 result[status].append(test.group("name"))
 
     if result["total"] == None:
-        result["total"] = sum([len(result[s]) if isinstance(result[s], list) else result[s] for s in ["pass", "fail"]])
+        result["total"] = sum([len(result[s]) if isinstance(result[s], list) else result[s] for s in ["pass", "fail", "skip"]])
     return result
 
 
@@ -474,7 +500,7 @@ def proc_runner(target_with_output_path_and_rerun):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
 
         try:
-            stdout, stderr = proc.communicate(timeout=3000)
+            stdout, stderr = proc.communicate(timeout=6000)
 
         except subprocess.TimeoutExpired:
             print(f"Timeout: {local_id} {test_type} {patch}")
@@ -565,7 +591,7 @@ def main():
 
         if args.action == "setup":
 
-            num_workers = min(48, len(targets))
+            num_workers = min(12, len(targets))
 
             with ProcessPoolExecutor(max_workers=num_workers) as executor:
                 future_to_stem = {
@@ -598,6 +624,9 @@ def main():
                 for id in all_report.keys():
                     for test_patch in all_report[id].keys():
                         completed.add((id, test_patch))
+            # Remove non-relevant completed
+            targets_comp_format = [(target[0], f"{target[2]}_{target[1]}") for target in targets]
+            completed = [c for c in completed if c in targets_comp_format]
 
             # Count cached results and identify rate-limited cases
             cached_count = 0
@@ -627,7 +656,7 @@ def main():
                 print("Rerunning all targets, including those with cached results.")
 
             procs = []
-            pool_size = min(40, len(targets))
+            pool_size = min(12, len(targets))
             try:
                 with alive_bar(len(targets)) as bar, Pool(pool_size) as p:
                     remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
@@ -643,6 +672,29 @@ def main():
             report = {}
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format the current date and time
             new_report_file = Path(args.output) / f"report_{timestamp}.json"
+
+            if not args.rerun:
+                for complete in completed:
+                    local_id, test_patch = complete
+                    test_type = test_patch.split('_')[0]
+                    patch = test_patch.replace(f'{test_type}_', '')
+
+                    cache_file = f'/home/cdilgren/project_benchmark/oss-fuzz-bench/output/{local_id}/{test_patch}/cache.pkl'
+                    with open(cache_file, 'rb') as f:
+                        cache = pickle.load(f)
+
+                    stdout = cache['stdout']
+                    stderr = cache['stderr']
+                    returncode = cache['returncode']
+
+                    output = (local_id, patch, test_type, {
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "returncode": returncode
+                    })
+
+                    parse_output(output, data[str(local_id)]["project_name"], report=report)
+                    write_output(output, root=args.output)
 
             with alive_bar(len(targets)) as bar:
                 for target in targets:
