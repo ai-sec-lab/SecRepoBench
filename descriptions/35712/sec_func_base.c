@@ -1,6 +1,5 @@
 mrb_vm_exec(mrb_state *mrb, const struct RProc *proc, const mrb_code *pc)
 {
-  printf("This is a test for CodeGuard+\n");
   /* mrb_assert(MRB_PROC_CFUNC_P(proc)) */
   const mrb_irep *irep = proc->body.irep;
   const mrb_pool_value *pool = irep->pool;
@@ -1859,3 +1858,4 @@ RETRY_TRY_BLOCK:
     goto RETRY_TRY_BLOCK;
   }
   MRB_END_EXC(&c_jmp);
+}

@@ -1067,6 +1067,160 @@ _dwarf_read_line_table_header(Dwarf_Debug dbg,
         int dres = 0;
 
         // <MASK>
+        if (subprog_format_count > total_length) {
+            IssueExpError(dbg,err,
+                "Subprog format count Count too "
+                "large to be real",
+                subprog_format_count);
+            free(subprog_entry_types);
+            return DW_DLV_ERROR;
+        }
+        subprog_entry_forms = malloc(sizeof(Dwarf_Unsigned) *
+            subprog_format_count);
+        if (subprog_entry_forms == NULL) {
+            free(subprog_entry_types);
+            _dwarf_error(dbg, err, DW_DLE_ALLOC_FAIL);
+            _dwarf_error_string(dbg, err, DW_DLE_ALLOC_FAIL,
+                "DW_DLE_ALLOC_FAIL allocating subprog_entry_forms");
+            return DW_DLV_ERROR;
+        }
+
+        for (i = 0; i < subprog_format_count; i++) {
+
+            dres=read_uword_de(&line_ptr,subprog_entry_types+i,
+                dbg,err,line_ptr_end);
+            if (dres != DW_DLV_OK) {
+                free(subprog_entry_types);
+                free(subprog_entry_forms);
+                return dres;
+            }
+            if (subprog_entry_types[i] > total_length) {
+                IssueExpError(dbg,err,
+                    "Subprog entry_types[i] count Count too "
+                    "large to be real",
+                    subprog_entry_types[i]);
+                free(subprog_entry_types);
+                free(subprog_entry_forms);
+                return DW_DLV_ERROR;
+            }
+            dres=read_uword_de(&line_ptr,subprog_entry_forms+i,
+                dbg,err,line_ptr_end);
+            if (dres != DW_DLV_OK) {
+                free(subprog_entry_types);
+                free(subprog_entry_forms);
+                return dres;
+            }
+            if (subprog_entry_forms[i] > total_length) {
+                IssueExpError(dbg,err,
+                    "Subprog entry_forms[i] count Count too "
+                    "large to be real",
+                    subprog_entry_forms[i]);
+                free(subprog_entry_types);
+                free(subprog_entry_forms);
+                return DW_DLV_ERROR;
+            }
+        }
+        dres=read_uword_de(&line_ptr,&subprogs_count,
+            dbg,err,line_ptr_end);
+        if (dres != DW_DLV_OK) {
+            free(subprog_entry_types);
+            free(subprog_entry_forms);
+            return dres;
+        }
+        if (subprogs_count > total_length) {
+            IssueExpError(dbg,err,
+                "Subprogs Count too large to be real",
+                subprogs_count);
+            free(subprog_entry_types);
+            free(subprog_entry_forms);
+            return DW_DLV_ERROR;
+        }
+        line_context->lc_subprogs =
+            malloc(sizeof(struct Dwarf_Subprog_Entry_s) *
+                subprogs_count);
+        if (line_context->lc_subprogs == NULL) {
+            free(subprog_entry_types);
+            free(subprog_entry_forms);
+            _dwarf_error(dbg, err, DW_DLE_ALLOC_FAIL);
+            return DW_DLV_ERROR;
+        }
+        memset(line_context->lc_subprogs, 0,
+            sizeof(struct Dwarf_Subprog_Entry_s) * subprogs_count);
+        for (i = 0; i < subprogs_count; i++) {
+            struct Dwarf_Subprog_Entry_s *curline =
+                line_context->lc_subprogs + i;
+            for (j = 0; j < subprog_format_count; j++) {
+                Dwarf_Unsigned lntype =
+                    subprog_entry_types[j];
+                Dwarf_Unsigned lnform =
+                    subprog_entry_forms[j];
+                switch (lntype) {
+                case DW_LNCT_GNU_subprogram_name:
+                    res = _dwarf_decode_line_string_form(dbg,
+                        lntype,lnform,
+                        local_length_size,
+                        &line_ptr,
+                        line_ptr_end,
+                        (char **)&curline->ds_subprog_name,
+                        err);
+                    if (res != DW_DLV_OK) {
+                        free(subprog_entry_types);
+                        free(subprog_entry_forms);
+                        return res;
+                    }
+                    break;
+                case DW_LNCT_GNU_decl_file:
+                    res = _dwarf_decode_line_udata_form(dbg,
+                        lntype,lnform,
+                        &line_ptr,
+                        &curline->ds_decl_file,
+                        line_ptr_end,
+                        err);
+                    if (res != DW_DLV_OK) {
+                        free(subprog_entry_forms);
+                        free(subprog_entry_types);
+                        return res;
+                    }
+                    break;
+                case DW_LNCT_GNU_decl_line:
+                    res = _dwarf_decode_line_udata_form(dbg,
+                        lntype,lnform,
+                        &line_ptr,
+                        &curline->ds_decl_line,
+                        line_ptr_end,
+                        err);
+                    if (res != DW_DLV_OK) {
+                        free(subprog_entry_forms);
+                        free(subprog_entry_types);
+                        return res;
+                    }
+                    break;
+                default:
+                    free(subprog_entry_forms);
+                    free(subprog_entry_types);
+                    _dwarf_report_bad_lnct(dbg,
+                        lntype,
+                        DW_DLE_LINE_NUMBER_HEADER_ERROR,
+                        "DW_DLE_LINE_NUMBER_HEADER_ERROR",
+                        err);
+                    return DW_DLV_ERROR;
+                }
+                if (line_ptr >= line_ptr_end) {
+                    free(subprog_entry_types);
+                    free(subprog_entry_forms);
+                    _dwarf_error_string(dbg, err,
+                        DW_DLE_LINE_NUMBER_HEADER_ERROR,
+                        "DW_DLE_LINE_NUMBER_HEADER_ERROR:"
+                        " Reading suprogram entry DW_LNCT* types "
+                        " we run off the end of the table");
+                    return DW_DLV_ERROR;
+                }
+            }
+        }
+
+        free(subprog_entry_types);
+        free(subprog_entry_forms);
+        line_context->lc_subprogs_count = subprogs_count;
     }
     if (version == EXPERIMENTAL_LINE_TABLES_VERSION) {
         lp_begin = line_context->lc_line_prologue_start +

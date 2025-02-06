@@ -240,10 +240,3 @@ for (a = 0; (a < packet->payload_packet_len) && (packet->parsed_lines < NDPI_MAX
       a++; /* next char in the payload */
     }
   }
-
-  if(packet->parsed_lines >= 1) {
-    packet->line[packet->parsed_lines].len =
-      (u_int16_t)(((unsigned long) &packet->payload[packet->payload_packet_len]) -
-		  ((unsigned long) packet->line[packet->parsed_lines].ptr));
-    packet->parsed_lines++;
-  }

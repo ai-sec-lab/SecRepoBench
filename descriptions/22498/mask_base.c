@@ -4867,6 +4867,13 @@ void ndpi_parse_packet_line_info(struct ndpi_detection_module_struct *ndpi_str, 
   packet->line[packet->parsed_lines].len = 0;
 
   // <MASK>
+
+  if(packet->parsed_lines >= 1) {
+    packet->line[packet->parsed_lines].len =
+      (u_int16_t)(((unsigned long) &packet->payload[packet->payload_packet_len]) -
+		  ((unsigned long) packet->line[packet->parsed_lines].ptr));
+    packet->parsed_lines++;
+  }
 }
 
 /* ********************************************************************************* */
