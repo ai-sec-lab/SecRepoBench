@@ -168,7 +168,6 @@ int HashMgr::add_word(const std::string& in_word,
                       const std::string* in_desc,
                       bool onlyupcase,
                       int captype) {
-
   const std::string* word = &in_word;
   const std::string* desc = in_desc;
 

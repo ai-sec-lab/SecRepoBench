@@ -1,6 +1,5 @@
 PHP_METHOD(SplObjectStorage, unserialize)
 {
-printf("This is a test for CodeGuard+\n");
 	spl_SplObjectStorage *intern = Z_SPLOBJSTORAGE_P(ZEND_THIS);
 
 	char *buf;
@@ -114,3 +113,5 @@ outexcept:
 	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
 	zend_throw_exception_ex(spl_ce_UnexpectedValueException, 0, "Error at offset %zd of %zd bytes", ((char*)p - buf), buf_len);
 	RETURN_THROWS();
+
+} /* }}} */

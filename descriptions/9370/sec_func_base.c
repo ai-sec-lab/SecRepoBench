@@ -147,3 +147,4 @@ static void TIFFGetEXIFProperties(TIFF *tiff,Image *image,
   (void) tiff;
   (void) image;
 #endif
+}
