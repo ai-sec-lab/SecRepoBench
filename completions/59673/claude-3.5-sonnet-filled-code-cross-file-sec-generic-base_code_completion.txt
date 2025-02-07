@@ -1,0 +1,78 @@
+linesize   = s->current_picture.f->linesize[0] << field_based;
+uvlinesize = s->current_picture.f->linesize[1] << field_based;
+
+mx = motion_x >> 1;
+my = motion_y >> 1;
+sx = motion_x & 1;
+sy = motion_y & 1;
+
+src_x = s->mb_x * 2 * block_s + (mx >> lowres);
+src_y = (mb_y * 2 * block_s >> field_based) + (my >> lowres);
+uvsrc_x = s->mb_x * block_s + (mx >> (lowres + 1));
+uvsrc_y = (mb_y * block_s >> field_based) + (my >> (lowres + 1));
+
+src_x = av_clip(src_x, -16, s->width + 1);
+src_y = av_clip(src_y, -16, s->height + 1);
+uvsrc_x = av_clip(uvsrc_x, -8, s->width / 2 + 1);
+uvsrc_y = av_clip(uvsrc_y, -8, s->height / 2 + 1);
+
+ptr_y  = ref_picture[0] + src_y * linesize + (src_x << lowres);
+ptr_cb = ref_picture[1] + uvsrc_y * uvlinesize + (uvsrc_x << lowres);
+ptr_cr = ref_picture[2] + uvsrc_y * uvlinesize + (uvsrc_x << lowres);
+
+if ((unsigned)src_x > FFMAX(h_edge_pos - (!!sx) - (2 * block_s), 0) ||
+    (unsigned)src_y > FFMAX(v_edge_pos - (!!sy) - h, 0)) {
+    s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_y,
+                             linesize, linesize,
+                             17, 17 + field_based,
+                             src_x, src_y << field_based,
+                             h_edge_pos, v_edge_pos);
+    ptr_y = s->sc.edge_emu_buffer;
+}
+if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+    uint8_t *uvbuf = s->sc.edge_emu_buffer + 18 * linesize;
+    if ((unsigned)uvsrc_x > FFMAX(h_edge_pos - (!!sx) - block_s, 0) ||
+        (unsigned)uvsrc_y > FFMAX(v_edge_pos - (!!sy) - h, 0)) {
+        s->vdsp.emulated_edge_mc(uvbuf, ptr_cb,
+                                 uvlinesize, uvlinesize,
+                                 9, 9 + field_based,
+                                 uvsrc_x, uvsrc_y << field_based,
+                                 h_edge_pos >> 1, v_edge_pos >> 1);
+        ptr_cb = uvbuf;
+        uvbuf += 16 * uvlinesize;
+        s->vdsp.emulated_edge_mc(uvbuf, ptr_cr,
+                                 uvlinesize, uvlinesize,
+                                 9, 9 + field_based,
+                                 uvsrc_x, uvsrc_y << field_based,
+                                 h_edge_pos >> 1, v_edge_pos >> 1);
+        ptr_cr = uvbuf;
+    }
+}
+
+if (bottom_field) {
+    dest_y  += s->linesize;
+    dest_cb += s->uvlinesize;
+    dest_cr += s->uvlinesize;
+}
+
+if (field_select) {
+    ptr_y   += linesize;
+    ptr_cb  += uvlinesize;
+    ptr_cr  += uvlinesize;
+}
+
+sx = (sx << 2) >> lowres;
+sy = (sy << 2) >> lowres;
+pix_op[lowres - 1](dest_y, ptr_y, linesize, h, sx, sy);
+
+if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+    uvsx = (2 * sx) >> (lowres + s->chroma_x_shift);
+    uvsy = (2 * sy) >> (lowres + s->chroma_y_shift);
+    if (s->chroma_y_shift) {
+        pix_op[op_index](dest_cb, ptr_cb, uvlinesize, h >> 1, uvsx, uvsy);
+        pix_op[op_index](dest_cr, ptr_cr, uvlinesize, h >> 1, uvsx, uvsy);
+    } else {
+        pix_op[op_index](dest_cb, ptr_cb, uvlinesize, h, uvsx, uvsy);
+        pix_op[op_index](dest_cr, ptr_cr, uvlinesize, h, uvsx, uvsy);
+    }
+}
