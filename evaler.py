@@ -58,11 +58,12 @@ def get_cwe_info(id):
 
 
 class BaseEvaler(ABC):
-    def __init__(self, model_name: str, context_type: str, prompt_type: str):
+    def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
         self.model_name = MODELS[model_name]
         self.context_type = context_type
         self.prompt_type = prompt_type
-        self.cache_file = f"cache/{model_name}-{self.context_type}-{self.prompt_type}.json"
+        self.mode = mode
+        self.cache_file = f"cache/{model_name}-{self.context_type}-{self.prompt_type}-{self.mode}.json"
         self.base_cache_file = f"cache/{model_name}-{self.context_type}.json"
         self.responses_cache = self._load_cache()
 
@@ -81,7 +82,7 @@ class BaseEvaler(ABC):
             response = response[start:end]
         return response.strip()
 
-    def _get_prompt(self, id: str) -> str:
+    def _get_prompt(self, id: str, mode) -> str:
         if self.context_type == 'in-file':
             with open(f'descriptions/{id}/new-in-file.txt', 'r') as file:
                 context = file.read()
@@ -89,13 +90,11 @@ class BaseEvaler(ABC):
         elif self.context_type == 'cross-file':
 
             # get func_mask_desc
-            for file_name in os.listdir(os.path.join('descriptions', id)):
-                if file_name.split('.')[0] == 'mask_func_desc':
-                    break
-            if not file_name.startswith('mask_func_desc'):
-                print(f'ID {id}: mask_func_desc file not present')
+            mask_desc_sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_desc_sec_func_{mode}.txt'
+            if not os.path.exists(mask_desc_sec_func_file):
+                print(f'ID {id}: mask_desc_sec_func_{mode} file not present')
                 return
-            with open(os.path.join('descriptions', id, file_name), "r") as file:
+            with open(mask_desc_sec_func_file, "r") as file:
                 context1 = file.read()
                 
             with open(f'descriptions/{id}/cross-file.txt', 'r') as file:
@@ -128,8 +127,8 @@ class BaseEvaler(ABC):
             json.dump(self.responses_cache, f)
 
 class APIEvaler(BaseEvaler):
-    def __init__(self, model_name: str, context_type: str, prompt_type: str):
-        super().__init__(model_name, context_type, prompt_type)
+    def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
+        super().__init__(model_name, context_type, prompt_type, mode)
         self.client = self._initialize_client()
         self.create = self._get_create_function()
         self.get_content = self._get_content_function()
@@ -248,15 +247,15 @@ class APIEvaler(BaseEvaler):
                                          google.api_core.exceptions.ResourceExhausted,
                                          google.api_core.exceptions.TooManyRequests,
                                          google.api_core.exceptions.InternalServerError))
-    def get_response(self, id: str) -> str:
-        prompt = self._get_prompt(id)
+    def get_response(self, id: str, mode) -> str:
+        prompt = self._get_prompt(id, mode)
         system_prompt = self._get_system_prompt(id)
         if 'gemini-' in self.model_name:
             self.client = self._initialize_client(system_prompt)
             self.create = self._get_create_function()
         if id in self.responses_cache:
             print('Using cache')
-            return self.postprocess(self.responses_cache[id])
+            return self.postprocess(self.responses_cache[id]), prompt, system_prompt
 
         if self.prompt_type != 'refine':
             messages = self._create_messages(prompt, system_prompt)
@@ -284,10 +283,10 @@ class APIEvaler(BaseEvaler):
             response = self.get_content(response)[0]
         except Exception as e:
             print(f"{id}: Error: {e}")
-            return ""
+            return "", prompt, system_prompt
         self.responses_cache[id] = response
 
-        return self.postprocess(response)
+        return self.postprocess(response), prompt, system_prompt
 
 
 class ChatEvaler(BaseEvaler):

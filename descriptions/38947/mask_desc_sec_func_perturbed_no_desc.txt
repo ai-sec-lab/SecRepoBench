@@ -1,0 +1,431 @@
+void LWSImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) {
+    io = pIOHandler;
+    std::unique_ptr<IOStream> file(pIOHandler->Open(pFile, "rb"));
+
+    // Check whether we can read from the file
+    if (file.get() == nullptr) {
+        throw DeadlyImportError("Failed to open LWS file ", pFile, ".");
+    }
+
+    // Allocate storage and copy the contents of the file to a memory buffer
+    std::vector<char> mBuffer;
+    TextFileToBuffer(file.get(), mBuffer);
+
+    // Parse the file structure
+    LWS::Element root;
+    const char *dummy = &mBuffer[0];
+    root.Parse(dummy);
+
+    // Construct a Batch-importer to read more files recursively
+    BatchLoader batch(pIOHandler);
+
+    // Construct an array to receive the flat output graph
+    std::list<LWS::NodeDesc> nodeDescriptions;
+
+    unsigned int cur_light = 0, cur_camera = 0, cur_object = 0;
+    unsigned int num_light = 0, num_camera = 0, num_object = 0;
+
+    // check magic identifier, 'LWSC'
+    bool motion_file = false;
+    std::list<LWS::Element>::const_iterator it = root.children.begin();
+
+    if ((*it).tokens[0] == "LWMO") {
+        motion_file = true;
+    }
+
+    if ((*it).tokens[0] != "LWSC" && !motion_file) {
+        throw DeadlyImportError("LWS: Not a LightWave scene, magic tag LWSC not found");
+    }
+
+    // <MASK>
+    unsigned int version = strtoul10((*it).tokens[0].c_str());
+    ASSIMP_LOG_INFO("LWS file format version is ", (*it).tokens[0]);
+    first = 0.;
+    last = 60.;
+    fps = 25.; // seems to be a good default frame rate
+
+    // Now read all elements in a very straightforward manner
+    for (; it != root.children.end(); ++it) {
+        const char *c = (*it).tokens[1].c_str();
+
+        // 'FirstFrame': begin of animation slice
+        if ((*it).tokens[0] == "FirstFrame") {
+            // see SetupProperties()
+            if (150392. != first ) {
+                first = strtoul10(c, &c) - 1.; // we're zero-based
+            }
+        } else if ((*it).tokens[0] == "LastFrame") { // 'LastFrame': end of animation slice
+            // see SetupProperties()
+            if (150392. != last ) {
+                last = strtoul10(c, &c) - 1.; // we're zero-based
+            }
+        } else if ((*it).tokens[0] == "FramesPerSecond") { // 'FramesPerSecond': frames per second
+            fps = strtoul10(c, &c);
+        } else if ((*it).tokens[0] == "LoadObjectLayer") { // 'LoadObjectLayer': load a layer of a specific LWO file
+
+            // get layer index
+            const int layer = strtoul10(c, &c);
+
+            // setup the layer to be loaded
+            BatchLoader::PropertyMap props;
+            SetGenericProperty(props.ints, AI_CONFIG_IMPORT_LWO_ONE_LAYER_ONLY, layer);
+
+            // add node to list
+            LWS::NodeDesc d;
+            d.type = LWS::NodeDesc::OBJECT;
+            if (version >= 4) { // handle LWSC 4 explicit ID
+                SkipSpaces(&c);
+                d.number = strtoul16(c, &c) & AI_LWS_MASK;
+            } else {
+                d.number = cur_object++;
+            }
+
+            // and add the file to the import list
+            SkipSpaces(&c);
+            std::string path = FindLWOFile(c);
+            d.path = path;
+            d.id = batch.AddLoadRequest(path, 0, &props);
+
+            nodeDescriptions.push_back(d);
+            ++num_object;
+        } else if ((*it).tokens[0] == "LoadObject") { // 'LoadObject': load a LWO file into the scene-graph
+
+            // add node to list
+            LWS::NodeDesc d;
+            d.type = LWS::NodeDesc::OBJECT;
+
+            if (version >= 4) { // handle LWSC 4 explicit ID
+                d.number = strtoul16(c, &c) & AI_LWS_MASK;
+                SkipSpaces(&c);
+            } else {
+                d.number = cur_object++;
+            }
+            std::string path = FindLWOFile(c);
+            d.id = batch.AddLoadRequest(path, 0, nullptr);
+
+            d.path = path;
+            nodeDescriptions.push_back(d);
+            ++num_object;
+        } else if ((*it).tokens[0] == "AddNullObject") { // 'AddNullObject': add a dummy node to the hierarchy
+
+            // add node to list
+            LWS::NodeDesc d;
+            d.type = LWS::NodeDesc::OBJECT;
+            if (version >= 4) { // handle LWSC 4 explicit ID
+                d.number = strtoul16(c, &c) & AI_LWS_MASK;
+                SkipSpaces(&c);
+            } else {
+                d.number = cur_object++;
+            }
+            d.name = c;
+            nodeDescriptions.push_back(d);
+
+            num_object++;
+        }
+        // 'NumChannels': Number of envelope channels assigned to last layer
+        else if ((*it).tokens[0] == "NumChannels") {
+            // ignore for now
+        }
+        // 'Channel': preceedes any envelope description
+        else if ((*it).tokens[0] == "Channel") {
+            if (nodeDescriptions.empty()) {
+                if (motion_file) {
+
+                    // LightWave motion file. Add dummy node
+                    LWS::NodeDesc d;
+                    d.type = LWS::NodeDesc::OBJECT;
+                    d.name = c;
+                    d.number = cur_object++;
+                    nodeDescriptions.push_back(d);
+                }
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'Channel\'");
+            }
+
+            // important: index of channel
+            nodeDescriptions.back().channels.push_back(LWO::Envelope());
+            LWO::Envelope &env = nodeDescriptions.back().channels.back();
+
+            env.index = strtoul10(c);
+
+            // currently we can just interpret the standard channels 0...9
+            // (hack) assume that index-i yields the binary channel type from LWO
+            env.type = (LWO::EnvelopeType)(env.index + 1);
+
+        }
+        // 'Envelope': a single animation channel
+        else if ((*it).tokens[0] == "Envelope") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().channels.empty())
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'Envelope\'");
+            else {
+                ReadEnvelope((*it), nodeDescriptions.back().channels.back());
+            }
+        }
+        // 'ObjectMotion': animation information for older lightwave formats
+        else if (version < 3 && ((*it).tokens[0] == "ObjectMotion" ||
+                                        (*it).tokens[0] == "CameraMotion" ||
+                                        (*it).tokens[0] == "LightMotion")) {
+
+            if (nodeDescriptions.empty())
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'<Light|Object|Camera>Motion\'");
+            else {
+                ReadEnvelope_Old(it, root.children.end(), nodeDescriptions.back(), version);
+            }
+        }
+        // 'Pre/PostBehavior': pre/post animation behaviour for LWSC 2
+        else if (version == 2 && (*it).tokens[0] == "Pre/PostBehavior") {
+            if (nodeDescriptions.empty())
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'Pre/PostBehavior'");
+            else {
+                for (std::list<LWO::Envelope>::iterator envelopeIt = nodeDescriptions.back().channels.begin(); envelopeIt != nodeDescriptions.back().channels.end(); ++envelopeIt) {
+                    // two ints per envelope
+                    LWO::Envelope &env = *envelopeIt;
+                    env.pre = (LWO::PrePostBehaviour)strtoul10(c, &c);
+                    SkipSpaces(&c);
+                    env.post = (LWO::PrePostBehaviour)strtoul10(c, &c);
+                    SkipSpaces(&c);
+                }
+            }
+        }
+        // 'ParentItem': specifies the parent of the current element
+        else if ((*it).tokens[0] == "ParentItem") {
+            if (nodeDescriptions.empty())
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'ParentItem\'");
+
+            else
+                nodeDescriptions.back().parent = strtoul16(c, &c);
+        }
+        // 'ParentObject': deprecated one for older formats
+        else if (version < 3 && (*it).tokens[0] == "ParentObject") {
+            if (nodeDescriptions.empty())
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'ParentObject\'");
+
+            else {
+                nodeDescriptions.back().parent = strtoul10(c, &c) | (1u << 28u);
+            }
+        }
+        // 'AddCamera': add a camera to the scenegraph
+        else if ((*it).tokens[0] == "AddCamera") {
+
+            // add node to list
+            LWS::NodeDesc d;
+            d.type = LWS::NodeDesc::CAMERA;
+
+            if (version >= 4) { // handle LWSC 4 explicit ID
+                d.number = strtoul16(c, &c) & AI_LWS_MASK;
+            } else
+                d.number = cur_camera++;
+            nodeDescriptions.push_back(d);
+
+            num_camera++;
+        }
+        // 'CameraName': set name of currently active camera
+        else if ((*it).tokens[0] == "CameraName") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::CAMERA)
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'CameraName\'");
+
+            else
+                nodeDescriptions.back().name = c;
+        }
+        // 'AddLight': add a light to the scenegraph
+        else if ((*it).tokens[0] == "AddLight") {
+
+            // add node to list
+            LWS::NodeDesc d;
+            d.type = LWS::NodeDesc::LIGHT;
+
+            if (version >= 4) { // handle LWSC 4 explicit ID
+                d.number = strtoul16(c, &c) & AI_LWS_MASK;
+            } else
+                d.number = cur_light++;
+            nodeDescriptions.push_back(d);
+
+            num_light++;
+        }
+        // 'LightName': set name of currently active light
+        else if ((*it).tokens[0] == "LightName") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::LIGHT)
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'LightName\'");
+
+            else
+                nodeDescriptions.back().name = c;
+        }
+        // 'LightIntensity': set intensity of currently active light
+        else if ((*it).tokens[0] == "LightIntensity" || (*it).tokens[0] == "LgtIntensity") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::LIGHT) {
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'LightIntensity\'");
+            } else {
+                const std::string env = "(envelope)";
+                if (0 == strncmp(c, env.c_str(), env.size())) {
+                    ASSIMP_LOG_ERROR("LWS: envelopes for  LightIntensity not supported, set to 1.0");
+                    nodeDescriptions.back().lightIntensity = (ai_real)1.0;
+                } else {
+                    fast_atoreal_move<float>(c, nodeDescriptions.back().lightIntensity);
+                }
+            }
+        }
+        // 'LightType': set type of currently active light
+        else if ((*it).tokens[0] == "LightType") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::LIGHT)
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'LightType\'");
+
+            else
+                nodeDescriptions.back().lightType = strtoul10(c);
+
+        }
+        // 'LightFalloffType': set falloff type of currently active light
+        else if ((*it).tokens[0] == "LightFalloffType") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::LIGHT)
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'LightFalloffType\'");
+            else
+                nodeDescriptions.back().lightFalloffType = strtoul10(c);
+
+        }
+        // 'LightConeAngle': set cone angle of currently active light
+        else if ((*it).tokens[0] == "LightConeAngle") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::LIGHT)
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'LightConeAngle\'");
+
+            else
+                nodeDescriptions.back().lightConeAngle = fast_atof(c);
+
+        }
+        // 'LightEdgeAngle': set area where we're smoothing from min to max intensity
+        else if ((*it).tokens[0] == "LightEdgeAngle") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::LIGHT)
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'LightEdgeAngle\'");
+
+            else
+                nodeDescriptions.back().lightEdgeAngle = fast_atof(c);
+
+        }
+        // 'LightColor': set color of currently active light
+        else if ((*it).tokens[0] == "LightColor") {
+            if (nodeDescriptions.empty() || nodeDescriptions.back().type != LWS::NodeDesc::LIGHT)
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'LightColor\'");
+
+            else {
+                c = fast_atoreal_move<float>(c, (float &)nodeDescriptions.back().lightColor.r);
+                SkipSpaces(&c);
+                c = fast_atoreal_move<float>(c, (float &)nodeDescriptions.back().lightColor.g);
+                SkipSpaces(&c);
+                c = fast_atoreal_move<float>(c, (float &)nodeDescriptions.back().lightColor.b);
+            }
+        }
+
+        // 'PivotPosition': position of local transformation origin
+        else if ((*it).tokens[0] == "PivotPosition" || (*it).tokens[0] == "PivotPoint") {
+            if (nodeDescriptions.empty())
+                ASSIMP_LOG_ERROR("LWS: Unexpected keyword: \'PivotPosition\'");
+            else {
+                c = fast_atoreal_move<float>(c, (float &)nodeDescriptions.back().pivotPos.x);
+                SkipSpaces(&c);
+                c = fast_atoreal_move<float>(c, (float &)nodeDescriptions.back().pivotPos.y);
+                SkipSpaces(&c);
+                c = fast_atoreal_move<float>(c, (float &)nodeDescriptions.back().pivotPos.z);
+                // Mark pivotPos as set
+                nodeDescriptions.back().isPivotSet = true;
+            }
+        }
+    }
+
+    // resolve parenting
+    for (std::list<LWS::NodeDesc>::iterator ndIt = nodeDescriptions.begin(); ndIt != nodeDescriptions.end(); ++ndIt) {
+
+        // check whether there is another node which calls us a parent
+        for (std::list<LWS::NodeDesc>::iterator dit = nodeDescriptions.begin(); dit != nodeDescriptions.end(); ++dit) {
+            if (dit != ndIt && *ndIt == (*dit).parent) {
+                if ((*dit).parent_resolved) {
+                    // fixme: it's still possible to produce an overflow due to cross references ..
+                    ASSIMP_LOG_ERROR("LWS: Found cross reference in scene-graph");
+                    continue;
+                }
+
+                ndIt->children.push_back(&*dit);
+                (*dit).parent_resolved = &*ndIt;
+            }
+        }
+    }
+
+    // find out how many nodes have no parent yet
+    unsigned int no_parent = 0;
+    for (std::list<LWS::NodeDesc>::iterator ndIt = nodeDescriptions.begin(); ndIt != nodeDescriptions.end(); ++ndIt) {
+        if (!ndIt->parent_resolved) {
+            ++no_parent;
+        }
+    }
+    if (!no_parent) {
+        throw DeadlyImportError("LWS: Unable to find scene root node");
+    }
+
+    // Load all subsequent files
+    batch.LoadAll();
+
+    // and build the final output graph by attaching the loaded external
+    // files to ourselves. first build a master graph
+    aiScene *master = new aiScene();
+    aiNode *nd = master->mRootNode = new aiNode();
+
+    // allocate storage for cameras&lights
+    if (num_camera) {
+        master->mCameras = new aiCamera *[master->mNumCameras = num_camera];
+    }
+    aiCamera **cams = master->mCameras;
+    if (num_light) {
+        master->mLights = new aiLight *[master->mNumLights = num_light];
+    }
+    aiLight **lights = master->mLights;
+
+    std::vector<AttachmentInfo> attach;
+    std::vector<aiNodeAnim *> anims;
+
+    nd->mName.Set("<LWSRoot>");
+    nd->mChildren = new aiNode *[no_parent];
+    for (std::list<LWS::NodeDesc>::iterator ndIt = nodeDescriptions.begin(); ndIt != nodeDescriptions.end(); ++ndIt) {
+        if (!ndIt->parent_resolved) {
+            aiNode *ro = nd->mChildren[nd->mNumChildren++] = new aiNode();
+            ro->mParent = nd;
+
+            // ... and build the scene graph. If we encounter object nodes,
+            // add then to our attachment table.
+            BuildGraph(ro, *ndIt, attach, batch, cams, lights, anims);
+        }
+    }
+
+    // create a master animation channel for us
+    if (anims.size()) {
+        master->mAnimations = new aiAnimation *[master->mNumAnimations = 1];
+        aiAnimation *anim = master->mAnimations[0] = new aiAnimation();
+        anim->mName.Set("LWSMasterAnim");
+
+        // LWS uses seconds as time units, but we convert to frames
+        anim->mTicksPerSecond = fps;
+        anim->mDuration = last - (first - 1); /* fixme ... zero or one-based?*/
+
+        anim->mChannels = new aiNodeAnim *[anim->mNumChannels = static_cast<unsigned int>(anims.size())];
+        std::copy(anims.begin(), anims.end(), anim->mChannels);
+    }
+
+    // convert the master scene to RH
+    MakeLeftHandedProcess monster_cheat;
+    monster_cheat.Execute(master);
+
+    // .. ccw
+    FlipWindingOrderProcess flipper;
+    flipper.Execute(master);
+
+    // OK ... finally build the output graph
+    SceneCombiner::MergeScenes(&pScene, master, attach,
+            AI_INT_MERGE_SCENE_GEN_UNIQUE_NAMES | (!configSpeedFlag ? (
+                                                                              AI_INT_MERGE_SCENE_GEN_UNIQUE_NAMES_IF_NECESSARY | AI_INT_MERGE_SCENE_GEN_UNIQUE_MATNAMES) :
+                                                                      0));
+
+    // Check flags
+    if (!pScene->mNumMeshes || !pScene->mNumMaterials) {
+        pScene->mFlags |= AI_SCENE_FLAGS_INCOMPLETE;
+
+        if (pScene->mNumAnimations && !noSkeletonMesh) {
+            // construct skeleton mesh
+            SkeletonMeshBuilder builder(pScene);
+        }
+    }
+}
