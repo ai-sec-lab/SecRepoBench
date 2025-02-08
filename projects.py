@@ -51,7 +51,22 @@ unittest_commands = {
     "ndpi": "cd /src && tar -xvzf libpcap-1.9.1.tar.gz && cd libpcap-1.9.1 && ./configure --disable-shared && make -j\\$(nproc) && make install\n\
 [ -d /src/json-c ] && cd /src/json-c && mkdir -p build && cd build && cmake -DBUILD_SHARED_LIBS=OFF .. && make install\n\
 cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
-    "imagemagick":"apt-get update && apt-get install -y perl build-essential wget tar libperl-dev && apt-get clean && apt-get install -y ghostscript libfreetype6-dev libbz2-dev libtiff5-dev libjpeg-dev libopenjp2-7-dev libx11-dev libxext-dev hp2xx ffmpeg && ./configure --with-perl && make && make install && ldconfig /usr/local/lib && make check ; cd PerlMagick && make test ; perl -I../blib/lib -I../blib/arch t/bzlib/read.t ; perl -I../blib/lib -I../blib/arch t/bzlib/write.t ; perl -I../blib/lib -I../blib/arch t/zlib/read.t ; perl -I../blib/lib -I../blib/arch t/zlib/write.t ; perl -I../blib/lib -I../blib/arch t/tiff/read.t ; perl -I../blib/lib -I../blib/arch t/tiff/write.t ; perl -I../blib/lib -I../blib/arch t/ttf/read.t ; perl -I../blib/lib -I../blib/arch t/jpeg/read.t ; perl -I../blib/lib -I../blib/arch t/jpeg/write.t ; perl -I../blib/lib -I../blib/arch t/jng/read.t ; perl -I../blib/lib -I../blib/arch t/jng/write.t ; perl -I../blib/lib -I../blib/arch t/png/read.t ; perl -I../blib/lib -I../blib/arch t/png/write.t ; perl -I../blib/lib -I../blib/arch t/ps/read.t ; perl -I../blib/lib -I../blib/arch t/ps/write.t ; perl -I../blib/lib -I../blib/arch t/openjp2/read.t ; perl -I../blib/lib -I../blib/arch t/x11/read.t ; perl -I../blib/lib -I../blib/arch t/x11/write.t  ; perl -I../blib/lib -I../blib/arch t/hpgl/read.t ; perl -I../blib/lib -I../blib/arch t/mpeg/read.t",
+    "imagemagick":"apt-get update && apt-get install -y perl build-essential wget tar libperl-dev && apt-get clean && apt-get install -y ghostscript libfreetype6-dev libbz2-dev libtiff5-dev libjpeg-dev libopenjp2-7-dev libx11-dev libxext-dev hp2xx ffmpeg && ./configure --with-perl && make && make install && ldconfig /usr/local/lib && make check ; cd PerlMagick && make test\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/imagemagick/tests -type f -name '*.log'); do\n\
+    echo \\\"----------------------------------------\\\"\n\
+    echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+    echo \\\"----------------------------------------\\\"\n\
+    cat \\\"\\$log\\\"\n\
+    echo \\\"\\n\\\"\n\
+  done\n\
+  for log in \\$(find /src/imagemagick/Magick++ -type f -name '*.log'); do\n\
+    echo \\\"----------------------------------------\\\"\n\
+    echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+    echo \\\"----------------------------------------\\\"\n\
+    cat \\\"\\$log\\\"\n\
+    echo \\\"\\n\\\"\n\
+  done",
     #"mupdf":"",
     #"leptonica":"arvo compile && make check",
     "hunspell":"arvo compile && make check\n\
@@ -219,7 +234,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
     "jsoncpp":"arvo compile",
     #"uwebsockets":"apt-get -y install zlib1g-dev clang && make -j && export CXX=\"clang++ -stdlib=libc++\" && make -C ",
     #"gdal":"",
-    "ffmpeg":"cd ffmpeg ; export CFLAGS=\\\"\\$(echo \\\"\\$CFLAGS\\\" | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\\"\\$CXXFLAGS\\\" | sed -e 's/-gline-tables-only//' -e 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure --samples=fate-suite/ ; make ; make fate-rsync ; make fate",
+    "ffmpeg":"cd ffmpeg ; export CFLAGS=\\\"\\$(echo \\\"\\$CFLAGS\\\" | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\\"\\$CXXFLAGS\\\" | sed -e 's/-gline-tables-only//' -e 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure --samples=fate-suite/ ; make ; make fate-rsync ; make -k fate",
     "binutils-gdb":"cd binutils-gdb ; apt-get install -y dejagnu ; export CFLAGS=\\\"\\$(echo \\$CFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure ; make ; make install ; make check RUNTESTFLAGS='GDB=/usr/local/bin/gdb gdb.base/a2-run.exp'\n\
   echo 'Unit tests that call the target function:'\n\
   for log in /src/binutils-gdb/libbacktrace/*.log; do\n\
