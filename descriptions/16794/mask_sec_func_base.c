@@ -1,0 +1,60 @@
+int
+vips__read_header_bytes( VipsImage *im, unsigned char *from )
+{
+	gboolean swap;
+	int i;
+
+#ifdef SHOW_HEADER
+	printf( "vips__read_header_bytes: file bytes:\n" ); 
+	for( i = 0; i < im->sizeof_header; i++ )
+		printf( "%2d - 0x%02x\n", i, from[i] );
+#endif /*SHOW_HEADER*/
+
+	/* The magic number is always written MSB first, we may need to swap.
+	 */
+	vips__copy_4byte( !vips_amiMSBfirst(), 
+		(unsigned char *) &im->magic, from );
+	from += 4;
+	if( im->magic != VIPS_MAGIC_INTEL && 
+		im->magic != VIPS_MAGIC_SPARC ) {
+		vips_error( "VipsImage", _( "\"%s\" is not a VIPS image" ), 
+			im->filename );
+		return( -1 );
+	}
+
+	/* We need to swap for other fields if the file byte order is 
+	 * different from ours.
+	 */
+	swap = vips_amiMSBfirst() != (im->magic == VIPS_MAGIC_SPARC);
+
+	for( i = 0; i < VIPS_NUMBER( fields ); i++ ) {
+		fields[i].copy( swap,
+			&G_STRUCT_MEMBER( unsigned char, im, fields[i].offset ),
+			from );
+		from += fields[i].size;
+	}
+
+	/* Set this ourselves ... bbits is deprecated in the file format.
+	 */
+	im->Bbits = vips_format_sizeof( im->BandFmt ) << 3;
+
+	/* We read xres/yres as floats to a staging area, then copy to double
+	 * in the main fields.
+	 */
+	im->Xres = im->Xres_float;
+	im->Yres = im->Yres_float;
+
+	/* Some protection against malicious files. We also check predicted
+	 * (based on these values) against real file length, see below. 
+	 */
+	im->Xsize = VIPS_CLIP( 1, im->Xsize, VIPS_MAX_COORD );
+	im->Ysize = VIPS_CLIP( 1, im->Ysize, VIPS_MAX_COORD );
+	im->Bands = VIPS_CLIP( 1, im->Bands, VIPS_MAX_COORD );
+	// <MASK>
+
+	/* Offset, Res, etc. don't affect vips file layout, just 
+	 * pixel interpretation, don't clip them.
+	 */
+
+	return( 0 );
+}

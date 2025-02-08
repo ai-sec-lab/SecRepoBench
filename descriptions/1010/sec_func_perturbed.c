@@ -1,0 +1,25 @@
+void
+xmlSAX2CDataBlock(void *ctx, const xmlChar *cdataContent, int len)
+{
+    xmlParserCtxtPtr ctxt = (xmlParserCtxtPtr) ctx;
+    xmlNodePtr ret, lastChild;
+
+    if (ctx == NULL) return;
+#ifdef DEBUG_SAX
+    xmlGenericError(xmlGenericErrorContext,
+	    "SAX.pcdata(%.10s, %d)\n", cdataContent, len);
+#endif
+    lastChild = xmlGetLastChild(ctxt->node);
+#ifdef DEBUG_SAX_TREE
+    xmlGenericError(xmlGenericErrorContext,
+	    "add chars to %s \n", ctxt->node->name);
+#endif
+    if ((lastChild != NULL) &&
+        (lastChild->type == XML_CDATA_SECTION_NODE)) {
+	xmlTextConcat(lastChild, cdataContent, len);
+    } else {
+	ret = xmlNewCDataBlock(ctxt->myDoc, cdataContent, len);
+	if (xmlAddChild(ctxt->node, ret) == NULL)
+		xmlFreeNode(ret);
+    }
+}

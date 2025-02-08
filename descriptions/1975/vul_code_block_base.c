@@ -1,0 +1,1 @@
+psGXF->nGType = atoi(papszList[0]);

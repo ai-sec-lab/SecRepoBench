@@ -1,0 +1,289 @@
+static int
+pdfi_read_cff_dict(byte *p, byte *e, pdfi_gs_cff_font_priv *fontpriv, cff_font_offsets *offsets, bool topdict)
+{
+    pdfi_cff_font_priv *font = &fontpriv->pdfcffpriv;
+    struct
+    {
+        int ival;
+        float fval;
+    } args[PDFI_CFF_STACK_SIZE];
+    int offset;
+    int b0, n;
+    double f;
+    int i;
+    int code = 0;
+    bool do_priv = false;
+
+    memset(args, 0x00, sizeof(args));
+
+    offset = p - font->cffdata;
+
+    n = 0;
+    while (p < e) {
+        b0 = *p++;
+
+        switch (b0) {
+            case 22:
+            case 23:
+            case 24:
+            case 25:
+            case 26:
+            case 27:
+            case 31:
+            case 255:
+                continue;
+            default:
+                break;
+        }
+
+        if (b0 < 22) {
+            if (b0 == 12) {
+                if (p + 1 > e) {
+                    return gs_throw(-1, "corrupt dictionary (operator)");
+                }
+                b0 = 0x100 | *p++;
+            }
+            if (b0 == 13) {     /* UniqueID */
+            }
+
+            if (b0 == 14) {     /* XUID */
+            }
+
+            if (b0 == 15) {
+                offsets->charset_off = args[0].ival;
+            }
+
+            if (b0 == 16) {
+                offsets->encoding_off = args[0].ival;
+            }
+
+            /* some CFF file offsets */
+
+            if (b0 == 17) {
+                font->charstrings = font->cffdata + args[0].ival;
+            }
+
+            if (b0 == 18) {
+                offsets->private_size = args[0].ival;
+                offsets->private_off = args[1].ival;
+                /* Catch a broken font with a self referencing Private dict */
+                if (topdict == true)
+                    do_priv = offsets->private_size > 0 ? true : false;
+                else {
+                    do_priv = false;
+                    code = gs_error_invalidfont;
+                    break;
+                }
+            }
+
+            if (b0 == 19) {
+                font->subrs = font->cffdata + offset + args[0].ival;
+            }
+
+            if (b0 == (256 | 30)) {
+                code = pdfi_make_string_from_sid(font->ctx, (pdf_obj **) &font->registry, font, offsets, args[0].ival);
+                if (code < 0)
+                    return code;
+                code = pdfi_make_string_from_sid(font->ctx, (pdf_obj **) &font->ordering, font, offsets, args[1].ival);
+                if (code < 0)
+                    return code;
+                font->supplement = args[2].ival;
+                offsets->have_ros = true;
+                fontpriv->FontType = ft_CID_encrypted;
+            }
+
+            if (b0 == (256 | 34)) {
+                font->cidcount = args[0].ival;
+            }
+
+            if (b0 == (256 | 35)) {
+                font->uidbase = args[0].ival;
+            }
+
+            if (b0 == (256 | 36)) {
+                offsets->fdarray_off = args[0].ival;
+            }
+
+            if (b0 == (256 | 37)) {
+                offsets->fdselect_off = args[0].ival;
+            }
+
+            if (b0 == (256 | 38)) {
+                pdf_string *fnamestr = NULL;
+
+                code = pdfi_make_string_from_sid(font->ctx, (pdf_obj **) &fnamestr, font, offsets, args[0].ival);
+                if (code >= 0) {
+                    memcpy(fontpriv->font_name.chars, fnamestr->data, fnamestr->length);
+                    memcpy(fontpriv->key_name.chars, fnamestr->data, fnamestr->length);
+                    fontpriv->font_name.size = fontpriv->key_name.size = fnamestr->length;
+                    pdfi_countdown(fnamestr);
+                }
+            }
+
+            /* Type1 stuff that need to be set for the ptpriv struct */
+
+            if (b0 == (256 | 6)) {
+                if (args[0].ival == 1) {
+                    fontpriv->type1data.interpret = gs_type1_interpret;
+                    fontpriv->type1data.lenIV = -1;       /* FIXME */
+                }
+            }
+
+            if (b0 == (256 | 7)) {
+                fontpriv->FontMatrix.xx = args[0].fval;
+                fontpriv->FontMatrix.xy = args[1].fval;
+                fontpriv->FontMatrix.yx = args[2].fval;
+                fontpriv->FontMatrix.yy = args[3].fval;
+                fontpriv->FontMatrix.tx = args[4].fval;
+                fontpriv->FontMatrix.ty = args[5].fval;
+                offsets->have_matrix = true;
+            }
+
+            if (b0 == 5) {
+                fontpriv->FontBBox.p.x = args[0].fval;
+                fontpriv->FontBBox.p.y = args[1].fval;
+                fontpriv->FontBBox.q.x = args[2].fval;
+                fontpriv->FontBBox.q.y = args[3].fval;
+            }
+
+            if (b0 == 20)
+                fontpriv->type1data.defaultWidthX = float2fixed(args[0].fval);
+
+            if (b0 == 21)
+                fontpriv->type1data.nominalWidthX = float2fixed(args[0].fval);
+
+            if (b0 == (256 | 19))
+                fontpriv->type1data.initialRandomSeed = args[0].ival;
+
+            if (b0 == 6) {
+                if (n > max_BlueValues * 2) n = max_BlueValues * 2;
+                fontpriv->type1data.BlueValues.count = n;
+                fontpriv->type1data.BlueValues.values[0] = args[0].fval;
+                for (i = 1; i < n; i++) {
+                    fontpriv->type1data.BlueValues.values[i] = fontpriv->type1data.BlueValues.values[i - 1] + args[i].fval;
+                }
+            }
+
+            if (b0 == 7) {
+                if (n > max_OtherBlues * 2) n = max_OtherBlues * 2;
+                fontpriv->type1data.OtherBlues.count = n;
+                fontpriv->type1data.OtherBlues.values[0] = args[0].fval;
+                for (i = 1; i < n; i++) {
+                    fontpriv->type1data.OtherBlues.values[i] = fontpriv->type1data.OtherBlues.values[i - 1] + args[i].fval;
+                }
+            }
+
+            if (b0 == 8) {
+                if (n > max_FamilyBlues * 2) n = max_FamilyBlues * 2;
+                fontpriv->type1data.FamilyBlues.count = n;
+                fontpriv->type1data.FamilyBlues.values[0] = args[0].fval;
+                for (i = 1; i < n; i++) {
+                    fontpriv->type1data.FamilyBlues.values[i] = fontpriv->type1data.FamilyBlues.values[i - 1] + args[i].fval;
+                }
+            }
+
+            if (b0 == 9) {
+                if (n > max_FamilyOtherBlues * 2) n = max_FamilyOtherBlues * 2;
+                fontpriv->type1data.FamilyOtherBlues.count = n;
+                fontpriv->type1data.FamilyOtherBlues.values[0] = args[0].fval;
+                for (i = 1; i < n; i++) {
+                    fontpriv->type1data.FamilyOtherBlues.values[i] = fontpriv->type1data.FamilyOtherBlues.values[i - 1] + args[i].fval;
+                }
+            }
+
+            if (b0 == 10) {
+                fontpriv->type1data.StdHW.count = 1;
+                fontpriv->type1data.StdHW.values[0] = args[0].fval;
+            }
+
+            if (b0 == 11) {
+                fontpriv->type1data.StdVW.count = 1;
+                fontpriv->type1data.StdVW.values[0] = args[0].fval;
+            }
+
+            if (b0 == (256 | 9))
+                fontpriv->type1data.BlueScale = args[0].fval;
+
+            if (b0 == (256 | 10))
+                fontpriv->type1data.BlueShift = args[0].fval;
+
+            if (b0 == (256 | 11))
+                fontpriv->type1data.BlueFuzz = (int)args[0].fval;
+
+            if (b0 == (256 | 12)) {
+                fontpriv->type1data.StemSnapH.count = n;
+                for (f = 0, i = 0; i < n; f += args[i].fval, i++)
+                    fontpriv->type1data.StemSnapH.values[i] = f;
+            }
+
+            if (b0 == (256 | 13)) {
+                fontpriv->type1data.StemSnapV.count = n;
+                for (f = 0, i = 0; i < n; f += args[i].fval, i++)
+                    fontpriv->type1data.StemSnapV.values[i] = f;
+            }
+
+            if (b0 == (256 | 14))
+                fontpriv->type1data.ForceBold = args[0].ival;
+
+            if (b0 == (256 | 17))
+                fontpriv->type1data.LanguageGroup = args[0].ival;
+
+            if (b0 == (256 | 18))
+                fontpriv->type1data.ExpansionFactor = args[0].fval;
+
+            n = 0;
+        }
+
+        else {
+            if (b0 == 30) {
+                p = pdfi_read_cff_real(p, e, &args[n].fval);
+                if (!p) {
+                    dmprintf(fontpriv->memory, "\nCFF: corrupt dictionary operand\n");
+                    break;
+                }
+                args[n].ival = (int)args[n].fval;
+                n++;
+            }
+            else if (b0 == 28 || b0 == 29 || (b0 >= 32 && b0 <= 254)) {
+                /* If we run out of data reading an integer at the very end of the stream, don't throw an error
+                   just return.
+                 */
+                bool near_end = ((e - p) <= 4);
+                p = pdfi_read_cff_integer(p, e, b0, &args[n].ival);
+                if (!p) {
+                    if (!near_end)
+                        code = gs_note_error(gs_error_invalidfont);
+                    dmprintf(fontpriv->memory, "\nCFF: corrupt dictionary operand\n");
+                    break;
+                }
+                args[n].fval = (float)args[n].ival;
+                n++;
+            }
+            else {
+                dmprintf1(fontpriv->memory, "CFF: corrupt dictionary operand (b0 = %d)", b0);
+            }
+        }
+        if (n >= PDFI_CFF_STACK_SIZE) {
+            code = gs_error_invalidfont;
+            break;
+        }
+    }
+
+    /* recurse for the private dictionary */
+    if (do_priv && code >= 0) {
+        byte *dend = font->cffdata + offsets->private_off + offsets->private_size;
+
+        if (dend > font->cffend)
+            dend = font->cffend;
+
+        if (p == NULL)
+            code = gs_error_invalidfont;
+        else
+            code = pdfi_read_cff_dict(font->cffdata + offsets->private_off, dend, fontpriv, offsets, false);
+
+        if (code < 0)
+            dmprintf(fontpriv->memory, "CFF: cannot read private dictionary");
+    }
+
+    return code;
+}

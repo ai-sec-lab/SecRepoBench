@@ -1,0 +1,106 @@
+static status
+Variant_decodeJsonUnwrapExtensionObject(UA_Variant *variantData, const UA_DataType *type, 
+                                        CtxJson *ctx, ParseCtx *parseCtx, UA_Boolean moveToken) {
+    (void) type, (void) moveToken;
+    /*EXTENSIONOBJECT POSITION!*/
+    UA_UInt16 old_index = parseCtx->index;
+    UA_Boolean typeIdFound;
+    
+    /* Decode the DataType */
+    UA_NodeId typeId;
+    UA_NodeId_init(&typeId);
+
+    size_t searchTypeIdResult = 0;
+    status ret = lookAheadForKey(UA_JSONKEY_TYPEID, ctx, parseCtx, &searchTypeIdResult);
+
+    if(ret != UA_STATUSCODE_GOOD) {
+        /*No Typeid found*/
+        typeIdFound = false;
+        /*return UA_STATUSCODE_BADDECODINGERROR;*/
+    } else {
+        typeIdFound = true;
+        /* parse the nodeid */
+        parseCtx->index = (UA_UInt16)searchTypeIdResult;
+        ret = NodeId_decodeJson(&typeId, &UA_TYPES[UA_TYPES_NODEID], ctx, parseCtx, true);
+        if(ret != UA_STATUSCODE_GOOD) {
+            UA_NodeId_deleteMembers(&typeId);
+            return ret;
+        }
+
+        /*restore index, ExtensionObject position*/
+        parseCtx->index = old_index;
+    }
+
+    /* ---Decode the EncodingByte--- */
+    if(!typeIdFound)
+        return UA_STATUSCODE_BADDECODINGERROR;
+
+    UA_Boolean encodingFound = false;
+    /*Search for Encoding*/
+    size_t searchEncodingResult = 0;
+    ret = lookAheadForKey(UA_JSONKEY_ENCODING, ctx, parseCtx, &searchEncodingResult);
+
+    UA_UInt64 encoding = 0;
+    /*If no encoding found it is Structure encoding*/
+    if(ret == UA_STATUSCODE_GOOD) { /*FOUND*/
+        encodingFound = true;
+        char *extObjEncoding = (char*)(ctx->pos + parseCtx->tokenArray[searchEncodingResult].start);
+        size_t size = (size_t)(parseCtx->tokenArray[searchEncodingResult].end 
+                               - parseCtx->tokenArray[searchEncodingResult].start);
+        atoiUnsigned(extObjEncoding, size, &encoding);
+    }
+        
+    const UA_DataType *typeOfBody = UA_findDataType(&typeId);
+        
+    if(encoding == 0 || typeOfBody != NULL) {
+        /*This value is 0 if the body is Structure encoded as a JSON object (see 5.4.6).*/
+        /* Found a valid type and it is structure encoded so it can be unwrapped */
+        if (typeOfBody == NULL)
+            return UA_STATUSCODE_BADDECODINGERROR;
+
+        variantData->type = typeOfBody;
+
+        /* Allocate memory for type*/
+        variantData->data = UA_new(variantData->type);
+        if(!variantData->data) {
+            UA_NodeId_deleteMembers(&typeId);
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        }
+
+        /* Decode the content */
+        UA_NodeId nodeIddummy;
+        DecodeEntry entries[3] =
+            {
+             {UA_JSONKEY_TYPEID, &nodeIddummy, (decodeJsonSignature) NodeId_decodeJson, false, NULL},
+             {UA_JSONKEY_BODY, variantData->data,
+              (decodeJsonSignature) decodeJsonJumpTable[variantData->type->typeKind], false, NULL},
+             {UA_JSONKEY_ENCODING, NULL, NULL, false, NULL}};
+
+        ret = decodeFields(ctx, parseCtx, entries, encodingFound ? 3:2, typeOfBody);
+        if(ret != UA_STATUSCODE_GOOD) {
+            UA_free(variantData->data);
+            variantData->data = NULL;
+        }
+    } else if(encoding == 1 || encoding == 2 || typeOfBody == NULL) {
+        UA_NodeId_deleteMembers(&typeId);
+            
+        /* decode as ExtensionObject */
+        variantData->type = &UA_TYPES[UA_TYPES_EXTENSIONOBJECT];
+
+        /* Allocate memory for extensionobject*/
+        variantData->data = UA_new(variantData->type);
+        if(!variantData->data)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+
+        /* decode: Does not move tokenindex. */
+        ret = DECODE_DIRECT_JSON(variantData->data, ExtensionObject);
+        if(ret != UA_STATUSCODE_GOOD) {
+            UA_free(variantData->data);
+            variantData->data = NULL;
+        }
+    } else {
+        /*no recognized encoding type*/
+        return UA_STATUSCODE_BADDECODINGERROR;
+    }
+    return ret;
+}

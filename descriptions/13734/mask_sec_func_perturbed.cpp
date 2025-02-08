@@ -1,0 +1,254 @@
+CPLErr VRTSimpleSource::XMLInit( CPLXMLNode *psSrc, const char *pszVRTPath,
+                                 void* pHandle,
+                                 std::map<CPLString, GDALDataset*>& oMapSharedSources )
+
+{
+    m_osResampling = CPLGetXMLValue( psSrc, "resampling", "");
+
+/* -------------------------------------------------------------------- */
+/*      Prepare filename.                                               */
+/* -------------------------------------------------------------------- */
+    CPLXMLNode* psSourceFileNameNode = CPLGetXMLNode(psSrc,"SourceFilename");
+    const char *pszFilename =
+        psSourceFileNameNode ?
+        CPLGetXMLValue(psSourceFileNameNode, nullptr, nullptr) : nullptr;
+
+    if( pszFilename == nullptr )
+    {
+        CPLError( CE_Warning, CPLE_AppDefined,
+                  "Missing <SourceFilename> element in VRTRasterBand." );
+        return CE_Failure;
+    }
+
+    // Backup original filename and relativeToVRT so as to be able to
+    // serialize them identically again (#5985)
+    m_osSourceFileNameOri = pszFilename;
+    m_bRelativeToVRTOri =
+        atoi( CPLGetXMLValue( psSourceFileNameNode, "relativetoVRT", "0") );
+    const char* pszShared = CPLGetXMLValue( psSourceFileNameNode,
+                                            "shared", nullptr );
+    if( pszShared == nullptr )
+    {
+        pszShared = CPLGetConfigOption("VRT_SHARED_SOURCE", nullptr );
+    }
+    bool bShared = false;
+    if( pszShared != nullptr )
+    {
+        bShared = CPLTestBool(pszShared);
+        m_nExplicitSharedStatus = bShared;
+    }
+    else
+    {
+        bShared = true;
+    }
+
+    char *pszSrcDSName = nullptr;
+    if( pszVRTPath != nullptr && m_bRelativeToVRTOri )
+    {
+        bool bDone = false;
+        for( size_t i = 0;
+             i < sizeof(apszSpecialSyntax) / sizeof(apszSpecialSyntax[0]);
+             ++i )
+        {
+            const char* pszSyntax = apszSpecialSyntax[i];
+            CPLString osPrefix(pszSyntax);
+            osPrefix.resize(strchr(pszSyntax, ':') - pszSyntax + 1);
+            if( pszSyntax[osPrefix.size()] == '"' )
+                osPrefix += '"';
+            if( EQUALN(pszFilename, osPrefix, osPrefix.size()) )
+            {
+                if( STARTS_WITH_CI(pszSyntax + osPrefix.size(), "{ANY}") )
+                {
+                    const char * pszLastPart = strrchr(pszFilename, ':') + 1;
+                    // CSV:z:/foo.xyz
+                    if( ( pszLastPart[0] == '/' ||
+                          pszLastPart[0] == '\\') &&
+                        pszLastPart - pszFilename >= 3 &&
+                        pszLastPart[-3] == ':' )
+                    {
+                        pszLastPart -= 2;
+                    }
+                    CPLString osPrefixFilename = pszFilename;
+                    osPrefixFilename.resize(pszLastPart - pszFilename);
+                    pszSrcDSName = CPLStrdup( (osPrefixFilename +
+                        CPLProjectRelativeFilename( pszVRTPath, pszLastPart )).c_str() );
+                    bDone = true;
+                }
+                else if( STARTS_WITH_CI(pszSyntax + osPrefix.size(), "{FILENAME}") )
+                {
+                    CPLString osFilename(pszFilename + osPrefix.size());
+                    size_t nPos = 0;
+                    if( osFilename.size() >= 3 && osFilename[1] == ':' &&
+                        (osFilename[2] == '\\' || osFilename[2] == '/') )
+                        nPos = 2;
+                    nPos = osFilename.find(
+                        pszSyntax[osPrefix.size() + strlen("{FILENAME}")],
+                        nPos);
+                    if( nPos != std::string::npos )
+                    {
+                        const CPLString osSuffix = osFilename.substr(nPos);
+                        osFilename.resize(nPos);
+                        pszSrcDSName = CPLStrdup(
+                            (osPrefix + CPLProjectRelativeFilename(
+                                pszVRTPath, osFilename ) + osSuffix).c_str() );
+                        bDone = true;
+                    }
+                }
+                break;
+            }
+        }
+        if( !bDone )
+        {
+            pszSrcDSName = CPLStrdup(
+                CPLProjectRelativeFilename( pszVRTPath, pszFilename ) );
+        }
+    }
+    else
+    {
+        pszSrcDSName = CPLStrdup( pszFilename );
+    }
+
+    const char* pszSourceBand = CPLGetXMLValue(psSrc,"SourceBand","1");
+    int nSrcBand = 0;
+    bool bGetMaskBand = false;
+    if( STARTS_WITH_CI(pszSourceBand, "mask") )
+    {
+        bGetMaskBand = true;
+        if( pszSourceBand[4] == ',' )
+            nSrcBand = atoi(pszSourceBand + 5);
+        else
+            nSrcBand = 1;
+    }
+    else
+    {
+        nSrcBand = atoi(pszSourceBand);
+    }
+    if( !GDALCheckBandCount(nSrcBand, 0) )
+    {
+        CPLError( CE_Warning, CPLE_AppDefined,
+                  "Invalid <SourceBand> element in VRTRasterBand." );
+        CPLFree( pszSrcDSName );
+        return CE_Failure;
+    }
+
+    // Newly generated VRT will have RasterXSize, RasterYSize, DataType,
+    // BlockXSize, BlockYSize tags, so that we don't have actually to
+    // open the real dataset immediately, but we can use a proxy dataset
+    // instead. This is particularly useful when dealing with huge VRT
+    // For example, a VRT with the world coverage of DTED0 (25594 files).
+    CPLXMLNode* psSrcProperties = CPLGetXMLNode(psSrc,"SourceProperties");
+    int nRasterXSize = 0;
+    int nRasterYSize = 0;
+    // TODO(schwehr): What is the difference between 0 (GDT_Unknown) and -1?
+    // Does there need to be a GDT_Uninitialized?
+    GDALDataType eDataType = static_cast<GDALDataType>(-1);
+    int nBlockXSize = 0;
+    int nBlockYSize = 0;
+    if( psSrcProperties )
+    {
+        nRasterXSize =
+            atoi(CPLGetXMLValue(psSrcProperties, "RasterXSize", "0"));
+        nRasterYSize =
+            atoi(CPLGetXMLValue(psSrcProperties, "RasterYSize", "0"));
+        const char *pszDataType =
+            CPLGetXMLValue(psSrcProperties, "DataType", nullptr);
+        if( pszDataType != nullptr )
+        {
+            for( int iType = 0; iType < GDT_TypeCount; iType++ )
+            {
+                const char *pszThisName =
+                    GDALGetDataTypeName(static_cast<GDALDataType>(iType));
+
+                if( pszThisName != nullptr && EQUAL(pszDataType, pszThisName) )
+                {
+                    eDataType = static_cast<GDALDataType>(iType);
+                    break;
+                }
+            }
+        }
+        nBlockXSize = atoi(CPLGetXMLValue(psSrcProperties, "BlockXSize", "0"));
+        nBlockYSize = atoi(CPLGetXMLValue(psSrcProperties, "BlockYSize", "0"));
+        if( nRasterXSize < 0 || nRasterYSize < 0 ||
+            nBlockXSize < 0 || nBlockYSize < 0 )
+        {
+            CPLError( CE_Warning, CPLE_AppDefined,
+                      "Invalid <SourceProperties> element in VRTRasterBand." );
+            CPLFree( pszSrcDSName );
+            return CE_Failure;
+        }
+    }
+
+    char** papszOpenOptions = GDALDeserializeOpenOptionsFromXML(psSrc);
+    if( strstr(pszSrcDSName,"<VRTDataset") != nullptr )
+        papszOpenOptions =
+            CSLSetNameValue(papszOpenOptions, "ROOT_PATH", pszVRTPath);
+
+    // <MASK>
+
+    if( bGetMaskBand )
+    {
+        m_poMaskBandMainBand = m_poRasterBand;
+        m_poRasterBand = m_poRasterBand->GetMaskBand();
+        if( m_poRasterBand == nullptr )
+            return CE_Failure;
+    }
+
+/* -------------------------------------------------------------------- */
+/*      Set characteristics.                                            */
+/* -------------------------------------------------------------------- */
+    CPLXMLNode * const psSrcRect = CPLGetXMLNode(psSrc,"SrcRect");
+    if( psSrcRect )
+    {
+        double xOff = CPLAtof(CPLGetXMLValue(psSrcRect,"xOff","-1"));
+        double yOff = CPLAtof(CPLGetXMLValue(psSrcRect,"yOff","-1"));
+        double xSize = CPLAtof(CPLGetXMLValue(psSrcRect,"xSize","-1"));
+        double ySize = CPLAtof(CPLGetXMLValue(psSrcRect,"ySize","-1"));
+        if( !CPLIsFinite(xOff) || !CPLIsFinite(yOff) ||
+            !CPLIsFinite(xSize) || !CPLIsFinite(ySize) ||
+            xOff < INT_MIN || xOff > INT_MAX ||
+            yOff < INT_MIN || yOff > INT_MAX ||
+            !(xSize > 0 || xSize == -1) || xSize > INT_MAX ||
+            !(ySize > 0 || ySize == -1) || ySize > INT_MAX )
+        {
+            CPLError(CE_Failure, CPLE_AppDefined, "Wrong values in SrcRect");
+            return CE_Failure;
+        }
+        SetSrcWindow( xOff, yOff, xSize, ySize );
+    }
+    else
+    {
+        m_dfSrcXOff = -1;
+        m_dfSrcYOff = -1;
+        m_dfSrcXSize = -1;
+        m_dfSrcYSize = -1;
+    }
+
+    CPLXMLNode * const psDstRect = CPLGetXMLNode(psSrc,"DstRect");
+    if( psDstRect )
+    {
+        double xOff = CPLAtof(CPLGetXMLValue(psDstRect,"xOff","-1"));
+        double yOff = CPLAtof(CPLGetXMLValue(psDstRect,"yOff","-1"));
+        double xSize = CPLAtof(CPLGetXMLValue(psDstRect,"xSize","-1"));
+        double ySize = CPLAtof(CPLGetXMLValue(psDstRect,"ySize","-1"));
+        if( !CPLIsFinite(xOff) || !CPLIsFinite(yOff) ||
+            !CPLIsFinite(xSize) || !CPLIsFinite(ySize) ||
+            xOff < INT_MIN || xOff > INT_MAX ||
+            yOff < INT_MIN || yOff > INT_MAX ||
+            !(xSize > 0 || xSize == -1) || xSize > INT_MAX ||
+            !(ySize > 0 || ySize == -1) || ySize > INT_MAX )
+        {
+            CPLError(CE_Failure, CPLE_AppDefined, "Wrong values in DstRect");
+            return CE_Failure;
+        }
+        SetDstWindow( xOff, yOff, xSize, ySize );
+    }
+    else
+    {
+      m_dfDstXOff = -1;
+      m_dfDstYOff = -1;
+      m_dfDstXSize = -1;
+      m_dfDstYSize = -1;
+    }
+
+    return CE_None;
+}

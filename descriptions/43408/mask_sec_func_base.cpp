@@ -1,0 +1,4 @@
+void SipRequestFirstLine::parseVersion()
+{
+	// <MASK>
+}

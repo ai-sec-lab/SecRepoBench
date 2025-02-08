@@ -1,0 +1,114 @@
+int SkAnimatedImage::decodeNextFrame() {
+    if (fFinished) {
+        return kFinished;
+    }
+
+    bool animationEnded = false;
+    int frameToDecode = this->computeNextFrame(fActiveFrame.fIndex, &animationEnded);
+
+    SkCodec::FrameInfo frameDetails;
+    if (fCodec->codec()->getFrameInfo(frameToDecode, &frameDetails)) {
+        if (!frameDetails.fFullyReceived) {
+            SkCodecPrintf("Frame %i not fully received\n", frameToDecode);
+            return this->finish();
+        }
+
+        fCurrentFrameDuration = frameDetails.fDuration;
+    } else {
+        animationEnded = true;
+        if (0 == frameToDecode) {
+            // <MASK>
+            fCurrentFrameDuration = kFinished;
+        } else {
+            SkCodecPrintf("Error getting frameInfo for frame %i\n",
+                          frameToDecode);
+            return this->finish();
+        }
+    }
+
+    if (frameToDecode == fActiveFrame.fIndex) {
+        if (animationEnded) {
+            return this->finish();
+        }
+        return fCurrentFrameDuration;
+    }
+
+    if (frameToDecode == fRestoreFrame.fIndex) {
+        SkTSwap(fActiveFrame, fRestoreFrame);
+        if (animationEnded) {
+            return this->finish();
+        }
+        return fCurrentFrameDuration;
+    }
+
+    // The following code makes an effort to avoid overwriting a frame that will
+    // be used again. If frame |i| is_restore_previous, frame |i+1| will not
+    // depend on frame |i|, so do not overwrite frame |i-1|, which may be needed
+    // for frame |i+1|.
+    // We could be even smarter about which frames to save by looking at the
+    // entire dependency chain.
+    SkCodec::Options options;
+    options.fFrameIndex = frameToDecode;
+    if (frameDetails.fRequiredFrame == SkCodec::kNone) {
+        if (is_restore_previous(frameDetails.fDisposalMethod)) {
+            // frameToDecode will be discarded immediately after drawing, so
+            // do not overwrite a frame which could possibly be used in the
+            // future.
+            if (fActiveFrame.fIndex != SkCodec::kNone &&
+                    !is_restore_previous(fActiveFrame.fDisposalMethod)) {
+                SkTSwap(fActiveFrame, fRestoreFrame);
+            }
+        }
+    } else {
+        auto validPriorFrame = [&frameDetails, &frameToDecode](const Frame& frame) {
+            if (SkCodec::kNone == frame.fIndex || is_restore_previous(frame.fDisposalMethod)) {
+                return false;
+            }
+
+            return frame.fIndex >= frameDetails.fRequiredFrame && frame.fIndex < frameToDecode;
+        };
+        if (validPriorFrame(fActiveFrame)) {
+            if (is_restore_previous(frameDetails.fDisposalMethod)) {
+                // fActiveFrame is a good frame to use for this one, but we
+                // don't want to overwrite it.
+                fActiveFrame.copyTo(&fRestoreFrame);
+            }
+            options.fPriorFrame = fActiveFrame.fIndex;
+        } else if (validPriorFrame(fRestoreFrame)) {
+            if (!is_restore_previous(frameDetails.fDisposalMethod)) {
+                SkTSwap(fActiveFrame, fRestoreFrame);
+            } else if (!fRestoreFrame.copyTo(&fActiveFrame)) {
+                SkCodecPrintf("Failed to restore frame\n");
+                return this->finish();
+            }
+            options.fPriorFrame = fActiveFrame.fIndex;
+        }
+    }
+
+    auto alphaType = kOpaque_SkAlphaType == frameDetails.fAlphaType ?
+                     kOpaque_SkAlphaType : kPremul_SkAlphaType;
+    SkBitmap* dst = &fActiveFrame.fBitmap;
+    if (dst->getPixels()) {
+        SkAssertResult(dst->setAlphaType(alphaType));
+    } else {
+        auto info = fDecodeInfo.makeAlphaType(alphaType);
+        if (!dst->tryAllocPixels(info)) {
+            return this->finish();
+        }
+    }
+
+    auto result = fCodec->codec()->getPixels(dst->info(), dst->getPixels(), dst->rowBytes(),
+                                             &options);
+    if (result != SkCodec::kSuccess) {
+        SkCodecPrintf("error %i, frame %i of %i\n", result, frameToDecode, fFrameCount);
+        return this->finish();
+    }
+
+    fActiveFrame.fIndex = frameToDecode;
+    fActiveFrame.fDisposalMethod = frameDetails.fDisposalMethod;
+
+    if (animationEnded) {
+        return this->finish();
+    }
+    return fCurrentFrameDuration;
+}

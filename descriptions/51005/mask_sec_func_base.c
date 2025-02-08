@@ -1,0 +1,74 @@
+static int
+pdfi_cff_enumerate_glyph(gs_font *pfont, int *pindex,
+                         gs_glyph_space_t glyph_space, gs_glyph *pglyph)
+{
+    int code, j;
+    pdf_name *key = NULL;
+    uint64_t i = (uint64_t) *pindex;
+    pdf_dict *cstrings;
+    pdf_font *pdffont = (pdf_font *) pfont->client_data;
+    pdf_context *ctx = (pdf_context *) pdffont->ctx;
+
+    (void)glyph_space;
+
+    /* Slightly naff: if build_char is NULL, this is an FDArray subfont */
+    if (pfont->procs.build_char == NULL) {
+        *pindex = 0;
+        *pglyph = GS_NO_GLYPH;
+        return 0;
+    }
+    else if (pdffont->pdfi_font_type == e_pdf_cidfont_type0) {
+        pdf_cidfont_type0 *cffcidfont = (pdf_cidfont_type0 *) pdffont;
+        cstrings = cffcidfont->CharStrings;
+    }
+    else {
+        pdf_font_cff *cfffont = (pdf_font_cff *) pdffont;
+
+        cstrings = cfffont->CharStrings;
+    }
+    if (*pindex <= 0)
+        code = pdfi_dict_key_first(pdffont->ctx, cstrings, (pdf_obj **) &key, &i);
+    else
+        code = pdfi_dict_key_next(pdffont->ctx, cstrings, (pdf_obj **) &key, &i);
+    if (code < 0) {
+        i = 0;
+        code = gs_note_error(gs_error_undefined);
+    }
+    /* If Encoding == NULL, it's an FDArray subfont */
+    else if (pdffont->pdfi_font_type != e_pdf_cidfont_type0 && pdffont->Encoding != NULL) {
+        // <MASK>
+    }
+    else {
+        char kbuf[32];
+        int l;
+        unsigned int val;
+        /* If this font started life as a CFF font that we've force to
+           act like a CIDFont, we can end up with a ".notdef" glyph name
+         */
+        if (key->length == 7 && memcmp(key->data, ".notdef", 7) == 0) {
+            val = 0;
+            l = 1;
+        }
+        else {
+            memcpy(kbuf, key->data, key->length);
+            kbuf[key->length] = 0;
+
+            l = sscanf(kbuf, "%ud", &val);
+        }
+        if (l > 0) {
+            pdf_cidfont_type0 *cffcidfont = (pdf_cidfont_type0 *) pdffont;
+            if (cffcidfont->cidtogidmap != NULL && cffcidfont->cidtogidmap->length > 0) {
+                for (j = (cffcidfont->cidtogidmap->length >> 1) - 1; j >= 0; j--) {
+                    if (val == (cffcidfont->cidtogidmap->data[j << 1] << 8 | cffcidfont->cidtogidmap->data[(j << 1) + 1])) {
+                        val = j;
+                        break;
+                    }
+                }
+            }
+            *pglyph = (gs_glyph) (val) + GS_MIN_CID_GLYPH;
+        }
+    }
+    *pindex = (int)i;
+    pdfi_countdown(key);
+    return code;
+}

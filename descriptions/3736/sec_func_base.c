@@ -1,0 +1,137 @@
+void Service_FindServers(UA_Server *server, UA_Session *session,
+                         const UA_FindServersRequest *request,
+                         UA_FindServersResponse *response) {
+    UA_LOG_DEBUG_SESSION(server->config.logger, session,
+                         "Processing FindServersRequest");
+
+    size_t foundServersSize = 0;
+    UA_ApplicationDescription *foundServers = NULL;
+
+    UA_Boolean addSelf = UA_FALSE;
+    // temporarily store all the pointers which we found to avoid reiterating
+    // through the list
+    UA_RegisteredServer **foundServerFilteredPointer = NULL;
+
+#ifdef UA_ENABLE_DISCOVERY
+    // check if client only requested a specific set of servers
+    if (request->serverUrisSize) {
+        size_t fsfpSize = sizeof(UA_RegisteredServer*) * server->registeredServersSize;
+        foundServerFilteredPointer = (UA_RegisteredServer **)UA_malloc(fsfpSize);
+        if(!foundServerFilteredPointer) {
+            response->responseHeader.serviceResult = UA_STATUSCODE_BADOUTOFMEMORY;
+            return;
+        }
+
+        for(size_t i = 0; i < request->serverUrisSize; i++) {
+            if(!addSelf && UA_String_equal(&request->serverUris[i],
+                                           &server->config.applicationDescription.applicationUri)) {
+                addSelf = UA_TRUE;
+            } else {
+                registeredServer_list_entry* current;
+                LIST_FOREACH(current, &server->registeredServers, pointers) {
+                    if(UA_String_equal(&current->registeredServer.serverUri, &request->serverUris[i])) {
+                        // check if entry already in list:
+                        UA_Boolean existing = false;
+                        for (size_t j=0; j<foundServersSize; j++) {
+                            if (UA_String_equal(&foundServerFilteredPointer[j]->serverUri, &request->serverUris[i])) {
+                                existing = true;
+                                break;
+                            }
+                        }
+                        if (!existing)
+                            foundServerFilteredPointer[foundServersSize++] = &current->registeredServer;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if(addSelf)
+            foundServersSize++;
+
+    } else {
+        addSelf = true;
+        // self + registered servers
+        foundServersSize = 1 + server->registeredServersSize;
+    }
+#else
+    if(request->serverUrisSize) {
+        for(size_t i = 0; i < request->serverUrisSize; i++) {
+            if(UA_String_equal(&request->serverUris[i],
+                               &server->config.applicationDescription.applicationUri)) {
+                addSelf = UA_TRUE;
+                foundServersSize = 1;
+                break;
+            }
+        }
+    } else {
+        addSelf = UA_TRUE;
+        foundServersSize = 1;
+    }
+#endif
+
+    if(foundServersSize) {
+        size_t fsSize = sizeof(UA_ApplicationDescription) * foundServersSize;
+        foundServers = (UA_ApplicationDescription *)UA_malloc(fsSize);
+        if(!foundServers) {
+            if(foundServerFilteredPointer)
+                UA_free(foundServerFilteredPointer);
+            response->responseHeader.serviceResult = UA_STATUSCODE_BADOUTOFMEMORY;
+            return;
+        }
+
+        if(addSelf) {
+            response->responseHeader.serviceResult =
+                setApplicationDescriptionFromServer(&foundServers[0], server);
+            if(response->responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
+                UA_free(foundServers);
+                if (foundServerFilteredPointer)
+                    UA_free(foundServerFilteredPointer);
+                return;
+            }
+        }
+
+#ifdef UA_ENABLE_DISCOVERY
+        size_t currentIndex = 0;
+        if (addSelf)
+            currentIndex++;
+
+        // add all the registered servers to the list
+
+        if (foundServerFilteredPointer) {
+            // use filtered list because client only requested specific uris
+            // -1 because foundServersSize also includes this self server
+            size_t iterCount = addSelf ? foundServersSize - 1 : foundServersSize;
+            for (size_t i = 0; i < iterCount; i++) {
+                response->responseHeader.serviceResult =
+                        setApplicationDescriptionFromRegisteredServer(request, &foundServers[currentIndex++],
+                                                                      foundServerFilteredPointer[i]);
+                if (response->responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
+                    UA_free(foundServers);
+                    UA_free(foundServerFilteredPointer);
+                    return;
+                }
+            }
+            UA_free(foundServerFilteredPointer);
+            foundServerFilteredPointer = NULL;
+        } else {
+            registeredServer_list_entry* current;
+            LIST_FOREACH(current, &server->registeredServers, pointers) {
+                response->responseHeader.serviceResult =
+                        setApplicationDescriptionFromRegisteredServer(request, &foundServers[currentIndex++],
+                                                                      &current->registeredServer);
+                if (response->responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
+                    UA_free(foundServers);
+                    return;
+                }
+            }
+        }
+#endif
+    }
+
+    if (foundServerFilteredPointer)
+        UA_free(foundServerFilteredPointer);
+
+    response->servers = foundServers;
+    response->serversSize = foundServersSize;
+}

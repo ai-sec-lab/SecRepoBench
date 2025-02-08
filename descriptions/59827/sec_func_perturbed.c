@@ -1,0 +1,40 @@
+void
+mrb_init_kernel(mrb_state *mrbstateptr)
+{
+  struct RClass *krn;
+
+  mrbstateptr->kernel_module = krn = mrb_define_module(mrbstateptr, "Kernel");                                                    /* 15.3.1 */
+  mrb_define_class_method(mrbstateptr, krn, "block_given?",         mrb_f_block_given_p_m,           MRB_ARGS_NONE());    /* 15.3.1.2.2  */
+  mrb_define_class_method(mrbstateptr, krn, "iterator?",            mrb_f_block_given_p_m,           MRB_ARGS_NONE());    /* 15.3.1.2.5  */
+  mrb_define_class_method(mrbstateptr, krn, "raise",                mrb_f_raise,                     MRB_ARGS_OPT(2));    /* 15.3.1.2.12 */
+
+  mrb_define_method(mrbstateptr, krn, "===",                        mrb_equal_m,                     MRB_ARGS_REQ(1));    /* 15.3.1.3.2  */
+  mrb_define_method(mrbstateptr, krn, "<=>",                        mrb_cmp_m,                       MRB_ARGS_REQ(1));
+  mrb_define_method(mrbstateptr, krn, "block_given?",               mrb_f_block_given_p_m,           MRB_ARGS_NONE());    /* 15.3.1.3.6  */
+  mrb_define_method(mrbstateptr, krn, "class",                      mrb_obj_class_m,                 MRB_ARGS_NONE());    /* 15.3.1.3.7  */
+  mrb_define_method(mrbstateptr, krn, "clone",                      mrb_obj_clone,                   MRB_ARGS_NONE());    /* 15.3.1.3.8  */
+  mrb_define_method(mrbstateptr, krn, "dup",                        mrb_obj_dup,                     MRB_ARGS_NONE());    /* 15.3.1.3.9  */
+  mrb_define_method(mrbstateptr, krn, "eql?",                       mrb_obj_equal_m,                 MRB_ARGS_REQ(1));    /* 15.3.1.3.10 */
+  mrb_define_method(mrbstateptr, krn, "freeze",                     mrb_obj_freeze,                  MRB_ARGS_NONE());
+  mrb_define_method(mrbstateptr, krn, "frozen?",                    mrb_obj_frozen,                  MRB_ARGS_NONE());
+  mrb_define_method(mrbstateptr, krn, "hash",                       mrb_obj_hash,                    MRB_ARGS_NONE());    /* 15.3.1.3.15 */
+  mrb_define_method(mrbstateptr, krn, "initialize_copy",            mrb_obj_init_copy,               MRB_ARGS_REQ(1));    /* 15.3.1.3.16 */
+  mrb_define_method(mrbstateptr, krn, "inspect",                    mrb_obj_inspect,                 MRB_ARGS_NONE());    /* 15.3.1.3.17 */
+  mrb_define_method(mrbstateptr, krn, "instance_of?",               obj_is_instance_of,              MRB_ARGS_REQ(1));    /* 15.3.1.3.19 */
+
+  mrb_define_method(mrbstateptr, krn, "is_a?",                      mrb_obj_is_kind_of_m,            MRB_ARGS_REQ(1));    /* 15.3.1.3.24 */
+  mrb_define_method(mrbstateptr, krn, "iterator?",                  mrb_f_block_given_p_m,           MRB_ARGS_NONE());    /* 15.3.1.3.25 */
+  mrb_define_method(mrbstateptr, krn, "kind_of?",                   mrb_obj_is_kind_of_m,            MRB_ARGS_REQ(1));    /* 15.3.1.3.26 */
+  mrb_define_method(mrbstateptr, krn, "nil?",                       mrb_false,                       MRB_ARGS_NONE());    /* 15.3.1.3.32 */
+  mrb_define_method(mrbstateptr, krn, "object_id",                  mrb_obj_id_m,                    MRB_ARGS_NONE());    /* 15.3.1.3.33 */
+  mrb_define_method(mrbstateptr, krn, "raise",                      mrb_f_raise,                     MRB_ARGS_ANY());     /* 15.3.1.3.40 */
+  mrb_define_method(mrbstateptr, krn, "remove_instance_variable",   mrb_obj_remove_instance_variable,MRB_ARGS_REQ(1));    /* 15.3.1.3.41 */
+  mrb_define_method(mrbstateptr, krn, "respond_to?",                obj_respond_to,                  MRB_ARGS_ARG(1,1));     /* 15.3.1.3.43 */
+  mrb_define_method(mrbstateptr, krn, "to_s",                       mrb_any_to_s,                    MRB_ARGS_NONE());    /* 15.3.1.3.46 */
+  mrb_define_method(mrbstateptr, krn, "__case_eqq",                 mrb_obj_ceqq,                    MRB_ARGS_REQ(1));    /* internal */
+  mrb_define_method(mrbstateptr, krn, "__to_int",                   mrb_ensure_int_type,             MRB_ARGS_NONE());    /* internal */
+  mrb_define_method(mrbstateptr, krn, "__ENCODING__",               mrb_encoding,                    MRB_ARGS_NONE());
+  mrb_define_method(mrbstateptr, krn, "respond_to_missing?",        mrb_false,                       MRB_ARGS_ARG(1,1));
+
+  mrb_include_module(mrbstateptr, mrbstateptr->object_class, mrbstateptr->kernel_module);
+}

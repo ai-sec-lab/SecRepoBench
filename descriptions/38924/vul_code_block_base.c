@@ -1,0 +1,1 @@
+return mrb_decode_insn(&s->iseq[s->lastpc]);

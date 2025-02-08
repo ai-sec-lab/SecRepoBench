@@ -1,0 +1,51 @@
+char *txt = buf;
+
+    /* b0 was 30 */
+
+    while (txt < buf + (sizeof buf) - 3 && currentptr < e) {
+        int b, n;
+
+        b = *currentptr++;
+
+        n = (b >> 4) &0xf;
+        if (n < 0xA) {
+            *txt++ = n + '0';
+        }
+        else if (n == 0xA) {
+            *txt++ = '.';
+        }
+        else if (n == 0xB) {
+            *txt++ = 'E';
+        }
+        else if (n == 0xC) {
+            *txt++ = 'E';
+            *txt++ = '-';
+        }
+        else if (n == 0xE) {
+            *txt++ = '-';
+        }
+        else if (n == 0xF) {
+            break;
+        }
+
+        n = b &0xf;
+        if (n < 0xA) {
+            *txt++ = n + '0';
+        }
+        else if (n == 0xA) {
+            *txt++ = '.';
+        }
+        else if (n == 0xB) {
+            *txt++ = 'E';
+        }
+        else if (n == 0xC) {
+            *txt++ = 'E';
+            *txt++ = '-';
+        }
+        else if (n == 0xE) {
+            *txt++ = '-';
+        }
+        else if (n == 0xF) {
+            break;
+        }
+    }

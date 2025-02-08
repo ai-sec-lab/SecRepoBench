@@ -1,0 +1,82 @@
+if (val < 0) {
+        return FLB_HTTP_ERROR;
+    }
+    /*
+     * 'val' contains the expected number of bytes, check current lengths
+     * and do buffer adjustments.
+     *
+     * we do val + 2 because the chunk always ends with \r\n
+     */
+    val += 2;
+
+    /* Number of bytes after the Chunk header */
+    len = r->data_len - (p - r->data);
+    if (len < val) {
+        return FLB_HTTP_MORE;
+    }
+
+    /* From the current chunk we expect it ends with \r\n */
+    if (p[val -2] != '\r' || p[val - 1] != '\n') {
+        return FLB_HTTP_ERROR;
+    }
+
+    /*
+     * At this point we are just fine, the chunk is valid, next steps:
+     *
+     * 1. check possible last chunk
+     * 2. drop chunk header from the buffer
+     * 3. remove chunk ending \r\n
+     */
+
+    /* 1. Validate ending chunk */
+    if (val - 2 == 0) {
+        /*
+         * For an ending chunk we expect:
+         *
+         * 0\r\n
+         * \r\n
+         *
+         * so at least we need 5 bytes in the buffer
+         */
+        len = r->data_len - (r->chunk_processed_end - r->data);
+        if (len < 5) {
+            return FLB_HTTP_MORE;
+        }
+
+        if (r->chunk_processed_end[3] != '\r' ||
+            r->chunk_processed_end[4] != '\n') {
+            return FLB_HTTP_ERROR;
+        }
+    }
+
+    /* 2. Drop chunk header */
+    drop = (p - r->chunk_processed_end);
+    len =  r->data_len - (r->chunk_processed_end - r->data);
+    consume_bytes(r->chunk_processed_end, drop, len);
+    r->data_len -= drop;
+    r->data[r->data_len] = '\0';
+
+    /* 3. Remove chunk ending \r\n */
+    drop = 2;
+    r->chunk_processed_end += labs(val - 2);
+    len = r->data_len - (r->chunk_processed_end - r->data);
+    consume_bytes(r->chunk_processed_end, drop, len);
+    r->data_len -= drop;
+
+    /* Always append a NULL byte */
+    r->data[r->data_len] = '\0';
+
+    /* Is this the last chunk ? */
+    if ((val - 2 == 0)) {
+        /* Update payload size */
+        r->payload_size = r->data_len - (r->headers_end - r->data);
+        return FLB_HTTP_OK;
+    }
+
+    /* If we have some remaining bytes, start over */
+    len = r->data_len - (r->chunk_processed_end - r->data);
+    if (len > 0) {
+        goto chunk_start;
+    }
+
+    return FLB_HTTP_MORE;

@@ -1,0 +1,11 @@
+static int flv_same_video_codec(AVCodecParameters *vpar, uint32_t flv_codecid)
+{
+    // This function checks if the video codec of the given AVCodecParameters (vpar)
+    // matches the codec ID specified in the FLV header. It first checks if the codec ID
+    // and codec tag are not set, returning true in such cases. The codec ID is determined 
+    // based on the FLV video codec identifier, which is extracted from flags or the buffer 
+    // in the FLV context. Depending on the codec ID found, it checks against known codec 
+    // IDs like HEVC, AV1, VP9, FLV1, FLASHSV, FLASHSV2, VP6F, VP6A, and H264, returning 
+    // true if there's a match, or defaults to comparing the codec tag.
+    // <MASK>
+}

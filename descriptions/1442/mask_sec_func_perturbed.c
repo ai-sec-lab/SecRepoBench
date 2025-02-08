@@ -1,0 +1,35 @@
+static int fdk_aac_decode_frame(AVCodecContext *avctx, void *data,
+                                int *got_frame_ptr, AVPacket *avpkt)
+{
+    FDKAACDecContext *s = avctx->priv_data;
+    AVFrame *frame = data;
+    int result;
+    AAC_DECODER_ERROR err;
+    UINT valid = avpkt->size;
+
+    err = aacDecoder_Fill(s->handle, &avpkt->data, &avpkt->size, &valid);
+    // <MASK>
+    if (err != AAC_DEC_OK) {
+        av_log(avctx, AV_LOG_ERROR,
+               "aacDecoder_DecodeFrame() failed: %x\n", err);
+        result = AVERROR_UNKNOWN;
+        goto end;
+    }
+
+    if ((result = get_stream_info(avctx)) < 0)
+        goto end;
+    frame->nb_samples = avctx->frame_size;
+
+    if ((result = ff_get_buffer(avctx, frame, 0)) < 0)
+        goto end;
+
+    memcpy(frame->extended_data[0], s->decoder_buffer,
+           avctx->channels * avctx->frame_size *
+           av_get_bytes_per_sample(avctx->sample_fmt));
+
+    *got_frame_ptr = 1;
+    result = avpkt->size - valid;
+
+end:
+    return result;
+}

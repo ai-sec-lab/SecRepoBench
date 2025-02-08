@@ -1,0 +1,68 @@
+static int
+dissect_form_urlencoded(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data)
+{
+	proto_tree	*url_tree;
+	proto_tree	*sub;
+	proto_item	*ti;
+	gint		offset = 0, next_offset;
+	const char	*data_name;
+	http_message_info_t *message_info;
+
+	data_name = pinfo->match_string;
+	if (! (data_name && data_name[0])) {
+		/*
+		 * No information from "match_string"
+		 */
+		message_info = (http_message_info_t *)data;
+		if (message_info == NULL) {
+			/*
+			 * No information from dissector data
+			 */
+			data_name = NULL;
+		} else {
+			data_name = message_info->media_str;
+			if (! (data_name && data_name[0])) {
+				/*
+				 * No information from dissector data
+				 */
+				data_name = NULL;
+			}
+		}
+	}
+
+	if (data_name)
+		col_append_sep_fstr(pinfo->cinfo, COL_INFO, " ", "(%s)", data_name);
+
+	ti = proto_tree_add_item(tree, proto_urlencoded, tvb, 0, -1, ENC_NA);
+	if (data_name)
+		proto_item_append_text(ti, ": %s", data_name);
+	url_tree = proto_item_add_subtree(ti, ett_form_urlencoded);
+
+	while (tvb_reported_length_remaining(tvb, offset) > 0) {
+		const int initialoffset = offset;
+		char *key, *value;
+		char *key_decoded, *value_decoded;
+
+		sub = proto_tree_add_subtree(url_tree, tvb, offset, 0, ett_form_keyvalue, &ti, "Form item");
+
+		next_offset = get_form_key_value(tvb, &key, offset, '=');
+		if (next_offset == -1)
+			break;
+		/* XXX: Only UTF-8 is conforming according to WHATWG, though we
+		 * ought to look for a "charset" parameter in media_str
+		 * to handle other encodings.
+		 * Our charset functions should probably return a boolean
+		 * indicating that replacement characters had to be used,
+		 * and that the string was not the expected encoding.
+		 */
+		// <MASK>
+		proto_tree_add_string(sub, hf_form_value, tvb, offset, next_offset - offset, value_decoded);
+		proto_item_append_text(sub, " = \"%s\"", format_text(pinfo->pool, value, strlen(value)));
+
+		offset = next_offset+1;
+
+		proto_item_set_len(ti, offset - initialoffset);
+	}
+
+	return tvb_captured_length(tvb);
+}

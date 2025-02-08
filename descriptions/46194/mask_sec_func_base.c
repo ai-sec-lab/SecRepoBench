@@ -1,0 +1,74 @@
+static av_cold int decode_init(AVCodecContext *avctx)
+{
+    WmallDecodeCtx *s  = avctx->priv_data;
+    uint8_t *edata_ptr = avctx->extradata;
+    unsigned int channel_mask;
+    int i, log2_max_num_subframes;
+
+    if (avctx->block_align <= 0 || avctx->block_align > (1<<21)) {
+        av_log(avctx, AV_LOG_ERROR, "block_align is not set or invalid\n");
+        return AVERROR(EINVAL);
+    }
+
+    // <MASK>
+
+    s->num_channels = avctx->ch_layout.nb_channels;
+
+    /* extract lfe channel position */
+    s->lfe_channel = -1;
+
+    if (channel_mask & 8) {
+        unsigned int mask;
+        for (mask = 1; mask < 16; mask <<= 1)
+            if (channel_mask & mask)
+                ++s->lfe_channel;
+    }
+
+    s->max_frame_size = MAX_FRAMESIZE * avctx->ch_layout.nb_channels;
+    s->frame_data = av_mallocz(s->max_frame_size + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!s->frame_data)
+        return AVERROR(ENOMEM);
+
+    s->avctx = avctx;
+    ff_llauddsp_init(&s->dsp);
+    init_put_bits(&s->pb, s->frame_data, s->max_frame_size);
+
+    /* generic init */
+    s->log2_frame_size = av_log2(avctx->block_align) + 4;
+
+    /* frame info */
+    s->skip_frame  = 1; /* skip first frame */
+    s->packet_loss = 1;
+    s->len_prefix  = s->decode_flags & 0x40;
+
+    /* get frame len */
+    s->samples_per_frame = 1 << ff_wma_get_frame_len_bits(avctx->sample_rate,
+                                                          3, s->decode_flags);
+    av_assert0(s->samples_per_frame <= WMALL_BLOCK_MAX_SIZE);
+
+    /* init previous block len */
+    for (i = 0; i < avctx->ch_layout.nb_channels; i++)
+        s->channel[i].prev_block_len = s->samples_per_frame;
+
+    /* subframe info */
+    log2_max_num_subframes  = (s->decode_flags & 0x38) >> 3;
+    s->max_num_subframes    = 1 << log2_max_num_subframes;
+    s->max_subframe_len_bit = 0;
+    s->subframe_len_bits    = av_log2(log2_max_num_subframes) + 1;
+
+    s->min_samples_per_subframe  = s->samples_per_frame / s->max_num_subframes;
+    s->dynamic_range_compression = s->decode_flags & 0x80;
+    s->bV3RTM                    = s->decode_flags & 0x100;
+
+    if (s->max_num_subframes > MAX_SUBFRAMES) {
+        av_log(avctx, AV_LOG_ERROR, "invalid number of subframes %"PRIu8"\n",
+               s->max_num_subframes);
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->frame = av_frame_alloc();
+    if (!s->frame)
+        return AVERROR(ENOMEM);
+
+    return 0;
+}

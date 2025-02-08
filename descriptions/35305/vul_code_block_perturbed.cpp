@@ -1,0 +1,1 @@
+decoder->image_out_buffer_set = true;

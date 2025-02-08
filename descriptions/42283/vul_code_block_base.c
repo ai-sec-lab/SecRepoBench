@@ -1,0 +1,211 @@
+
+    /* Nothing was ever drawn. */
+    if (buf == NULL)
+        return 0;
+
+    bg = buf->group_color_info->isadditive ? 65535 : 0;
+    src_profile = buf->group_color_info->icc_profile;
+
+    num_comp = buf->n_chan - 1;
+    rect = buf->rect;
+    planestride = buf->planestride;
+    rowstride = buf->rowstride;
+
+    /* Make sure that this is the only item on the stack. Fuzzing revealed a
+       potential problem. Bug 694190 */
+    if (buf->saved != NULL) {
+        return gs_throw(gs_error_unknownerror, "PDF14 device push/pop out of sync");
+    }
+    if_debug0m('v', dev->memory, "[v]pdf14_put_image\n");
+    rect_intersect(rect, buf->dirty);
+    x1 = min(pdev->width, rect.q.x);
+    y1 = min(pdev->height, rect.q.y);
+    width = x1 - rect.p.x;
+    height = y1 - rect.p.y;
+#ifdef DUMP_TO_PNG
+    dump_planar_rgba(pdev->memory, buf);
+#endif
+    if (width <= 0 || height <= 0 || buf->data == NULL)
+        return 0;
+    buf_ptr = buf->data + (rect.p.y - buf->rect.p.y) * buf->rowstride + ((rect.p.x - buf->rect.p.x) << deep);
+
+    /* Check that target is OK.  From fuzzing results the target could have been
+       destroyed, for e.g if it were a pattern accumulator that was closed
+       prematurely (Bug 694154).  We should always be able to to get an ICC
+       profile from the target. */
+    code = dev_proc(target, get_profile)(target,  &dev_target_profile);
+    if (code < 0)
+        return code;
+    if (dev_target_profile == NULL)
+        return gs_throw_code(gs_error_Fatal);
+
+    if (src_profile == NULL) {
+        code = dev_proc(dev, get_profile)(dev, &pdf14dev_profile);
+        if (code < 0) {
+            return code;
+        }
+        src_profile = pdf14dev_profile->device_profile[GS_DEFAULT_DEVICE_PROFILE];
+    }
+
+    /* Check if we have a color conversion issue */
+    des_profile = dev_target_profile->device_profile[GS_DEFAULT_DEVICE_PROFILE];
+    if (pdev->using_blend_cs || !gsicc_profiles_equal(des_profile, src_profile))
+        color_mismatch = true;
+
+    /* Check if target supports alpha */
+    supports_alpha = dev_proc(target, dev_spec_op)(target, gxdso_supports_alpha, NULL, 0);
+    code = 0;
+
+#if RAW_DUMP
+    dump_raw_buffer(pdev->ctx->memory, height, width, buf->n_planes,
+        pdev->ctx->stack->planestride, pdev->ctx->stack->rowstride,
+        "pre_final_blend", buf_ptr, deep);
+#endif
+
+    /* Note. The logic below will need a little rework if we ever
+       have a device that has tags and alpha support */
+    if (supports_alpha) {
+        if (!color_mismatch) {
+            alpha_offset = num_comp;
+            tag_offset = buf->has_tags ? buf->n_chan : 0;
+
+            for (i = 0; i < buf->n_planes; i++)
+                buf_ptrs[i] = buf_ptr + i * planestride;
+            code = dev_proc(target, put_image) (target, target, buf_ptrs, num_comp,
+                rect.p.x, rect.p.y, width, height,
+                rowstride, alpha_offset,
+                tag_offset);
+            /* Right now code has number of rows written */
+        } else {
+            /* In this case, just color convert and maintain alpha.  This is a case
+               where we either either blend in the right color space and have no
+               alpha for the output device or hand back the wrong color space with
+               alpha data.  We choose the later. */
+            code = pdf14_put_image_color_convert(pdev, pgs, src_profile,
+                dev_target_profile, &buf, &buf_ptr, false, rect.p.x, rect.p.y,
+                width, height);
+            if (code < 0)
+                return code;
+
+            /* reset */
+            rowstride = buf->rowstride;
+            planestride = buf->planestride;
+            num_comp = buf->n_chan - 1;
+            alpha_offset = num_comp;
+            tag_offset = buf->has_tags ? buf->n_chan : 0;
+
+            /* And then out */
+            for (i = 0; i < buf->n_planes; i++)
+                buf_ptrs[i] = buf_ptr + i * planestride;
+            code = dev_proc(target, put_image) (target, target, buf_ptrs, num_comp,
+                rect.p.x, rect.p.y, width, height, rowstride, alpha_offset,
+                tag_offset);
+            /* Right now code has number of rows written */
+        }
+    } else if (has_tags) {
+        /* We are going out to a device that supports tags */
+        if (deep) {
+            gx_blend_image_buffer16(buf_ptr, width, height, rowstride,
+                buf->planestride, num_comp, bg, false);
+        } else {
+            gx_blend_image_buffer(buf_ptr, width, height, rowstride,
+                buf->planestride, num_comp, bg >> 8);
+        }
+
+#if RAW_DUMP
+        dump_raw_buffer(pdev->ctx->memory, height, width, buf->n_planes,
+            pdev->ctx->stack->planestride, pdev->ctx->stack->rowstride,
+            "post_final_blend", buf_ptr, deep);
+#endif
+
+        /* Take care of color issues */
+        if (color_mismatch) {
+            /* In this case, just color convert and maintain alpha.  This is a case
+               where we either either blend in the right color space and have no
+               alpha for the output device or hand back the wrong color space with
+               alpha data.  We choose the later. */
+            code = pdf14_put_image_color_convert(pdev, pgs, src_profile, dev_target_profile,
+                &buf, &buf_ptr, true, rect.p.x, rect.p.y, width, height);
+            if (code < 0)
+                return code;
+
+#if RAW_DUMP
+            dump_raw_buffer(pdev->ctx->memory, height, width, buf->n_planes,
+                pdev->ctx->stack->planestride, pdev->ctx->stack->rowstride,
+                "final_color_manage", buf_ptr, deep);
+            global_index++;
+#endif
+        }
+
+        /* reset */
+        rowstride = buf->rowstride;
+        planestride = buf->planestride;
+        num_comp = buf->n_chan - 1;
+        alpha_offset = 0;  /* It is there but this indicates we have done the blend */
+        tag_offset = buf->has_tags ? buf->n_chan : 0;
+
+        /* And then out */
+        for (i = 0; i < buf->n_planes; i++)
+            buf_ptrs[i] = buf_ptr + i * planestride;
+        code = dev_proc(target, put_image) (target, target, buf_ptrs, num_comp,
+            rect.p.x, rect.p.y, width, height, rowstride, alpha_offset,
+            tag_offset);
+        /* Right now code has number of rows written */
+
+    }
+
+    /* If code > 0 then put image worked.  Let it finish and then exit */
+    if (code > 0) {
+        /* We processed some or all of the rows.  Continue until we are done */
+        num_rows_left = height - code;
+        while (num_rows_left > 0) {
+            code = dev_proc(target, put_image) (target, target, buf_ptrs, num_comp,
+                                                rect.p.x, rect.p.y + code, width,
+                                                num_rows_left, rowstride,
+                                                alpha_offset, tag_offset);
+            num_rows_left = num_rows_left - code;
+        }
+        return 0;
+    }
+
+    /* Target device did not support alpha or tags.
+     * Set color space in preparation for sending an image.
+     * color conversion will occur after blending with through
+     * the begin typed image work flow.
+     */
+
+    planestride = buf->planestride;
+    rowstride = buf->rowstride;
+    code = gs_cspace_build_ICC(&pcs, NULL, pgs->memory);
+    if (code < 0)
+        return code;
+    /* Need to set this to avoid color management during the image color render
+       operation.  Exception is for the special case when the destination was
+       CIELAB.  Then we need to convert from default RGB to CIELAB in the put
+       image operation.  That will happen here as we should have set the profile
+       for the pdf14 device to RGB and the target will be CIELAB.  In addition,
+       the case when we have a blend color space that is different than the
+       target device color space */
+    pcs->cmm_icc_profile_data = src_profile;
+
+    /* pcs takes a reference to the profile data it just retrieved. */
+    gsicc_adjust_profile_rc(pcs->cmm_icc_profile_data, 1, "pdf14_put_image");
+    gsicc_set_icc_range(&(pcs->cmm_icc_profile_data));
+    gs_image_t_init_adjust(&image, pcs, false);
+    image.ImageMatrix.xx = (float)width;
+    image.ImageMatrix.yy = (float)height;
+    image.Width = width;
+    image.Height = height;
+    image.BitsPerComponent = deep ? 16 : 8;
+    image.ColorSpace = pcs;
+    ctm_only_writable(pgs).xx = (float)width;
+    ctm_only_writable(pgs).xy = 0;
+    ctm_only_writable(pgs).yx = 0;
+    ctm_only_writable(pgs).yy = (float)height;
+    ctm_only_writable(pgs).tx = (float)rect.p.x;
+    ctm_only_writable(pgs).ty = (float)rect.p.y;
+    code = dev_proc(target, begin_typed_image) (target,
+                                                pgs, NULL,
+                                                (gs_image_common_t *)&image,
+                                                NULL, NULL, NULL,
+                                                pgs->memory, &info);

@@ -1,0 +1,82 @@
+static bool
+load_specific_debug_section (enum dwarf_section_display_enum debug,
+			     asection *sec, void *file)
+{
+  struct dwarf_section *section = &debug_displays [debug].section;
+  bfd *abfd = (bfd *) file;
+  bfd_byte *contents;
+  bfd_size_type amt;
+  size_t alloced;
+  bool issuccessful;
+
+  if (section->start != NULL)
+    {
+      /* If it is already loaded, do nothing.  */
+      if (streq (section->filename, bfd_get_filename (abfd)))
+	return true;
+      free (section->start);
+    }
+
+  section->filename = bfd_get_filename (abfd);
+  section->reloc_info = NULL;
+  section->num_relocs = 0;
+  section->address = bfd_section_vma (sec);
+  section->size = bfd_section_size (sec);
+  /* PR 24360: On 32-bit hosts sizeof (size_t) < sizeof (bfd_size_type). */
+  alloced = amt = section->size + 1;
+  if (alloced != amt || alloced == 0)
+    {
+      section->start = NULL;
+      free_debug_section (debug);
+      printf (_("\nSection '%s' has an invalid size: %#llx.\n"),
+	      sanitize_string (section->name),
+	      (unsigned long long) section->size);
+      return false;
+    }
+
+  section->start = contents = xmalloc (alloced);
+  /* Ensure any string section has a terminating NUL.  */
+  section->start[section->size] = 0;
+
+  if ((abfd->flags & (EXEC_P | DYNAMIC)) == 0
+      && debug_displays [debug].relocate)
+    {
+      issuccessful = bfd_simple_get_relocated_section_contents (abfd,
+						       sec,
+						       section->start,
+						       syms) != NULL;
+      if (issuccessful)
+	{
+	  long reloc_size = bfd_get_reloc_upper_bound (abfd, sec);
+
+	  if (reloc_size > 0)
+	    {
+	      long reloc_count;
+	      arelent **relocs;
+
+	      relocs = (arelent **) xmalloc (reloc_size);
+
+	      reloc_count = bfd_canonicalize_reloc (abfd, sec, relocs, NULL);
+	      if (reloc_count <= 0)
+		free (relocs);
+	      else
+		{
+		  section->reloc_info = relocs;
+		  section->num_relocs = reloc_count;
+		}
+	    }
+	}
+    }
+  else
+    issuccessful = bfd_get_full_section_contents (abfd, sec, &contents);
+
+  if (!issuccessful)
+    {
+      free_debug_section (debug);
+      printf (_("\nCan't get contents for section '%s'.\n"),
+	      sanitize_string (section->name));
+      return false;
+    }
+
+  return true;
+}

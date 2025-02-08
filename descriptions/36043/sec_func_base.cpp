@@ -1,0 +1,54 @@
+Status MetaSqueeze(Image &image, std::vector<SqueezeParams> *parameters) {
+  if (parameters->empty()) {
+    DefaultSqueezeParameters(parameters, image);
+  }
+
+  for (size_t i = 0; i < parameters->size(); i++) {
+    JXL_RETURN_IF_ERROR(
+        CheckMetaSqueezeParams((*parameters)[i], image.channel.size()));
+    bool horizontal = (*parameters)[i].horizontal;
+    bool in_place = (*parameters)[i].in_place;
+    uint32_t beginc = (*parameters)[i].begin_c;
+    uint32_t endc = (*parameters)[i].begin_c + (*parameters)[i].num_c - 1;
+
+    uint32_t offset;
+    if (beginc < image.nb_meta_channels) {
+      if (endc >= image.nb_meta_channels) {
+        return JXL_FAILURE("Invalid squeeze: mix of meta and nonmeta channels");
+      }
+      if (!in_place)
+        return JXL_FAILURE(
+            "Invalid squeeze: meta channels require in-place residuals");
+      image.nb_meta_channels += (*parameters)[i].num_c;
+    }
+    if (in_place) {
+      offset = endc + 1;
+    } else {
+      offset = image.channel.size();
+    }
+    for (uint32_t c = beginc; c <= endc; c++) {
+      if (image.channel[c].hshift > 30 || image.channel[c].vshift > 30) {
+        return JXL_FAILURE("Too many squeezes: shift > 30");
+      }
+      size_t w = image.channel[c].w;
+      size_t h = image.channel[c].h;
+      if (horizontal) {
+        image.channel[c].w = (w + 1) / 2;
+        image.channel[c].hshift++;
+        w = w - (w + 1) / 2;
+      } else {
+        image.channel[c].h = (h + 1) / 2;
+        image.channel[c].vshift++;
+        h = h - (h + 1) / 2;
+      }
+      image.channel[c].shrink();
+      Channel dummy(w, h);
+      dummy.hshift = image.channel[c].hshift;
+      dummy.vshift = image.channel[c].vshift;
+
+      image.channel.insert(image.channel.begin() + offset + (c - beginc),
+                           std::move(dummy));
+    }
+  }
+  return true;
+}

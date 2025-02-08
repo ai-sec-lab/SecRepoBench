@@ -1,0 +1,60 @@
+int
+sc_pkcs15init_delete_by_path(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
+		const struct sc_path *file_path)
+{
+	struct sc_context *ctx = p15card->card->ctx;
+	struct sc_file *parent = NULL, *file = NULL;
+	struct sc_path path;
+	int rv;
+	/*int file_type = SC_FILE_TYPE_DF;*/
+
+	LOG_FUNC_CALLED(ctx);
+	sc_log(ctx, "trying to delete '%s'", sc_print_path(file_path));
+
+	/* For some cards, to delete file should be satisfied the 'DELETE' ACL of the file itself,
+	 * for the others the 'DELETE' ACL of parent.
+	 * Let's start from the file's 'DELETE' ACL.
+	 *
+	 * TODO: 'DELETE_SELF' exists. Proper solution would be to use this acl by every
+	 * card (driver and profile) that uses self delete ACL.
+	 */
+	/* Select the file itself */
+	path = *file_path;
+	rv = sc_select_file(p15card->card, &path, &file);
+	LOG_TEST_RET(ctx, rv, "cannot select file to delete");
+
+	if (sc_file_get_acl_entry(file, SC_AC_OP_DELETE_SELF))   {
+		sc_log(ctx, "Found 'DELETE-SELF' acl");
+		rv = sc_pkcs15init_authenticate(profile, p15card, file, SC_AC_OP_DELETE_SELF);
+		sc_file_free(file);
+	}
+	else if (sc_file_get_acl_entry(file, SC_AC_OP_DELETE))   {
+		sc_log(ctx, "Found 'DELETE' acl");
+	        rv = sc_pkcs15init_authenticate(profile, p15card, file, SC_AC_OP_DELETE);
+		sc_file_free(file);
+	}
+	else    {
+		sc_log(ctx, "Try to get the parent's 'DELETE' access");
+		/*file_type = file->type;*/
+		if (file_path->len >= 2) {
+			/* Select the parent DF */
+			path.len -= 2;
+			rv = sc_select_file(p15card->card, &path, &parent);
+			LOG_TEST_RET(ctx, rv, "Cannot select parent");
+
+			rv = sc_pkcs15init_authenticate(profile, p15card, parent, SC_AC_OP_DELETE);
+			sc_file_free(parent);
+			LOG_TEST_RET(ctx, rv, "parent 'DELETE' authentication failed");
+		}
+	}
+	LOG_TEST_RET(ctx, rv, "'DELETE' authentication failed");
+
+	/* Reselect file to delete: current path could be changed by 'verify PIN' procedure */
+	path = *file_path;
+	rv = sc_select_file(p15card->card, &path, &file);
+	LOG_TEST_RET(ctx, rv, "cannot select file to delete");
+
+	memset(&path, 0, sizeof(path));
+	path.type = SC_PATH_TYPE_FILE_ID;
+	// <MASK>
+}

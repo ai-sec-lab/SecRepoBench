@@ -1,0 +1,90 @@
+static int
+dxf_entities_read (Bit_Chain *restrict dat, Dwg_Data *restrict drawing)
+{
+  Dxf_Pair *pair = dxf_read_pair (dat);
+  char name[80];
+  BITCODE_RLL mspace = drawing->header_vars.BLOCK_RECORD_MSPACE
+                           ? drawing->header_vars.BLOCK_RECORD_MSPACE->absolute_ref
+                           : 0x1F;
+  BITCODE_RLL pspace = drawing->header_vars.BLOCK_RECORD_PSPACE
+                           ? drawing->header_vars.BLOCK_RECORD_PSPACE->absolute_ref
+                           : 0UL;
+  BITCODE_H mspace_ref = dwg_model_space_ref (drawing);
+
+  while (pair != NULL && pair->code == 0 && pair->value.s)
+    {
+      strncpy (name, pair->value.s, 79);
+      name[79] = '\0';
+      entity_alias (name);
+      // until 0 ENDSEC
+      while (pair != NULL && pair->code == 0 && pair->value.s
+             && (is_dwg_entity (name) || strEQc (name, "DIMENSION")))
+        {
+          char *dxfname = strdup (pair->value.s);
+          BITCODE_BL idx = drawing->num_objects;
+          // LOG_HANDLE ("dxfname = strdup (%s)\n", dxfname);
+          if (idx)
+            {
+              Dwg_Object *obj = &drawing->object[drawing->num_objects - 1];
+              if (!obj->handle.value)
+                {
+                  BITCODE_RLL next_handle = dwg_next_handle (drawing);
+                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                             obj->handle.size, obj->handle.value);
+                }
+            }
+          dxf_free_pair (pair);
+          pair = new_object (name, dxfname, dat, drawing, 0, NULL);
+          if (!pair)
+            {
+              Dwg_Object *obj = &drawing->object[idx];
+              free (dxfname);
+              if (idx != drawing->num_objects)
+                obj->dxfname = NULL;
+              return DWG_ERR_INVALIDDWG;
+            }
+          if (pair->code == 0 && pair->value.s)
+            {
+              Dwg_Object *obj = &drawing->object[drawing->num_objects - 1];
+              Dwg_Object_Entity *ent = obj->tio.entity;
+              if (ent->ownerhandle)
+                {
+                  if (ent->ownerhandle->absolute_ref == mspace)
+                    ent->entmode = 2;
+                  else if (pspace && ent->ownerhandle->absolute_ref == pspace)
+                    ent->entmode = 1;
+                  add_to_BLOCK_HEADER (obj, ent->ownerhandle);
+                }
+              else
+                {
+                  ent->entmode = 2;
+                  add_to_BLOCK_HEADER (obj, mspace_ref);
+                }
+
+              in_postprocess_handles (obj);
+              strncpy (name, pair->value.s, 79);
+              name[79] = '\0';
+              entity_alias (name);
+            }
+        }
+      if (drawing->num_objects)
+        {
+          Dwg_Object *obj = &drawing->object[drawing->num_objects - 1];
+          if (!obj->handle.value)
+            {
+              BITCODE_RLL next_handle = dwg_next_handle (drawing);
+              dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+              LOG_TRACE ("%s.handle = (0.%d." FORMAT_RLLx ")\n", obj->name,
+                         obj->handle.size, obj->handle.value);
+            }
+        }
+      DXF_RETURN_ENDSEC (0)
+      else LOG_WARN ("Unhandled 0 %s (%s)", name, "entities");
+      dxf_free_pair (pair);
+      pair = dxf_read_pair (dat);
+      DXF_CHECK_EOF;
+    }
+  dxf_free_pair (pair);
+  return 0;
+}

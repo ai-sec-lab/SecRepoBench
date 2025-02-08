@@ -1,0 +1,63 @@
+const char
+          *option;
+
+        double
+          high,
+          low;
+
+        ssize_t
+          n;
+
+        /*
+          Auto fit text into bounding box.
+        */
+        low=1.0;
+        option=GetImageOption(image_info,"label:max-pointsize");
+        if (option != (const char*) NULL)
+          {
+            high=StringToDouble(option,(char**) NULL);
+            if (high < 1.0)
+              high=1.0;
+            high+=1.0;
+          }
+        else
+          {
+            option=GetImageOption(image_info,"label:start-pointsize");
+            if (option != (const char *) NULL)
+              {
+                draw_info->pointsize=StringToDouble(option,(char**) NULL);
+                if (draw_info->pointsize < 1.0)
+                  draw_info->pointsize=1.0;
+              }
+            for (n=0; n < 32; n++, draw_info->pointsize*=2.0)
+            {
+              (void) FormatLocaleString(geometry,MagickPathExtent,"%+g%+g",
+                metrics.bounds.x1,metrics.ascent);
+              if (draw_info->gravity == UndefinedGravity)
+                (void) CloneString(&draw_info->geometry,geometry);
+              status=GetMultilineTypeMetrics(image,draw_info,&metrics,exception);
+              if (status == MagickFalse)
+                break;
+              AdjustTypeMetricBounds(&metrics);
+              width=(size_t) floor(metrics.width+draw_info->stroke_width+0.5);
+              imgheight=(size_t) floor(metrics.height+draw_info->stroke_width+0.5);
+              if ((image->columns != 0) && (image->rows != 0))
+                {
+                  if ((width >= image->columns) || (imgheight >= image->rows))
+                    break;
+                  if ((width < image->columns) && (imgheight < image->rows))
+                    low=draw_info->pointsize;
+                }
+              else
+                if (((image->columns != 0) && (width >= image->columns)) ||
+                    ((image->rows != 0) && (imgheight >= image->rows)))
+                  break;
+            }
+            if (status == MagickFalse)
+              {
+                label=DestroyString(label);
+                draw_info=DestroyDrawInfo(draw_info);
+                image=DestroyImageList(image);
+                return((Image *) NULL);
+              }
+          }

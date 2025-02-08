@@ -1,0 +1,106 @@
+int RMFDataset::JPEGDecompress(const GByte* pabyIn, GUInt32 nSizeIn,
+                               GByte* pabyOut, GUInt32 nSizeOut,
+                               GUInt32 nRawXSize, GUInt32 nRawYSize)
+{
+    if(pabyIn == nullptr ||
+       pabyOut == nullptr ||
+       nSizeOut < nSizeIn ||
+       nSizeIn < 2)
+       return 0;
+
+    jpeg_decompress_struct  oJpegInfo;
+    jpeg_source_mgr         oSrc;
+    jpeg_error_mgr          jpegErrMgr;
+    jmp_buf                 oJmpBuf;
+
+    oJpegInfo.err = jpeg_std_error(&jpegErrMgr);
+    jpegErrMgr.error_exit = RMFJPEGError;
+    jpegErrMgr.emit_message = RMFJPEGMessage;
+    oJpegInfo.client_data = reinterpret_cast<void*>(&oJmpBuf);
+
+    memset(&oSrc, 0, sizeof(jpeg_source_mgr));
+
+    oSrc.next_input_byte = (JOCTET *)pabyIn;
+    // <MASK>
+
+    if(setjmp(oJmpBuf))
+    {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "RMF JPEG: Error decompress JPEG tile");
+        jpeg_destroy_decompress(&oJpegInfo);
+        return 0;
+    }
+
+    oJpegInfo.src = &oSrc;
+    jpeg_read_header(&oJpegInfo, TRUE);
+
+    if(oJpegInfo.num_components != RMF_JPEG_BAND_COUNT)
+    {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "RMF JPEG: Invalid num_components %d in tile, must be %d",
+                 (int)oJpegInfo.num_components, (int)RMF_JPEG_BAND_COUNT);
+        jpeg_destroy_decompress(&oJpegInfo);
+        return 0;
+    }
+
+    oJpegInfo.dct_method = JDCT_FLOAT;
+    oJpegInfo.out_color_space = JCS_RGB;
+
+    jpeg_start_decompress(&oJpegInfo);
+
+    JDIMENSION  nImageHeight = std::min(oJpegInfo.image_height,
+                                        (JDIMENSION)nRawYSize);
+    int         nRawScanLineSize = nRawXSize *
+                                   oJpegInfo.num_components;
+    GByte*      pabyScanline = nullptr;
+
+    if((JDIMENSION)nRawXSize < oJpegInfo.image_width)
+    {
+        pabyScanline = reinterpret_cast<GByte *>(
+                VSIMalloc(oJpegInfo.num_components*
+                          oJpegInfo.image_width));
+        if(!pabyScanline)
+        {
+            CPLError( CE_Failure, CPLE_OutOfMemory,
+                      "Can't allocate scanline buffer %d.",
+                      (int)oJpegInfo.num_components*
+                      oJpegInfo.image_width);
+            jpeg_destroy_decompress(&oJpegInfo);
+            return 0;
+        }
+    }
+
+    while(oJpegInfo.output_scanline < nImageHeight)
+    {
+        JSAMPROW    pabyBuffer[1];
+
+        if(pabyScanline)
+        {
+            pabyBuffer[0] = (JSAMPROW)pabyScanline;
+        }
+        else
+        {
+            pabyBuffer[0] = (JSAMPROW)pabyOut +
+                            nRawScanLineSize*oJpegInfo.output_scanline;
+        }
+
+        if(jpeg_read_scanlines(&oJpegInfo, pabyBuffer, 1) == 0)
+        {
+            jpeg_destroy_decompress(&oJpegInfo);
+            VSIFree(pabyScanline);
+            return 0;
+        }
+
+        if(pabyScanline)
+        {
+            memcpy(pabyOut + nRawScanLineSize*(oJpegInfo.output_scanline - 1),
+                   pabyScanline, nRawScanLineSize);
+        }
+    }
+
+    VSIFree(pabyScanline);
+    jpeg_finish_decompress(&oJpegInfo);
+    jpeg_destroy_decompress(&oJpegInfo);
+
+    return oJpegInfo.output_scanline*nRawScanLineSize;
+}

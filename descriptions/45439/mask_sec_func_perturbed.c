@@ -1,0 +1,36 @@
+static int
+pdfi_cff_cid_glyph_data(gs_font_base *pbfont, gs_glyph glyph, gs_glyph_data_t *glyphdata, int *pfidx)
+{
+    int code = 0;
+    pdf_cidfont_type0 *pdffont9 = (pdf_cidfont_type0 *) pbfont->client_data;
+    gs_font_cid0 *gscidfont = (gs_font_cid0 *) pbfont;
+    pdf_name *glyphname = NULL;
+    pdf_string *charstring = NULL;
+    char nbuf[64];
+    uint32_t l;
+    gs_glyph gid;
+
+    *pfidx = 0;
+
+    if (glyph < GS_MIN_CID_GLYPH)
+        gid = glyph;
+    else
+        gid = glyph - GS_MIN_CID_GLYPH;
+
+    if (pdffont9->cidtogidmap.size > (gid << 1) + 1) {
+        gid = pdffont9->cidtogidmap.data[gid << 1] << 8 | pdffont9->cidtogidmap.data[(gid << 1) + 1];
+    }
+
+    l = gs_snprintf(nbuf, sizeof(nbuf), "%" PRId64, gid);
+
+    code = pdfi_name_alloc(pdffont9->ctx, (byte *) nbuf, l, (pdf_obj **) &glyphname);
+    if (code >= 0) {
+        pdfi_countup(glyphname);
+        code = pdfi_dict_get_by_key(pdffont9->ctx, pdffont9->CharStrings, glyphname, (pdf_obj **) &charstring);
+        // <MASK>
+    }
+    pdfi_countdown(charstring);
+    pdfi_countdown(glyphname);
+
+    return code;
+}

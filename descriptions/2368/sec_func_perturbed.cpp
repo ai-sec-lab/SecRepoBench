@@ -1,0 +1,127 @@
+bool CntZImage::readZTile(Byte** ppByte, size_t& nRemainingBytesInOut,
+                          int i0, int i1, int columnstart, int j1,
+                          double maxZErrorInFile, float maxZInImg)
+{
+  size_t nRemainingBytes = nRemainingBytesInOut;
+  Byte* ptr = *ppByte;
+  int numPixel = 0;
+
+  if( nRemainingBytes < 1 )
+  {
+    LERC_BRKPNT();
+    return false;
+  }
+  Byte comprFlag = *ptr++;
+  nRemainingBytes -= 1;
+  int bits67 = comprFlag >> 6;
+  comprFlag &= 63;
+
+  if (comprFlag == 2)    // entire zTile is constant 0 (if valid or invalid doesn't matter)
+  {
+    for (int i = i0; i < i1; i++)
+    {
+      CntZ* dstPtr = getData() + i * width_ + columnstart;
+      for (int j = columnstart; j < j1; j++)
+      {
+        if (dstPtr->cnt > 0)
+          dstPtr->z = 0;
+        dstPtr++;
+      }
+    }
+
+    *ppByte = ptr;
+    nRemainingBytesInOut = nRemainingBytes;
+    return true;
+  }
+
+  if (comprFlag > 3)
+    return false;
+
+  if (comprFlag == 0)
+  {
+    // read z's as flt arr uncompressed
+    const float* srcPtr = (const float*)ptr;
+
+    for (int i = i0; i < i1; i++)
+    {
+      CntZ* dstPtr = getData() + i * width_ + columnstart;
+      for (int j = columnstart; j < j1; j++)
+      {
+        if (dstPtr->cnt > 0)
+        {
+          if( nRemainingBytes < sizeof(float) )
+          {
+            LERC_BRKPNT();
+            return false;
+          }
+          dstPtr->z = *srcPtr++;
+          nRemainingBytes -= sizeof(float);
+          SWAP_4(dstPtr->z);
+          numPixel++;
+        }
+        dstPtr++;
+      }
+    }
+
+    ptr += numPixel * sizeof(float);
+  }
+  else
+  {
+    // read z's as int arr bit stuffed
+    int n = (bits67 == 0) ? 4 : 3 - bits67;
+    float offset = 0;
+    if (!readFlt(&ptr, nRemainingBytes, offset, n))
+    {
+      LERC_BRKPNT();
+      return false;
+    }
+
+    if (comprFlag == 3)
+    {
+      for (int i = i0; i < i1; i++)
+      {
+        CntZ* dstPtr = getData() + i * width_ + columnstart;
+        for (int j = columnstart; j < j1; j++)
+        {
+          if (dstPtr->cnt > 0)
+            dstPtr->z = offset;
+          dstPtr++;
+        }
+      }
+    }
+    else
+    {
+      vector<unsigned int>& dataVec = m_tmpDataVec;
+      BitStuffer bitStuffer;
+      if (!bitStuffer.read(&ptr, nRemainingBytes, dataVec))
+      {
+        LERC_BRKPNT();
+        return false;
+      }
+
+      double invScale = 2 * maxZErrorInFile;
+      size_t nDataVecIdx = 0;
+
+      for (int i = i0; i < i1; i++)
+      {
+        CntZ* dstPtr = getData() + i * width_ + columnstart;
+        for (int j = columnstart; j < j1; j++)
+        {
+          if (dstPtr->cnt > 0)
+          {
+            if( nDataVecIdx == dataVec.size() )
+              return false;
+            float z = (float)(offset + dataVec[nDataVecIdx] * invScale);
+            nDataVecIdx ++;
+            dstPtr->z = min(z, maxZInImg);    // make sure we stay in the orig range
+          }
+          dstPtr++;
+        }
+      }
+    }
+  }
+
+  *ppByte = ptr;
+  nRemainingBytesInOut = nRemainingBytes;
+  return true;
+}

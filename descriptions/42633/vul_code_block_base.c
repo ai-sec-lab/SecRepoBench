@@ -1,0 +1,2 @@
+memcpy(code_space->ranges[i].first, s->cur[-((si * 2) + 1)].val.string, s->cur[-((si * 2) + 1)].size);
+            memcpy(code_space->ranges[i].last, s->cur[-(si * 2)].val.string, s->cur[-(si * 2)].size);

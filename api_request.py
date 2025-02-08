@@ -10,14 +10,13 @@ os.environ["GOOGLE_API_KEY"] = ""
 
 def main(args):
     if 'gpt-' in args.model_name or 'claude-' in args.model_name or 'gemini-' in args.model_name:
-        evaler = APIEvaler(args.model_name, args.context_type, args.prompt_type)
+        evaler = APIEvaler(args.model_name, args.context_type, args.prompt_type, args.mode)
     else:
-        evaler = ChatEvaler(args.model_name, args.context_type, args.prompt_type)
+        evaler = ChatEvaler(args.model_name, args.context_type, args.prompt_type, args.mode)
 
-    with open('final_ids.txt', 'r') as f:
+    with open('ids_125_have_good.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
 
-    ids = sorted([int(id) for id in ids])
     num = 0
     for id in tqdm(ids):
         id = str(id)
@@ -25,9 +24,13 @@ def main(args):
             os.makedirs(f'completions/{id}')
 
         num += 1
-        response = evaler.get_response(id)
-        with open(f'completions/{id}/{args.model_name}-filled-code-{args.context_type}-{args.prompt_type}.txt', 'w') as file:
+        response, prompt, system_prompt = evaler.get_response(id, args.mode)
+        with open(f'completions/{id}/{args.model_name}-filled-code-{args.context_type}-{args.prompt_type}-{args.mode}_code_completion.txt', 'w') as file:
             file.write(response)
+        with open(f'completions/{id}/{args.model_name}-filled-code-{args.context_type}-{args.prompt_type}-{args.mode}_prompt.txt', 'w') as file:
+            file.write(prompt)
+        with open(f'completions/{id}/{args.model_name}-filled-code-{args.context_type}-{args.prompt_type}-{args.mode}_system_prompt.txt', 'w') as file:
+            file.write(system_prompt)
         evaler.save_cache()
     evaler.save_cache()
     print(num)
@@ -37,5 +40,6 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default='claude-3-haiku')
     parser.add_argument('--context_type', type=str, default='cross-file')
     parser.add_argument('--prompt_type', type=str, default='refine')
+    parser.add_argument('--mode', type=str, default='base')
     args = parser.parse_args()
     main(args)

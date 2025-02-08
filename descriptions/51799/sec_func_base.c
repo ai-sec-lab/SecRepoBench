@@ -1,0 +1,306 @@
+static bfd *
+pdb_get_elt_at_index (bfd *abfd, symindex sym_index)
+{
+  char int_buf[sizeof (uint32_t)];
+  uint32_t block_size, block_map_addr, block, num_files;
+  uint32_t first_dir_block, dir_offset, file_size, block_off, left;
+  char name[10];
+  bfd *file;
+  char *buf;
+
+  /* Get block_size.  */
+
+  if (bfd_seek (abfd, sizeof (pdb_magic), SEEK_SET))
+    return NULL;
+
+  if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+    {
+      bfd_set_error (bfd_error_malformed_archive);
+      return NULL;
+    }
+
+  block_size = bfd_getl32 (int_buf);
+  if ((block_size & -block_size) != block_size
+      || block_size < 512
+      || block_size > 4096)
+    {
+      bfd_set_error (bfd_error_malformed_archive);
+      return NULL;
+    }
+
+  /* Get block_map_addr.  */
+
+  if (bfd_seek (abfd, 4 * sizeof (uint32_t), SEEK_CUR))
+    return NULL;
+
+  if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+    {
+      bfd_set_error (bfd_error_malformed_archive);
+      return NULL;
+    }
+
+  block_map_addr = bfd_getl32 (int_buf);
+
+  /* Get num_files.  */
+
+  if (bfd_seek (abfd, block_map_addr * block_size, SEEK_SET))
+    return NULL;
+
+  if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+    {
+      bfd_set_error (bfd_error_malformed_archive);
+      return NULL;
+    }
+
+  first_dir_block = bfd_getl32 (int_buf);
+
+  if (bfd_seek (abfd, first_dir_block * block_size, SEEK_SET))
+    return NULL;
+
+  if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+    {
+      bfd_set_error (bfd_error_malformed_archive);
+      return NULL;
+    }
+
+  num_files = bfd_getl32 (int_buf);
+
+  if (sym_index >= num_files)
+    {
+      bfd_set_error (bfd_error_no_more_archived_files);
+      return NULL;
+    }
+
+  /* Read file size.  */
+
+  dir_offset = sizeof (uint32_t) * (sym_index + 1);
+
+  if (dir_offset >= block_size)
+    {
+      uint32_t block_map_addr_off;
+
+      block_map_addr_off = ((dir_offset / block_size) * sizeof (uint32_t));
+
+      if (bfd_seek (abfd, (block_map_addr * block_size) + block_map_addr_off,
+		    SEEK_SET))
+	return NULL;
+
+      if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+	{
+	  bfd_set_error (bfd_error_malformed_archive);
+	  return NULL;
+	}
+
+      block = bfd_getl32 (int_buf);
+    }
+  else
+    {
+      block = first_dir_block;
+    }
+
+  if (bfd_seek (abfd, (block * block_size) + (dir_offset % block_size),
+		SEEK_SET))
+    return NULL;
+
+  if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+    {
+      bfd_set_error (bfd_error_malformed_archive);
+      return NULL;
+    }
+
+  file_size = bfd_getl32 (int_buf);
+
+  /* Undocumented? Seen on PDBs created by MSVC 2022.  */
+  if (file_size == 0xffffffff)
+    file_size = 0;
+
+  /* Create BFD. */
+
+  /* Four hex digits is enough - even though MSF allows for 32 bits, the
+     PDB format itself only uses 16 bits for stream numbers.  */
+  sprintf (name, "%04lx", sym_index);
+
+  file = bfd_create (name, abfd);
+
+  if (!file)
+    return NULL;
+
+  if (!bfd_make_writable (file))
+    goto fail;
+
+  file->arelt_data =
+    (struct areltdata *) bfd_zmalloc (sizeof (struct areltdata));
+
+  if (!file->arelt_data)
+    goto fail;
+
+  arch_eltdata (file)->parsed_size = file_size;
+  arch_eltdata (file)->key = sym_index;
+
+  if (file_size == 0)
+    return file;
+
+  block_off = 0;
+
+  /* Sum number of blocks in previous files.  */
+
+  if (sym_index != 0)
+    {
+      dir_offset = sizeof (uint32_t);
+
+      if (bfd_seek (abfd, (first_dir_block * block_size) + sizeof (uint32_t),
+		    SEEK_SET))
+	goto fail;
+
+      for (symindex i = 0; i < sym_index; i++)
+	{
+	  uint32_t size, num_blocks;
+
+	  if ((dir_offset % block_size) == 0)
+	    {
+	      uint32_t block_map_addr_off;
+
+	      block_map_addr_off =
+		((dir_offset / block_size) * sizeof (uint32_t));
+
+	      if (bfd_seek
+		  (abfd, (block_map_addr * block_size) + block_map_addr_off,
+		   SEEK_SET))
+		goto fail;
+
+	      if (bfd_bread (int_buf, sizeof (uint32_t), abfd) !=
+		  sizeof (uint32_t))
+		{
+		  bfd_set_error (bfd_error_malformed_archive);
+		  goto fail;
+		}
+
+	      block = bfd_getl32 (int_buf);
+
+	      if (bfd_seek (abfd, block * block_size, SEEK_SET))
+		goto fail;
+	    }
+
+	  if (bfd_bread (int_buf, sizeof (uint32_t), abfd) !=
+	      sizeof (uint32_t))
+	    {
+	      bfd_set_error (bfd_error_malformed_archive);
+	      goto fail;
+	    }
+
+	  size = bfd_getl32 (int_buf);
+
+	  if (size == 0xffffffff)
+	    size = 0;
+
+	  num_blocks = (size + block_size - 1) / block_size;
+	  block_off += num_blocks;
+
+	  dir_offset += sizeof (uint32_t);
+	}
+    }
+
+  /* Read blocks, and write into new BFD.  */
+
+  dir_offset = sizeof (uint32_t) * (num_files + block_off + 1);
+
+  if (dir_offset >= block_size)
+    {
+      uint32_t block_map_addr_off;
+
+      block_map_addr_off = ((dir_offset / block_size) * sizeof (uint32_t));
+
+      if (bfd_seek (abfd, (block_map_addr * block_size) + block_map_addr_off,
+		    SEEK_SET))
+	goto fail;
+
+      if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+	{
+	  bfd_set_error (bfd_error_malformed_archive);
+	  goto fail;
+	}
+
+      block = bfd_getl32 (int_buf);
+    }
+  else
+    {
+      block = first_dir_block;
+    }
+
+  buf = bfd_malloc (block_size);
+  if (!buf)
+    goto fail;
+
+  left = file_size;
+  do
+    {
+      uint32_t file_block, to_read;
+
+      if ((dir_offset % block_size) == 0 && left != file_size)
+	{
+	  uint32_t block_map_addr_off;
+
+	  block_map_addr_off =
+	    ((dir_offset / block_size) * sizeof (uint32_t));
+
+	  if (bfd_seek
+	      (abfd, (block_map_addr * block_size) + block_map_addr_off,
+	       SEEK_SET))
+	    goto fail2;
+
+	  if (bfd_bread (int_buf, sizeof (uint32_t), abfd) !=
+	      sizeof (uint32_t))
+	    {
+	      bfd_set_error (bfd_error_malformed_archive);
+	      goto fail2;
+	    }
+
+	  block = bfd_getl32 (int_buf);
+	}
+
+      if (bfd_seek (abfd, (block * block_size) + (dir_offset % block_size),
+		    SEEK_SET))
+	goto fail2;
+
+      if (bfd_bread (int_buf, sizeof (uint32_t), abfd) != sizeof (uint32_t))
+	{
+	  bfd_set_error (bfd_error_malformed_archive);
+	  goto fail2;
+	}
+
+      file_block = bfd_getl32 (int_buf);
+
+      if (bfd_seek (abfd, file_block * block_size, SEEK_SET))
+	goto fail2;
+
+      to_read = left > block_size ? block_size : left;
+
+      if (bfd_bread (buf, to_read, abfd) != to_read)
+	{
+	  bfd_set_error (bfd_error_malformed_archive);
+	  goto fail2;
+	}
+
+      if (bfd_bwrite (buf, to_read, file) != to_read)
+	goto fail2;
+
+      if (left > block_size)
+	left -= block_size;
+      else
+	break;
+
+      dir_offset += sizeof (uint32_t);
+    }
+  while (left > 0);
+
+  free (buf);
+
+  return file;
+
+fail2:
+  free (buf);
+
+fail:
+  bfd_close (file);
+  return NULL;
+}
