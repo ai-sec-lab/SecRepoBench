@@ -1,0 +1,160 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/hunspell/suggestmgr.cxx
+int SuggestMgr::checkword(const std::string& word,
+                          int cpdsuggest,
+                          int* timer,
+                          clock_t* timelimit) {
+  // check time limit
+  if (timer) {
+    (*timer)--;
+    if (!(*timer) && timelimit) {
+      if ((clock() - *timelimit) > TIMELIMIT)
+        return 0;
+      *timer = MAXPLUSTIMER;
+    }
+  }
+
+  if (pAMgr) {
+    struct hentry* rv = NULL;
+    int nosuffix = 0;
+
+    if (cpdsuggest == 1) {
+      if (pAMgr->get_compound()) {
+        struct hentry* rv2 = NULL;
+        struct hentry* rwords[100];  // buffer for COMPOUND pattern checking
+        rv = pAMgr->compound_check(word, 0, 0, 100, 0, NULL, (hentry**)&rwords, 0, 1, 0);  // EXT
+        if (rv &&
+            (!(rv2 = pAMgr->lookup(word.c_str())) || !rv2->astr ||
+             !(TESTAFF(rv2->astr, pAMgr->get_forbiddenword(), rv2->alen) ||
+               TESTAFF(rv2->astr, pAMgr->get_nosuggest(), rv2->alen))))
+          return 3;  // XXX obsolote categorisation + only ICONV needs affix
+                     // flag check?
+      }
+      return 0;
+    }
+
+    rv = pAMgr->lookup(word.c_str());
+
+    if (rv) {
+      if ((rv->astr) &&
+          (TESTAFF(rv->astr, pAMgr->get_forbiddenword(), rv->alen) ||
+           TESTAFF(rv->astr, pAMgr->get_nosuggest(), rv->alen) ||
+           TESTAFF(rv->astr, pAMgr->get_substandard(), rv->alen)))
+        return 0;
+      while (rv) {
+        if (rv->astr &&
+            (TESTAFF(rv->astr, pAMgr->get_needaffix(), rv->alen) ||
+             TESTAFF(rv->astr, ONLYUPCASEFLAG, rv->alen) ||
+             TESTAFF(rv->astr, pAMgr->get_onlyincompound(), rv->alen))) {
+          rv = rv->next_homonym;
+        } else
+          break;
+      }
+    } else
+      rv = pAMgr->prefix_check(word, 0, word.size(),
+                               0);  // only prefix, and prefix + suffix XXX
+
+    if (rv) {
+      nosuffix = 1;
+    } else {
+      rv = pAMgr->suffix_check(word, 0, word.size(), 0, NULL,
+                               FLAG_NULL, FLAG_NULL, IN_CPD_NOT);  // only suffix
+    }
+
+    if (!rv && pAMgr->have_contclass()) {
+      rv = pAMgr->suffix_check_twosfx(word, 0, word.size(), 0, NULL, FLAG_NULL);
+      if (!rv)
+        rv = pAMgr->prefix_check_twosfx(word, 0, word.size(), 0, FLAG_NULL);
+    }
+
+    // check forbidden words
+    if ((rv) && (rv->astr) &&
+        (TESTAFF(rv->astr, pAMgr->get_forbiddenword(), rv->alen) ||
+         TESTAFF(rv->astr, ONLYUPCASEFLAG, rv->alen) ||
+         TESTAFF(rv->astr, pAMgr->get_nosuggest(), rv->alen) ||
+         TESTAFF(rv->astr, pAMgr->get_onlyincompound(), rv->alen)))
+      return 0;
+
+    if (rv) {  // XXX obsolote
+      if ((pAMgr->get_compoundflag()) &&
+          TESTAFF(rv->astr, pAMgr->get_compoundflag(), rv->alen))
+        return 2 + nosuffix;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/tools/munch.cxx
+int load_tables(FILE* wdlst) {
+  char ts[MAX_LN_LEN];
+  int nExtra = 5;
+
+  /* first read the first line of file to get hash table size */
+  if (!fgets(ts, MAX_LN_LEN - 1, wdlst))
+    return 2;
+  mychomp(ts);
+  tablesize = atoi(ts);
+
+  if (tablesize <= 0 ||
+      (tablesize >= (std::numeric_limits<int>::max() - 1 - nExtra) / (int)sizeof(struct hentry*))) {
+    return 3;
+  }
+
+  tablesize += nExtra;
+  if ((tablesize % 2) == 0)
+    tablesize++;
+
+  /* allocate the hash table */
+  tableptr = (struct hentry*)calloc(tablesize, sizeof(struct hentry));
+  if (!tableptr)
+    return 3;
+
+  /* loop thorugh all words on much list and add to hash
+   * table and store away word and affix strings in tmpfile
+   */
+
+  while (fgets(ts, MAX_LN_LEN - 1, wdlst)) {
+    mychomp(ts);
+    char* ap = mystrdup(ts);
+    add_word(ap);
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/hashmgr.cxx
+int HashMgr::remove_forbidden_flag(const std::string& word) {
+  struct hentry* dp = lookup(word.c_str());
+  if (!dp)
+    return 1;
+  while (dp) {
+    if (dp->astr && TESTAFF(dp->astr, forbiddenword, dp->alen))
+      dp->alen = 0;  // XXX forbidden words of personal dic.
+    dp = dp->next_homonym;
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/hashmgr.cxx
+const std::vector<replentry>& HashMgr::get_reptable() const {
+  return reptable;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/hashmgr.cxx
+int HashMgr::hash(const char* word) const {
+  unsigned long hv = 0;
+  for (int i = 0; i < 4 && *word != 0; i++)
+    hv = (hv << 8) | (*word++);
+  while (*word != 0) {
+    ROTATE(hv, ROTATE_LEN);
+    hv ^= (*word++);
+  }
+  return (unsigned long)hv % tableptr.size();
+}
+

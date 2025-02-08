@@ -1,0 +1,279 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+int sslTryAndRetrieveServerCertificate(struct ndpi_detection_module_struct *ndpi_struct,
+				       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  int rc = 1;
+  
+  if(packet->tcp) {
+    if(!flow->l4.tcp.tls_srv_cert_fingerprint_processed)
+      getSSCertificateFingerprint(ndpi_struct, flow);
+  }
+  
+#if 1
+  /* consider only specific SSL packets (handshake) */
+  if((packet->payload_packet_len > 9) && (packet->payload[0] == 0x16)) {
+    char certificate[64];
+    int rc;
+
+    certificate[0] = '\0';
+    rc = getTLScertificate(ndpi_struct, flow, certificate, sizeof(certificate));
+    packet->tls_certificate_num_checks++;
+
+    if(rc > 0) {
+      char organization[64];
+
+      // try fetch server organization once server certificate is found
+      organization[0] = '\0';
+      getSSLorganization(ndpi_struct, flow, organization, sizeof(organization));
+
+      packet->tls_certificate_detected++;
+#if 0
+      if((flow->l4.tcp.tls_seen_server_cert == 1)
+	 && (flow->protos.stun_ssl.ssl.server_certificate[0] != '\0'))
+        /* 0 means we've done processing extra packets (since we found what we wanted) */
+        return 0;
+#endif
+    }
+
+    if(flow->l4.tcp.tls_record_offset == 0) {
+    /* Client hello, Server Hello, and certificate packets probably all checked in this case */
+      if(((packet->tls_certificate_num_checks >= 3)
+	  && (flow->l4.tcp.seen_syn)
+	  && (flow->l4.tcp.seen_syn_ack)
+	  && (flow->l4.tcp.seen_ack) /* We have seen the 3-way handshake */
+	  && flow->l4.tcp.tls_srv_cert_fingerprint_processed)
+	 /* || (flow->protos.stun_ssl.ssl.ja3_server[0] != '\0') */
+	 ) {
+	/* We're done processing extra packets since we've probably checked all possible cert packets */
+	return(rc);
+      }
+    }
+  }
+#endif
+  
+  /* 1 means keep looking for more packets */
+  if(!flow->l4.tcp.tls_srv_cert_fingerprint_processed) rc = 1;
+  return(rc);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+void getSSLorganization(struct ndpi_detection_module_struct *ndpi_struct,
+			struct ndpi_flow_struct *flow,
+			char *buffer, int buffer_len) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  u_int16_t total_len;
+  u_int8_t handshake_protocol;
+  
+  if(packet->payload[0] != 0x16 /* Handshake */)
+    return;
+
+  total_len  = (packet->payload[3] << 8) + packet->payload[4] + 5 /* SSL Header */;
+  handshake_protocol = packet->payload[5]; /* handshake protocol a bit misleading, it is message type according TLS specs */
+  
+  if((handshake_protocol != 0x02)
+     && (handshake_protocol != 0xb) /* Server Hello and Certificate message types are interesting for us */)
+    return;
+
+#ifdef DEBUG_TLS
+  printf("=>> [TLS] Certificate [total_len: %u/%u]\n", ntohs(*(u_int16_t*)&packet->payload[3]), total_len);
+#endif
+  
+  /* Truncate total len, search at least in incomplete packet */
+  if(total_len > packet->payload_packet_len)
+    total_len = packet->payload_packet_len;
+
+  memset(buffer, 0, buffer_len);
+
+  /* Check after handshake protocol header (5 bytes) and message header (4 bytes) */
+  u_int num_found = 0;
+  u_int i, j;
+  for(i = 9; i < packet->payload_packet_len-4; i++) {
+    /* Organization OID: 2.5.4.10 */
+    if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0a)) {
+      u_int8_t server_len = packet->payload[i+4];
+
+      num_found++;
+      /* what we want is subject certificate, so we bypass the issuer certificate */
+      if(num_found != 2) continue;
+
+      // packet is truncated... further inspection is not needed
+      if(i+4+server_len >= packet->payload_packet_len) {
+	break;
+      }
+
+      char *server_org = (char*)&packet->payload[i+5];
+
+      u_int len = (u_int)ndpi_min(server_len, buffer_len-1);
+      strncpy(buffer, server_org, len);
+      buffer[len] = '\0';
+
+      // check if organization string are all printable
+      u_int8_t is_printable = 1;
+      for (j = 0; j < len; j++) {
+	if(!ndpi_isprint(buffer[j])) {
+	  is_printable = 0;
+	  break;
+	}
+      }
+
+      if(is_printable == 1) {
+	snprintf(flow->protos.stun_ssl.ssl.server_organization,
+		 sizeof(flow->protos.stun_ssl.ssl.server_organization), "%s", buffer);
+#ifdef DEBUG_TLS
+	printf("Certificate organization: %s\n", flow->protos.stun_ssl.ssl.server_organization);
+#endif
+      }
+    } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x1e) && (packet->payload[i+2] == 0x17)) {
+      u_int8_t len = packet->payload[i+3];
+      u_int offset = i+4;
+
+      if((offset+len) < packet->payload_packet_len) {
+	char utcDate[32];
+
+#ifdef DEBUG_TLS
+	printf("[CERTIFICATE] notBefore [len: %u][", len);
+	for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+	printf("]\n");
+#endif
+
+	if(len < (sizeof(utcDate)-1)) {
+	  struct tm utc;
+	  utc.tm_isdst = -1; /* Not set by strptime */
+
+	  strncpy(utcDate, (const char*)&packet->payload[i+4], len);
+	  utcDate[len] = '\0';
+
+	  /* 141021000000Z */
+	  if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc) != NULL) {
+	    flow->protos.stun_ssl.ssl.notBefore = timegm(&utc);
+#ifdef DEBUG_TLS
+	    printf("[CERTIFICATE] notBefore %u [%s]\n",
+		   flow->protos.stun_ssl.ssl.notBefore, utcDate);
+#endif
+	  }
+	}
+
+	offset += len;
+
+	if((offset+1) < packet->payload_packet_len) {
+	  len = packet->payload[offset+1];
+
+	  offset += 2;
+
+	  if((offset+len) < packet->payload_packet_len) {
+#ifdef DEBUG_TLS
+	    printf("[CERTIFICATE] notAfter [len: %u][", len);
+	    for(j=0; j<len; j++) printf("%c", packet->payload[offset+j]);
+	    printf("]\n");
+#endif
+
+	    if(len < (sizeof(utcDate)-1)) {
+	      struct tm utc;
+	      utc.tm_isdst = -1; /* Not set by strptime */
+
+	      strncpy(utcDate, (const char*)&packet->payload[offset], len);
+	      utcDate[len] = '\0';
+
+	      /* 141021000000Z */
+	      if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc) != NULL) {
+		flow->protos.stun_ssl.ssl.notAfter = timegm(&utc);
+#ifdef DEBUG_TLS
+		printf("[CERTIFICATE] notAfter %u [%s]\n",
+		       flow->protos.stun_ssl.ssl.notAfter, utcDate);
+#endif
+	      }
+	    }
+	  }
+	}
+      }
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/kerberos.c
+void init_kerberos_dissector(struct ndpi_detection_module_struct *ndpi_struct,
+			     u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask) {
+  ndpi_set_bitmask_protocol_detection("Kerberos", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_KERBEROS,
+				      ndpi_search_kerberos,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_OR_UDP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/stun.c
+void ndpi_search_stun(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &flow->packet;
+
+  NDPI_LOG_DBG(ndpi_struct, "search stun\n");
+
+  if(packet->payload == NULL)
+    return;
+  else if(packet->iphv6 != NULL) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  if(packet->tcp) {
+    /* STUN may be encapsulated in TCP packets */
+    if((packet->payload_packet_len >= 22)
+       && ((ntohs(get_u_int16_t(packet->payload, 0)) + 2) == packet->payload_packet_len)) {
+      /* TODO there could be several STUN packets in a single TCP packet so maybe the detection could be
+       * improved by checking only the STUN packet of given length */
+
+      if(ndpi_int_check_stun(ndpi_struct, flow, packet->payload + 2,
+			     packet->payload_packet_len - 2) == NDPI_IS_STUN) {
+	goto udp_stun_match;
+      }
+    }
+  }
+
+  /* UDP */
+  if(ndpi_int_check_stun(ndpi_struct, flow, packet->payload,
+			 packet->payload_packet_len) == NDPI_IS_STUN) {
+  udp_stun_match:
+    if(flow->guessed_protocol_id == NDPI_PROTOCOL_UNKNOWN)
+      flow->guessed_protocol_id = NDPI_PROTOCOL_STUN;
+
+    if(flow->guessed_host_protocol_id == NDPI_PROTOCOL_UNKNOWN) {
+      flow->guessed_host_protocol_id = flow->guessed_protocol_id;
+      flow->guessed_protocol_id = NDPI_PROTOCOL_STUN;
+    }
+    
+    ndpi_int_stun_add_connection(ndpi_struct, flow,
+				 flow->guessed_protocol_id,
+				 flow->guessed_host_protocol_id);
+    return;
+  }
+
+  if(flow->protos.stun_ssl.stun.num_udp_pkts >= MAX_NUM_STUN_PKTS)
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+
+  if(flow->packet_counter > 0) {
+    /* This might be a RTP stream: let's make sure we check it */
+    NDPI_CLR(&flow->excluded_protocol_bitmask, NDPI_PROTOCOL_RTP);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/dhcp.c
+void init_dhcp_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask)
+{
+  ndpi_set_bitmask_protocol_detection("DHCP", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_DHCP,
+				      ndpi_search_dhcp_udp,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_UDP_WITH_PAYLOAD,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+  *id += 1;
+}
+

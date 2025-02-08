@@ -137,7 +137,7 @@ def get_crossfile_context_from_chunks(
     cfc_text = f"{line_start_sym} Here are some relevant code fragments from other files of the repo:\n\n"
     for sc, scf in zip(selected_chunks, selected_chunks_filename):
         cfc_text += f"{line_start_sym} the below code fragment can be found in:\n{line_start_sym} {scf}" + "\n"
-        cfc_text += "\n".join([f"{line_start_sym} {cl}" for cl in sc.strip('\n').splitlines()]) + "\n\n"
+        cfc_text += sc.strip('\n') + "\n\n"
 
     return cross_file_context, cfc_text, meta_data
 
@@ -211,8 +211,8 @@ def get_funcs(file, content, target_func):
         return
 
     # Parse the source code with Tree-sitter
-    parser = Parser(LANGUAGE)
-    # parser.set_language(LANGUAGE)
+    parser = Parser()
+    parser.set_language(LANGUAGE)
     tree = parser.parse(bytes(content, 'utf8'))
     node = tree.root_node
 
@@ -236,14 +236,17 @@ def get_funcs(file, content, target_func):
 
 
 def get_cfc(args, semantic_ranker, project_context):
-    # get func
-    for file_name in os.listdir(os.path.join('descriptions', str(args.query_id))):
-        if file_name.split('.')[0] == 'sec_func':
-            break
-    if not file_name.startswith('sec_func'):
+    # get secure function
+    func_c = f'descriptions/{args.query_id}/sec_func_base.c'
+    func_cpp = f'descriptions/{args.query_id}/sec_func_base.cpp'
+    if os.path.exists(func_c):
+        sec_func_file_name = func_c
+    elif os.path.exists(func_cpp):
+        sec_func_file_name = func_cpp
+    else:
         print(f'ID {id}: sec_func file not present')
         return
-    with open(os.path.join('descriptions', str(args.query_id), file_name), "r") as f:
+    with open(sec_func_file_name, "r") as f:
         target_func = f.read()
 
     status = None
@@ -289,14 +292,19 @@ def get_cfc(args, semantic_ranker, project_context):
                 status = "no_crossfile_context"
 
             else:
-                for file_name in os.listdir(os.path.join('descriptions', str(args.query_id))):
-                    if file_name.split('.')[0] == 'mask_func':
-                        break
-                if not file_name.startswith('mask_func'):
-                    print(f'ID {id}: mask_func file not present')
+                # get masked function
+                mask_func_c = f'descriptions/{args.query_id}/mask_sec_func_base.c'
+                mask_func_cpp = f'descriptions/{args.query_id}/mask_sec_func_base.cpp'
+                if os.path.exists(mask_func_c):
+                    mask_sec_func_file_name = mask_func_c
+                elif os.path.exists(mask_func_cpp):
+                    mask_sec_func_file_name = mask_func_cpp
+                else:
+                    print(f'ID {id}: mask_sec_func file not present')
                     return
-                with open(os.path.join('descriptions', str(args.query_id), file_name), "r") as f:
+                with open(mask_sec_func_file_name, "r") as f:
                     query = f.read().strip()
+
                 assert "// <MASK>" in query, "Query should contain the special symbol // <MASK>"
                 cfc, cfc_text, meta_data = get_crossfile_context_from_chunks(
                     args=args,
@@ -418,8 +426,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    with open('final_ids.txt', 'r') as f:
-        ids = f.read().splitlines()[1:]
+    with open('analyze_report/ids_each_step.json', 'r') as f:
+        ids = json.load(f)['ids_pass_testcase_unittest']
 
     with open('filter_logs/cases.json', 'r') as f:
         cases = json.load(f)
@@ -427,12 +435,12 @@ if __name__ == "__main__":
     original_path = os.getcwd()
     for id in tqdm(ids):
         print(id)
-        if os.path.exists(os.path.join('descriptions', str(id), 'cross-file.txt')):
-            continue
+        # if os.path.exists(os.path.join('descriptions', str(id), 'cross-file.txt')):
+        #     continue
         args.query_id = id
         args.query_original_path = cases[id]['changed_file']
         commit = cases[id]['fixing_commit']
-        repository_root = os.path.join('/home/cdilgren/project_benchmark/repos', cases[id]['project_name'])
+        repository_root = os.path.join('/space1/cdilgren/project_benchmark/repos', cases[id]['project_name'])
         args.repository_path = repository_root
         # use git to checkout the commit
         try:

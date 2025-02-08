@@ -1,0 +1,117 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsUInt32Number CMSEXPORT cmsGetHeaderRenderingIntent(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE*  Icc = (_cmsICCPROFILE*) hProfile;
+    return Icc -> RenderingIntent;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsBool CMSEXPORT cmsIsTag(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+       _cmsICCPROFILE*  Icc = (_cmsICCPROFILE*) (void*) hProfile;
+       return _cmsSearchTag(Icc, sig, FALSE) >= 0;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+static
+cmsBool SetLinks( _cmsICCPROFILE* Icc)
+{
+    cmsUInt32Number i;
+
+    for (i=0; i < Icc -> TagCount; i++) {
+
+        cmsTagSignature lnk = Icc ->TagLinked[i];
+        if (lnk != (cmsTagSignature) 0) {
+
+            int j = _cmsSearchTag(Icc, lnk, FALSE);
+            if (j >= 0) {
+
+                Icc ->TagOffsets[i] = Icc ->TagOffsets[j];
+                Icc ->TagSizes[i]   = Icc ->TagSizes[j];
+            }
+
+        }
+    }
+
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsUInt32Number CMSEXPORT cmsSaveProfileToIOhandler(cmsHPROFILE hProfile, cmsIOHANDLER* io)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    _cmsICCPROFILE Keep;
+    cmsIOHANDLER* PrevIO = NULL;
+    cmsUInt32Number UsedSpace;
+    cmsContext ContextID;
+
+    _cmsAssert(hProfile != NULL);
+    
+    if (!_cmsLockMutex(Icc->ContextID, Icc->UsrMutex)) return 0;
+    memmove(&Keep, Icc, sizeof(_cmsICCPROFILE));
+
+    ContextID = cmsGetProfileContextID(hProfile);
+    PrevIO = Icc ->IOhandler = cmsOpenIOhandlerFromNULL(ContextID);
+    if (PrevIO == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc->UsrMutex);
+        return 0;
+    }
+
+    // Pass #1 does compute offsets
+
+    if (!_cmsWriteHeader(Icc, 0)) goto Error;
+    if (!SaveTags(Icc, &Keep)) goto Error;
+
+    UsedSpace = PrevIO ->UsedSpace;
+
+    // Pass #2 does save to iohandler
+
+    if (io != NULL) {
+
+        Icc ->IOhandler = io;
+        if (!SetLinks(Icc)) goto Error;
+        if (!_cmsWriteHeader(Icc, UsedSpace)) goto Error;
+        if (!SaveTags(Icc, &Keep)) goto Error;
+    }
+
+    memmove(Icc, &Keep, sizeof(_cmsICCPROFILE));
+    if (!cmsCloseIOhandler(PrevIO)) 
+        UsedSpace = 0; // As a error marker
+
+    _cmsUnlockMutex(Icc->ContextID, Icc->UsrMutex);
+
+    return UsedSpace;
+
+
+Error:
+    cmsCloseIOhandler(PrevIO);
+    memmove(Icc, &Keep, sizeof(_cmsICCPROFILE));
+    _cmsUnlockMutex(Icc->ContextID, Icc->UsrMutex);
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+static
+cmsBool IsTypeSupported(cmsTagDescriptor* TagDescriptor, cmsTagTypeSignature Type)
+{
+    cmsUInt32Number i, nMaxTypes;
+
+    nMaxTypes = TagDescriptor->nSupportedTypes;
+    if (nMaxTypes >= MAX_TYPES_IN_LCMS_PLUGIN)
+        nMaxTypes = MAX_TYPES_IN_LCMS_PLUGIN;
+
+    for (i=0; i < nMaxTypes; i++) {
+        if (Type == TagDescriptor ->SupportedTypes[i]) return TRUE;
+    }
+
+    return FALSE;
+}
+

@@ -1,0 +1,193 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static int processTLSBlock(struct ndpi_detection_module_struct *ndpi_struct,
+			   struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+
+  switch(packet->payload[0] /* block type */) {
+  case 0x01: /* Client Hello */
+  case 0x02: /* Server Hello */
+    processClientServerHello(ndpi_struct, flow, 0);
+    flow->l4.tcp.tls.hello_processed = 1;
+    ndpi_int_tls_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_TLS);
+    break;
+
+  case 0x0b: /* Certificate */
+    /* Important: populate the tls union fields only after
+     * ndpi_int_tls_add_connection has been called */
+    if(flow->l4.tcp.tls.hello_processed) {
+      processCertificate(ndpi_struct, flow);
+      flow->l4.tcp.tls.certificate_processed = 1;
+    }
+    break;
+
+  default:
+    return(-1);
+  }
+
+  return(0);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static void ndpi_search_tls_wrapper(struct ndpi_detection_module_struct *ndpi_struct,
+				    struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+
+#ifdef DEBUG_TLS
+  printf("==>> %s() %u [len: %u][version: %u]\n",
+	 __FUNCTION__,
+	 flow->guessed_host_protocol_id,
+	 packet->payload_packet_len,
+	 flow->protos.stun_ssl.ssl.ssl_version);
+#endif
+
+  if(packet->udp != NULL)
+    ndpi_search_tls_udp(ndpi_struct, flow);
+  else
+    ndpi_search_tls_tcp(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+int processCertificate(struct ndpi_detection_module_struct *ndpi_struct,
+		       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  u_int32_t certificates_length, length = (packet->payload[1] << 16) + (packet->payload[2] << 8) + packet->payload[3];
+  u_int16_t certificates_offset = 7;
+  u_int8_t num_certificates_found = 0;
+
+#ifdef DEBUG_TLS
+  printf("[TLS] %s() [payload_packet_len=%u][direction: %u][%02X %02X %02X %02X %02X %02X...]\n",
+	 __FUNCTION__, packet->payload_packet_len,
+	 packet->packet_direction,
+	 packet->payload[0], packet->payload[1], packet->payload[2],
+	 packet->payload[3], packet->payload[4], packet->payload[5]);
+#endif
+
+  if((packet->payload_packet_len != (length + 4)) || (packet->payload[1] != 0x0)) {
+    NDPI_SET_BIT(flow->risk, NDPI_MALFORMED_PACKET);
+    return(-1); /* Invalid length */
+  }
+
+  certificates_length = (packet->payload[4] << 16) + (packet->payload[5] << 8) + packet->payload[6];
+
+  if((packet->payload[4] != 0x0) || ((certificates_length+3) != length)) {
+    NDPI_SET_BIT(flow->risk, NDPI_MALFORMED_PACKET);
+    return(-2); /* Invalid length */
+  }
+
+  if(!flow->l4.tcp.tls.srv_cert_fingerprint_ctx) {
+    if((flow->l4.tcp.tls.srv_cert_fingerprint_ctx = (void*)ndpi_malloc(sizeof(SHA1_CTX))) == NULL)
+      return(-3); /* Not enough memory */
+  }
+
+  /* Now let's process each individual certificates */
+  while(certificates_offset < certificates_length) {
+    u_int32_t certificate_len = (packet->payload[certificates_offset] << 16) + (packet->payload[certificates_offset+1] << 8) + packet->payload[certificates_offset+2];
+
+    /* Invalid lenght */
+    if((certificate_len == 0)
+       || (packet->payload[certificates_offset] != 0x0)
+       || ((certificates_offset+certificate_len) > (4+certificates_length))) {
+#ifdef DEBUG_TLS
+      printf("[TLS] Invalid length [certificate_len: %u][certificates_offset: %u][%u vs %u]\n",
+	     certificate_len, certificates_offset,
+	     (certificates_offset+certificate_len),
+	     certificates_length);
+#endif
+      break;
+    }
+
+    certificates_offset += 3;
+#ifdef DEBUG_TLS
+    printf("[TLS] Processing %u bytes certificate [%02X %02X %02X]\n",
+	   certificate_len,
+	   packet->payload[certificates_offset],
+	   packet->payload[certificates_offset+1],
+	   packet->payload[certificates_offset+2]);
+#endif
+
+    if(num_certificates_found++ == 0) /* Dissect only the first certificate that is the one we care */ {
+      /* For SHA-1 we take into account only the first certificate and not all of them */
+
+      SHA1Init(flow->l4.tcp.tls.srv_cert_fingerprint_ctx);
+
+#ifdef DEBUG_CERTIFICATE_HASH
+      {
+	int i;
+
+	for(i=0;i<certificate_len;i++)
+	  printf("%02X ", packet->payload[certificates_offset+i]);
+
+	printf("\n");
+      }
+#endif
+
+      SHA1Update(flow->l4.tcp.tls.srv_cert_fingerprint_ctx,
+		 &packet->payload[certificates_offset],
+		 certificate_len);
+
+      SHA1Final(flow->l4.tcp.tls.sha1_certificate_fingerprint, flow->l4.tcp.tls.srv_cert_fingerprint_ctx);
+
+      flow->l4.tcp.tls.fingerprint_set = 1;
+
+#ifdef DEBUG_TLS
+      {
+	int i;
+
+	printf("[TLS] SHA-1: ");
+	for(i=0;i<20;i++)
+	  printf("%s%02X", (i > 0) ? ":" : "", flow->l4.tcp.tls.sha1_certificate_fingerprint[i]);
+	printf("\n");
+      }
+#endif
+
+      processCertificateElements(ndpi_struct, flow, certificates_offset, certificate_len);
+    }
+
+    certificates_offset += certificate_len;
+  }
+
+  if(( ndpi_struct->num_tls_blocks_to_follow != 0)
+     && (flow->l4.tcp.tls.num_tls_blocks >= ndpi_struct->num_tls_blocks_to_follow)) {
+#ifdef DEBUG_TLS_BLOCKS
+    printf("*** [TLS Block] Enough blocks dissected\n");
+#endif
+    
+    flow->extra_packets_func = NULL; /* We're good now */  
+  }
+  
+  return(1);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/ssh.c
+void init_ssh_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask)
+{
+  ndpi_set_bitmask_protocol_detection("SSH", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_SSH,
+				      ndpi_search_ssh_tcp,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/telnet.c
+static void ndpi_int_telnet_add_connection(struct ndpi_detection_module_struct
+					   *ndpi_struct, struct ndpi_flow_struct *flow) {
+  flow->guessed_host_protocol_id = flow->guessed_protocol_id = NDPI_PROTOCOL_TELNET;
+
+  /* This is necessary to inform the core to call this dissector again */
+  flow->check_extra_packets = 1;
+  flow->max_extra_packets_to_check = 64;
+  flow->extra_packets_func = search_telnet_again;
+
+  ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_TELNET, NDPI_PROTOCOL_UNKNOWN);
+}
+

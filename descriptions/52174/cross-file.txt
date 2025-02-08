@@ -1,0 +1,124 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/icecast.c
+void init_icecast_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask)
+{
+  ndpi_set_bitmask_protocol_detection("IceCast", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_ICECAST,
+				      ndpi_search_icecast_tcp,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/bittorrent.c
+static void ndpi_int_search_bittorrent_tcp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  if(packet->payload_packet_len == 0) {
+    return;
+  }
+
+  if(flow->bittorrent_stage == 0 && packet->payload_packet_len != 0) {
+    /* exclude stage 0 detection from next run */
+    flow->bittorrent_stage = 1;
+    if(ndpi_int_search_bittorrent_tcp_zero(ndpi_struct, flow) != 0) {
+      NDPI_LOG_DBG2(ndpi_struct, "stage 0 has detected something, returning\n");
+      return;
+    }
+
+    NDPI_LOG_DBG2(ndpi_struct, "stage 0 has no direct detection, fall through\n");
+  }
+  return;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/fasttrack.c
+void init_fasttrack_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask)
+{
+  ndpi_set_bitmask_protocol_detection("FastTrack", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_FASTTRACK,
+				      ndpi_search_fasttrack_tcp,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/thunder.c
+void ndpi_search_thunder(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  //
+  //struct ndpi_id_struct *src = flow->src;
+  //struct ndpi_id_struct *dst = flow->dst;
+
+  if (packet->tcp != NULL) {
+    ndpi_int_search_thunder_http(ndpi_struct, flow);
+    ndpi_int_search_thunder_tcp(ndpi_struct, flow);
+  } else if (packet->udp != NULL) {
+    ndpi_int_search_thunder_udp(ndpi_struct, flow);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/mail_smtp.c
+int ndpi_extra_search_mail_smtp_tcp(struct ndpi_detection_module_struct *ndpi_struct,
+				    struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct * const packet = &ndpi_struct->packet;
+  int rc;
+
+  if(flow->l4.tcp.smtp_command_bitmask & SMTP_BIT_STARTTLS) {
+
+    /* RFC 3207:
+       "After the client gives the STARTTLS command, the server responds with
+        one of the following reply codes:
+         220 Ready to start TLS
+         501 Syntax error (no parameters allowed)
+         454 TLS not available due to temporary reason"
+    */
+
+    if(ndpi_struct->opportunistic_tls_smtp_enabled &&
+       packet->payload_packet_len > 3 && memcmp(packet->payload, "220", 3) == 0) {
+      rc = 1;
+      /* Switch classification to SMTPS, keeping the hostname sub-classification (if any) */
+      if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_UNKNOWN &&
+	 flow->detected_protocol_stack[0] != NDPI_PROTOCOL_MAIL_SMTP) {
+	ndpi_set_detected_protocol(ndpi_struct, flow,
+                                   flow->detected_protocol_stack[0], NDPI_PROTOCOL_MAIL_SMTPS, NDPI_CONFIDENCE_DPI);
+	/* Now it is safe to write to `flow->protos.tls_quic` union */
+	flow->protos.tls_quic.subprotocol_detected = 1;
+      } else {
+        ndpi_set_detected_protocol(ndpi_struct, flow,
+                                   NDPI_PROTOCOL_MAIL_SMTPS, NDPI_PROTOCOL_UNKNOWN, NDPI_CONFIDENCE_DPI);
+      }
+      NDPI_LOG_DBG(ndpi_struct, "Switching to [%d/%d]\n",
+                   flow->detected_protocol_stack[0], flow->detected_protocol_stack[1]);
+      /* We are done (in SMTP dissector): delegating TLS... */
+      switch_extra_dissection_to_tls(ndpi_struct, flow);
+    } else {
+      rc = 0; /* Something went wrong. Stop extra dissection */
+    }
+
+  } else {
+    ndpi_search_mail_smtp_tcp(ndpi_struct, flow);
+    rc = ((flow->l4.tcp.ftp_imap_pop_smtp.password[0] == '\0') &&
+          (flow->l4.tcp.ftp_imap_pop_smtp.auth_tls == 1 ||
+           flow->l4.tcp.ftp_imap_pop_smtp.auth_done == 0)) ? 1 : 0;
+  }
+
+#ifdef SMTP_DEBUG
+  printf("**** %s() [rc: %d]\n", __FUNCTION__, rc);
+#endif
+
+  return(rc);
+}
+

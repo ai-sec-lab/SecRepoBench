@@ -1,0 +1,347 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// tree.c
+xmlAttrPtr
+xmlCopyProp(xmlNodePtr target, xmlAttrPtr cur) {
+	return xmlCopyPropInternal(NULL, target, cur);
+}
+
+// the below code fragment can be found in:
+// tree.c
+static int
+xmlDOMWrapAdoptAttr(xmlDOMWrapCtxtPtr ctxt,
+		    xmlDocPtr sourceDoc,
+		    xmlAttrPtr attr,
+		    xmlDocPtr destDoc,
+		    xmlNodePtr destParent,
+		    int options ATTRIBUTE_UNUSED)
+{
+    xmlNodePtr cur;
+    int adoptStr = 1;
+
+    if ((attr == NULL) || (destDoc == NULL))
+	return (-1);
+
+    attr->doc = destDoc;
+    if (attr->ns != NULL) {
+	xmlNsPtr ns = NULL;
+
+	if (ctxt != NULL) {
+	    /* TODO: User defined. */
+	}
+	/* XML Namespace. */
+	if (IS_STR_XML(attr->ns->prefix)) {
+	    ns = xmlTreeEnsureXMLDecl(destDoc);
+	} else if (destParent == NULL) {
+	    /*
+	    * Store in @destDoc->oldNs.
+	    */
+	    ns = xmlDOMWrapStoreNs(destDoc, attr->ns->href, attr->ns->prefix);
+	} else {
+	    /*
+	    * Declare on @destParent.
+	    */
+	    if (xmlSearchNsByNamespaceStrict(destDoc, destParent, attr->ns->href,
+		&ns, 1) == -1)
+		goto internal_error;
+	    if (ns == NULL) {
+		ns = xmlDOMWrapNSNormDeclareNsForced(destDoc, destParent,
+		    attr->ns->href, attr->ns->prefix, 1);
+	    }
+	}
+	if (ns == NULL)
+	    goto internal_error;
+	attr->ns = ns;
+    }
+
+    XML_TREE_ADOPT_STR(attr->name);
+    attr->atype = 0;
+    attr->psvi = NULL;
+    /*
+    * Walk content.
+    */
+    if (attr->children == NULL)
+	return (0);
+    cur = attr->children;
+    if ((cur != NULL) && (cur->type == XML_NAMESPACE_DECL))
+        goto internal_error;
+    while (cur != NULL) {
+	cur->doc = destDoc;
+	switch (cur->type) {
+	    case XML_TEXT_NODE:
+	    case XML_CDATA_SECTION_NODE:
+		XML_TREE_ADOPT_STR_2(cur->content)
+		break;
+	    case XML_ENTITY_REF_NODE:
+		/*
+		* Remove reference to the entity-node.
+		*/
+		cur->content = NULL;
+		cur->children = NULL;
+		cur->last = NULL;
+		if ((destDoc->intSubset) || (destDoc->extSubset)) {
+		    xmlEntityPtr ent;
+		    /*
+		    * Assign new entity-node if available.
+		    */
+		    ent = xmlGetDocEntity(destDoc, cur->name);
+		    if (ent != NULL) {
+			cur->content = ent->content;
+			cur->children = (xmlNodePtr) ent;
+			cur->last = (xmlNodePtr) ent;
+		    }
+		}
+		break;
+	    default:
+		break;
+	}
+	if (cur->children != NULL) {
+	    cur = cur->children;
+	    continue;
+	}
+next_sibling:
+	if (cur == (xmlNodePtr) attr)
+	    break;
+	if (cur->next != NULL)
+	    cur = cur->next;
+	else {
+	    cur = cur->parent;
+	    goto next_sibling;
+	}
+    }
+    return (0);
+internal_error:
+    return (-1);
+}
+
+// the below code fragment can be found in:
+// parser.c
+int
+xmlParseBalancedChunkMemoryRecover(xmlDocPtr doc, xmlSAXHandlerPtr sax,
+     void *user_data, int depth, const xmlChar *string, xmlNodePtr *lst,
+     int recover) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr newDoc;
+    xmlSAXHandlerPtr oldsax = NULL;
+    xmlNodePtr content, newRoot;
+    int size;
+    int ret = 0;
+
+    if (depth > 40) {
+	return(XML_ERR_ENTITY_LOOP);
+    }
+
+
+    if (lst != NULL)
+        *lst = NULL;
+    if (string == NULL)
+        return(-1);
+
+    size = xmlStrlen(string);
+
+    ctxt = xmlCreateMemoryParserCtxt((char *) string, size);
+    if (ctxt == NULL) return(-1);
+    ctxt->userData = ctxt;
+    if (sax != NULL) {
+	oldsax = ctxt->sax;
+        ctxt->sax = sax;
+	if (user_data != NULL)
+	    ctxt->userData = user_data;
+    }
+    newDoc = xmlNewDoc(BAD_CAST "1.0");
+    if (newDoc == NULL) {
+	xmlFreeParserCtxt(ctxt);
+	return(-1);
+    }
+    newDoc->properties = XML_DOC_INTERNAL;
+    if ((doc != NULL) && (doc->dict != NULL)) {
+        xmlDictFree(ctxt->dict);
+	ctxt->dict = doc->dict;
+	xmlDictReference(ctxt->dict);
+	ctxt->str_xml = xmlDictLookup(ctxt->dict, BAD_CAST "xml", 3);
+	ctxt->str_xmlns = xmlDictLookup(ctxt->dict, BAD_CAST "xmlns", 5);
+	ctxt->str_xml_ns = xmlDictLookup(ctxt->dict, XML_XML_NAMESPACE, 36);
+	ctxt->dictNames = 1;
+    } else {
+	xmlCtxtUseOptionsInternal(ctxt, XML_PARSE_NODICT, NULL);
+    }
+    /* doc == NULL is only supported for historic reasons */
+    if (doc != NULL) {
+	newDoc->intSubset = doc->intSubset;
+	newDoc->extSubset = doc->extSubset;
+    }
+    newRoot = xmlNewDocNode(newDoc, NULL, BAD_CAST "pseudoroot", NULL);
+    if (newRoot == NULL) {
+	if (sax != NULL)
+	    ctxt->sax = oldsax;
+	xmlFreeParserCtxt(ctxt);
+	newDoc->intSubset = NULL;
+	newDoc->extSubset = NULL;
+        xmlFreeDoc(newDoc);
+	return(-1);
+    }
+    xmlAddChild((xmlNodePtr) newDoc, newRoot);
+    nodePush(ctxt, newRoot);
+    /* doc == NULL is only supported for historic reasons */
+    if (doc == NULL) {
+	ctxt->myDoc = newDoc;
+    } else {
+	ctxt->myDoc = newDoc;
+	newDoc->children->doc = doc;
+	/* Ensure that doc has XML spec namespace */
+	xmlSearchNsByHref(doc, (xmlNodePtr)doc, XML_XML_NAMESPACE);
+	newDoc->oldNs = doc->oldNs;
+    }
+    ctxt->instate = XML_PARSER_CONTENT;
+    ctxt->input_id = 2;
+    ctxt->depth = depth;
+
+    /*
+     * Doing validity checking on chunk doesn't make sense
+     */
+    ctxt->validate = 0;
+    ctxt->loadsubset = 0;
+    xmlDetectSAX2(ctxt);
+
+    if ( doc != NULL ){
+        content = doc->children;
+        doc->children = NULL;
+        xmlParseContent(ctxt);
+        doc->children = content;
+    }
+    else {
+        xmlParseContent(ctxt);
+    }
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW != 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if (ctxt->node != newDoc->children) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    }
+
+    if (!ctxt->wellFormed) {
+        if (ctxt->errNo == 0)
+	    ret = 1;
+	else
+	    ret = ctxt->errNo;
+    } else {
+      ret = 0;
+    }
+
+    if ((lst != NULL) && ((ret == 0) || (recover == 1))) {
+	xmlNodePtr cur;
+
+	/*
+	 * Return the newly created nodeset after unlinking it from
+	 * they pseudo parent.
+	 */
+	cur = newDoc->children->children;
+	*lst = cur;
+	while (cur != NULL) {
+	    xmlSetTreeDoc(cur, doc);
+	    cur->parent = NULL;
+	    cur = cur->next;
+	}
+	newDoc->children->children = NULL;
+    }
+
+    if (sax != NULL)
+	ctxt->sax = oldsax;
+    xmlFreeParserCtxt(ctxt);
+    newDoc->intSubset = NULL;
+    newDoc->extSubset = NULL;
+    /* This leaks the namespace list if doc == NULL */
+    newDoc->oldNs = NULL;
+    xmlFreeDoc(newDoc);
+
+    return(ret);
+}
+
+// the below code fragment can be found in:
+// debugXML.c
+static void
+xmlCtxtDumpString(xmlDebugCtxtPtr ctxt, const xmlChar * str)
+{
+    int i;
+
+    if (ctxt->check) {
+        return;
+    }
+    /* TODO: check UTF8 content of the string */
+    if (str == NULL) {
+        fprintf(ctxt->output, "(NULL)");
+        return;
+    }
+    for (i = 0; i < 40; i++)
+        if (str[i] == 0)
+            return;
+        else if (IS_BLANK_CH(str[i]))
+            fputc(' ', ctxt->output);
+        else if (str[i] >= 0x80)
+            fprintf(ctxt->output, "#%X", str[i]);
+        else
+            fputc(str[i], ctxt->output);
+    fprintf(ctxt->output, "...");
+}
+
+// the below code fragment can be found in:
+// xmlreader.c
+const xmlChar *
+xmlTextReaderConstName(xmlTextReaderPtr reader) {
+    xmlNodePtr node;
+
+    if ((reader == NULL) || (reader->node == NULL))
+	return(NULL);
+    if (reader->curnode != NULL)
+	node = reader->curnode;
+    else
+	node = reader->node;
+    switch (node->type) {
+        case XML_ELEMENT_NODE:
+        case XML_ATTRIBUTE_NODE:
+	    if ((node->ns == NULL) ||
+		(node->ns->prefix == NULL))
+		return(node->name);
+	    return(CONSTQSTR(node->ns->prefix, node->name));
+        case XML_TEXT_NODE:
+	    return(CONSTSTR(BAD_CAST "#text"));
+        case XML_CDATA_SECTION_NODE:
+	    return(CONSTSTR(BAD_CAST "#cdata-section"));
+        case XML_ENTITY_NODE:
+        case XML_ENTITY_REF_NODE:
+	    return(CONSTSTR(node->name));
+        case XML_PI_NODE:
+	    return(CONSTSTR(node->name));
+        case XML_COMMENT_NODE:
+	    return(CONSTSTR(BAD_CAST "#comment"));
+        case XML_DOCUMENT_NODE:
+        case XML_HTML_DOCUMENT_NODE:
+	    return(CONSTSTR(BAD_CAST "#document"));
+        case XML_DOCUMENT_FRAG_NODE:
+	    return(CONSTSTR(BAD_CAST "#document-fragment"));
+        case XML_NOTATION_NODE:
+	    return(CONSTSTR(node->name));
+        case XML_DOCUMENT_TYPE_NODE:
+        case XML_DTD_NODE:
+	    return(CONSTSTR(node->name));
+        case XML_NAMESPACE_DECL: {
+	    xmlNsPtr ns = (xmlNsPtr) node;
+
+	    if (ns->prefix == NULL)
+		return(CONSTSTR(BAD_CAST "xmlns"));
+	    return(CONSTQSTR(BAD_CAST "xmlns", ns->prefix));
+	}
+
+        case XML_ELEMENT_DECL:
+        case XML_ATTRIBUTE_DECL:
+        case XML_ENTITY_DECL:
+        case XML_XINCLUDE_START:
+        case XML_XINCLUDE_END:
+	    return(NULL);
+    }
+    return(NULL);
+}
+

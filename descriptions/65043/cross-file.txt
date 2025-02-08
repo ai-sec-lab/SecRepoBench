@@ -1,0 +1,195 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// xmlsave.c
+static int xmlSaveClearEncoding(xmlSaveCtxtPtr ctxt) {
+    xmlOutputBufferPtr buf = ctxt->buf;
+    xmlOutputBufferFlush(buf);
+    xmlCharEncCloseFunc(buf->encoder);
+    xmlBufFree(buf->conv);
+    buf->encoder = NULL;
+    buf->conv = NULL;
+    return(0);
+}
+
+// the below code fragment can be found in:
+// xmlIO.c
+static int
+endOfInput (void * context ATTRIBUTE_UNUSED,
+	    char * buffer ATTRIBUTE_UNUSED,
+	    int len ATTRIBUTE_UNUSED) {
+    return(0);
+}
+
+// the below code fragment can be found in:
+// encoding.c
+static int
+UTF8ToISO8859x(unsigned char* out, int *outlen,
+              const unsigned char* in, int *inlen,
+              const unsigned char* const xlattable) {
+    const unsigned char* outstart = out;
+    const unsigned char* inend;
+    const unsigned char* instart = in;
+    const unsigned char* processed = in;
+
+    if ((out == NULL) || (outlen == NULL) || (inlen == NULL) ||
+        (xlattable == NULL))
+	return(XML_ENC_ERR_INTERNAL);
+    if (in == NULL) {
+        /*
+        * initialization nothing to do
+        */
+        *outlen = 0;
+        *inlen = 0;
+        return(0);
+    }
+    inend = in + (*inlen);
+    while (in < inend) {
+        unsigned char d = *in++;
+        if  (d < 0x80)  {
+            *out++ = d;
+        } else if (d < 0xC0) {
+            /* trailing byte in leading position */
+            *outlen = out - outstart;
+            *inlen = processed - instart;
+            return(XML_ENC_ERR_INPUT);
+        } else if (d < 0xE0) {
+            unsigned char c;
+            if (!(in < inend)) {
+                /* trailing byte not in input buffer */
+                *outlen = out - outstart;
+                *inlen = processed - instart;
+                return(XML_ENC_ERR_PARTIAL);
+            }
+            c = *in++;
+            if ((c & 0xC0) != 0x80) {
+                /* not a trailing byte */
+                *outlen = out - outstart;
+                *inlen = processed - instart;
+                return(XML_ENC_ERR_INPUT);
+            }
+            c = c & 0x3F;
+            d = d & 0x1F;
+            d = xlattable [48 + c + xlattable [d] * 64];
+            if (d == 0) {
+                /* not in character set */
+                *outlen = out - outstart;
+                *inlen = processed - instart;
+                return(XML_ENC_ERR_INPUT);
+            }
+            *out++ = d;
+        } else if (d < 0xF0) {
+            unsigned char c1;
+            unsigned char c2;
+            if (!(in < inend - 1)) {
+                /* trailing bytes not in input buffer */
+                *outlen = out - outstart;
+                *inlen = processed - instart;
+                return(XML_ENC_ERR_PARTIAL);
+            }
+            c1 = *in++;
+            if ((c1 & 0xC0) != 0x80) {
+                /* not a trailing byte (c1) */
+                *outlen = out - outstart;
+                *inlen = processed - instart;
+                return(XML_ENC_ERR_INPUT);
+            }
+            c2 = *in++;
+            if ((c2 & 0xC0) != 0x80) {
+                /* not a trailing byte (c2) */
+                *outlen = out - outstart;
+                *inlen = processed - instart;
+                return(XML_ENC_ERR_INPUT);
+            }
+            c1 = c1 & 0x3F;
+            c2 = c2 & 0x3F;
+	    d = d & 0x0F;
+	    d = xlattable [48 + c2 + xlattable [48 + c1 +
+			xlattable [32 + d] * 64] * 64];
+            if (d == 0) {
+                /* not in character set */
+                *outlen = out - outstart;
+                *inlen = processed - instart;
+                return(XML_ENC_ERR_INPUT);
+            }
+            *out++ = d;
+        } else {
+            /* cannot transcode >= U+010000 */
+            *outlen = out - outstart;
+            *inlen = processed - instart;
+            return(XML_ENC_ERR_INPUT);
+        }
+        processed = in;
+    }
+    *outlen = out - outstart;
+    *inlen = processed - instart;
+    return(*outlen);
+}
+
+// the below code fragment can be found in:
+// parserInternals.c
+int
+xmlSwitchEncodingName(xmlParserCtxtPtr ctxt, const char *encoding) {
+    xmlCharEncodingHandlerPtr handler;
+    int res;
+
+    res = xmlOpenCharEncodingHandler(encoding, &handler);
+    if (res != 0) {
+        if (res == XML_ERR_UNSUPPORTED_ENCODING)
+            __xmlErrEncoding(ctxt, res, "Unsupported encoding: %s\n",
+                             (const xmlChar *) encoding, NULL);
+        else
+            xmlFatalErr(ctxt, res, NULL);
+        return(-1);
+    }
+
+    return(xmlSwitchInputEncoding(ctxt, ctxt->input, handler));
+}
+
+// the below code fragment can be found in:
+// parserInternals.c
+int
+xmlSwitchEncoding(xmlParserCtxtPtr ctxt, xmlCharEncoding enc)
+{
+    xmlCharEncodingHandlerPtr handler = NULL;
+    int ret;
+    int res;
+
+    if ((ctxt == NULL) || (ctxt->input == NULL))
+        return(-1);
+
+    switch (enc) {
+	case XML_CHAR_ENCODING_NONE:
+	case XML_CHAR_ENCODING_UTF8:
+        case XML_CHAR_ENCODING_ASCII:
+            res = 0;
+            break;
+        case XML_CHAR_ENCODING_EBCDIC:
+            res = xmlDetectEBCDIC(ctxt->input, &handler);
+            break;
+        default:
+            res = xmlLookupCharEncodingHandler(enc, &handler);
+            break;
+    }
+
+    if (res != 0) {
+        if (res == XML_ERR_UNSUPPORTED_ENCODING) {
+            const char *name = xmlGetCharEncodingName(enc);
+
+            __xmlErrEncoding(ctxt, res, "encoding not supported: %s\n",
+                             BAD_CAST (name ? name : "<null>"), NULL);
+        } else {
+            xmlFatalErr(ctxt, res, NULL);
+        }
+        return(-1);
+    }
+
+    ret = xmlSwitchInputEncoding(ctxt, ctxt->input, handler);
+
+    if ((ret >= 0) && (enc == XML_CHAR_ENCODING_NONE)) {
+        ctxt->input->flags &= ~XML_INPUT_HAS_ENCODING;
+    }
+
+    return(ret);
+}
+

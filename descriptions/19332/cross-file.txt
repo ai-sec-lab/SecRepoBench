@@ -1,0 +1,246 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/stun.c
+static int is_google_ip_address(u_int32_t host) {
+  if(
+     ((host & 0xFFFF0000 /* 255.255.0.0 */) == 0x4A7D0000 /* 74.125.0.0/16 */)
+     || ((host & 0xFFFF0000 /* 255.255.0.0 */) == 0x42660000 /* 66.102.0.0/16 */)
+     )
+    return(1);
+  else
+    return(0);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/stun.c
+void init_stun_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id,
+			 NDPI_PROTOCOL_BITMASK *detection_bitmask) {
+  ndpi_set_bitmask_protocol_detection("STUN", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_STUN,
+				      ndpi_search_stun,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_TCP_OR_UDP_WITH_PAYLOAD,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+void ndpi_process_extra_packet(struct ndpi_detection_module_struct *ndpi_str,
+			       struct ndpi_flow_struct *flow,
+			       const unsigned char *packet,
+			       const unsigned short packetlen,
+			       const u_int64_t current_tick_l,
+			       struct ndpi_id_struct *src,
+			       struct ndpi_id_struct *dst) {
+  if(flow == NULL)
+    return;
+
+  if(flow->server_id == NULL) flow->server_id = dst; /* Default */
+
+  /* need at least 20 bytes for ip header */
+  if(packetlen < 20) {
+    return;
+  }
+
+  flow->packet.tick_timestamp_l = current_tick_l;
+  flow->packet.tick_timestamp = (u_int32_t)(current_tick_l/ndpi_str->ticks_per_second);
+
+  /* parse packet */
+  flow->packet.iph = (struct ndpi_iphdr *)packet;
+  /* we are interested in ipv4 packet */
+
+  /* set up the packet headers for the extra packet function to use if it wants */
+  if(ndpi_init_packet_header(ndpi_str, flow, packetlen) != 0)
+    return;
+
+  /* detect traffic for tcp or udp only */
+  flow->src = src, flow->dst = dst;
+  ndpi_connection_tracking(ndpi_str, flow);
+
+  /* call the extra packet function (which may add more data/info to flow) */
+  if(flow->extra_packets_func) {
+    if((flow->extra_packets_func(ndpi_str, flow)) == 0)
+      flow->check_extra_packets = 0;
+  }
+
+  flow->num_extra_packets_checked++;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+void init_tls_dissector(struct ndpi_detection_module_struct *ndpi_struct,
+			u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask) {
+  ndpi_set_bitmask_protocol_detection("TLS", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_TLS,
+				      ndpi_search_tls_tcp_udp,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_OR_UDP_WITH_PAYLOAD,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+int getSSCertificateFingerprint(struct ndpi_detection_module_struct *ndpi_struct,
+				struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  u_int8_t multiple_messages;
+
+  if(flow->l4.tcp.tls_srv_cert_fingerprint_processed)
+    return(0); /* We're good */
+  
+#ifdef DEBUG_TLS
+  printf("=>> [TLS] %s() [tls_record_offset=%d][payload_packet_len=%u][direction: %u][%02X %02X %02X...]\n",
+	 __FUNCTION__, flow->l4.tcp.tls_record_offset, packet->payload_packet_len,
+	 packet->packet_direction,
+	 packet->payload[0], packet->payload[1], packet->payload[2]);
+#endif
+  
+  if((packet->packet_direction == 0) /* Client -> Server */
+     || (packet->payload_packet_len == 0))
+    return(1); /* More packets please */
+  else if(flow->l4.tcp.tls_srv_cert_fingerprint_processed)
+    return(0); /* We're good */
+
+  if(packet->payload_packet_len <= flow->l4.tcp.tls_record_offset) {
+    /* Avoid invalid memory accesses */
+    return(1);
+  }
+
+  if(flow->l4.tcp.tls_fingerprint_len > 0) {
+    unsigned int avail = packet->payload_packet_len - flow->l4.tcp.tls_record_offset;
+
+    if(avail > flow->l4.tcp.tls_fingerprint_len)
+      avail = flow->l4.tcp.tls_fingerprint_len;
+
+#ifdef DEBUG_TLS
+    printf("=>> [TLS] Certificate record [%02X %02X %02X...][missing: %u][offset: %u][avail: %u] (B)\n",
+	   packet->payload[flow->l4.tcp.tls_record_offset],
+	   packet->payload[flow->l4.tcp.tls_record_offset+1],
+	   packet->payload[flow->l4.tcp.tls_record_offset+2],
+	   flow->l4.tcp.tls_fingerprint_len, flow->l4.tcp.tls_record_offset, avail
+	   );
+#endif
+    
+#ifdef DEBUG_CERTIFICATE_HASH
+    for(i=0;i<avail;i++)
+      printf("%02X ", packet->payload[flow->l4.tcp.tls_record_offset+i]);
+    printf("\n");
+#endif
+    
+    SHA1Update(flow->l4.tcp.tls_srv_cert_fingerprint_ctx,
+	       &packet->payload[flow->l4.tcp.tls_record_offset],
+	       avail);
+      
+    flow->l4.tcp.tls_fingerprint_len -= avail;
+      
+    if(flow->l4.tcp.tls_fingerprint_len == 0) {
+      SHA1Final(flow->l4.tcp.tls_sha1_certificate_fingerprint, flow->l4.tcp.tls_srv_cert_fingerprint_ctx);
+
+#ifdef DEBUG_TLS
+      {
+	int i;
+	
+	printf("=>> [TLS] SHA-1: ");
+	for(i=0;i<20;i++)
+	  printf("%s%02X", (i > 0) ? ":" : "", flow->l4.tcp.tls_sha1_certificate_fingerprint[i]);
+	printf("\n");
+      }
+#endif
+      
+      flow->l4.tcp.tls_srv_cert_fingerprint_processed = 1;
+      return(0); /* We're good */
+    } else {
+      flow->l4.tcp.tls_record_offset = 0;
+#ifdef DEBUG_TLS
+      printf("=>> [TLS] Certificate record: still missing %u bytes\n", flow->l4.tcp.tls_fingerprint_len);
+#endif
+      return(1); /* More packets please */
+    }
+  }
+
+  if(packet->payload[flow->l4.tcp.tls_record_offset] == 0x15 /* Alert */) {
+    u_int len = ntohs(*(u_int16_t*)&packet->payload[flow->l4.tcp.tls_record_offset+3]) + 5 /* SSL header len */;
+
+    if(len < 10 /* Sanity check */) {
+      if((flow->l4.tcp.tls_record_offset+len) < packet->payload_packet_len)
+	flow->l4.tcp.tls_record_offset += len;
+    } else
+      goto invalid_len;
+  }
+  
+  multiple_messages = (packet->payload[flow->l4.tcp.tls_record_offset] == 0x16 /* Handshake */) ? 0 : 1;
+
+#ifdef DEBUG_TLS
+  printf("=>> [TLS] [multiple_messages: %d]\n", multiple_messages);
+#endif
+
+  if((!multiple_messages) && (packet->payload[flow->l4.tcp.tls_record_offset] != 0x16 /* Handshake */))
+    return(1);
+  else if(((!multiple_messages) && (packet->payload[flow->l4.tcp.tls_record_offset+5] == 0xb) /* Certificate */)
+	  || (packet->payload[flow->l4.tcp.tls_record_offset] == 0xb) /* Certificate */) {
+    /* TODO: Do not take into account all certificates but only the first one */
+#ifdef DEBUG_TLS
+    printf("=>> [TLS] Certificate found\n");
+#endif
+
+    if(flow->l4.tcp.tls_srv_cert_fingerprint_ctx == NULL)
+      flow->l4.tcp.tls_srv_cert_fingerprint_ctx = (void*)ndpi_malloc(sizeof(SHA1_CTX));
+    else {
+#ifdef DEBUG_TLS
+      printf("[TLS] Internal error: double allocation\n:");
+#endif
+    }
+    
+    if(flow->l4.tcp.tls_srv_cert_fingerprint_ctx) {
+      SHA1Init(flow->l4.tcp.tls_srv_cert_fingerprint_ctx);
+      flow->l4.tcp.tls_srv_cert_fingerprint_found = 1;
+      flow->l4.tcp.tls_record_offset += (!multiple_messages) ? 13 : 8;
+      flow->l4.tcp.tls_fingerprint_len = ntohs(*(u_int16_t*)&packet->payload[flow->l4.tcp.tls_record_offset]);
+      flow->l4.tcp.tls_record_offset = flow->l4.tcp.tls_record_offset+2;
+#ifdef DEBUG_TLS
+      printf("=>> [TLS] Certificate [total certificate len: %u][certificate initial offset: %u]\n",
+	     flow->l4.tcp.tls_fingerprint_len, flow->l4.tcp.tls_record_offset);
+#endif
+      return(getSSCertificateFingerprint(ndpi_struct, flow));        
+    } else
+      return(0); /* That's all */
+  } else if(flow->l4.tcp.tls_seen_certificate)
+    return(0); /* That's all */  
+  else if(packet->payload_packet_len > flow->l4.tcp.tls_record_offset+7+1/* +1 because we are going to read 2 bytes */) {
+    /* This is a handshake but not a certificate record */
+    u_int16_t len = ntohs(*(u_int16_t*)&packet->payload[flow->l4.tcp.tls_record_offset+7]);
+
+#ifdef DEBUG_TLS
+    printf("=>> [TLS] Found record %02X [len: %u]\n",
+	   packet->payload[flow->l4.tcp.tls_record_offset+5], len);
+#endif
+
+    if(len > 4096) {
+    invalid_len:
+      /* This looks an invalid len: we giveup */
+      flow->l4.tcp.tls_record_offset = 0, flow->l4.tcp.tls_srv_cert_fingerprint_processed = 1;
+#ifdef DEBUG_TLS
+      printf("=>> [TLS] Invalid fingerprint processing %u <-> %u\n",
+	     ntohs(packet->tcp->source), ntohs(packet->tcp->dest));
+#endif
+      return(0);
+    } else {
+      flow->l4.tcp.tls_record_offset += len + 9;
+      
+      if(flow->l4.tcp.tls_record_offset < packet->payload_packet_len)
+	return(getSSCertificateFingerprint(ndpi_struct, flow));
+      else {
+	flow->l4.tcp.tls_record_offset -= packet->payload_packet_len;      
+      }
+    }
+  }
+
+  flow->extra_packets_func = NULL; /* We're good now */
+  return(1);
+}
+

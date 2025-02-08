@@ -1,0 +1,288 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfDwaCompressor.cpp
+bool match (const std::string& suffix, const PixelType type) const
+    {
+        if (_type != type) return false;
+
+        if (_caseInsensitive)
+        {
+            std::string tmp (suffix);
+            std::transform (tmp.begin (), tmp.end (), tmp.begin (), tolower);
+            return tmp == _suffix;
+        }
+
+        return suffix == _suffix;
+    }
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_huf.c
+static inline void
+countFrequencies (uint64_t* freq, const uint16_t* data, uint64_t n)
+{
+    memset (freq, 0, HUF_ENCSIZE * sizeof (uint64_t));
+    for (uint64_t i = 0; i < n; ++i)
+        ++freq[data[i]];
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_classifier.h
+static inline const char*
+Classifier_find_suffix (const char* channel_name)
+{
+    const char* suffix = strrchr (channel_name, '.');
+    if (suffix) { suffix += 1; }
+    else { suffix = channel_name; }
+    return suffix;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfIDManifest.cpp
+void
+MurmurHash3_x64_128 (
+    const void* key, const int len, const uint32_t seed, void* out)
+{
+    const uint8_t* data    = (const uint8_t*) key;
+    const int      nblocks = len / 16;
+    uint64_t       h1      = seed;
+    uint64_t       h2      = seed;
+    const uint64_t c1      = BIG_CONSTANT (0x87c37b91114253d5);
+    const uint64_t c2      = BIG_CONSTANT (0x4cf5ad432745937f);
+    //----------
+    // body
+    const uint64_t* blocks = (const uint64_t*) (data);
+    for (int i = 0; i < nblocks; i++)
+    {
+        uint64_t k1 = getblock64 (blocks, i * 2 + 0);
+        uint64_t k2 = getblock64 (blocks, i * 2 + 1);
+        k1 *= c1;
+        k1 = ROTL64 (k1, 31);
+        k1 *= c2;
+        h1 ^= k1;
+        h1 = ROTL64 (h1, 27);
+        h1 += h2;
+        h1 = h1 * 5 + 0x52dce729;
+        k2 *= c2;
+        k2 = ROTL64 (k2, 33);
+        k2 *= c1;
+        h2 ^= k2;
+        h2 = ROTL64 (h2, 31);
+        h2 += h1;
+        h2 = h2 * 5 + 0x38495ab5;
+    }
+    //----------
+    // tail
+    const uint8_t* tail = (const uint8_t*) (data + nblocks * 16);
+    uint64_t       k1   = 0;
+    uint64_t       k2   = 0;
+    switch (len & 15)
+    {
+        case 15: k2 ^= ((uint64_t) tail[14]) << 48;
+        case 14: k2 ^= ((uint64_t) tail[13]) << 40;
+        case 13: k2 ^= ((uint64_t) tail[12]) << 32;
+        case 12: k2 ^= ((uint64_t) tail[11]) << 24;
+        case 11: k2 ^= ((uint64_t) tail[10]) << 16;
+        case 10: k2 ^= ((uint64_t) tail[9]) << 8;
+        case 9:
+            k2 ^= ((uint64_t) tail[8]) << 0;
+            k2 *= c2;
+            k2 = ROTL64 (k2, 33);
+            k2 *= c1;
+            h2 ^= k2;
+        case 8: k1 ^= ((uint64_t) tail[7]) << 56;
+        case 7: k1 ^= ((uint64_t) tail[6]) << 48;
+        case 6: k1 ^= ((uint64_t) tail[5]) << 40;
+        case 5: k1 ^= ((uint64_t) tail[4]) << 32;
+        case 4: k1 ^= ((uint64_t) tail[3]) << 24;
+        case 3: k1 ^= ((uint64_t) tail[2]) << 16;
+        case 2: k1 ^= ((uint64_t) tail[1]) << 8;
+        case 1:
+            k1 ^= ((uint64_t) tail[0]) << 0;
+            k1 *= c1;
+            k1 = ROTL64 (k1, 31);
+            k1 *= c2;
+            h1 ^= k1;
+    };
+    //----------
+    // finalization
+    h1 ^= len;
+    h2 ^= len;
+    h1 += h2;
+    h2 += h1;
+    h1 = fmix64 (h1);
+    h2 = fmix64 (h2);
+    h1 += h2;
+    h2 += h1;
+    ((uint64_t*) out)[0] = h1;
+    ((uint64_t*) out)[1] = h2;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_huf.c
+static void
+hufBuildEncTable (
+    uint64_t*  frq,
+    uint32_t*  im,
+    uint32_t*  iM,
+    uint32_t*  hlink,
+    uint64_t** fHeap,
+    uint64_t*  scode)
+{
+    //
+    // This function assumes that when it is called, array frq
+    // indicates the frequency of all possible symbols in the data
+    // that are to be Huffman-encoded.  (frq[i] contains the number
+    // of occurrences of symbol i in the data.)
+    //
+    // The loop below does three things:
+    //
+    // 1) Finds the minimum and maximum indices that point
+    //    to non-zero entries in frq:
+    //
+    //     frq[im] != 0, and frq[i] == 0 for all i < im
+    //     frq[iM] != 0, and frq[i] == 0 for all i > iM
+    //
+    // 2) Fills array fHeap with pointers to all non-zero
+    //    entries in frq.
+    //
+    // 3) Initializes array hlink such that hlink[i] == i
+    //    for all array entries.
+    //
+    uint32_t nf = 0;
+
+    *im = 0;
+
+    while (!frq[*im])
+        (*im)++;
+
+    for (uint32_t i = *im; i < HUF_ENCSIZE; i++)
+    {
+        hlink[i] = i;
+
+        if (frq[i])
+        {
+            fHeap[nf] = &frq[i];
+            ++nf;
+            *iM = i;
+        }
+    }
+
+    //
+    // Add a pseudo-symbol, with a frequency count of 1, to frq;
+    // adjust the fHeap and hlink array accordingly.  Function
+    // hufEncode() uses the pseudo-symbol for run-length encoding.
+    //
+
+    (*iM)++;
+    frq[*iM]  = 1;
+    fHeap[nf] = &frq[*iM];
+    ++nf;
+
+    //
+    // Build an array, scode, such that scode[i] contains the number
+    // of bits assigned to symbol i.  Conceptually this is done by
+    // constructing a tree whose leaves are the symbols with non-zero
+    // frequency:
+    //
+    //     Make a heap that contains all symbols with a non-zero frequency,
+    //     with the least frequent symbol on top.
+    //
+    //     Repeat until only one symbol is left on the heap:
+    //
+    //         Take the two least frequent symbols off the top of the heap.
+    //         Create a new node that has first two nodes as children, and
+    //         whose frequency is the sum of the frequencies of the first
+    //         two nodes.  Put the new node back into the heap.
+    //
+    // The last node left on the heap is the root of the tree.  For each
+    // leaf node, the distance between the root and the leaf is the length
+    // of the code for the corresponding symbol.
+    //
+    // The loop below doesn't actually build the tree; instead we compute
+    // the distances of the leaves from the root on the fly.  When a new
+    // node is added to the heap, then that node's descendants are linked
+    // into a single linear list that starts at the new node, and the code
+    // lengths of the descendants (that is, their distance from the root
+    // of the tree) are incremented by one.
+    //
+
+    make_heap (fHeap, nf);
+
+    memset (scode, 0, sizeof (uint64_t) * HUF_ENCSIZE);
+
+    while (nf > 1)
+    {
+        uint32_t mm, m;
+        //
+        // Find the indices, mm and m, of the two smallest non-zero frq
+        // values in fHeap, add the smallest frq to the second-smallest
+        // frq, and remove the smallest frq value from fHeap.
+        //
+
+        mm = (uint32_t) (fHeap[0] - frq);
+        pop_heap (&fHeap[0], &fHeap[nf]);
+        --nf;
+
+        m = (uint32_t) (fHeap[0] - frq);
+        pop_heap (&fHeap[0], &fHeap[nf]);
+
+        frq[m] += frq[mm];
+        push_heap (&fHeap[0], &fHeap[nf]);
+
+        //
+        // The entries in scode are linked into lists with the
+        // entries in hlink serving as "next" pointers and with
+        // the end of a list marked by hlink[j] == j.
+        //
+        // Traverse the lists that start at scode[m] and scode[mm].
+        // For each element visited, increment the length of the
+        // corresponding code by one bit. (If we visit scode[j]
+        // during the traversal, then the code for symbol j becomes
+        // one bit longer.)
+        //
+        // Merge the lists that start at scode[m] and scode[mm]
+        // into a single list that starts at scode[m].
+        //
+
+        //
+        // Add a bit to all codes in the first list.
+        //
+
+        for (uint32_t j = m;; j = hlink[j])
+        {
+            scode[j]++;
+
+            if (hlink[j] == j)
+            {
+                //
+                // Merge the two lists.
+                //
+
+                hlink[j] = mm;
+                break;
+            }
+        }
+
+        //
+        // Add a bit to all codes in the second list
+        //
+
+        for (uint32_t j = mm;; j = hlink[j])
+        {
+            scode[j]++;
+
+            if (hlink[j] == j) break;
+        }
+    }
+
+    //
+    // Build a canonical Huffman code table, replacing the code
+    // lengths in scode with (code, code length) pairs.  Copy the
+    // code table from scode into frq.
+    //
+
+    hufCanonicalCodeTable (scode);
+    memcpy (frq, scode, sizeof (uint64_t) * HUF_ENCSIZE);
+}
+

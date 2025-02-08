@@ -1,0 +1,276 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static void process_tls(struct ndpi_detection_module_struct *ndpi_struct,
+			struct ndpi_flow_struct *flow,
+			const u_int8_t *crypto_data, uint32_t crypto_data_len,
+			uint32_t version)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  /* Overwriting packet payload */
+  u_int16_t p_len;
+  const u_int8_t *p;
+  p = packet->payload;
+  p_len = packet->payload_packet_len;
+  packet->payload = crypto_data;
+  packet->payload_packet_len = crypto_data_len;
+
+  processClientServerHello(ndpi_struct, flow, version);
+  flow->protos.tls_quic.hello_processed = 1; /* Allow matching of custom categories */
+
+  /* Restore */
+  packet->payload = p;
+  packet->payload_packet_len = p_len;
+
+  /* ServerHello is not needed to sub-classified QUIC, so we ignore it:
+     this way we lose JA3S and negotiated ciphers...
+     Negotiated version is only present in the ServerHello message too, but
+     fortunately, QUIC always uses TLS version 1.3 */
+  flow->protos.tls_quic.ssl_version = 0x0304;
+
+  /* DNS-over-QUIC: ALPN is "doq" or "doq-XXX" (for drafts versions) */
+  if(flow->protos.tls_quic.alpn &&
+     strncmp(flow->protos.tls_quic.alpn, "doq", 3) == 0) {
+    NDPI_LOG_DBG(ndpi_struct, "Found DOQ (ALPN: [%s])\n", flow->protos.tls_quic.alpn);
+    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_DOH_DOT, NDPI_PROTOCOL_QUIC, NDPI_CONFIDENCE_DPI);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static int eval_extra_processing(struct ndpi_detection_module_struct *ndpi_struct,
+				 struct ndpi_flow_struct *flow, u_int32_t version)
+{
+  /* For the time being we need extra processing in two cases only:
+     1) to detect Snapchat calls, i.e. RTP/RTCP multiplxed with QUIC.
+        We noticed that Snapchat uses Q046, without any SNI.
+     2) to reassemble CH fragments on multiple UDP packets.
+     These two cases are mutually exclusive
+   */
+
+  if((version == V_Q046 &&
+      flow->host_server_name[0] == '\0') ||
+     is_ch_reassembler_pending(flow)) {
+    NDPI_LOG_DBG2(ndpi_struct, "We have further work to do\n");
+    return 1;
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static void quic_decrypt_message(quic_pp_cipher *pp_cipher, const uint8_t *packet_payload, uint32_t packet_payload_len,
+				 uint32_t header_length, uint8_t first_byte, uint32_t pkn_len,
+				 uint64_t packet_number, quic_decrypt_result_t *result)
+{
+  gcry_error_t err;
+  uint8_t *header;
+  uint8_t nonce[TLS13_AEAD_NONCE_LENGTH];
+  uint8_t *buffer;
+  uint8_t atag[16];
+  uint32_t buffer_length;
+#ifdef DEBUG_CRYPT
+  char buferr[128];
+#endif
+
+  if(!(pp_cipher != NULL) ||
+     !(pp_cipher->pp_cipher != NULL) ||
+     !(pkn_len < header_length) ||
+     !(1 <= pkn_len && pkn_len <= 4)) {
+#ifdef DEBUG_CRYPT
+    printf("Failed sanity checks\n");
+#endif
+    return;
+  }
+  /* Copy header, but replace encrypted first byte and PKN by plaintext. */
+  header = (uint8_t *)memdup(packet_payload, header_length);
+  if(!header)
+    return;
+  header[0] = first_byte;
+  for(uint32_t i = 0; i < pkn_len; i++) {
+    header[header_length - 1 - i] = (uint8_t)(packet_number >> (8 * i));
+  }
+
+  /* Input is "header || ciphertext (buffer) || auth tag (16 bytes)" */
+  buffer_length = packet_payload_len - (header_length + 16);
+  if(buffer_length == 0) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption not possible, ciphertext is too short\n");
+#endif
+    ndpi_free(header);
+    return;
+  }
+  buffer = (uint8_t *)memdup(packet_payload + header_length, buffer_length);
+  if(!buffer) {
+    ndpi_free(header);
+    return;
+  }
+  memcpy(atag, packet_payload + header_length + buffer_length, 16);
+
+  memcpy(nonce, pp_cipher->pp_iv, TLS13_AEAD_NONCE_LENGTH);
+  /* Packet number is left-padded with zeroes and XORed with write_iv */
+  phton64(nonce + sizeof(nonce) - 8, pntoh64(nonce + sizeof(nonce) - 8) ^ packet_number);
+
+  gcry_cipher_reset(pp_cipher->pp_cipher);
+  err = gcry_cipher_setiv(pp_cipher->pp_cipher, nonce, TLS13_AEAD_NONCE_LENGTH);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (setiv) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(header);
+    ndpi_free(buffer);
+    return;
+  }
+
+  /* associated data (A) is the contents of QUIC header */
+  err = gcry_cipher_authenticate(pp_cipher->pp_cipher, header, header_length);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (authenticate) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(header);
+    ndpi_free(buffer);
+    return;
+  }
+
+  ndpi_free(header);
+
+  /* Output ciphertext (C) */
+  err = gcry_cipher_decrypt(pp_cipher->pp_cipher, buffer, buffer_length, NULL, 0);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (decrypt) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(buffer);
+    return;
+  }
+
+  err = gcry_cipher_checktag(pp_cipher->pp_cipher, atag, 16);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (checktag) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(buffer);
+    return;
+  }
+
+  result->data = buffer;
+  result->data_len = buffer_length;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static int quic_decrypt_header(const uint8_t *packet_payload,
+			       uint32_t pn_offset, quic_hp_cipher *hp_cipher,
+			       int hp_cipher_algo, uint8_t *first_byte, uint32_t *pn,
+			       int loss_bits_negotiated)
+{
+  if(!hp_cipher->hp_cipher) {
+    /* Need to know the cipher */
+    return 0;
+  }
+  gcry_cipher_hd_t h = hp_cipher->hp_cipher;
+
+  /* Sample is always 16 bytes and starts after PKN (assuming length 4).
+     https://tools.ietf.org/html/draft-ietf-quic-tls-22#section-5.4.2 */
+  uint8_t sample[16];
+  memcpy(sample, packet_payload + pn_offset + 4, 16);
+
+  uint8_t mask[5] = { 0 };
+  switch (hp_cipher_algo) {
+  case GCRY_CIPHER_AES128:
+  case GCRY_CIPHER_AES256:
+    /* Encrypt in-place with AES-ECB and extract the mask. */
+    if(gcry_cipher_encrypt(h, sample, sizeof(sample), NULL, 0)) {
+      return 0;
+    }
+    memcpy(mask, sample, sizeof(mask));
+    break;
+  default:
+    return 0;
+  }
+
+  /* https://tools.ietf.org/html/draft-ietf-quic-tls-22#section-5.4.1 */
+  uint8_t packet0 = packet_payload[0];
+  if((packet0 & 0x80) == 0x80) {
+    /* Long header: 4 bits masked */
+    packet0 ^= mask[0] & 0x0f;
+  } else {
+    /* Short header */
+    if(loss_bits_negotiated == 0) {
+      /* Standard mask: 5 bits masked */
+      packet0 ^= mask[0] & 0x1F;
+    } else {
+      /* https://tools.ietf.org/html/draft-ferrieuxhamchaoui-quic-lossbits-03#section-5.3 */
+      packet0 ^= mask[0] & 0x07;
+    }
+  }
+  uint32_t pkn_len = (packet0 & 0x03) + 1;
+  /* printf("packet0 0x%x pkn_len %d\n", packet0, pkn_len); */
+
+  uint8_t pkn_bytes[4];
+  memcpy(pkn_bytes, packet_payload + pn_offset, pkn_len);
+  uint32_t pkt_pkn = 0;
+  for(uint32_t i = 0; i < pkn_len; i++) {
+    pkt_pkn |= (uint32_t)(pkn_bytes[i] ^ mask[1 + i]) << (8 * (pkn_len - 1 - i));
+  }
+  *first_byte = packet0;
+  *pn = pkt_pkn;
+  return 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static uint8_t *get_clear_payload(struct ndpi_detection_module_struct *ndpi_struct,
+				  struct ndpi_flow_struct *flow,
+				  uint32_t version, uint32_t *clear_payload_len)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int8_t *clear_payload;
+  u_int8_t dest_conn_id_len;
+#ifdef HAVE_LIBGCRYPT
+  u_int8_t source_conn_id_len;
+#endif
+
+  if(is_gquic_ver_less_than(version, 43)) {
+    clear_payload = (uint8_t *)&packet->payload[26];
+    *clear_payload_len = packet->payload_packet_len - 26;
+    /* Skip Private-flag field for version for < Q34 */
+    if(is_gquic_ver_less_than(version, 33)) {
+      clear_payload += 1;
+      (*clear_payload_len) -= 1;
+    }
+  } else if(version == V_Q046) {
+    if(packet->payload[5] != 0x50) {
+      NDPI_LOG_DBG(ndpi_struct, "Q46 invalid conn id len 0x%x\n",
+		   packet->payload[5]);
+      return NULL;
+    }
+    clear_payload = (uint8_t *)&packet->payload[30];
+    *clear_payload_len = packet->payload_packet_len - 30;
+  } else {
+    /* Upper limit of CIDs length has been already validated. If dest_conn_id_len is 0,
+       this is probably the Initial Packet from the server */
+    dest_conn_id_len = packet->payload[5];
+    if(dest_conn_id_len == 0) {
+      NDPI_LOG_DBG(ndpi_struct, "Packet 0x%x with dest_conn_id_len %d\n",
+		   version, dest_conn_id_len);
+      return NULL;
+    }
+#ifdef HAVE_LIBGCRYPT
+    source_conn_id_len = packet->payload[6 + dest_conn_id_len];
+    const u_int8_t *dest_conn_id = &packet->payload[6];
+    clear_payload = decrypt_initial_packet(ndpi_struct, flow,
+					   dest_conn_id, dest_conn_id_len,
+					   source_conn_id_len, version,
+					   clear_payload_len);
+#else
+    clear_payload = NULL;
+#endif
+  }
+
+  return clear_payload;
+}
+

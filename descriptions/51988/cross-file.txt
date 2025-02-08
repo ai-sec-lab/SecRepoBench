@@ -1,0 +1,183 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/hunspell/csutil.cxx
+int get_captype_utf8(const std::vector<w_char>& word, int langnum) {
+  // now determine the capitalization type of the first nl letters
+  size_t ncap = 0;
+  size_t nneutral = 0;
+  size_t firstcap = 0;
+
+  std::vector<w_char>::const_iterator it = word.begin();
+  std::vector<w_char>::const_iterator it_end = word.end();
+  while (it != it_end) {
+    unsigned short idx = (it->h << 8) + it->l;
+    unsigned short lwridx = unicodetolower(idx, langnum);
+    if (idx != lwridx)
+      ncap++;
+    if (unicodetoupper(idx, langnum) == lwridx)
+      nneutral++;
+    ++it;
+  }
+  if (ncap) {
+    unsigned short idx = (word[0].h << 8) + word[0].l;
+    firstcap = (idx != unicodetolower(idx, langnum));
+  }
+
+  // now finally set the captype
+  if (ncap == 0) {
+    return NOCAP;
+  } else if ((ncap == 1) && firstcap) {
+    return INITCAP;
+  } else if ((ncap == word.size()) || ((ncap + nneutral) == word.size())) {
+    return ALLCAP;
+  } else if ((ncap > 1) && firstcap) {
+    return HUHINITCAP;
+  }
+  return HUHCAP;
+}
+
+// the below code fragment can be found in:
+// src/tools/hzip.cxx
+int encode_file(char** table,
+                int n,
+                FILE* f,
+                FILE* f2,
+                unsigned short tw,
+                char* key) {
+  char bitbuf[BUFSIZE];
+  int i, bits = 0;
+  unsigned char cl, ch;
+  int cx[2];
+  union {
+    char c[2];
+    unsigned short word;
+  } u;
+  char* enc = key;
+
+  /* header and codes */
+  fprintf(f2, "%s", (key ? MAGIC_ENCRYPTED : MAGIC)); /* 3-byte HEADER */
+  cl = (unsigned char)(n & 0x00ff);
+  ch = (unsigned char)(n >> 8);
+  if (key) {
+    unsigned char cs;
+    for (cs = 0; *enc; enc++)
+      cs ^= *enc;
+    fprintf(f2, "%c", cs); /* 1-byte check sum */
+    enc = key;
+    ch ^= *enc;
+    if ((*(++enc)) == '\0')
+      enc = key;
+    cl ^= *enc;
+  }
+  fprintf(f2, "%c%c", ch, cl); /* upper and lower byte of record count */
+  for (i = 0; i < BUFSIZE; i++)
+    bitbuf[i] = '\0';
+  for (i = 0; i < CODELEN + 1; i++)
+    if (table[i]) {
+      size_t nmemb;
+      u.word = (unsigned short)i;
+      if (i == CODELEN)
+        u.word = tw;
+      if (key) {
+        if (*(++enc) == '\0')
+          enc = key;
+        u.c[0] ^= *enc;
+        if (*(++enc) == '\0')
+          enc = key;
+        u.c[1] ^= *enc;
+      }
+      fprintf(f2, "%c%c", u.c[0], u.c[1]); /* 2-character code id */
+      bits = 0;
+      if (write_bits(f2, bitbuf, &bits, table[i]) != 0)
+        return 1;
+      if (key) {
+        if (*(++enc) == '\0')
+          enc = key;
+        fprintf(f2, "%c", ((unsigned char)bits) ^ *enc);
+        for (cl = 0; cl <= bits / 8; cl++) {
+          if (*(++enc) == '\0')
+            enc = key;
+          bitbuf[cl] ^= *enc;
+        }
+      } else
+        fprintf(f2, "%c", (unsigned char)bits); /* 1-byte code length */
+      nmemb = bits / 8 + 1;
+      if (fwrite(bitbuf, 1, bits / 8 + 1, f2) != nmemb) /* x-byte code */
+        return 1;
+    }
+
+  /* file encoding */
+  bits = 0;
+  while ((cx[0] = getc(f)) != -1 && (cx[1] = getc(f)) != -1) {
+    u.c[0] = cx[0];
+    u.c[1] = cx[1];
+    if (write_bits(f2, bitbuf, &bits, table[u.word]) != 0)
+      return 1;
+  }
+  /* terminal suffixes */
+  if (write_bits(f2, bitbuf, &bits, table[CODELEN]) != 0)
+    return 1;
+  if (bits > 0) {
+    size_t nmemb = bits / 8 + 1;
+    if (fwrite(bitbuf, 1, nmemb, f2) != nmemb)
+      return 1;
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/csutil.cxx
+w_char upper_utf(w_char u, int langnum) {
+  unsigned short idx = (u.h << 8) + u.l;
+  unsigned short upridx = unicodetoupper(idx, langnum);
+  if (idx != upridx) {
+    u.h = (unsigned char)(upridx >> 8);
+    u.l = (unsigned char)(upridx & 0x00FF);
+  }
+  return u;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/suggestmgr.cxx
+int SuggestMgr::lcslen(const char* s, const char* s2) {
+  int m;
+  int n;
+  int i;
+  int j;
+  int len = 0;
+  char* result = lcs(s, s2, &m, &n);
+  i = m;
+  j = n;
+  while ((i != 0) && (j != 0)) {
+    if (result[i * (n + 1) + j] == LCS_UPLEFT) {
+      len++;
+      i--;
+      j--;
+    } else if (result[i * (n + 1) + j] == LCS_UP) {
+      i--;
+    } else
+      j--;
+  }
+  delete[] result;
+  return len;
+}
+
+// the below code fragment can be found in:
+// src/parsers/xmlparser.cxx
+int XMLParser::change_token(const char* word) {
+  if (strstr(word, APOSTROPHE) != NULL || strchr(word, '"') != NULL ||
+      strchr(word, '&') != NULL || strchr(word, '<') != NULL ||
+      strchr(word, '>') != NULL) {
+    std::string r(word);
+    mystrrep(r, "&", "__namp;__");
+    mystrrep(r, "__namp;__", "&amp;");
+    mystrrep(r, APOSTROPHE, ENTITY_APOS);
+    mystrrep(r, "\"", "&quot;");
+    mystrrep(r, ">", "&gt;");
+    mystrrep(r, "<", "&lt;");
+    return TextParser::change_token(r.c_str());
+  }
+  return TextParser::change_token(word);
+}
+

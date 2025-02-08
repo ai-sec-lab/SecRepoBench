@@ -1,0 +1,477 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// MagickCore/fx.c
+static MagickOffsetType FxGCD(MagickOffsetType alpha,MagickOffsetType beta)
+{
+  if (beta != 0)
+    return(FxGCD(beta,alpha % beta));
+  return(alpha);
+}
+
+// the below code fragment can be found in:
+// MagickCore/fx.c
+MagickPrivate MagickBooleanType FxEvaluateExpression(FxInfo *fx_info,
+  double *alpha,ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  status=FxEvaluateChannelExpression(fx_info,GrayPixelChannel,0,0,alpha,
+    exception);
+  return(status);
+}
+
+// the below code fragment can be found in:
+// coders/uil.c
+static MagickBooleanType WriteUILImage(const ImageInfo *image_info,Image *image,
+  ExceptionInfo *exception)
+{
+#define MaxCixels  92
+
+  char
+    basename[MagickPathExtent],
+    buffer[MagickPathExtent],
+    name[MagickPathExtent],
+    *symbol;
+
+  int
+    j;
+
+  MagickBooleanType
+    status,
+    transparent;
+
+  MagickSizeType
+    number_pixels;
+
+  PixelInfo
+    pixel;
+
+  register const Quantum
+    *p;
+
+  register ssize_t
+    i,
+    x;
+
+  size_t
+    characters_per_pixel,
+    colors;
+
+  ssize_t
+    k,
+    y;
+
+  static const char
+    Cixel[MaxCixels+1] = " .XoO+@#$%&*=-;:>,<1234567890qwertyuipasdfghjk"
+                         "lzxcvbnmMNBVCZASDFGHJKLPIUYTREWQ!~^/()_`'][{}|";
+
+  /*
+    Open output image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  status=OpenBlob(image_info,image,WriteBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    return(status);
+  (void) TransformImageColorspace(image,sRGBColorspace,exception);
+  transparent=MagickFalse;
+  i=0;
+  p=(const Quantum *) NULL;
+  if (image->storage_class == PseudoClass)
+    colors=image->colors;
+  else
+    {
+      unsigned char
+        *matte_image;
+
+      /*
+        Convert DirectClass to PseudoClass image.
+      */
+      matte_image=(unsigned char *) NULL;
+      if (image->alpha_trait != UndefinedPixelTrait)
+        {
+          /*
+            Map all the transparent pixels.
+          */
+          number_pixels=(MagickSizeType) image->columns*image->rows;
+          if (number_pixels != ((MagickSizeType) (size_t) number_pixels))
+            ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+          matte_image=(unsigned char *) AcquireQuantumMemory(image->columns,
+            image->rows*sizeof(*matte_image));
+          if (matte_image == (unsigned char *) NULL)
+            ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+          for (y=0; y < (ssize_t) image->rows; y++)
+          {
+            p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+            if (p == (const Quantum *) NULL)
+              break;
+            for (x=0; x < (ssize_t) image->columns; x++)
+            {
+              matte_image[i]=(unsigned char) (GetPixelAlpha(image,p) ==
+                (Quantum) TransparentAlpha ? 1 : 0);
+              if (matte_image[i] != 0)
+                transparent=MagickTrue;
+              i++;
+              p+=GetPixelChannels(image);
+            }
+          }
+        }
+      (void) SetImageType(image,PaletteType,exception);
+      colors=image->colors;
+      if (transparent != MagickFalse)
+        {
+          register Quantum
+            *q;
+
+          i=0;
+          colors++;
+          for (y=0; y < (ssize_t) image->rows; y++)
+          {
+            q=GetAuthenticPixels(image,0,y,image->columns,1,exception);
+            if (q == (Quantum *) NULL)
+              break;
+            for (x=0; x < (ssize_t) image->columns; x++)
+            {
+              if (matte_image[i] != 0)
+                SetPixelIndex(image,(Quantum) image->colors,q);
+              i++;
+              q+=GetPixelChannels(image);
+            }
+          }
+        }
+      if (matte_image != (unsigned char *) NULL)
+        matte_image=(unsigned char *) RelinquishMagickMemory(matte_image);
+    }
+  /*
+    Compute the character per pixel.
+  */
+  characters_per_pixel=1;
+  for (k=MaxCixels; (ssize_t) colors > k; k*=MaxCixels)
+    characters_per_pixel++;
+  /*
+    UIL header.
+  */
+  symbol=AcquireString("");
+  (void) WriteBlobString(image,"/* UIL */\n");
+  GetPathComponent(image->filename,BasePath,basename);
+  (void) FormatLocaleString(buffer,MagickPathExtent,
+    "value\n  %s_ct : color_table(\n",basename);
+  (void) WriteBlobString(image,buffer);
+  GetPixelInfo(image,&pixel);
+  for (i=0; i < (ssize_t) colors; i++)
+  {
+    /*
+      Define UIL color.
+    */
+    pixel=image->colormap[i];
+    pixel.colorspace=sRGBColorspace;
+    pixel.depth=8;
+    pixel.alpha=(double) OpaqueAlpha;
+    GetColorTuple(&pixel,MagickTrue,name);
+    if (transparent != MagickFalse)
+      if (i == (ssize_t) (colors-1))
+        (void) CopyMagickString(name,"None",MagickPathExtent);
+    /*
+      Write UIL color.
+    */
+    k=i % MaxCixels;
+    symbol[0]=Cixel[k];
+    for (j=1; j < (int) characters_per_pixel; j++)
+    {
+      k=((i-k)/MaxCixels) % MaxCixels;
+      symbol[j]=Cixel[k];
+    }
+    symbol[j]='\0';
+    (void) SubstituteString(&symbol,"'","''");
+    if (LocaleCompare(name,"None") == 0)
+      (void) FormatLocaleString(buffer,MagickPathExtent,
+        "    background color = '%s'",symbol);
+    else
+      (void) FormatLocaleString(buffer,MagickPathExtent,
+        "    color('%s',%s) = '%s'",name,
+        GetPixelInfoIntensity(image,image->colormap+i) <
+        (QuantumRange/2.0) ? "background" : "foreground",symbol);
+    (void) WriteBlobString(image,buffer);
+    (void) FormatLocaleString(buffer,MagickPathExtent,"%s",
+      (i == (ssize_t) (colors-1) ? ");\n" : ",\n"));
+    (void) WriteBlobString(image,buffer);
+  }
+  /*
+    Define UIL pixels.
+  */
+  GetPathComponent(image->filename,BasePath,basename);
+  (void) FormatLocaleString(buffer,MagickPathExtent,
+    "  %s_icon : icon(color_table = %s_ct,\n",basename,basename);
+  (void) WriteBlobString(image,buffer);
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+    if (p == (const Quantum *) NULL)
+      break;
+    (void) WriteBlobString(image,"    \"");
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      k=((ssize_t) GetPixelIndex(image,p) % MaxCixels);
+      symbol[0]=Cixel[k];
+      for (j=1; j < (int) characters_per_pixel; j++)
+      {
+        k=(((int) GetPixelIndex(image,p)-k)/MaxCixels) %
+          MaxCixels;
+        symbol[j]=Cixel[k];
+      }
+      symbol[j]='\0';
+      (void) CopyMagickString(buffer,symbol,MagickPathExtent);
+      (void) WriteBlobString(image,buffer);
+      p+=GetPixelChannels(image);
+    }
+    (void) FormatLocaleString(buffer,MagickPathExtent,"\"%s\n",
+      (y == (ssize_t) (image->rows-1) ? ");" : ","));
+    (void) WriteBlobString(image,buffer);
+    status=SetImageProgress(image,SaveImageTag,(MagickOffsetType) y,
+      image->rows);
+    if (status == MagickFalse)
+      break;
+  }
+  symbol=DestroyString(symbol);
+  (void) CloseBlob(image);
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// coders/xpm.c
+static MagickBooleanType WriteXPMImage(const ImageInfo *image_info,Image *image,
+  ExceptionInfo *exception)
+{
+#define MaxCixels  92
+
+  static const char
+    Cixel[MaxCixels+1] = " .XoO+@#$%&*=-;:>,<1234567890qwertyuipasdfghjk"
+                         "lzxcvbnmMNBVCZASDFGHJKLPIUYTREWQ!~^/()_`'][{}|";
+
+  char
+    buffer[MagickPathExtent],
+    basename[MagickPathExtent],
+    name[MagickPathExtent],
+    symbol[MagickPathExtent];
+
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    pixel;
+
+  register const Quantum
+    *p;
+
+  register ssize_t
+    i,
+    x;
+
+  size_t
+    characters_per_pixel;
+
+  ssize_t
+    j,
+    k,
+    opacity,
+    y;
+
+  /*
+    Open output image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  status=OpenBlob(image_info,image,WriteBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    return(status);
+  if (IssRGBCompatibleColorspace(image->colorspace) == MagickFalse)
+    (void) TransformImageColorspace(image,sRGBColorspace,exception);
+  opacity=(-1);
+  if (image->alpha_trait == UndefinedPixelTrait)
+    {
+      if ((image->storage_class == DirectClass) || (image->colors > 256))
+        (void) SetImageType(image,PaletteType,exception);
+    }
+  else
+    {
+      double
+        alpha,
+        beta;
+
+      /*
+        Identify transparent colormap index.
+      */
+      if ((image->storage_class == DirectClass) || (image->colors > 256))
+        (void) SetImageType(image,PaletteBilevelAlphaType,exception);
+      for (i=0; i < (ssize_t) image->colors; i++)
+        if (image->colormap[i].alpha != OpaqueAlpha)
+          {
+            if (opacity < 0)
+              {
+                opacity=i;
+                continue;
+              }
+            alpha=(double) TransparentAlpha-(double)
+              image->colormap[i].alpha;
+            beta=(double) TransparentAlpha-(double)
+              image->colormap[opacity].alpha;
+            if (alpha < beta)
+              opacity=i;
+          }
+      if (opacity == -1)
+        {
+          (void) SetImageType(image,PaletteBilevelAlphaType,exception);
+          for (i=0; i < (ssize_t) image->colors; i++)
+            if (image->colormap[i].alpha != OpaqueAlpha)
+              {
+                if (opacity < 0)
+                  {
+                    opacity=i;
+                    continue;
+                  }
+                alpha=(Quantum) TransparentAlpha-(double)
+                  image->colormap[i].alpha;
+                beta=(Quantum) TransparentAlpha-(double)
+                  image->colormap[opacity].alpha;
+                if (alpha < beta)
+                  opacity=i;
+              }
+        }
+      if (opacity >= 0)
+        {
+          image->colormap[opacity].red=image->transparent_color.red;
+          image->colormap[opacity].green=image->transparent_color.green;
+          image->colormap[opacity].blue=image->transparent_color.blue;
+        }
+    }
+  /*
+    Compute the character per pixel.
+  */
+  characters_per_pixel=1;
+  for (k=MaxCixels; (ssize_t) image->colors > k; k*=MaxCixels)
+    characters_per_pixel++;
+  /*
+    XPM header.
+  */
+  (void) WriteBlobString(image,"/* XPM */\n");
+  GetPathComponent(image->filename,BasePath,basename);
+  if (isalnum((int) ((unsigned char) *basename)) == 0)
+    {
+      (void) FormatLocaleString(buffer,MagickPathExtent,"xpm_%s",basename);
+      (void) CopyMagickString(basename,buffer,MagickPathExtent);
+    }
+  if (isalpha((int) ((unsigned char) basename[0])) == 0)
+    basename[0]='_';
+  for (i=1; basename[i] != '\0'; i++)
+    if (isalnum((int) ((unsigned char) basename[i])) == 0)
+      basename[i]='_';
+  (void) FormatLocaleString(buffer,MagickPathExtent,
+    "static char *%s[] = {\n",basename);
+  (void) WriteBlobString(image,buffer);
+  (void) WriteBlobString(image,"/* columns rows colors chars-per-pixel */\n");
+  (void) FormatLocaleString(buffer,MagickPathExtent,
+    "\"%.20g %.20g %.20g %.20g \",\n",(double) image->columns,(double)
+    image->rows,(double) image->colors,(double) characters_per_pixel);
+  (void) WriteBlobString(image,buffer);
+  GetPixelInfo(image,&pixel);
+  for (i=0; i < (ssize_t) image->colors; i++)
+  {
+    /*
+      Define XPM color.
+    */
+    pixel=image->colormap[i];
+    pixel.colorspace=sRGBColorspace;
+    pixel.depth=8;
+    pixel.alpha=(double) OpaqueAlpha;
+    (void) QueryColorname(image,&pixel,XPMCompliance,name,exception);
+    if (i == opacity)
+      (void) CopyMagickString(name,"None",MagickPathExtent);
+    /*
+      Write XPM color.
+    */
+    k=i % MaxCixels;
+    symbol[0]=Cixel[k];
+    for (j=1; j < (ssize_t) characters_per_pixel; j++)
+    {
+      k=((i-k)/MaxCixels) % MaxCixels;
+      symbol[j]=Cixel[k];
+    }
+    symbol[j]='\0';
+    (void) FormatLocaleString(buffer,MagickPathExtent,"\"%s c %s\",\n",symbol,
+      name);
+    (void) WriteBlobString(image,buffer);
+  }
+  /*
+    Define XPM pixels.
+  */
+  (void) WriteBlobString(image,"/* pixels */\n");
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+    if (p == (const Quantum *) NULL)
+      break;
+    (void) WriteBlobString(image,"\"");
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      k=((ssize_t) GetPixelIndex(image,p) % MaxCixels);
+      symbol[0]=Cixel[k];
+      for (j=1; j < (ssize_t) characters_per_pixel; j++)
+      {
+        k=(((int) GetPixelIndex(image,p)-k)/MaxCixels) % MaxCixels;
+        symbol[j]=Cixel[k];
+      }
+      symbol[j]='\0';
+      (void) CopyMagickString(buffer,symbol,MagickPathExtent);
+      (void) WriteBlobString(image,buffer);
+      p+=GetPixelChannels(image);
+    }
+    (void) FormatLocaleString(buffer,MagickPathExtent,"\"%s\n",
+      (y == (ssize_t) (image->rows-1) ? "" : ","));
+    (void) WriteBlobString(image,buffer);
+    if (image->previous == (Image *) NULL)
+      {
+        status=SetImageProgress(image,SaveImageTag,(MagickOffsetType) y,
+          image->rows);
+        if (status == MagickFalse)
+          break;
+      }
+  }
+  (void) WriteBlobString(image,"};\n");
+  (void) CloseBlob(image);
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// coders/mpc.c
+ModuleExport size_t RegisterMPCImage(void)
+{
+  MagickInfo
+    *entry;
+
+  entry=AcquireMagickInfo("MPC","CACHE",
+    "Magick Persistent Cache image format");
+  entry->flags|=CoderStealthFlag;
+  (void) RegisterMagickInfo(entry);
+  entry=AcquireMagickInfo("MPC","MPC","Magick Persistent Cache image format");
+  entry->decoder=(DecodeImageHandler *) ReadMPCImage;
+  entry->encoder=(EncodeImageHandler *) WriteMPCImage;
+  entry->magick=(IsImageFormatHandler *) IsMPC;
+  entry->flags|=CoderDecoderSeekableStreamFlag;
+  (void) RegisterMagickInfo(entry);
+  return(MagickImageCoderSignature);
+}
+

@@ -1,0 +1,593 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/flb_parser_decoder.c
+int flb_parser_decoder_do(struct mk_list *decoders,
+                          const char *in_buf, size_t in_size,
+                          char **out_buf, size_t *out_size)
+{
+    int i;
+    int ret;
+    int matched;
+    int is_decoded;
+    int is_decoded_as;
+    int in_type;
+    int out_type;
+    int dec_type;
+    int extra_keys = FLB_FALSE;
+    size_t off = 0;
+    char *dec_buf;
+    size_t dec_size;
+    flb_sds_t tmp_sds = NULL;
+    flb_sds_t data_sds = NULL;
+    flb_sds_t in_sds = NULL;
+    flb_sds_t out_sds = NULL;
+    struct mk_list *head;
+    struct mk_list *r_head;
+    struct flb_parser_dec *dec = NULL;
+    struct flb_parser_dec_rule *rule;
+    msgpack_object k;
+    msgpack_object v;
+    msgpack_object map;
+    msgpack_unpacked result;
+    msgpack_sbuffer mp_sbuf;
+    msgpack_packer  mp_pck;
+    /* Contexts to handle extra keys to be appended at the end of the log */
+    msgpack_sbuffer extra_mp_sbuf;
+    msgpack_packer  extra_mp_pck;
+
+    /* Initialize unpacker */
+    msgpack_unpacked_init(&result);
+    msgpack_unpack_next(&result, in_buf, in_size, &off);
+    map = result.data;
+
+    if (map.type != MSGPACK_OBJECT_MAP) {
+        msgpack_unpacked_destroy(&result);
+        return -1;
+    }
+
+    /*
+     * First check if any field in the record matches a decoder rule. It's
+     * better to check this before hand otherwise we need to jump directly
+     * to create a "possible new outgoing buffer".
+     */
+    matched = -1;
+    for (i = 0; i < map.via.map.size; i++) {
+        k = map.via.map.ptr[i].key;
+        if (k.type != MSGPACK_OBJECT_STR) {
+            continue;
+        }
+
+        /* Try to match this key name with decoder's rule */
+        mk_list_foreach(head, decoders) {
+            dec = mk_list_entry(head, struct flb_parser_dec, _head);
+            if (flb_sds_cmp(dec->key, k.via.str.ptr,
+                            k.via.str.size) == 0) {
+                /* we have a match, stop the check */
+                matched = i;
+                break;
+            }
+            else {
+                matched = -1;
+            }
+        }
+
+        if (matched >= 0) {
+            break;
+        }
+    }
+
+    /* No matches, no need to continue */
+    if (matched == -1) {
+        msgpack_unpacked_destroy(&result);
+        return -1;
+    }
+
+    /* Create new outgoing buffer */
+    msgpack_sbuffer_init(&mp_sbuf);
+    msgpack_packer_init(&mp_pck, &mp_sbuf, msgpack_sbuffer_write);
+
+    /* Register the map (same size) */
+    msgpack_pack_map(&mp_pck, map.via.map.size);
+
+    /* Compose new outgoing buffer */
+    for (i = 0; i < map.via.map.size; i++) {
+        k = map.via.map.ptr[i].key;
+        v = map.via.map.ptr[i].val;
+
+        /* Pack right away previous fields in the map */
+        if (i < matched) {
+            msgpack_pack_object(&mp_pck, k);
+            msgpack_pack_object(&mp_pck, v);
+            continue;
+        }
+
+        /* Process current key names and decoder rules */
+        if (k.type != MSGPACK_OBJECT_STR || v.type != MSGPACK_OBJECT_STR) {
+            msgpack_pack_object(&mp_pck, k);
+            msgpack_pack_object(&mp_pck, v);
+            continue;
+        }
+
+        /*
+         * Per key, we allow only one successful 'Decode_Field' and one
+         * successful 'Decode_Field_As' rules. Otherwise it may lead
+         * to duplicated entries in the final map.
+         *
+         * is_decoded    => Decode_Field successul ?
+         * is_decoded_as => Decode_Field_As successful ?
+         */
+        is_decoded = FLB_FALSE;
+        is_decoded_as = FLB_FALSE;
+
+        /* Lookup for decoders associated to the current 'key' */
+        mk_list_foreach(head, decoders) {
+            dec = mk_list_entry(head, struct flb_parser_dec, _head);
+            if (flb_sds_cmp(dec->key, k.via.str.ptr,
+                            k.via.str.size) == 0) {
+                break;
+            }
+            dec = NULL;
+        }
+
+        /* No decoder found, pack content */
+        if (!dec) {
+            msgpack_pack_object(&mp_pck, k);
+            msgpack_pack_object(&mp_pck, v);
+            continue;
+        }
+
+        if (!in_sds) {
+            in_sds  = flb_sds_create_size(v.via.str.size);
+            if (!in_sds) {
+                break;
+            }
+            out_sds = flb_sds_create_size(v.via.str.size);
+            if (!out_sds) {
+                break;
+            }
+            data_sds = flb_sds_create_size(v.via.str.size);
+        }
+
+        /* Copy original content */
+        tmp_sds = flb_sds_copy(data_sds, v.via.str.ptr,
+                               v.via.str.size);
+        if (tmp_sds != data_sds) {
+            data_sds = tmp_sds;
+        }
+
+        /*
+         * We got a match: 'key name' == 'decoder field name', validate
+         * that we have enough space in our temporary buffer.
+         */
+        if (flb_sds_alloc(dec->buffer) < flb_sds_alloc(data_sds)) {
+            /* Increase buffer size */
+            size_t diff;
+            diff = (flb_sds_alloc(data_sds) - flb_sds_alloc(dec->buffer));
+            tmp_sds = flb_sds_increase(dec->buffer, diff);
+            if (!tmp_sds) {
+                flb_errno();
+                break;
+            }
+            if (tmp_sds != dec->buffer) {
+                dec->buffer = tmp_sds;
+            }
+        }
+
+        /* Process decoder rules */
+        ret = -1;
+        dec_buf = NULL;
+
+        /*
+         * If some rule type is FLB_PARSER_DEC_DEFAULT, means that it will
+         * try to register some extra fields as part of the record. For such
+         * case we prepare a temporary buffer to hold these extra keys.
+         *
+         * The content of this buffer is just a serialized number of maps.
+         */
+        if (dec->add_extra_keys == FLB_TRUE) {
+            extra_keys = FLB_TRUE;
+            msgpack_sbuffer_init(&extra_mp_sbuf);
+            msgpack_packer_init(&extra_mp_pck, &extra_mp_sbuf,
+                                msgpack_sbuffer_write);
+        }
+
+        mk_list_foreach(r_head, &dec->rules) {
+            rule = mk_list_entry(r_head, struct flb_parser_dec_rule, _head);
+
+            if (rule->type == FLB_PARSER_DEC_DEFAULT &&
+                rule->action == FLB_PARSER_ACT_DO_NEXT &&
+                is_decoded == FLB_TRUE) {
+                continue;
+            }
+
+            if (is_decoded_as == FLB_TRUE && in_type != TYPE_OUT_STRING) {
+                continue;
+            }
+
+            /* Process using defined decoder backend */
+            if (rule->backend == FLB_PARSER_DEC_JSON) {
+                ret = decode_json(dec, (char *) data_sds, flb_sds_len(data_sds),
+                                  &dec_buf, &dec_size, &dec_type);
+            }
+            else if (rule->backend == FLB_PARSER_DEC_ESCAPED) {
+                ret = decode_escaped(dec,
+                                     (char *) data_sds, flb_sds_len(data_sds),
+                                     &dec_buf, &dec_size, &dec_type);
+            }
+            else if (rule->backend == FLB_PARSER_DEC_ESCAPED_UTF8) {
+                ret = decode_escaped_utf8(dec,
+                                     (char *) data_sds, flb_sds_len(data_sds),
+                                     &dec_buf, &dec_size, &dec_type);
+            }
+            else if (rule->backend == FLB_PARSER_DEC_MYSQL_QUOTED) {
+                ret = decode_mysql_quoted(dec,
+                                          (char *) data_sds, flb_sds_len(data_sds),
+                                          &dec_buf, &dec_size, &dec_type);
+            }
+
+            /* Check decoder status */
+            if (ret == -1) {
+                /* Current decoder failed, should we try the next one ? */
+                if (rule->action == FLB_PARSER_ACT_TRY_NEXT ||
+                    rule->action == FLB_PARSER_ACT_DO_NEXT) {
+                    continue;
+                }
+
+                /* Stop: no more rules should be applied */
+                break;
+            }
+
+            /* Internal packing: replace value content in the same key */
+            if (rule->type == FLB_PARSER_DEC_AS) {
+                tmp_sds = flb_sds_copy(in_sds, dec_buf, dec_size);
+                if (tmp_sds != in_sds) {
+                    in_sds = tmp_sds;
+                }
+                tmp_sds = flb_sds_copy(data_sds, dec_buf, dec_size);
+                if (tmp_sds != data_sds) {
+                    data_sds = tmp_sds;
+                }
+                in_type = dec_type;
+                is_decoded_as = FLB_TRUE;
+            }
+            else if (rule->type == FLB_PARSER_DEC_DEFAULT) {
+                tmp_sds = flb_sds_copy(out_sds, dec_buf, dec_size);
+                if (tmp_sds != out_sds) {
+                    out_sds = tmp_sds;
+                }
+                out_type = dec_type;
+                is_decoded = FLB_TRUE;
+            }
+
+
+            if (dec_buf != dec->buffer) {
+                flb_free(dec_buf);
+            }
+            dec_buf = NULL;
+            dec_size = 0;
+
+            /* Apply more rules ? */
+            if (rule->action == FLB_PARSER_ACT_DO_NEXT) {
+                continue;
+            }
+            break;
+        }
+
+        /* Package the key */
+        msgpack_pack_object(&mp_pck, k);
+
+        /* We need to place some value for the key in question */
+        if (is_decoded_as == FLB_TRUE) {
+            if (in_type == TYPE_OUT_STRING) {
+                msgpack_pack_str(&mp_pck, flb_sds_len(in_sds));
+                msgpack_pack_str_body(&mp_pck,
+                                      in_sds, flb_sds_len(in_sds));
+            }
+            else if (in_type == TYPE_OUT_OBJECT) {
+                msgpack_sbuffer_write(&mp_sbuf,
+                                      in_sds, flb_sds_len(in_sds));
+            }
+        }
+        else {
+            /* Pack original value */
+            msgpack_pack_object(&mp_pck, v);
+        }
+
+        /* Package as external keys */
+        if (is_decoded == FLB_TRUE) {
+            if (out_type == TYPE_OUT_STRING) {
+                flb_error("[parser_decoder] string type is not allowed");
+            }
+            else if (out_type == TYPE_OUT_OBJECT) {
+                msgpack_sbuffer_write(&extra_mp_sbuf,
+                                      out_sds, flb_sds_len(out_sds));
+            }
+        }
+    }
+
+    if (in_sds) {
+        flb_sds_destroy(in_sds);
+    }
+    if (out_sds) {
+        flb_sds_destroy(out_sds);
+    }
+    if (data_sds) {
+        flb_sds_destroy(data_sds);
+    }
+
+    msgpack_unpacked_destroy(&result);
+    *out_buf = mp_sbuf.data;
+    *out_size = mp_sbuf.size;
+
+    if (extra_keys == FLB_TRUE) {
+        ret = merge_record_and_extra_keys(mp_sbuf.data, mp_sbuf.size,
+                                          extra_mp_sbuf.data, extra_mp_sbuf.size,
+                                          out_buf, out_size);
+        msgpack_sbuffer_destroy(&extra_mp_sbuf);
+        if (ret == 0) {
+            msgpack_sbuffer_destroy(&mp_sbuf);
+            return 0;
+        }
+    }
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/flb_parser_decoder.c
+static struct flb_parser_dec *get_decoder_key_context(const char *key_name, int key_len,
+                                                      struct mk_list *list)
+{
+    struct mk_list *head;
+    struct flb_parser_dec *dec = NULL;
+
+    mk_list_foreach(head, list) {
+        dec = mk_list_entry(head, struct flb_parser_dec, _head);
+
+        /* Check if the decoder matches the requested key name */
+        if (flb_sds_cmp(dec->key, key_name, key_len) != 0) {
+            dec = NULL;
+            continue;
+        }
+        else {
+            break;
+        }
+    }
+
+    if (!dec) {
+        dec = flb_malloc(sizeof(struct flb_parser_dec));
+        if (!dec) {
+            flb_errno();
+            return NULL;
+        }
+
+        dec->key = flb_sds_create_len(key_name, key_len);
+        if (!dec->key) {
+            flb_errno();
+            flb_free(dec);
+            return NULL;
+        }
+
+        dec->buffer = flb_sds_create_size(FLB_PARSER_DEC_BUF_SIZE);
+        if (!dec->buffer) {
+            flb_errno();
+            flb_sds_destroy(dec->key);
+            flb_free(dec);
+            return NULL;
+        }
+        dec->add_extra_keys = FLB_FALSE;
+        mk_list_init(&dec->rules);
+        mk_list_add(&dec->_head, list);
+    }
+
+    return dec;
+}
+
+// the below code fragment can be found in:
+// src/flb_parser_ltsv.c
+int flb_parser_ltsv_do(struct flb_parser *parser,
+                       const char *in_buf, size_t in_size,
+                       void **out_buf, size_t *out_size,
+                       struct flb_time *out_time)
+{
+    int ret;
+    time_t time_lookup;
+    double tmfrac = 0;
+    struct flb_time *t;
+    msgpack_sbuffer tmp_sbuf;
+    msgpack_packer tmp_pck;
+    char *dec_out_buf;
+    size_t dec_out_size;
+    size_t map_size;
+    char *time_key;
+    size_t time_key_len;
+    int last_byte;
+
+    if (parser->time_key) {
+        time_key = parser->time_key;
+    }
+    else {
+        time_key = "time";
+    }
+    time_key_len = strlen(time_key);
+    time_lookup = 0;
+
+    /* count the number of key value pairs */
+    map_size = 0;
+    ltsv_parser(parser, in_buf, in_size, NULL,
+                time_key, time_key_len,
+                &time_lookup, &tmfrac, &map_size);
+    if (map_size == 0) {
+        return -1;
+    }
+
+    /* Prepare new outgoing buffer */
+    msgpack_sbuffer_init(&tmp_sbuf);
+    msgpack_packer_init(&tmp_pck, &tmp_sbuf, msgpack_sbuffer_write);
+    msgpack_pack_map(&tmp_pck, map_size);
+
+    last_byte = ltsv_parser(parser, in_buf, in_size, &tmp_pck,
+                            time_key, time_key_len,
+                            &time_lookup, &tmfrac, &map_size);
+    if (last_byte < 0) {
+        msgpack_sbuffer_destroy(&tmp_sbuf);
+        return last_byte;
+    }
+
+    /* Export results */
+    *out_buf = tmp_sbuf.data;
+    *out_size = tmp_sbuf.size;
+
+    t = out_time;
+    t->tm.tv_sec  = time_lookup;
+    t->tm.tv_nsec = (tmfrac * 1000000000);
+
+    /* Check if some decoder was specified */
+    if (parser->decoders) {
+        ret = flb_parser_decoder_do(parser->decoders,
+                                    tmp_sbuf.data, tmp_sbuf.size,
+                                    &dec_out_buf, &dec_out_size);
+        if (ret == 0) {
+            *out_buf = dec_out_buf;
+            *out_size = dec_out_size;
+            msgpack_sbuffer_destroy(&tmp_sbuf);
+        }
+    }
+
+    return last_byte;
+}
+
+// the below code fragment can be found in:
+// src/flb_parser_logfmt.c
+int flb_parser_logfmt_do(struct flb_parser *parser,
+                        const char *in_buf, size_t in_size,
+                        void **out_buf, size_t *out_size,
+                        struct flb_time *out_time)
+{
+    int ret;
+    time_t time_lookup;
+    double tmfrac = 0;
+    struct flb_time *t;
+    msgpack_sbuffer tmp_sbuf;
+    msgpack_packer tmp_pck;
+    char *dec_out_buf;
+    size_t dec_out_size;
+    size_t map_size;
+    char *time_key;
+    size_t time_key_len;
+    int last_byte;
+
+    if (parser->time_key) {
+        time_key = parser->time_key;
+    }
+    else {
+        time_key = "time";
+    }
+    time_key_len = strlen(time_key);
+    time_lookup = 0;
+
+    /* count the number of key value pairs */
+    map_size = 0;
+    logfmt_parser(parser, in_buf, in_size, NULL,
+                  time_key, time_key_len,
+                  &time_lookup, &tmfrac, &map_size);
+    if (map_size == 0) {
+        return -1;
+    }
+
+    /* Prepare new outgoing buffer */
+    msgpack_sbuffer_init(&tmp_sbuf);
+    msgpack_packer_init(&tmp_pck, &tmp_sbuf, msgpack_sbuffer_write);
+    msgpack_pack_map(&tmp_pck, map_size);
+
+    last_byte = logfmt_parser(parser, in_buf, in_size, &tmp_pck,
+                              time_key, time_key_len,
+                              &time_lookup, &tmfrac, &map_size);
+    if (last_byte < 0) {
+        msgpack_sbuffer_destroy(&tmp_sbuf);
+        return last_byte;
+    }
+
+    /* Export results */
+    *out_buf = tmp_sbuf.data;
+    *out_size = tmp_sbuf.size;
+
+    t = out_time;
+    t->tm.tv_sec  = time_lookup;
+    t->tm.tv_nsec = (tmfrac * 1000000000);
+
+    /* Check if some decoder was specified */
+    if (parser->decoders) {
+        ret = flb_parser_decoder_do(parser->decoders,
+                                    tmp_sbuf.data, tmp_sbuf.size,
+                                    &dec_out_buf, &dec_out_size);
+        if (ret == 0) {
+            *out_buf = dec_out_buf;
+            *out_size = dec_out_size;
+            msgpack_sbuffer_destroy(&tmp_sbuf);
+        }
+    }
+
+    return last_byte;
+}
+
+// the below code fragment can be found in:
+// src/flb_pack.c
+int flb_msgpack_expand_map(char *map_data, size_t map_size,
+                           msgpack_object_kv **kv_arr, int kv_arr_len,
+                           char** out_buf, int* out_size)
+{
+    msgpack_sbuffer sbuf;
+    msgpack_packer  pck;
+    msgpack_unpacked result;
+    size_t off = 0;
+    char *ret_buf;
+    int map_num;
+    int i;
+    int len;
+
+    if (map_data == NULL){
+        return -1;
+    }
+
+    msgpack_unpacked_init(&result);
+    if ( (i=msgpack_unpack_next(&result, map_data, map_size, &off)) != MSGPACK_UNPACK_SUCCESS ){
+        return -1;
+    }
+    if (result.data.type != MSGPACK_OBJECT_MAP) {
+        msgpack_unpacked_destroy(&result);
+        return -1;
+    }
+
+    len = result.data.via.map.size;
+    map_num = kv_arr_len + len;
+
+    msgpack_sbuffer_init(&sbuf);
+    msgpack_packer_init(&pck, &sbuf, msgpack_sbuffer_write);
+    msgpack_pack_map(&pck, map_num);
+
+    for(i=0; i<len; i++) {
+        msgpack_pack_object(&pck, result.data.via.map.ptr[i].key);
+        msgpack_pack_object(&pck, result.data.via.map.ptr[i].val);
+    }
+    for(i=0; i<kv_arr_len; i++){
+        msgpack_pack_object(&pck, kv_arr[i]->key);
+        msgpack_pack_object(&pck, kv_arr[i]->val);
+    }
+    msgpack_unpacked_destroy(&result);
+
+    *out_size = sbuf.size;
+    ret_buf  = flb_malloc(sbuf.size);
+    *out_buf = ret_buf;
+    if (*out_buf == NULL) {
+        flb_errno();
+        msgpack_sbuffer_destroy(&sbuf);
+        return -1;
+    }
+    memcpy(*out_buf, sbuf.data, sbuf.size);
+    msgpack_sbuffer_destroy(&sbuf);
+
+    return 0;
+}
+

@@ -1,0 +1,250 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+static int parallel_blosc(blosc2_context* context) {
+#ifdef BLOSC_POSIX_BARRIERS
+  int rc;
+#endif
+  /* Set sentinels */
+  context->thread_giveup_code = 1;
+  context->thread_nblock = -1;
+
+  if (threads_callback) {
+    threads_callback(threads_callback_data, t_blosc_do_job,
+                     context->nthreads, sizeof(struct thread_context), (void*) context->thread_contexts);
+  }
+  else {
+    /* Synchronization point for all threads (wait for initialization) */
+    WAIT_INIT(-1, context);
+
+    /* Synchronization point for all threads (wait for finalization) */
+    WAIT_FINISH(-1, context);
+  }
+
+  if (context->thread_giveup_code <= 0) {
+    /* Compression/decompression gave up.  Return error code. */
+    return context->thread_giveup_code;
+  }
+
+  /* Return the total bytes (de-)compressed in threads */
+  return (int)context->output_bytes;
+}
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+static void* t_blosc(void* ctxt) {
+  struct thread_context* thcontext = (struct thread_context*)ctxt;
+  blosc2_context* context = thcontext->parent_context;
+#ifdef BLOSC_POSIX_BARRIERS
+  int rc;
+#endif
+
+  while (1) {
+    /* Synchronization point for all threads (wait for initialization) */
+    WAIT_INIT(NULL, context);
+
+    if (context->end_threads) {
+      break;
+    }
+
+    t_blosc_do_job(ctxt);
+
+    /* Meeting point for all threads (wait for finalization) */
+    WAIT_FINISH(NULL, context);
+  }
+
+  /* Cleanup our working space and context */
+  free_thread_context(thcontext);
+
+  return (NULL);
+}
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+static struct thread_context*
+create_thread_context(blosc2_context* context, int32_t tid) {
+  struct thread_context* thread_context;
+  thread_context = (struct thread_context*)my_malloc(sizeof(struct thread_context));
+  BLOSC_ERROR_NULL(thread_context, NULL);
+  int rc = init_thread_context(thread_context, context, tid);
+  if (rc < 0) {
+    return NULL;
+  }
+  return thread_context;
+}
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+static int serial_blosc(struct thread_context* thread_context) {
+  blosc2_context* context = thread_context->parent_context;
+  int32_t j, bsize, leftoverblock;
+  int32_t cbytes;
+  int32_t ntbytes = (int32_t)context->output_bytes;
+  int32_t* bstarts = context->bstarts;
+  uint8_t* tmp = thread_context->tmp;
+  uint8_t* tmp2 = thread_context->tmp2;
+  int dict_training = context->use_dict && (context->dict_cdict == NULL);
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+  if (!context->do_compress && context->special_type) {
+    // Fake a runlen as if its a memcpyed chunk
+    memcpyed = true;
+  }
+
+  for (j = 0; j < context->nblocks; j++) {
+    if (context->do_compress && !memcpyed && !dict_training) {
+      _sw32(bstarts + j, ntbytes);
+    }
+    bsize = context->blocksize;
+    leftoverblock = 0;
+    if ((j == context->nblocks - 1) && (context->leftover > 0)) {
+      bsize = context->leftover;
+      leftoverblock = 1;
+    }
+    if (context->do_compress) {
+      if (memcpyed && !context->prefilter) {
+        /* We want to memcpy only */
+        memcpy(context->dest + context->header_overhead + j * context->blocksize,
+               context->src + j * context->blocksize, (unsigned int)bsize);
+        cbytes = (int32_t)bsize;
+      }
+      else {
+        /* Regular compression */
+        cbytes = blosc_c(thread_context, bsize, leftoverblock, ntbytes,
+                         context->destsize, context->src, j * context->blocksize,
+                         context->dest + ntbytes, tmp, tmp2);
+        if (cbytes == 0) {
+          ntbytes = 0;              /* uncompressible data */
+          break;
+        }
+      }
+    }
+    else {
+      /* Regular decompression */
+      // If memcpyed we don't have a bstarts section (because it is not needed)
+      int32_t src_offset = memcpyed ?
+          context->header_overhead + j * context->blocksize : sw32_(bstarts + j);
+      cbytes = blosc_d(thread_context, bsize, leftoverblock, memcpyed,
+                       context->src, context->srcsize, src_offset, j,
+                       context->dest, j * context->blocksize, tmp, tmp2);
+    }
+
+    if (cbytes < 0) {
+      ntbytes = cbytes;         /* error in blosc_c or blosc_d */
+      break;
+    }
+    ntbytes += cbytes;
+  }
+
+  return ntbytes;
+}
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+int pipeline_d(struct thread_context* thread_context, const int32_t bsize, uint8_t* dest,
+               const int32_t offset, uint8_t* src, uint8_t* tmp,
+               uint8_t* tmp2, int last_filter_index, int32_t nblock) {
+  blosc2_context* context = thread_context->parent_context;
+  int32_t typesize = context->typesize;
+  uint8_t* filters = context->filters;
+  uint8_t* filters_meta = context->filters_meta;
+  uint8_t* _src = src;
+  uint8_t* _dest = tmp;
+  uint8_t* _tmp = tmp2;
+  int errcode = 0;
+
+  for (int i = BLOSC2_MAX_FILTERS - 1; i >= 0; i--) {
+    // Delta filter requires the whole chunk ready
+    int last_copy_filter = (last_filter_index == i) || (next_filter(filters, i, 'd') == BLOSC_DELTA);
+    if (last_copy_filter && context->postfilter == NULL) {
+      _dest = dest + offset;
+    }
+    switch (filters[i]) {
+      case BLOSC_SHUFFLE:
+        for (int j = 0; j <= filters_meta[i]; j++) {
+          unshuffle(typesize, bsize, _src, _dest);
+          // Cycle filters when required
+          if (j < filters_meta[i]) {
+            _src = _dest;
+            _dest = _tmp;
+            _tmp = _src;
+          }
+          // Check whether we have to copy the intermediate _dest buffer to final destination
+          if (last_copy_filter && (filters_meta[i] % 2) == 1 && j == filters_meta[i]) {
+            memcpy(dest + offset, _dest, (unsigned int)bsize);
+          }
+        }
+        break;
+      case BLOSC_BITSHUFFLE:
+        if (bitunshuffle(typesize, bsize, _src, _dest, _tmp, context->src[BLOSC2_CHUNK_VERSION]) < 0) {
+          return BLOSC2_ERROR_FILTER_PIPELINE;
+        }
+        break;
+      case BLOSC_DELTA:
+        if (context->nthreads == 1) {
+          /* Serial mode */
+          delta_decoder(dest, offset, bsize, typesize, _dest);
+        } else {
+          /* Force the thread in charge of the block 0 to go first */
+          pthread_mutex_lock(&context->delta_mutex);
+          if (context->dref_not_init) {
+            if (offset != 0) {
+              pthread_cond_wait(&context->delta_cv, &context->delta_mutex);
+            } else {
+              delta_decoder(dest, offset, bsize, typesize, _dest);
+              context->dref_not_init = 0;
+              pthread_cond_broadcast(&context->delta_cv);
+            }
+          }
+          pthread_mutex_unlock(&context->delta_mutex);
+          if (offset != 0) {
+            delta_decoder(dest, offset, bsize, typesize, _dest);
+          }
+        }
+        break;
+      case BLOSC_TRUNC_PREC:
+        // TRUNC_PREC filter does not need to be undone
+        break;
+      default:
+        if (filters[i] != BLOSC_NOFILTER) {
+          BLOSC_TRACE_ERROR("Filter %d not handled during decompression.",
+                            filters[i]);
+
+          errcode = -1;
+        }
+    }
+    // Cycle buffers when required
+    if ((filters[i] != BLOSC_NOFILTER) && (filters[i] != BLOSC_TRUNC_PREC)) {
+      _src = _dest;
+      _dest = _tmp;
+      _tmp = _src;
+    }
+    if (last_filter_index == i) {
+      break;
+    }
+  }
+
+  /* Postfilter function */
+  if (context->postfilter != NULL) {
+    // Create new postfilter parameters for this block (must be private for each thread)
+    blosc2_postfilter_params postparams;
+    memcpy(&postparams, context->postparams, sizeof(postparams));
+    postparams.in = _src;
+    postparams.out = dest + offset;
+    postparams.size = bsize;
+    postparams.typesize = typesize;
+    postparams.offset = nblock * context->blocksize;
+    postparams.tid = thread_context->tid;
+    postparams.ttmp = thread_context->tmp;
+    postparams.ttmp_nbytes = thread_context->tmp_nbytes;
+    postparams.ctx = context;
+
+    if (context->postfilter(&postparams) != 0) {
+      BLOSC_TRACE_ERROR("Execution of postfilter function failed");
+      return BLOSC2_ERROR_POSTFILTER;
+    }
+  }
+
+  return errcode;
+}
+

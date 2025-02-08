@@ -1,0 +1,187 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/flb_parser_decoder.c
+int flb_parser_decoder_list_destroy(struct mk_list *list)
+{
+    int c = 0;
+    struct mk_list *head;
+    struct mk_list *r_head;
+    struct mk_list *tmp;
+    struct mk_list *r_tmp;
+    struct flb_parser_dec *dec;
+    struct flb_parser_dec_rule *dec_rule;
+
+    mk_list_foreach_safe(head, tmp, list) {
+        dec = mk_list_entry(head, struct flb_parser_dec, _head);
+
+        /* Destroy rules */
+        mk_list_foreach_safe(r_head, r_tmp, &dec->rules) {
+            dec_rule = mk_list_entry(r_head, struct flb_parser_dec_rule,
+                                     _head);
+            mk_list_del(&dec_rule->_head);
+            flb_free(dec_rule);
+        }
+
+        mk_list_del(&dec->_head);
+        flb_sds_destroy(dec->key);
+        flb_sds_destroy(dec->buffer);
+        flb_free(dec);
+        c++;
+    }
+
+    flb_free(list);
+    return c;
+}
+
+// the below code fragment can be found in:
+// src/flb_utils.c
+int flb_utils_timer_consume(flb_pipefd_t fd)
+{
+    int ret;
+    uint64_t val;
+
+    ret = flb_pipe_r(fd, &val, sizeof(val));
+    if (ret == -1) {
+        flb_errno();
+        return -1;
+    }
+
+#ifdef __linux__
+    /* A timer on linux must return an unisgned 64 bit number */
+    if (ret == 0) {
+        return -1;
+    }
+#endif
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/flb_parser.c
+static flb_sds_t get_parser_key(char *key,
+                                struct flb_config *config,
+                                struct mk_rconf_section *section)
+{
+    char *tmp;
+    flb_sds_t val;
+
+    tmp = mk_rconf_section_get_key(section, key, MK_RCONF_STR);
+    if (!tmp) {
+        return NULL;
+    }
+
+    val = flb_env_var_translate(config->env, tmp);
+    flb_free(tmp);
+
+    if (!val) {
+        return NULL;
+    }
+
+    if (flb_sds_len(val) == 0) {
+        flb_sds_destroy(val);
+        return NULL;
+    }
+
+    return val;
+}
+
+// the below code fragment can be found in:
+// src/http_server/flb_hs_endpoints.c
+int flb_hs_endpoints(struct flb_hs *hs)
+{
+    endpoint_root(hs);
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/flb_signv4.c
+void headers_sanitize(struct mk_list *in_list, struct mk_list *out_list)
+{
+    int x;
+    char *v_start;
+    char *v_end;
+    char *val;
+    struct mk_list *head;
+    struct mk_list *c_head;
+    struct mk_list *tmp;
+    struct mk_list out_tmp;
+    struct flb_kv *kv;
+    struct flb_kv *c_kv;
+    flb_sds_t t;
+
+    mk_list_init(&out_tmp);
+
+    /* Create lowercase key headers in the temporal list */
+    mk_list_foreach(head, in_list) {
+        kv = mk_list_entry(head, struct flb_kv, _head);
+
+        /* Sanitize value */
+        v_start = kv->val;
+        v_end = kv->val + flb_sds_len(kv->val);
+        while (*v_start == ' ' || *v_start == '\t') {
+            v_start++;
+        }
+        while (*v_end == ' ' || *v_end == '\t') {
+            v_end--;
+        }
+
+        /*
+         * The original headers might have upper case characters, for safety just
+         * make a copy of them so we can lowercase them if required.
+         */
+        kv = flb_kv_item_create_len(&out_tmp,
+                                    kv->key, flb_sds_len(kv->key),
+                                    v_start, v_end - v_start);
+        for (x = 0; x < flb_sds_len(kv->key); x++) {
+            kv->key[x] = tolower(kv->key[x]);
+        }
+
+        /*
+         * trim: kv->val alreay have a copy of the original value, now we need
+         * to look for double empty spaces in the middle of the value and do
+         * proper adjustments.
+         */
+        val = kv->val;
+        while (v_start < v_end) {
+            if (*v_start == ' ') {
+                if (v_start < v_end && *(v_start + 1) == ' ') {
+                    v_start++;
+                    continue;
+                }
+            }
+            *val = *v_start;
+            v_start++;
+            val++;
+        }
+        *val = '\0';
+        flb_sds_len_set(kv->val, val - kv->val);
+    }
+
+    /* Find and merge duplicates */
+    mk_list_foreach_safe(head, tmp, &out_tmp) {
+        kv = mk_list_entry(head, struct flb_kv, _head);
+
+        /* Check if this kv exists in out_list */
+        c_kv = NULL;
+        mk_list_foreach(c_head, out_list) {
+            c_kv = mk_list_entry(c_head, struct flb_kv, _head);
+            if (strcmp(kv->key, c_kv->key) == 0) {
+                break;
+            }
+            c_kv = NULL;
+        }
+
+        /* if c_kv is set, means the key already exists in the outgoing list */
+        if (c_kv) {
+            t = flb_sds_printf(&c_kv->val, ",%s", kv->val);
+            c_kv->val = t;
+            flb_kv_item_destroy(kv);
+        }
+        else {
+            mk_list_del(&kv->_head);
+            mk_list_add(&kv->_head, out_list);
+        }
+    }
+}
+

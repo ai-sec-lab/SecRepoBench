@@ -1,0 +1,292 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// MagickCore/fx.c
+static MagickBooleanType TranslateExpression (
+  FxInfo * pfx, const char * strLimit, char * chLimit, MagickBooleanType * needPopAll)
+{
+  /* There should be only one New per expression (oAssign), but can be many Old.
+  */
+  MagickBooleanType UserSymbol, NewUserSymbol;
+  int UserSymNdx0, UserSymNdx1;
+
+  MagickBooleanType
+    Assign = MagickFalse,
+    Update = MagickFalse,
+    IncrDecr = MagickFalse;
+
+  int StartEleNdx;
+
+  TernaryT ternary;
+  ternary.addrQuery = NULL_ADDRESS;
+  ternary.addrColon = NULL_ADDRESS;
+
+  pfx->teDepth++;
+
+  *chLimit = '\0';
+
+  StartEleNdx = pfx->usedElements-1;
+  if (StartEleNdx < 0) StartEleNdx = 0;
+
+  SkipSpaces (pfx);
+
+  if (!*pfx->pex) {
+    pfx->teDepth--;
+    return MagickFalse;
+  }
+
+  if (strchr(strLimit,*pfx->pex)!=NULL) {
+    *chLimit = *pfx->pex;
+    pfx->pex++;
+    pfx->teDepth--;
+
+    return MagickFalse;
+  }
+
+  if (!GetOperand (pfx, &UserSymbol, &NewUserSymbol, &UserSymNdx0, needPopAll)) return MagickFalse;
+  SkipSpaces (pfx);
+
+  /* Loop through Operator, Operand, Operator, Operand, ...
+  */
+  while (*pfx->pex && (!*strLimit || (strchr(strLimit,*pfx->pex)==NULL))) {
+    if (!GetOperator (pfx, &Assign, &Update, &IncrDecr)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (NewUserSymbol && !Assign) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected assignment after new UserSymbol", "'%s' at '%s'",
+        pfx->token, SetShortExp(pfx));
+      return MagickFalse;
+    }
+    if (!UserSymbol && Assign) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Attempted assignment to non-UserSymbol", "'%s' at '%s'",
+        pfx->token, SetShortExp(pfx));
+      return MagickFalse;
+    }
+    if (!UserSymbol && Update) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Attempted update to non-UserSymbol", "'%s' at '%s'",
+        pfx->token, SetShortExp(pfx));
+      return MagickFalse;
+    }
+    if (UserSymbol && (Assign || Update) && !IncrDecr) {
+
+      if (!TranslateExpression (pfx, strLimit, chLimit, needPopAll)) return MagickFalse;
+      if (!*pfx->pex) break;
+      if (!*strLimit) break;
+      if (strchr(strLimit,*chLimit)!=NULL) break;
+    }
+    if (UserSymbol && !Assign && !Update && UserSymNdx0 != NULL_ADDRESS) {
+      ElementT * pel;
+      (void) AddAddressingElement (pfx, rCopyFrom, UserSymNdx0);
+      UserSymNdx0 = NULL_ADDRESS;
+      pel = &pfx->Elements[pfx->usedElements-1];
+      pel->DoPush = MagickTrue;
+    }
+
+    if (UserSymbol) {
+      while (TopOprIsUnaryPrefix (pfx)) {
+        OperatorE op = pfx->OperatorStack[pfx->usedOprStack-1];
+        (void) AddElement (pfx, (fxFltType) 0, op);
+        pfx->usedOprStack--;
+      }
+    }
+
+    if (!ProcessTernaryOpr (pfx, &ternary)) return MagickFalse;
+
+    if (ternary.addrColon != NULL_ADDRESS) {
+      if (!TranslateExpression (pfx, ",);", chLimit, needPopAll)) return MagickFalse;
+      break;
+    }
+
+    UserSymbol = NewUserSymbol = MagickFalse;
+
+    if ( (!*pfx->pex) || (*strLimit && (strchr(strLimit,*pfx->pex)!=NULL) ) )
+    {
+      if (IncrDecr) break;
+
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected operand after operator", "at '%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+
+    if (IncrDecr) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "'++' and '--' must be the final operators in an expression at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+
+    if (!GetOperand (pfx, &UserSymbol, &NewUserSymbol, &UserSymNdx1, needPopAll)) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected operand at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    SkipSpaces (pfx);
+    if (NewUserSymbol && !Assign) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "NewUserSymbol", "'%s' after non-assignment operator at '%s'",
+        pfx->token, SetShortExp(pfx));
+      return MagickFalse;
+    }
+    if (UserSymbol && !NewUserSymbol) {
+      (void) AddAddressingElement (pfx, rCopyFrom, UserSymNdx1);
+      UserSymNdx1 = NULL_ADDRESS;
+    }
+    UserSymNdx0 = UserSymNdx1;
+  }
+
+  if (UserSymbol && !Assign && !Update && UserSymNdx0 != NULL_ADDRESS) {
+    ElementT * pel;
+    if (NewUserSymbol) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "NewUserSymbol", "'%s' needs assignment operator at '%s'",
+        pfx->token, SetShortExp(pfx));
+      return MagickFalse;
+    }
+    (void) AddAddressingElement (pfx, rCopyFrom, UserSymNdx0);
+    pel = &pfx->Elements[pfx->usedElements-1];
+    pel->DoPush = MagickTrue;
+  }
+
+  if (*pfx->pex && !*chLimit && (strchr(strLimit,*pfx->pex)!=NULL)) {
+    *chLimit = *pfx->pex;
+    pfx->pex++;
+  }
+  while (pfx->usedOprStack) {
+    OperatorE op = pfx->OperatorStack[pfx->usedOprStack-1];
+    if (op == oOpenParen || op == oOpenBracket || op == oOpenBrace) {
+      break;
+    }
+    if ( (op==oAssign && !Assign) || (OprInPlace(op) && !Update) ) {
+      break;
+    }
+    pfx->usedOprStack--;
+    (void) AddElement (pfx, (fxFltType) 0, op);
+    if (op == oAssign) {
+      /* Adjust last element, by deletion and add.
+      */
+      pfx->usedElements--;
+      (void) AddAddressingElement (pfx, rCopyTo, UserSymNdx0);
+      break;
+    } else if (OprInPlace (op)) {
+      /* Modify latest element.
+      */
+      pfx->Elements[pfx->usedElements-1].EleNdx = UserSymNdx0;
+      break;
+    }
+  }
+
+  (void) ResolveTernaryAddresses (pfx, &ternary);
+
+  pfx->teDepth--;
+
+  if (!pfx->teDepth && *needPopAll) {
+    (void) AddAddressingElement (pfx, rZerStk, NULL_ADDRESS);
+    *needPopAll = MagickFalse;
+  }
+
+  if (pfx->exception->severity != UndefinedException)
+    return MagickFalse;
+
+  return MagickTrue;
+}
+
+// the below code fragment can be found in:
+// MagickCore/fx.c
+static MagickBooleanType TranslateStatement (FxInfo * pfx, char * strLimit, char * chLimit)
+{
+  MagickBooleanType NeedPopAll = MagickFalse;
+
+  SkipSpaces (pfx);
+
+  if (!*pfx->pex) return MagickFalse;
+
+  if (!TranslateExpression (pfx, strLimit, chLimit, &NeedPopAll)) {
+    return MagickFalse;
+  }
+  if (pfx->usedElements && *chLimit==';') {
+    /* FIXME: not necessarily the last element,
+       but the last _executed_ element, eg "goto" in a "for()"., 
+       Pending a fix, we will use rZerStk.
+    */
+    ElementT * pel = &pfx->Elements[pfx->usedElements-1];
+    if (pel->DoPush) pel->DoPush = MagickFalse;
+  }
+
+  return MagickTrue;
+}
+
+// the below code fragment can be found in:
+// MagickCore/fx.c
+static MagickBooleanType ExtendOperatorStack (FxInfo * pfx)
+{
+  pfx->numOprStack = (int) ceil (pfx->numOprStack * (1 + TableExtend));
+  pfx->OperatorStack = (OperatorE*) ResizeMagickMemory (pfx->OperatorStack, pfx->numOprStack * sizeof(OperatorE));
+  if (!pfx->OperatorStack) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), ResourceLimitFatalError,
+      "OprStack", "%i",
+      pfx->numOprStack);
+    return MagickFalse;
+  }
+  return MagickTrue;
+}
+
+// the below code fragment can be found in:
+// MagickCore/fx.c
+static MagickBooleanType ExtendUserSymbols (FxInfo * pfx)
+{
+  pfx->numUserSymbols = (int) ceil (pfx->numUserSymbols * (1 + TableExtend));
+  pfx->UserSymbols = (UserSymbolT*) ResizeMagickMemory (pfx->UserSymbols, pfx->numUserSymbols * sizeof(UserSymbolT));
+  if (!pfx->UserSymbols) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), ResourceLimitFatalError,
+      "UserSymbols", "%i",
+      pfx->numUserSymbols);
+    return MagickFalse;
+  }
+
+  return MagickTrue;
+}
+
+// the below code fragment can be found in:
+// MagickCore/fx.c
+static MagickBooleanType TranslateStatementList (FxInfo * pfx, const char * strLimit, char * chLimit)
+{
+#define MAX_SLIMIT 10
+  char sLimits[MAX_SLIMIT];
+  SkipSpaces (pfx);
+
+  if (!*pfx->pex) return MagickFalse;
+  (void) CopyMagickString (sLimits, strLimit, MAX_SLIMIT-1);
+
+  if (strchr(strLimit,';')==NULL)
+    (void) ConcatenateMagickString (sLimits, ";", MAX_SLIMIT);
+
+  for (;;) {
+    if (!TranslateStatement (pfx, sLimits, chLimit)) return MagickFalse;
+
+    if (!*pfx->pex) break;
+
+    if (*chLimit != ';') {
+      break;
+    }
+  }
+
+  if (pfx->exception->severity != UndefinedException)
+    return MagickFalse;
+
+  return MagickTrue;
+}
+

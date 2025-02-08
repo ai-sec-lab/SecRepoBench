@@ -1,0 +1,344 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/flb_gzip.c
+int flb_gzip_uncompress(void *in_data, size_t in_len,
+                        void **out_data, size_t *out_len)
+{
+    int status;
+    uint8_t *p;
+    void *out_buf;
+    size_t out_size = 0;
+    void *zip_data;
+    size_t zip_len;
+    unsigned char flg;
+    unsigned int xlen, hcrc;
+    unsigned int dlen, crc;
+    mz_ulong crc_out;
+    mz_stream stream;
+    const unsigned char *start;
+
+    /* Minimal length: header + crc32 */
+    if (in_len < 18) {
+        flb_error("[gzip] unexpected content length");
+        return -1;
+    }
+
+    /* Magic bytes */
+    p = in_data;
+    if (p[0] != 0x1F || p[1] != 0x8B) {
+        flb_error("[gzip] invalid magic bytes");
+        return -1;
+    }
+
+    if (p[2] != 8) {
+        flb_error("[gzip] invalid method");
+        return -1;
+    }
+
+    /* Flag byte */
+    flg = p[3];
+
+    /* Reserved bits */
+    if (flg & 0xE0) {
+        flb_error("[gzip] invalid flag");
+        return -1;
+    }
+
+    /* Skip base header of 10 bytes */
+    start = p + FLB_GZIP_HEADER_OFFSET;
+
+    /* Skip extra data if present */
+    if (flg & FEXTRA) {
+        xlen = read_le16(start);
+        if (xlen > in_len - 12) {
+            flb_error("[gzip] invalid gzip data");
+            return -1;
+        }
+        start += xlen + 2;
+    }
+
+    /* Skip file name if present */
+    if (flg & FNAME) {
+        do {
+            if (start - p >= in_len) {
+                flb_error("[gzip] invalid gzip data (FNAME)");
+                return -1;
+            }
+        } while (*start++);
+    }
+
+    /* Skip file comment if present */
+    if (flg & FCOMMENT) {
+        do {
+            if (start - p >= in_len) {
+                flb_error("[gzip] invalid gzip data (FCOMMENT)");
+                return -1;
+            }
+        } while (*start++);
+    }
+
+    /* Check header crc if present */
+    if (flg & FHCRC) {
+        if (start - p > in_len - 2) {
+            flb_error("[gzip] invalid gzip data (FHRC)");
+            return -1;
+        }
+
+        hcrc = read_le16(start);
+        crc = mz_crc32(MZ_CRC32_INIT, p, start - p) & 0x0000FFFF;
+        if (hcrc != crc) {
+            flb_error("[gzip] invalid gzip header CRC");
+            return -1;
+        }
+        start += 2;
+    }
+
+    /* Get decompressed length */
+    dlen = read_le32(&p[in_len - 4]);
+
+    /* Get CRC32 checksum of original data */
+    crc = read_le32(&p[in_len - 8]);
+
+    /* Decompress data */
+    if ((p + in_len) - p < 8) {
+        flb_error("[gzip] invalid gzip CRC32 checksum");
+        return -1;
+    }
+
+    /* Allocate outgoing buffer */
+    out_buf = flb_malloc(dlen);
+    if (!out_buf) {
+        flb_errno();
+        return -1;
+    }
+    out_size = dlen;
+
+    /* Map zip content */
+    zip_data = (uint8_t *) start;
+    zip_len = (p + in_len) - start - 8;
+
+    memset(&stream, 0, sizeof(stream));
+    stream.next_in = zip_data;
+    stream.avail_in = zip_len;
+    stream.next_out = out_buf;
+    stream.avail_out = out_size;
+
+    status = mz_inflateInit2(&stream, -Z_DEFAULT_WINDOW_BITS);
+    if (status != MZ_OK) {
+        flb_free(out_buf);
+        return -1;
+    }
+
+    status = mz_inflate(&stream, MZ_FINISH);
+    if (status != MZ_STREAM_END) {
+        mz_inflateEnd(&stream);
+        flb_free(out_buf);
+        return -1;
+    }
+
+    if (stream.total_out != dlen) {
+        mz_inflateEnd(&stream);
+        flb_free(out_buf);
+        flb_error("[gzip] invalid gzip data size");
+        return -1;
+    }
+
+    /* terminate the stream, it's not longer required */
+    mz_inflateEnd(&stream);
+
+    /* Validate message CRC vs inflated data CRC */
+    crc_out = mz_crc32(MZ_CRC32_INIT, out_buf, dlen);
+    if (crc_out != crc) {
+        flb_free(out_buf);
+        flb_error("[gzip] invalid GZip checksum (CRC32)");
+        return -1;
+    }
+
+    /* set the uncompressed data */
+    *out_len = dlen;
+    *out_data = out_buf;
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/stream_processor/flb_sp.c
+int flb_sp_test_fd_event(int fd, struct flb_sp_task *task, char **out_data,
+                         size_t *out_size)
+{
+    char *tag = NULL;
+    int tag_len = 0;
+
+    if (task->window.type != FLB_SP_WINDOW_DEFAULT) {
+        if (fd == task->window.fd) {
+            if (task->window.records > 0) {
+                /* find input tag from task source */
+                package_results(tag, tag_len, out_data, out_size, task);
+                if (task->stream) {
+                    flb_sp_stream_append_data(*out_data, *out_size, task->stream);
+                }
+                else {
+                    flb_pack_print(*out_data, *out_size);
+                }
+            }
+
+            flb_sp_window_prune(task);
+        }
+        else if (fd == task->window.fd_hop) {
+            sp_process_hopping_slot(tag, tag_len, task);
+        }
+    }
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/flb_parser_decoder.c
+static int decode_mysql_quoted(struct flb_parser_dec *dec,
+                               char *in_buf, size_t in_size,
+                               char **out_buf, size_t *out_size, int *out_type)
+{
+    int len;
+    if(in_size < 2) {
+        dec->buffer[0] = in_buf[0];
+        dec->buffer[1] = 0;
+        *out_buf = dec->buffer;
+        *out_size = in_size;
+        *out_type = TYPE_OUT_STRING;
+    }
+    else if(in_buf[0] == '\'' && in_buf[in_size-1] == '\'') {
+        len = flb_mysql_unquote_string(in_buf+1, in_size-2, &dec->buffer);
+        *out_buf = dec->buffer;
+        *out_size = len;
+        *out_type = TYPE_OUT_STRING;
+    }
+    else if(in_buf[0] == '\"' && in_buf[in_size-1] == '\"') {
+        len = flb_mysql_unquote_string(in_buf+1, in_size-2, &dec->buffer);
+        *out_buf = dec->buffer;
+        *out_size = len;
+        *out_type = TYPE_OUT_STRING;
+    }
+    else {
+        memcpy(dec->buffer, in_buf, in_size);
+        dec->buffer[in_size] = 0;
+        *out_buf = dec->buffer;
+        *out_size = in_size;
+        *out_type = TYPE_OUT_STRING;
+    }
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/flb_parser_decoder.c
+static int decode_escaped_utf8(struct flb_parser_dec *dec,
+                               const char *in_buf, size_t in_size,
+                               char **out_buf, size_t *out_size, int *out_type)
+{
+    int len;
+
+    len = flb_unescape_string_utf8(in_buf, in_size, dec->buffer);
+    *out_buf = dec->buffer;
+    *out_size = len;
+    *out_type = TYPE_OUT_STRING;
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/stream_processor/flb_sp.c
+int flb_sp_do(struct flb_sp *sp, struct flb_input_instance *in,
+              const char *tag, int tag_len,
+              const char *buf_data, size_t buf_size)
+
+{
+    int ret;
+    size_t out_size;
+    char *out_buf;
+    struct mk_list *head;
+    struct flb_sp_task *task;
+    struct flb_sp_cmd *cmd;
+
+    /* Lookup tasks that match the incoming instance data */
+    mk_list_foreach(head, &sp->tasks) {
+        task = mk_list_entry(head, struct flb_sp_task, _head);
+        cmd = task->cmd;
+
+        if (cmd->source_type == FLB_SP_STREAM) {
+            if (task->source_instance != in) {
+                continue;
+            }
+        }
+        else if (cmd->source_type == FLB_SP_TAG) {
+            ret = flb_router_match(tag, tag_len, cmd->source_name, NULL);
+            if (ret == FLB_FALSE) {
+                continue;
+            }
+        }
+
+        /* We found a task that matches the stream rule */
+        if (task->aggr_keys == FLB_TRUE) {
+            ret = sp_process_data_aggr(buf_data, buf_size,
+                                       tag, tag_len,
+                                       task, sp);
+
+            if (ret == -1) {
+                flb_error("[sp] error processing records for '%s'",
+                          task->name);
+                continue;
+            }
+
+            if (flb_sp_window_populate(task, buf_data, buf_size) == -1) {
+                flb_error("[sp] error populating window for '%s'",
+                          task->name);
+                continue;
+            }
+
+            if (task->window.type == FLB_SP_WINDOW_DEFAULT) {
+                package_results(tag, tag_len, &out_buf, &out_size, task);
+                flb_sp_window_prune(task);
+            }
+        }
+        else {
+            ret = sp_process_data(tag, tag_len,
+                                  buf_data, buf_size,
+                                  &out_buf, &out_size,
+                                  task, sp);
+
+            if (ret == -1) {
+                flb_error("[sp] error processing records for '%s'",
+                          task->name);
+                continue;
+            }
+        }
+
+        if (ret == 0) {
+            /* no records */
+            continue;
+        }
+
+        /*
+         * This task involves append data to a stream, which
+         * means: register the output of the query as data
+         * generated by an input instance plugin.
+         */
+        if (task->aggr_keys != FLB_TRUE ||
+            task->window.type == FLB_SP_WINDOW_DEFAULT) {
+            /*
+             * Add to stream processing stream if there is no
+             * aggregation function. Otherwise, write it at timer event
+             */
+            if (task->stream) {
+                flb_sp_stream_append_data(out_buf, out_size, task->stream);
+            }
+            else {
+                flb_pack_print(out_buf, out_size);
+                flb_free(out_buf);
+            }
+        }
+    }
+
+    return -1;
+}
+

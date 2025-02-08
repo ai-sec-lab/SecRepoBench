@@ -1,0 +1,208 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/ndpi_utils.c
+static const char* ndpi_get_flow_info_by_proto_id(struct ndpi_flow_struct const * const flow,
+                                                  u_int16_t proto_id) {
+  switch (proto_id) {
+    case NDPI_PROTOCOL_WHOIS_DAS:
+    case NDPI_PROTOCOL_MAIL_SMTP:
+    case NDPI_PROTOCOL_NETBIOS:
+    case NDPI_PROTOCOL_SSDP:
+    case NDPI_PROTOCOL_MDNS:
+    case NDPI_PROTOCOL_STUN:
+    case NDPI_PROTOCOL_DNS:
+    case NDPI_PROTOCOL_DHCP:
+    case NDPI_PROTOCOL_XIAOMI:
+    case NDPI_PROTOCOL_SD_RTN:
+    case NDPI_PROTOCOL_COLLECTD:
+    case NDPI_PROTOCOL_HTTP:
+    case NDPI_PROTOCOL_HTTP_CONNECT:
+    case NDPI_PROTOCOL_HTTP_PROXY:
+      return flow->host_server_name;
+
+    case NDPI_PROTOCOL_QUIC:
+    case NDPI_PROTOCOL_TLS:
+      if(flow->protos.tls_quic.hello_processed != 0)
+        return flow->host_server_name;
+      break;
+  }
+  
+  return NULL;
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+int ndpi_load_protocols_file(struct ndpi_detection_module_struct *ndpi_str, const char *path) {
+  FILE *fd;
+  char *buffer, *old_buffer;
+  int chunk_len = 1024, buffer_len = chunk_len, old_buffer_len;
+  int i, rc = -1;
+
+  if(!ndpi_str || !path)
+    return(-1);
+
+  fd = fopen(path, "r");
+
+  if(fd == NULL) {
+    NDPI_LOG_ERR(ndpi_str, "Unable to open file %s [%s]\n", path, strerror(errno));
+    goto error;
+  }
+
+  buffer = ndpi_malloc(buffer_len);
+
+  if(buffer == NULL) {
+    NDPI_LOG_ERR(ndpi_str, "Memory allocation failure\n");
+    goto close_fd;
+  }
+
+  while(1) {
+    char *line = buffer;
+    int line_len = buffer_len;
+
+    while((line = fgets(line, line_len, fd)) != NULL && line[strlen(line) - 1] != '\n') {
+      i = strlen(line);
+      old_buffer = buffer;
+      old_buffer_len = buffer_len;
+      buffer_len += chunk_len;
+
+      buffer = ndpi_realloc(old_buffer, old_buffer_len, buffer_len);
+
+      if(buffer == NULL) {
+	NDPI_LOG_ERR(ndpi_str, "Memory allocation failure\n");
+	ndpi_free(old_buffer);
+	goto close_fd;
+      }
+
+      line = &buffer[i];
+      line_len = chunk_len;
+    }
+
+    if(!line) /* safety check */
+      break;
+
+    i = strlen(buffer);
+    if((i <= 1) || (buffer[0] == '#'))
+      continue;
+    else
+      buffer[i - 1] = '\0';
+
+    if(ndpi_handle_rule(ndpi_str, buffer, 1) != 0)
+      NDPI_LOG_INFO(ndpi_str, "Discraded rule '%s'\n", buffer);
+  }
+
+  rc = 0;
+
+  ndpi_free(buffer);
+
+ close_fd:
+  fclose(fd);
+
+ error:
+  return(rc);
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+static void ndpi_init_ptree_ipv4(struct ndpi_detection_module_struct *ndpi_str,
+				 void *ptree, ndpi_network host_list[]) {
+  int i;
+
+  for(i = 0; host_list[i].network != 0x0; i++) {
+    struct in_addr pin;
+    ndpi_patricia_node_t *node;
+
+    pin.s_addr = htonl(host_list[i].network);
+    if((node = add_to_ptree(ptree, AF_INET, &pin, host_list[i].cidr /* bits */)) != NULL) {
+      /*
+	Two main cases:
+	1) ip -> protocol: uv16[0].user_value = protocol; uv16[0].additional_user_value = 0;
+	2) ip -> risk: uv16[0].user_value = risk; uv16[0].additional_user_value = 0;
+      */
+      node->value.u.uv16[0].user_value = host_list[i].value, node->value.u.uv16[0].additional_user_value = 0;
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/third_party/src/ndpi_sha1.c
+void SHA1Final(unsigned char digest[20], SHA1_CTX* context)
+{
+unsigned i;
+unsigned char finalcount[8];
+unsigned char c;
+
+#if 0	/* untested "improvement" by DHR */
+    /* Convert context->count to a sequence of bytes
+     * in finalcount.  Second element first, but
+     * big-endian order within element.
+     * But we do it all backwards.
+     */
+    unsigned char *fcp = &finalcount[8];
+
+    for (i = 0; i < 2; i++)
+    {
+	u_int32_t t = context->count[i];
+	int j;
+
+	for (j = 0; j < 4; t >>= 8, j++)
+	    *--fcp = (unsigned char) t
+    }
+#else
+    for (i = 0; i < 8; i++) {
+        finalcount[i] = (unsigned char)((context->count[(i >= 4 ? 0 : 1)]
+         >> ((3-(i & 3)) * 8) ) & 255);  /* Endian independent */
+    }
+#endif
+    c = 0200;
+    SHA1Update(context, &c, 1);
+    while ((context->count[0] & 504) != 448) {
+	c = 0000;
+        SHA1Update(context, &c, 1);
+    }
+    SHA1Update(context, finalcount, 8);  /* Should cause a SHA1Transform() */
+    for (i = 0; i < 20; i++) {
+        digest[i] = (unsigned char)
+         ((context->state[i>>2] >> ((3-(i & 3)) * 8) ) & 255);
+    }
+    /* Wipe variables */
+    memset(context, '\0', sizeof(*context));
+    memset(&finalcount, '\0', sizeof(finalcount));
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static u_int32_t make_tls_cert_key(struct ndpi_packet_struct *packet, int is_from_client)
+{
+  u_int32_t key;
+
+  /* Server ip/port */
+  if(packet->iphv6 == NULL) {
+    if(packet->tcp) {
+      if(is_from_client)
+        key = packet->iph->daddr + packet->tcp->dest;
+      else
+        key = packet->iph->saddr + packet->tcp->source;
+    } else {
+      if(is_from_client)
+        key = packet->iph->daddr + packet->udp->dest;
+      else
+        key = packet->iph->saddr + packet->udp->source;
+    }
+  } else {
+    if(packet->tcp) {
+      if(is_from_client)
+        key = ndpi_quick_hash((unsigned char *)&packet->iphv6->ip6_dst, 16) + packet->tcp->dest;
+      else
+        key = ndpi_quick_hash((unsigned char *)&packet->iphv6->ip6_src, 16) + packet->tcp->source;
+    } else {
+      if(is_from_client)
+        key = ndpi_quick_hash((unsigned char *)&packet->iphv6->ip6_dst, 16) + packet->udp->dest;
+      else
+        key = ndpi_quick_hash((unsigned char *)&packet->iphv6->ip6_src, 16) + packet->udp->source;
+    }
+  }
+
+  return key;
+}
+
