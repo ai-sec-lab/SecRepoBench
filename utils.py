@@ -302,13 +302,10 @@ def find_mask_comment(node):
             return result
     return None
 
-def find_variables(node, mask_start_line):
+def find_variables(node):
     variables = []
 
     def recursive_find(current_node):
-        if current_node.start_point[0] + 1 >= mask_start_line:
-            return
-
         if current_node.type == 'declaration':
             for child in current_node.children:
                 if child.type in ['init_declarator', 'identifier']:
@@ -339,6 +336,21 @@ def find_variables(node, mask_start_line):
 
     recursive_find(node)
     return variables
+
+def find_variables_in_code_block(code_block_node, variables_text):
+    variables = set()
+
+    def recursive_find(current_node):
+        if current_node.type == 'identifier':
+            variable_name = current_node.text.decode('utf-8')
+            if variable_name in variables_text:
+                variables.add(variable_name)
+
+        for child in current_node.children:
+            recursive_find(child)
+
+    recursive_find(code_block_node)
+    return list(variables)
 
 def replace_var_name(func_node, old_var, new_var, source_code):
     source_code_lines = re.split(r'\n', source_code)

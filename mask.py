@@ -427,12 +427,12 @@ def get_mod_lines_deleted(diff, diff_non_trivial):
     return modified_lines
 
 
-def get_new_var(function_node, old_var, evaler):
+def get_new_var(function_node, old_var, evaler, attempt=1):
     # make prompt for LM to make a new_var
     prompt = f"Below is a C/C++ function. Create a new name for the variable {old_var}. "
-    prompt += "The new variable name should be semantically similar to the original name and variable purpose. "
-    prompt += "For example, a variable called 'dst' that tracks geometric distance can be renamed 'distance'. "
-    prompt += "As another example, a variable called 'start_line can be renamed 's_ln'. "
+    prompt += "The new variable name should be different from the old_var but still be reasonable given the surrounding code context. "
+    prompt += "For example, a variable named 'dst' that tracks geometric distance can be renamed 'distance'. "
+    prompt += "As another example, a variable named 'x' that tracks a column index can be renamed 'column_index'. "
     prompt += "Only return the new variable name. "
     prompt += "DO NOT include any other information, such as a preamble or suffix."
     prompt += "\n```\n"
@@ -440,6 +440,9 @@ def get_new_var(function_node, old_var, evaler):
     prompt += "\n```\n"
 
     new_var = evaler.get_response(prompt)
+    if new_var == old_var and attempt < 5:
+        attempt += 1
+        new_var = get_new_var(function_node, old_var, evaler, attempt)
     return new_var
 
 
@@ -523,7 +526,7 @@ def mask_helper(id, case, base_path, mod, perturbed_content=None):
             sec_code_block_comments_rm = remove_sl_comments_code_block(sec_code_block)
             vul_code_block_comments_rm = remove_sl_comments_code_block(vul_code_block)
     
-    return x
+    return sec_code_block
 
 
 def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
@@ -543,26 +546,26 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
     language = determine_language(ext)
     if language == 'c':
         LANGUAGE = C_LANGUAGE
-        mask_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_{mod}.c'
-        sec_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block_{mod}.c'
-        vul_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_{mod}.c'
-        sec_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_{mod}.c'
-        vul_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_{mod}.c'
-        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_print_{mod}.c'
-        sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_func_{mod}.c'
-        mask_sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_sec_func_{mod}.c'
-        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_sec_base_{mod}.c'
+        mask_file = f'descriptions/{id}/mask_{mod}.c'
+        sec_code_block_file = f'descriptions/{id}/sec_code_block_{mod}.c'
+        vul_code_block_file = f'descriptions/{id}/vul_code_block_{mod}.c'
+        sec_file = f'descriptions/{id}/sec_{mod}.c'
+        vul_file = f'descriptions/{id}/vul_{mod}.c'
+        sec_print_file = f'descriptions/{id}/sec_print_{mod}.c'
+        sec_func_file = f'descriptions/{id}/sec_func_{mod}.c'
+        mask_sec_func_file = f'descriptions/{id}/mask_sec_func_{mod}.c'
+        vul_sec_base_file = f'descriptions/{id}/vul_sec_base_{mod}.c'
     elif language == 'cpp':
         LANGUAGE = CPP_LANGUAGE
-        mask_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_{mod}.cpp'
-        sec_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_code_block_{mod}.cpp'
-        vul_code_block_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_code_block_{mod}.cpp'
-        sec_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_{mod}.cpp'
-        vul_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_{mod}.cpp'
-        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_print_{mod}.cpp'
-        sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/sec_func_{mod}.cpp'
-        mask_sec_func_file =f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_sec_func_{mod}.cpp'
-        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/vul_sec_base_{mod}.cpp'
+        mask_file = f'descriptions/{id}/mask_{mod}.cpp'
+        sec_code_block_file = f'descriptions/{id}/sec_code_block_{mod}.cpp'
+        vul_code_block_file = f'descriptions/{id}/vul_code_block_{mod}.cpp'
+        sec_file = f'descriptions/{id}/sec_{mod}.cpp'
+        vul_file = f'descriptions/{id}/vul_{mod}.cpp'
+        sec_print_file = f'descriptions/{id}/sec_print_{mod}.cpp'
+        sec_func_file = f'descriptions/{id}/sec_func_{mod}.cpp'
+        mask_sec_func_file =f'descriptions/{id}/mask_sec_func_{mod}.cpp'
+        vul_sec_base_file = f'descriptions/{id}/vul_sec_base_{mod}.cpp'
     else:
         print(f"Language of modified file not recognized for id {id}")
         return
@@ -592,7 +595,7 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
     total_lines = len(source_code_lines)
 
     # Get full diff file
-    diff_file = f'/home/cdilgren/project_benchmark/ARVO-Meta/patches/{id}.diff'
+    diff_file = f'ARVO-Meta/patches/{id}.diff'
     with open(diff_file, 'r') as f:
         diff_file_content = f.read()
     diff = parse_git_diff(diff_file_content, changed_file)
@@ -709,7 +712,7 @@ def local_var_perturbation(id2var, evaler, case, x):
         return
 
     # Get full diff file
-    diff_file = f'/home/cdilgren/project_benchmark/ARVO-Meta/patches/{id}.diff'
+    diff_file = f'ARVO-Meta/patches/{id}.diff'
     with open(diff_file, 'r') as f:
         diff_file_content = f.read()
     diff = parse_git_diff(diff_file_content, case['changed_file'])
@@ -723,6 +726,8 @@ def local_var_perturbation(id2var, evaler, case, x):
     vul_tree = parser.parse(bytes(case['source_code_before'], 'utf8'))
     vul_function_node = get_ts_function_node(vul_tree.root_node, 'vul', diff, case['diff'], case['changed_file'], case['changed_function'], case['source_code_before'])
 
+    sec_code_block_node = parser.parse(bytes(sec_code_block, 'utf-8')).root_node
+
     if sec_function_node is None or vul_function_node is None:
         # if tree-sitter can't find the function node, then we can't perturb
         id2var[id] = {
@@ -733,20 +738,25 @@ def local_var_perturbation(id2var, evaler, case, x):
         sec_perturbed_content = case['source_code']
         vul_perturbed_content = case['source_code_before']
     else:
-        variables = find_variables(sec_function_node, x)
+        variables = find_variables(sec_function_node)
 
         if variables:
             variables_text = [var.text.decode('utf-8') for var in variables]
 
+            # Get variables in the code block -- back off to full variable set if necessary
+            variables_in_code_block = find_variables_in_code_block(sec_code_block_node, variables_text)
+            if len(variables_in_code_block) == 0:
+                variables_in_code_block = variables_text
+
             if id in id2var.keys():
                 old_var = id2var[id]['old_var']
                 new_var = id2var[id]['new_var']
-                if old_var is not None and new_var is not None and old_var in variables_text:
+                if old_var is not None and new_var is not None and old_var in variables_in_code_block:
                     # use previous var
                     print(f"Using previous variable found: {old_var}, new var: {new_var}")
                 else:
                     # mask changed, need to pick a new one
-                    old_var = random.choice(variables_text)
+                    old_var = random.choice(variables_in_code_block)
                     new_var = get_new_var(sec_function_node, old_var, evaler)
                     id2var[id] = {
                         'old_var': old_var,
@@ -755,7 +765,7 @@ def local_var_perturbation(id2var, evaler, case, x):
                     print(f"Variable found: {old_var}, new var: {new_var}")
             else:
                 # get new var
-                old_var = random.choice(variables_text)
+                old_var = random.choice(variables_in_code_block)
                 new_var = get_new_var(sec_function_node, old_var, evaler)
                 id2var[id] = {
                     'old_var': old_var,
@@ -785,13 +795,13 @@ def local_var_perturbation(id2var, evaler, case, x):
 
 
 if __name__ == "__main__":
-    with open('ids_125_dup_replaced.txt', 'r') as f:
+    with open('ids_125_have_good.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
 
     with open('filter_logs/cases.json', 'r') as f:
         cases = json.load(f)
 
-    base_path = '/home/cdilgren/project_benchmark/descriptions'
+    base_path = 'descriptions'
     if not os.path.exists(base_path):
         os.mkdir(base_path)
 
@@ -803,6 +813,6 @@ if __name__ == "__main__":
     for id in ids:
         print(id)
         case = cases[id]
-        x = mask_helper(id, case, base_path, 'base')
-        perturbed_content = local_var_perturbation(id2var, evaler, case, x)
+        sec_code_block = mask_helper(id, case, base_path, 'base')
+        perturbed_content = local_var_perturbation(id2var, evaler, case, sec_code_block)
         mask_helper(id, case, base_path, 'perturbed', perturbed_content)
