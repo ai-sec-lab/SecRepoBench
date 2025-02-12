@@ -1,0 +1,313 @@
+Below is the content of a C/C++ file where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static
+int WriteOutputLUT(cmsIOHANDLER* m, cmsHPROFILE hProfile, cmsUInt32Number Intent, cmsUInt32Number dwFlags)
+{
+    cmsHPROFILE hLab;
+    cmsHTRANSFORM xform;
+    cmsUInt32Number i, nChannels;
+    cmsUInt32Number OutputFormat;
+    _cmsTRANSFORM* v;
+    cmsPipeline* DeviceLink;
+    cmsHPROFILE Profiles[3];
+    cmsCIEXYZ BlackPointAdaptedToD50;
+    cmsBool lDoBPC = (cmsBool) (dwFlags & cmsFLAGS_BLACKPOINTCOMPENSATION);
+    cmsBool lFixWhite = (cmsBool) !(dwFlags & cmsFLAGS_NOWHITEONWHITEFIXUP);
+    cmsUInt32Number InFrm = TYPE_Lab_16;
+    cmsUInt32Number AdjustedEncodingIntent;
+    cmsColorSpaceSignature ColorSpace;
+    cmsStage* first;
+
+    hLab = cmsCreateLab4ProfileTHR(m ->ContextID, NULL);
+    if (hLab == NULL) return 0;
+
+    OutputFormat = cmsFormatterForColorspaceOfProfile(hProfile, 2, FALSE);
+    nChannels    = T_CHANNELS(OutputFormat);
+
+    ColorSpace = cmsGetColorSpace(hProfile);
+
+    // For absolute colorimetric, the LUT is encoded as relative in order to preserve precision.
+
+    AdjustedEncodingIntent = Intent;
+    if (AdjustedEncodingIntent == INTENT_ABSOLUTE_COLORIMETRIC)
+        AdjustedEncodingIntent = INTENT_RELATIVE_COLORIMETRIC;
+
+
+    // Use V4 Lab always
+    Profiles[0] = hLab;
+    Profiles[1] = hProfile;
+
+    xform = cmsCreateMultiprofileTransformTHR(m ->ContextID,
+                                              Profiles, 2, TYPE_Lab_DBL,
+                                              OutputFormat, AdjustedEncodingIntent, 0);
+    cmsCloseProfile(hLab);
+
+    if (xform == NULL) {        
+        cmsSignalError(m ->ContextID, cmsERROR_COLORSPACE_CHECK, "Cannot create transform Lab -> Profile in CRD creation");
+        return 0;
+    }
+
+    // Get a copy of the internal devicelink
+    v = (_cmsTRANSFORM*) xform;
+    DeviceLink = cmsPipelineDup(v ->Lut);
+    // Checks if the DeviceLink is NULL and deletes the transform if it is.
+    // If the DeviceLink exists, it forces the use of a CLUT by setting the cmsFLAGS_FORCE_CLUT flag.
+    // Proceeds to optimize the pipeline for color rendering using the _cmsOptimizePipeline function.
+    // <MASK>
+
+    _cmsIOPrintf(m, "<<\n");
+    _cmsIOPrintf(m, "/ColorRenderingType 1\n");
+
+
+    cmsDetectBlackPoint(&BlackPointAdaptedToD50, hProfile, Intent, 0);
+
+    // Emit headers, etc.
+    EmitWhiteBlackD50(m, &BlackPointAdaptedToD50);
+    EmitPQRStage(m, hProfile, lDoBPC, Intent == INTENT_ABSOLUTE_COLORIMETRIC);
+    EmitXYZ2Lab(m);
+
+
+    // FIXUP: map Lab (100, 0, 0) to perfect white, because the particular encoding for Lab
+    // does map a=b=0 not falling into any specific node. Since range a,b goes -128..127,
+    // zero is slightly moved towards right, so assure next node (in L=100 slice) is mapped to
+    // zero. This would sacrifice a bit of highlights, but failure to do so would cause
+    // scum dot. Ouch.
+
+    if (Intent == INTENT_ABSOLUTE_COLORIMETRIC)
+            lFixWhite = FALSE;
+
+    _cmsIOPrintf(m, "/RenderTable ");
+
+    first = cmsPipelineGetPtrToFirstStage(DeviceLink);
+    if (first != NULL) {
+        WriteCLUT(m, first, "<", ">\n", "", "", lFixWhite, ColorSpace);
+    }
+
+    _cmsIOPrintf(m, " %d {} bind ", nChannels);
+
+    for (i=1; i < nChannels; i++)
+            _cmsIOPrintf(m, "dup ");
+
+    _cmsIOPrintf(m, "]\n");
+
+    EmitIntent(m, Intent);
+
+    _cmsIOPrintf(m, ">>\n");
+
+    if (!(dwFlags & cmsFLAGS_NODEFAULTRESOURCEDEF)) {
+
+        _cmsIOPrintf(m, "/Current exch /ColorRendering defineresource pop\n");
+    }
+
+    cmsPipelineFree(DeviceLink);
+    cmsDeleteTransform(xform);
+
+    return 1;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/cmsps2.c
+static
+cmsFloat64Number* GetPtrToMatrix(const cmsStage* mpe)
+{
+    _cmsStageMatrixData* Data = (_cmsStageMatrixData*) mpe ->Data;
+
+    return Data -> Double;
+}
+
+// the below code fragment can be found in:
+// src/cmsps2.c
+static
+cmsUInt32Number GenerateCSA(cmsContext ContextID,
+                            cmsHPROFILE hProfile,
+                            cmsUInt32Number Intent,
+                            cmsUInt32Number dwFlags,
+                            cmsIOHANDLER* mem)
+{
+    cmsUInt32Number dwBytesUsed;
+    cmsPipeline* lut = NULL;
+    cmsStage* Matrix, *Shaper;
+
+
+    // Is a named color profile?
+    if (cmsGetDeviceClass(hProfile) == cmsSigNamedColorClass) {
+
+        if (!WriteNamedColorCSA(mem, hProfile, Intent)) goto Error;
+    }
+    else {
+
+
+        // Any profile class are allowed (including devicelink), but
+        // output (PCS) colorspace must be XYZ or Lab
+        cmsColorSpaceSignature ColorSpace = cmsGetPCS(hProfile);
+
+        if (ColorSpace != cmsSigXYZData &&
+            ColorSpace != cmsSigLabData) {
+
+                cmsSignalError(ContextID, cmsERROR_COLORSPACE_CHECK, "Invalid output color space");
+                goto Error;
+        }
+
+
+        // Read the lut with all necessary conversion stages
+        lut = _cmsReadInputLUT(hProfile, Intent);
+        if (lut == NULL) goto Error;
+
+
+        // Tone curves + matrix can be implemented without any LUT
+        if (cmsPipelineCheckAndRetreiveStages(lut, 2, cmsSigCurveSetElemType, cmsSigMatrixElemType, &Shaper, &Matrix)) {
+
+            if (!WriteInputMatrixShaper(mem, hProfile, Matrix, Shaper)) goto Error;
+
+        }
+        else {
+           // We need a LUT for the rest
+           if (!WriteInputLUT(mem, hProfile, Intent, dwFlags)) goto Error;
+        }
+    }
+
+
+    // Done, keep memory usage
+    dwBytesUsed = mem ->UsedSpace;
+
+    // Get rid of LUT
+    if (lut != NULL) cmsPipelineFree(lut);
+
+    // Finally, return used byte count
+    return dwBytesUsed;
+
+Error:
+    if (lut != NULL) cmsPipelineFree(lut);
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/cmsps2.c
+static
+cmsUInt32Number  GenerateCRD(cmsContext ContextID,
+                             cmsHPROFILE hProfile,
+                             cmsUInt32Number Intent, cmsUInt32Number dwFlags,
+                             cmsIOHANDLER* mem)
+{
+    cmsUInt32Number dwBytesUsed;
+
+    if (!(dwFlags & cmsFLAGS_NODEFAULTRESOURCEDEF)) {
+
+        EmitHeader(mem, "Color Rendering Dictionary (CRD)", hProfile);
+    }
+
+
+    // Is a named color profile?
+    if (cmsGetDeviceClass(hProfile) == cmsSigNamedColorClass) {
+
+        if (!WriteNamedColorCRD(mem, hProfile, Intent, dwFlags)) {
+            return 0;
+        }
+    }
+    else {
+
+        // CRD are always implemented as LUT
+
+        if (!WriteOutputLUT(mem, hProfile, Intent, dwFlags)) {
+            return 0;
+        }
+    }
+
+    if (!(dwFlags & cmsFLAGS_NODEFAULTRESOURCEDEF)) {
+
+        _cmsIOPrintf(mem, "%%%%EndResource\n");
+        _cmsIOPrintf(mem, "\n%% CRD End\n");
+    }
+
+    // Done, keep memory usage
+    dwBytesUsed = mem ->UsedSpace;
+
+    // Finally, return used byte count
+    return dwBytesUsed;
+
+    cmsUNUSED_PARAMETER(ContextID);
+}
+
+// the below code fragment can be found in:
+// src/cmsps2.c
+static
+int WriteNamedColorCSA(cmsIOHANDLER* m, cmsHPROFILE hNamedColor, cmsUInt32Number Intent)
+{
+    cmsHTRANSFORM xform;
+    cmsHPROFILE   hLab;
+    cmsUInt32Number i, nColors;
+    char ColorName[cmsMAX_PATH];
+    cmsNAMEDCOLORLIST* NamedColorList;
+
+    hLab  = cmsCreateLab4ProfileTHR(m ->ContextID, NULL);
+    xform = cmsCreateTransform(hNamedColor, TYPE_NAMED_COLOR_INDEX, hLab, TYPE_Lab_DBL, Intent, 0);
+    cmsCloseProfile(hLab);
+
+    if (xform == NULL) return 0;
+
+    NamedColorList = cmsGetNamedColorList(xform);
+    if (NamedColorList == NULL) {
+        cmsDeleteTransform(xform);
+        return 0;
+    }
+
+    _cmsIOPrintf(m, "<<\n");
+    _cmsIOPrintf(m, "(colorlistcomment) (%s)\n", "Named color CSA");
+    _cmsIOPrintf(m, "(Prefix) [ (Pantone ) (PANTONE ) ]\n");
+    _cmsIOPrintf(m, "(Suffix) [ ( CV) ( CVC) ( C) ]\n");
+
+    nColors   = cmsNamedColorCount(NamedColorList);
+
+    for (i=0; i < nColors; i++) {
+
+        cmsUInt16Number In[1];
+        cmsCIELab Lab;
+
+        In[0] = (cmsUInt16Number) i;
+
+        if (!cmsNamedColorInfo(NamedColorList, i, ColorName, NULL, NULL, NULL, NULL))
+                continue;
+
+        cmsDoTransform(xform, In, &Lab, 1);
+        _cmsIOPrintf(m, "  (%s) [ %.3f %.3f %.3f ]\n", ColorName, Lab.L, Lab.a, Lab.b);
+    }
+
+    _cmsIOPrintf(m, ">>\n");
+
+    cmsDeleteTransform(xform);
+    return 1;
+}
+
+// the below code fragment can be found in:
+// src/cmsps2.c
+static
+cmsToneCurve* ExtractGray2Y(cmsContext ContextID, cmsHPROFILE hProfile, cmsUInt32Number Intent)
+{
+    cmsToneCurve* Out = cmsBuildTabulatedToneCurve16(ContextID, 256, NULL);
+    cmsHPROFILE hXYZ  = cmsCreateXYZProfile();
+    cmsHTRANSFORM xform = cmsCreateTransformTHR(ContextID, hProfile, TYPE_GRAY_8, hXYZ, TYPE_XYZ_DBL, Intent, cmsFLAGS_NOOPTIMIZE);
+    int i;
+
+    if (Out != NULL && xform != NULL) {
+        for (i=0; i < 256; i++) {
+
+            cmsUInt8Number Gray = (cmsUInt8Number) i;
+            cmsCIEXYZ XYZ;
+
+            cmsDoTransform(xform, &Gray, &XYZ, 1);
+
+            Out ->Table16[i] =_cmsQuickSaturateWord(XYZ.Y * 65535.0);
+        }
+    }
+
+    if (xform) cmsDeleteTransform(xform);
+    if (hXYZ) cmsCloseProfile(hXYZ);
+    return Out;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).
