@@ -1,0 +1,1 @@
+xmlXPathReturnString (ctxt, ret);

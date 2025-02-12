@@ -2,632 +2,632 @@
 
 // the below code fragment can be found in:
 // cram/cram_encode.c
-static int cram_encode_slice_read(cram_fd *fd,
-                                  cram_container *c,
-                                  cram_block_compression_hdr *h,
-                                  cram_slice *s,
-                                  cram_record *cr,
-                                  int64_t *last_pos) {
-    int r = 0;
-    int32_t i32;
-    unsigned char uc;
-
-    //fprintf(stderr, "Encode seq %d, %d/%d FN=%d, %s\n", rec, core->byte, core->bit, cr->nfeature, s->name_ds->str + cr->name);
-
-    //printf("BF=0x%x\n", cr->flags);
-    //      bf = cram_flag_swap[cr->flags];
-    i32 = fd->cram_flag_swap[cr->flags & 0xfff];
-    r |= h->codecs[DS_BF]->encode(s, h->codecs[DS_BF], (char *)&i32, 1);
-
-    i32 = cr->cram_flags & CRAM_FLAG_MASK;
-    r |= h->codecs[DS_CF]->encode(s, h->codecs[DS_CF], (char *)&i32, 1);
-
-    if (CRAM_MAJOR_VERS(fd->version) != 1 && s->hdr->ref_seq_id == -2)
-        r |= h->codecs[DS_RI]->encode(s, h->codecs[DS_RI], (char *)&cr->ref_id, 1);
-
-    r |= h->codecs[DS_RL]->encode(s, h->codecs[DS_RL], (char *)&cr->len, 1);
-
-    if (c->pos_sorted) {
-#ifdef LARGE_POS
-        int64_t i64;
-        i64 = cr->apos - *last_pos;
-        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
-#else
-        i32 = cr->apos - *last_pos;
-        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
-#endif
-        *last_pos = cr->apos;
-    } else {
-#ifdef LARGE_POS
-        int64_t i64;
-        i64 = cr->apos;
-        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
-#else
-        i32 = cr->apos;
-        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
-#endif
-    }
-
-    r |= h->codecs[DS_RG]->encode(s, h->codecs[DS_RG], (char *)&cr->rg, 1);
-
-    if (cr->cram_flags & CRAM_FLAG_DETACHED) {
-        i32 = cr->mate_flags;
-        r |= h->codecs[DS_MF]->encode(s, h->codecs[DS_MF], (char *)&i32, 1);
-
-        r |= h->codecs[DS_NS]->encode(s, h->codecs[DS_NS],
-                                      (char *)&cr->mate_ref_id, 1);
-
-#ifdef LARGE_POS
-        r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
-                                      (char *)&cr->mate_pos, 1);
-
-        r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
-                                      (char *)&cr->tlen, 1);
-#else
-        i32 = cr->mate_pos;
-        r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
-                                      (char *)&i32, 1);
-        i32 = cr->tlen;
-        r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
-                                      (char *)&i32, 1);
-#endif
-    } else if (cr->cram_flags & CRAM_FLAG_MATE_DOWNSTREAM) {
-        r |= h->codecs[DS_NF]->encode(s, h->codecs[DS_NF],
-                                      (char *)&cr->mate_line, 1);
-    }
-
-    /* Aux tags */
-    if (CRAM_MAJOR_VERS(fd->version) == 1) {
-        int j;
-        uc = cr->ntags;
-        r |= h->codecs[DS_TC]->encode(s, h->codecs[DS_TC], (char *)&uc, 1);
-
-        for (j = 0; j < cr->ntags; j++) {
-            uint32_t i32 = s->TN[cr->TN_idx + j]; // id
-            r |= h->codecs[DS_TN]->encode(s, h->codecs[DS_TN], (char *)&i32, 1);
-        }
-    } else {
-        r |= h->codecs[DS_TL]->encode(s, h->codecs[DS_TL], (char *)&cr->TL, 1);
-    }
-
-    // qual
-    // QS codec : Already stored in block[2].
-
-    // features (diffs)
-    if (!(cr->flags & BAM_FUNMAP)) {
-        int prev_pos = 0, j;
-
-        r |= h->codecs[DS_FN]->encode(s, h->codecs[DS_FN],
-                                      (char *)&cr->nfeature, 1);
-        for (j = 0; j < cr->nfeature; j++) {
-            cram_feature *f = &s->features[cr->feature + j];
-
-            uc = f->X.code;
-            r |= h->codecs[DS_FC]->encode(s, h->codecs[DS_FC], (char *)&uc, 1);
-            i32 = f->X.pos - prev_pos;
-            r |= h->codecs[DS_FP]->encode(s, h->codecs[DS_FP], (char *)&i32, 1);
-            prev_pos = f->X.pos;
-
-            switch(f->X.code) {
-                //char *seq;
-
-            case 'X':
-                //fprintf(stderr, "    FC=%c FP=%d base=%d\n", f->X.code, i32, f->X.base);
-
-                uc = f->X.base;
-                r |= h->codecs[DS_BS]->encode(s, h->codecs[DS_BS],
-                                              (char *)&uc, 1);
-                break;
-            case 'S':
-                // Already done
-                //r |= h->codecs[DS_SC]->encode(s, h->codecs[DS_SC],
-                //                              BLOCK_DATA(s->soft_blk) + f->S.seq_idx,
-                //                              f->S.len);
-
-                //if (IS_CRAM_3_VERS(fd)) {
-                //    r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
-                //                                  BLOCK_DATA(s->seqs_blk) + f->S.seq_idx,
-                //                                  f->S.len);
-                //}
-                break;
-            case 'I':
-                //seq = DSTRING_STR(s->seqs_ds) + f->S.seq_idx;
-                //r |= h->codecs[DS_IN]->encode(s, h->codecs[DS_IN],
-                //                           seq, f->S.len);
-                //if (IS_CRAM_3_VERS(fd)) {
-                //    r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
-                //                                  BLOCK_DATA(s->seqs_blk) + f->I.seq_idx,
-                //                                  f->I.len);
-                //}
-                break;
-            case 'i':
-                uc = f->i.base;
-                r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA],
-                                              (char *)&uc, 1);
-                //seq = DSTRING_STR(s->seqs_ds) + f->S.seq_idx;
-                //r |= h->codecs[DS_IN]->encode(s, h->codecs[DS_IN],
-                //                           seq, 1);
-                break;
-            case 'D':
-                i32 = f->D.len;
-                r |= h->codecs[DS_DL]->encode(s, h->codecs[DS_DL],
-                                              (char *)&i32, 1);
-                break;
-
-            case 'B':
-                //                  // Used when we try to store a non ACGTN base or an N
-                //                  // that aligns against a non ACGTN reference
-
-                uc  = f->B.base;
-                r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA],
-                                              (char *)&uc, 1);
-
-                //                  Already added
-                //                  uc  = f->B.qual;
-                //                  r |= h->codecs[DS_QS]->encode(s, h->codecs[DS_QS],
-                //                                           (char *)&uc, 1);
-                break;
-
-            case 'b':
-                // string of bases
-                r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
-                                              (char *)BLOCK_DATA(s->seqs_blk)
-                                                      + f->b.seq_idx,
-                                              f->b.len);
-                break;
-
-            case 'Q':
-                //                  Already added
-                //                  uc  = f->B.qual;
-                //                  r |= h->codecs[DS_QS]->encode(s, h->codecs[DS_QS],
-                //                                           (char *)&uc, 1);
-                break;
-
-            case 'N':
-                i32 = f->N.len;
-                r |= h->codecs[DS_RS]->encode(s, h->codecs[DS_RS],
-                                              (char *)&i32, 1);
-                break;
-
-            case 'P':
-                i32 = f->P.len;
-                r |= h->codecs[DS_PD]->encode(s, h->codecs[DS_PD],
-                                              (char *)&i32, 1);
-                break;
-
-            case 'H':
-                i32 = f->H.len;
-                r |= h->codecs[DS_HC]->encode(s, h->codecs[DS_HC],
-                                              (char *)&i32, 1);
-                break;
-
-
-            default:
-                hts_log_error("Unhandled feature code %c", f->X.code);
-                return -1;
-            }
-        }
-
-        r |= h->codecs[DS_MQ]->encode(s, h->codecs[DS_MQ],
-                                      (char *)&cr->mqual, 1);
-    } else {
-        char *seq = (char *)BLOCK_DATA(s->seqs_blk) + cr->seq;
-        if (cr->len)
-            r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA], seq, cr->len);
-    }
-
-    return r ? -1 : 0;
-}
+// static int cram_encode_slice_read(cram_fd *fd,
+//                                   cram_container *c,
+//                                   cram_block_compression_hdr *h,
+//                                   cram_slice *s,
+//                                   cram_record *cr,
+//                                   int64_t *last_pos) {
+//     int r = 0;
+//     int32_t i32;
+//     unsigned char uc;
+// 
+//     //fprintf(stderr, "Encode seq %d, %d/%d FN=%d, %s\n", rec, core->byte, core->bit, cr->nfeature, s->name_ds->str + cr->name);
+// 
+//     //printf("BF=0x%x\n", cr->flags);
+//     //      bf = cram_flag_swap[cr->flags];
+//     i32 = fd->cram_flag_swap[cr->flags & 0xfff];
+//     r |= h->codecs[DS_BF]->encode(s, h->codecs[DS_BF], (char *)&i32, 1);
+// 
+//     i32 = cr->cram_flags & CRAM_FLAG_MASK;
+//     r |= h->codecs[DS_CF]->encode(s, h->codecs[DS_CF], (char *)&i32, 1);
+// 
+//     if (CRAM_MAJOR_VERS(fd->version) != 1 && s->hdr->ref_seq_id == -2)
+//         r |= h->codecs[DS_RI]->encode(s, h->codecs[DS_RI], (char *)&cr->ref_id, 1);
+// 
+//     r |= h->codecs[DS_RL]->encode(s, h->codecs[DS_RL], (char *)&cr->len, 1);
+// 
+//     if (c->pos_sorted) {
+// #ifdef LARGE_POS
+//         int64_t i64;
+//         i64 = cr->apos - *last_pos;
+//         r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
+// #else
+//         i32 = cr->apos - *last_pos;
+//         r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
+// #endif
+//         *last_pos = cr->apos;
+//     } else {
+// #ifdef LARGE_POS
+//         int64_t i64;
+//         i64 = cr->apos;
+//         r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
+// #else
+//         i32 = cr->apos;
+//         r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
+// #endif
+//     }
+// 
+//     r |= h->codecs[DS_RG]->encode(s, h->codecs[DS_RG], (char *)&cr->rg, 1);
+// 
+//     if (cr->cram_flags & CRAM_FLAG_DETACHED) {
+//         i32 = cr->mate_flags;
+//         r |= h->codecs[DS_MF]->encode(s, h->codecs[DS_MF], (char *)&i32, 1);
+// 
+//         r |= h->codecs[DS_NS]->encode(s, h->codecs[DS_NS],
+//                                       (char *)&cr->mate_ref_id, 1);
+// 
+// #ifdef LARGE_POS
+//         r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
+//                                       (char *)&cr->mate_pos, 1);
+// 
+//         r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
+//                                       (char *)&cr->tlen, 1);
+// #else
+//         i32 = cr->mate_pos;
+//         r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
+//                                       (char *)&i32, 1);
+//         i32 = cr->tlen;
+//         r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
+//                                       (char *)&i32, 1);
+// #endif
+//     } else if (cr->cram_flags & CRAM_FLAG_MATE_DOWNSTREAM) {
+//         r |= h->codecs[DS_NF]->encode(s, h->codecs[DS_NF],
+//                                       (char *)&cr->mate_line, 1);
+//     }
+// 
+//     /* Aux tags */
+//     if (CRAM_MAJOR_VERS(fd->version) == 1) {
+//         int j;
+//         uc = cr->ntags;
+//         r |= h->codecs[DS_TC]->encode(s, h->codecs[DS_TC], (char *)&uc, 1);
+// 
+//         for (j = 0; j < cr->ntags; j++) {
+//             uint32_t i32 = s->TN[cr->TN_idx + j]; // id
+//             r |= h->codecs[DS_TN]->encode(s, h->codecs[DS_TN], (char *)&i32, 1);
+//         }
+//     } else {
+//         r |= h->codecs[DS_TL]->encode(s, h->codecs[DS_TL], (char *)&cr->TL, 1);
+//     }
+// 
+//     // qual
+//     // QS codec : Already stored in block[2].
+// 
+//     // features (diffs)
+//     if (!(cr->flags & BAM_FUNMAP)) {
+//         int prev_pos = 0, j;
+// 
+//         r |= h->codecs[DS_FN]->encode(s, h->codecs[DS_FN],
+//                                       (char *)&cr->nfeature, 1);
+//         for (j = 0; j < cr->nfeature; j++) {
+//             cram_feature *f = &s->features[cr->feature + j];
+// 
+//             uc = f->X.code;
+//             r |= h->codecs[DS_FC]->encode(s, h->codecs[DS_FC], (char *)&uc, 1);
+//             i32 = f->X.pos - prev_pos;
+//             r |= h->codecs[DS_FP]->encode(s, h->codecs[DS_FP], (char *)&i32, 1);
+//             prev_pos = f->X.pos;
+// 
+//             switch(f->X.code) {
+//                 //char *seq;
+// 
+//             case 'X':
+//                 //fprintf(stderr, "    FC=%c FP=%d base=%d\n", f->X.code, i32, f->X.base);
+// 
+//                 uc = f->X.base;
+//                 r |= h->codecs[DS_BS]->encode(s, h->codecs[DS_BS],
+//                                               (char *)&uc, 1);
+//                 break;
+//             case 'S':
+//                 // Already done
+//                 //r |= h->codecs[DS_SC]->encode(s, h->codecs[DS_SC],
+//                 //                              BLOCK_DATA(s->soft_blk) + f->S.seq_idx,
+//                 //                              f->S.len);
+// 
+//                 //if (IS_CRAM_3_VERS(fd)) {
+//                 //    r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
+//                 //                                  BLOCK_DATA(s->seqs_blk) + f->S.seq_idx,
+//                 //                                  f->S.len);
+//                 //}
+//                 break;
+//             case 'I':
+//                 //seq = DSTRING_STR(s->seqs_ds) + f->S.seq_idx;
+//                 //r |= h->codecs[DS_IN]->encode(s, h->codecs[DS_IN],
+//                 //                           seq, f->S.len);
+//                 //if (IS_CRAM_3_VERS(fd)) {
+//                 //    r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
+//                 //                                  BLOCK_DATA(s->seqs_blk) + f->I.seq_idx,
+//                 //                                  f->I.len);
+//                 //}
+//                 break;
+//             case 'i':
+//                 uc = f->i.base;
+//                 r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA],
+//                                               (char *)&uc, 1);
+//                 //seq = DSTRING_STR(s->seqs_ds) + f->S.seq_idx;
+//                 //r |= h->codecs[DS_IN]->encode(s, h->codecs[DS_IN],
+//                 //                           seq, 1);
+//                 break;
+//             case 'D':
+//                 i32 = f->D.len;
+//                 r |= h->codecs[DS_DL]->encode(s, h->codecs[DS_DL],
+//                                               (char *)&i32, 1);
+//                 break;
+// 
+//             case 'B':
+//                 //                  // Used when we try to store a non ACGTN base or an N
+//                 //                  // that aligns against a non ACGTN reference
+// 
+//                 uc  = f->B.base;
+//                 r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA],
+//                                               (char *)&uc, 1);
+// 
+//                 //                  Already added
+//                 //                  uc  = f->B.qual;
+//                 //                  r |= h->codecs[DS_QS]->encode(s, h->codecs[DS_QS],
+//                 //                                           (char *)&uc, 1);
+//                 break;
+// 
+//             case 'b':
+//                 // string of bases
+//                 r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
+//                                               (char *)BLOCK_DATA(s->seqs_blk)
+//                                                       + f->b.seq_idx,
+//                                               f->b.len);
+//                 break;
+// 
+//             case 'Q':
+//                 //                  Already added
+//                 //                  uc  = f->B.qual;
+//                 //                  r |= h->codecs[DS_QS]->encode(s, h->codecs[DS_QS],
+//                 //                                           (char *)&uc, 1);
+//                 break;
+// 
+//             case 'N':
+//                 i32 = f->N.len;
+//                 r |= h->codecs[DS_RS]->encode(s, h->codecs[DS_RS],
+//                                               (char *)&i32, 1);
+//                 break;
+// 
+//             case 'P':
+//                 i32 = f->P.len;
+//                 r |= h->codecs[DS_PD]->encode(s, h->codecs[DS_PD],
+//                                               (char *)&i32, 1);
+//                 break;
+// 
+//             case 'H':
+//                 i32 = f->H.len;
+//                 r |= h->codecs[DS_HC]->encode(s, h->codecs[DS_HC],
+//                                               (char *)&i32, 1);
+//                 break;
+// 
+// 
+//             default:
+//                 hts_log_error("Unhandled feature code %c", f->X.code);
+//                 return -1;
+//             }
+//         }
+// 
+//         r |= h->codecs[DS_MQ]->encode(s, h->codecs[DS_MQ],
+//                                       (char *)&cr->mqual, 1);
+//     } else {
+//         char *seq = (char *)BLOCK_DATA(s->seqs_blk) + cr->seq;
+//         if (cr->len)
+//             r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA], seq, cr->len);
+//     }
+// 
+//     return r ? -1 : 0;
+// }
 
 // the below code fragment can be found in:
 // cram/cram_decode.c
-int cram_dependent_data_series(cram_fd *fd,
-                               cram_block_compression_hdr *hdr,
-                               cram_slice *s) {
-    int *block_used;
-    int core_used = 0;
-    int i;
-    static int i_to_id[] = {
-        DS_BF, DS_AP, DS_FP, DS_RL, DS_DL, DS_NF, DS_BA, DS_QS,
-        DS_FC, DS_FN, DS_BS, DS_IN, DS_RG, DS_MQ, DS_TL, DS_RN,
-        DS_NS, DS_NP, DS_TS, DS_MF, DS_CF, DS_RI, DS_RS, DS_PD,
-        DS_HC, DS_SC, DS_BB, DS_QQ,
-    };
-    uint32_t orig_ds;
-
-    /*
-     * Set the data_series bit field based on fd->required_fields
-     * contents.
-     */
-    if (fd->required_fields && fd->required_fields != INT_MAX) {
-        s->data_series = 0;
-
-        if (fd->required_fields & SAM_QNAME)
-            s->data_series |= CRAM_RN;
-
-        if (fd->required_fields & SAM_FLAG)
-            s->data_series |= CRAM_BF;
-
-        if (fd->required_fields & SAM_RNAME)
-            s->data_series |= CRAM_RI | CRAM_BF;
-
-        if (fd->required_fields & SAM_POS)
-            s->data_series |= CRAM_AP | CRAM_BF;
-
-        if (fd->required_fields & SAM_MAPQ)
-            s->data_series |= CRAM_MQ;
-
-        if (fd->required_fields & SAM_CIGAR)
-            s->data_series |= CRAM_CIGAR;
-
-        if (fd->required_fields & SAM_RNEXT)
-            s->data_series |= CRAM_CF | CRAM_NF | CRAM_RI | CRAM_NS |CRAM_BF;
-
-        if (fd->required_fields & SAM_PNEXT)
-            s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_NP | CRAM_BF;
-
-        if (fd->required_fields & SAM_TLEN)
-            s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_TS |
-                CRAM_BF | CRAM_MF | CRAM_RI | CRAM_CIGAR;
-
-        if (fd->required_fields & SAM_SEQ)
-            s->data_series |= CRAM_SEQ;
-
-        if (!(fd->required_fields & SAM_AUX))
-            // No easy way to get MD/NM without other tags at present
-            s->decode_md = 0;
-
-        if (fd->required_fields & SAM_QUAL)
-            s->data_series |= CRAM_QUAL;
-
-        if (fd->required_fields & SAM_AUX)
-            s->data_series |= CRAM_RG | CRAM_TL | CRAM_aux;
-
-        if (fd->required_fields & SAM_RGAUX)
-            s->data_series |= CRAM_RG | CRAM_BF;
-
-        // Always uncompress CORE block
-        if (cram_uncompress_block(s->block[0]))
-            return -1;
-    } else {
-        s->data_series = CRAM_ALL;
-
-        for (i = 0; i < s->hdr->num_blocks; i++) {
-            if (cram_uncompress_block(s->block[i]))
-                return -1;
-        }
-
-        return 0;
-    }
-
-    block_used = calloc(s->hdr->num_blocks+1, sizeof(int));
-    if (!block_used)
-        return -1;
-
-    do {
-        /*
-         * Also set data_series based on code prerequisites. Eg if we need
-         * CRAM_QS then we also need to know CRAM_RL so we know how long it
-         * is, or if we need FC/FP then we also need FN (number of features).
-         *
-         * It's not reciprocal though. We may be needing to decode FN
-         * but have no need to decode FC, FP and cigar ops.
-         */
-        if (s->data_series & CRAM_RS)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_PD)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_HC)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_QS)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_IN)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_SC)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_BS)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_DL)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_BA)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_BB)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_QQ)    s->data_series |= CRAM_FC|CRAM_FP;
-
-        // cram_decode_seq() needs seq[] array
-        if (s->data_series & (CRAM_SEQ|CRAM_CIGAR)) s->data_series |= CRAM_RL;
-
-        if (s->data_series & CRAM_FP)    s->data_series |= CRAM_FC;
-        if (s->data_series & CRAM_FC)    s->data_series |= CRAM_FN;
-        if (s->data_series & CRAM_aux)   s->data_series |= CRAM_TL;
-        if (s->data_series & CRAM_MF)    s->data_series |= CRAM_CF;
-        if (s->data_series & CRAM_MQ)    s->data_series |= CRAM_BF;
-        if (s->data_series & CRAM_BS)    s->data_series |= CRAM_RI;
-        if (s->data_series & (CRAM_MF |CRAM_NS |CRAM_NP |CRAM_TS |CRAM_NF))
-            s->data_series |= CRAM_CF;
-        if (!hdr->read_names_included && s->data_series & CRAM_RN)
-            s->data_series |= CRAM_CF | CRAM_NF;
-        if (s->data_series & (CRAM_BA | CRAM_QS | CRAM_BB | CRAM_QQ))
-            s->data_series |= CRAM_BF | CRAM_CF | CRAM_RL;
-
-        orig_ds = s->data_series;
-
-        // Find which blocks are in use.
-        for (i = 0; i < sizeof(i_to_id)/sizeof(*i_to_id); i++) {
-            int bnum1, bnum2, j;
-            cram_codec *c = hdr->codecs[i_to_id[i]];
-
-            if (!(s->data_series & (1<<i)))
-                continue;
-
-            if (!c)
-                continue;
-
-            bnum1 = cram_codec_to_id(c, &bnum2);
-
-            for (;;) {
-                switch (bnum1) {
-                case -2:
-                    break;
-
-                case -1:
-                    core_used = 1;
-                    break;
-
-                default:
-                    for (j = 0; j < s->hdr->num_blocks; j++) {
-                        if (s->block[j]->content_type == EXTERNAL &&
-                            s->block[j]->content_id == bnum1) {
-                            block_used[j] = 1;
-                            if (cram_uncompress_block(s->block[j])) {
-                                free(block_used);
-                                return -1;
-                            }
-                        }
-                    }
-                    break;
-                }
-
-                if (bnum2 == -2 || bnum1 == bnum2)
-                    break;
-
-                bnum1 = bnum2; // 2nd pass
-            }
-        }
-
-        // Tags too
-        if ((fd->required_fields & SAM_AUX) ||
-            (s->data_series & CRAM_aux)) {
-            for (i = 0; i < CRAM_MAP_HASH; i++) {
-                int bnum1, bnum2, j;
-                cram_map *m = hdr->tag_encoding_map[i];
-
-                while (m) {
-                    cram_codec *c = m->codec;
-                    if (!c) {
-                        m = m->next;
-                        continue;
-                    }
-
-                    bnum1 = cram_codec_to_id(c, &bnum2);
-
-                    for (;;) {
-                        switch (bnum1) {
-                        case -2:
-                            break;
-
-                        case -1:
-                            core_used = 1;
-                            break;
-
-                        default:
-                            for (j = 0; j < s->hdr->num_blocks; j++) {
-                                if (s->block[j]->content_type == EXTERNAL &&
-                                    s->block[j]->content_id == bnum1) {
-                                    block_used[j] = 1;
-                                    if (cram_uncompress_block(s->block[j])) {
-                                        free(block_used);
-                                        return -1;
-                                    }
-                                }
-                            }
-                            break;
-                        }
-
-                        if (bnum2 == -2 || bnum1 == bnum2)
-                            break;
-
-                        bnum1 = bnum2; // 2nd pass
-                    }
-
-                    m = m->next;
-                }
-            }
-        }
-
-        // We now know which blocks are in used, so repeat and find
-        // which other data series need to be added.
-        for (i = 0; i < sizeof(i_to_id)/sizeof(*i_to_id); i++) {
-            int bnum1, bnum2, j;
-            cram_codec *c = hdr->codecs[i_to_id[i]];
-
-            if (!c)
-                continue;
-
-            bnum1 = cram_codec_to_id(c, &bnum2);
-
-            for (;;) {
-                switch (bnum1) {
-                case -2:
-                    break;
-
-                case -1:
-                    if (core_used) {
-                        //printf(" + data series %08x:\n", 1<<i);
-                        s->data_series |= 1<<i;
-                    }
-                    break;
-
-                default:
-                    for (j = 0; j < s->hdr->num_blocks; j++) {
-                        if (s->block[j]->content_type == EXTERNAL &&
-                            s->block[j]->content_id == bnum1) {
-                            if (block_used[j]) {
-                                //printf(" + data series %08x:\n", 1<<i);
-                                s->data_series |= 1<<i;
-                            }
-                        }
-                    }
-                    break;
-                }
-
-                if (bnum2 == -2 || bnum1 == bnum2)
-                    break;
-
-                bnum1 = bnum2; // 2nd pass
-            }
-        }
-
-        // Tags too
-        for (i = 0; i < CRAM_MAP_HASH; i++) {
-            int bnum1, bnum2, j;
-            cram_map *m = hdr->tag_encoding_map[i];
-
-            while (m) {
-                cram_codec *c = m->codec;
-                if (!c) {
-                    m = m->next;
-                    continue;
-                }
-
-                bnum1 = cram_codec_to_id(c, &bnum2);
-
-                for (;;) {
-                    switch (bnum1) {
-                    case -2:
-                        break;
-
-                    case -1:
-                        //printf(" + data series %08x:\n", CRAM_aux);
-                        s->data_series |= CRAM_aux;
-                        break;
-
-                    default:
-                        for (j = 0; j < s->hdr->num_blocks; j++) {
-                            if (s->block[j]->content_type == EXTERNAL &&
-                                s->block[j]->content_id == bnum1) {
-                                if (block_used[j]) {
-                                    //printf(" + data series %08x:\n",
-                                    //       CRAM_aux);
-                                    s->data_series |= CRAM_aux;
-                                }
-                            }
-                        }
-                        break;
-                    }
-
-                    if (bnum2 == -2 || bnum1 == bnum2)
-                        break;
-
-                    bnum1 = bnum2; // 2nd pass
-                }
-
-                m = m->next;
-            }
-        }
-    } while (orig_ds != s->data_series);
-
-    free(block_used);
-    return 0;
-}
+// int cram_dependent_data_series(cram_fd *fd,
+//                                cram_block_compression_hdr *hdr,
+//                                cram_slice *s) {
+//     int *block_used;
+//     int core_used = 0;
+//     int i;
+//     static int i_to_id[] = {
+//         DS_BF, DS_AP, DS_FP, DS_RL, DS_DL, DS_NF, DS_BA, DS_QS,
+//         DS_FC, DS_FN, DS_BS, DS_IN, DS_RG, DS_MQ, DS_TL, DS_RN,
+//         DS_NS, DS_NP, DS_TS, DS_MF, DS_CF, DS_RI, DS_RS, DS_PD,
+//         DS_HC, DS_SC, DS_BB, DS_QQ,
+//     };
+//     uint32_t orig_ds;
+// 
+//     /*
+//      * Set the data_series bit field based on fd->required_fields
+//      * contents.
+//      */
+//     if (fd->required_fields && fd->required_fields != INT_MAX) {
+//         s->data_series = 0;
+// 
+//         if (fd->required_fields & SAM_QNAME)
+//             s->data_series |= CRAM_RN;
+// 
+//         if (fd->required_fields & SAM_FLAG)
+//             s->data_series |= CRAM_BF;
+// 
+//         if (fd->required_fields & SAM_RNAME)
+//             s->data_series |= CRAM_RI | CRAM_BF;
+// 
+//         if (fd->required_fields & SAM_POS)
+//             s->data_series |= CRAM_AP | CRAM_BF;
+// 
+//         if (fd->required_fields & SAM_MAPQ)
+//             s->data_series |= CRAM_MQ;
+// 
+//         if (fd->required_fields & SAM_CIGAR)
+//             s->data_series |= CRAM_CIGAR;
+// 
+//         if (fd->required_fields & SAM_RNEXT)
+//             s->data_series |= CRAM_CF | CRAM_NF | CRAM_RI | CRAM_NS |CRAM_BF;
+// 
+//         if (fd->required_fields & SAM_PNEXT)
+//             s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_NP | CRAM_BF;
+// 
+//         if (fd->required_fields & SAM_TLEN)
+//             s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_TS |
+//                 CRAM_BF | CRAM_MF | CRAM_RI | CRAM_CIGAR;
+// 
+//         if (fd->required_fields & SAM_SEQ)
+//             s->data_series |= CRAM_SEQ;
+// 
+//         if (!(fd->required_fields & SAM_AUX))
+//             // No easy way to get MD/NM without other tags at present
+//             s->decode_md = 0;
+// 
+//         if (fd->required_fields & SAM_QUAL)
+//             s->data_series |= CRAM_QUAL;
+// 
+//         if (fd->required_fields & SAM_AUX)
+//             s->data_series |= CRAM_RG | CRAM_TL | CRAM_aux;
+// 
+//         if (fd->required_fields & SAM_RGAUX)
+//             s->data_series |= CRAM_RG | CRAM_BF;
+// 
+//         // Always uncompress CORE block
+//         if (cram_uncompress_block(s->block[0]))
+//             return -1;
+//     } else {
+//         s->data_series = CRAM_ALL;
+// 
+//         for (i = 0; i < s->hdr->num_blocks; i++) {
+//             if (cram_uncompress_block(s->block[i]))
+//                 return -1;
+//         }
+// 
+//         return 0;
+//     }
+// 
+//     block_used = calloc(s->hdr->num_blocks+1, sizeof(int));
+//     if (!block_used)
+//         return -1;
+// 
+//     do {
+//         /*
+//          * Also set data_series based on code prerequisites. Eg if we need
+//          * CRAM_QS then we also need to know CRAM_RL so we know how long it
+//          * is, or if we need FC/FP then we also need FN (number of features).
+//          *
+//          * It's not reciprocal though. We may be needing to decode FN
+//          * but have no need to decode FC, FP and cigar ops.
+//          */
+//         if (s->data_series & CRAM_RS)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_PD)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_HC)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_QS)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_IN)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_SC)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_BS)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_DL)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_BA)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_BB)    s->data_series |= CRAM_FC|CRAM_FP;
+//         if (s->data_series & CRAM_QQ)    s->data_series |= CRAM_FC|CRAM_FP;
+// 
+//         // cram_decode_seq() needs seq[] array
+//         if (s->data_series & (CRAM_SEQ|CRAM_CIGAR)) s->data_series |= CRAM_RL;
+// 
+//         if (s->data_series & CRAM_FP)    s->data_series |= CRAM_FC;
+//         if (s->data_series & CRAM_FC)    s->data_series |= CRAM_FN;
+//         if (s->data_series & CRAM_aux)   s->data_series |= CRAM_TL;
+//         if (s->data_series & CRAM_MF)    s->data_series |= CRAM_CF;
+//         if (s->data_series & CRAM_MQ)    s->data_series |= CRAM_BF;
+//         if (s->data_series & CRAM_BS)    s->data_series |= CRAM_RI;
+//         if (s->data_series & (CRAM_MF |CRAM_NS |CRAM_NP |CRAM_TS |CRAM_NF))
+//             s->data_series |= CRAM_CF;
+//         if (!hdr->read_names_included && s->data_series & CRAM_RN)
+//             s->data_series |= CRAM_CF | CRAM_NF;
+//         if (s->data_series & (CRAM_BA | CRAM_QS | CRAM_BB | CRAM_QQ))
+//             s->data_series |= CRAM_BF | CRAM_CF | CRAM_RL;
+// 
+//         orig_ds = s->data_series;
+// 
+//         // Find which blocks are in use.
+//         for (i = 0; i < sizeof(i_to_id)/sizeof(*i_to_id); i++) {
+//             int bnum1, bnum2, j;
+//             cram_codec *c = hdr->codecs[i_to_id[i]];
+// 
+//             if (!(s->data_series & (1<<i)))
+//                 continue;
+// 
+//             if (!c)
+//                 continue;
+// 
+//             bnum1 = cram_codec_to_id(c, &bnum2);
+// 
+//             for (;;) {
+//                 switch (bnum1) {
+//                 case -2:
+//                     break;
+// 
+//                 case -1:
+//                     core_used = 1;
+//                     break;
+// 
+//                 default:
+//                     for (j = 0; j < s->hdr->num_blocks; j++) {
+//                         if (s->block[j]->content_type == EXTERNAL &&
+//                             s->block[j]->content_id == bnum1) {
+//                             block_used[j] = 1;
+//                             if (cram_uncompress_block(s->block[j])) {
+//                                 free(block_used);
+//                                 return -1;
+//                             }
+//                         }
+//                     }
+//                     break;
+//                 }
+// 
+//                 if (bnum2 == -2 || bnum1 == bnum2)
+//                     break;
+// 
+//                 bnum1 = bnum2; // 2nd pass
+//             }
+//         }
+// 
+//         // Tags too
+//         if ((fd->required_fields & SAM_AUX) ||
+//             (s->data_series & CRAM_aux)) {
+//             for (i = 0; i < CRAM_MAP_HASH; i++) {
+//                 int bnum1, bnum2, j;
+//                 cram_map *m = hdr->tag_encoding_map[i];
+// 
+//                 while (m) {
+//                     cram_codec *c = m->codec;
+//                     if (!c) {
+//                         m = m->next;
+//                         continue;
+//                     }
+// 
+//                     bnum1 = cram_codec_to_id(c, &bnum2);
+// 
+//                     for (;;) {
+//                         switch (bnum1) {
+//                         case -2:
+//                             break;
+// 
+//                         case -1:
+//                             core_used = 1;
+//                             break;
+// 
+//                         default:
+//                             for (j = 0; j < s->hdr->num_blocks; j++) {
+//                                 if (s->block[j]->content_type == EXTERNAL &&
+//                                     s->block[j]->content_id == bnum1) {
+//                                     block_used[j] = 1;
+//                                     if (cram_uncompress_block(s->block[j])) {
+//                                         free(block_used);
+//                                         return -1;
+//                                     }
+//                                 }
+//                             }
+//                             break;
+//                         }
+// 
+//                         if (bnum2 == -2 || bnum1 == bnum2)
+//                             break;
+// 
+//                         bnum1 = bnum2; // 2nd pass
+//                     }
+// 
+//                     m = m->next;
+//                 }
+//             }
+//         }
+// 
+//         // We now know which blocks are in used, so repeat and find
+//         // which other data series need to be added.
+//         for (i = 0; i < sizeof(i_to_id)/sizeof(*i_to_id); i++) {
+//             int bnum1, bnum2, j;
+//             cram_codec *c = hdr->codecs[i_to_id[i]];
+// 
+//             if (!c)
+//                 continue;
+// 
+//             bnum1 = cram_codec_to_id(c, &bnum2);
+// 
+//             for (;;) {
+//                 switch (bnum1) {
+//                 case -2:
+//                     break;
+// 
+//                 case -1:
+//                     if (core_used) {
+//                         //printf(" + data series %08x:\n", 1<<i);
+//                         s->data_series |= 1<<i;
+//                     }
+//                     break;
+// 
+//                 default:
+//                     for (j = 0; j < s->hdr->num_blocks; j++) {
+//                         if (s->block[j]->content_type == EXTERNAL &&
+//                             s->block[j]->content_id == bnum1) {
+//                             if (block_used[j]) {
+//                                 //printf(" + data series %08x:\n", 1<<i);
+//                                 s->data_series |= 1<<i;
+//                             }
+//                         }
+//                     }
+//                     break;
+//                 }
+// 
+//                 if (bnum2 == -2 || bnum1 == bnum2)
+//                     break;
+// 
+//                 bnum1 = bnum2; // 2nd pass
+//             }
+//         }
+// 
+//         // Tags too
+//         for (i = 0; i < CRAM_MAP_HASH; i++) {
+//             int bnum1, bnum2, j;
+//             cram_map *m = hdr->tag_encoding_map[i];
+// 
+//             while (m) {
+//                 cram_codec *c = m->codec;
+//                 if (!c) {
+//                     m = m->next;
+//                     continue;
+//                 }
+// 
+//                 bnum1 = cram_codec_to_id(c, &bnum2);
+// 
+//                 for (;;) {
+//                     switch (bnum1) {
+//                     case -2:
+//                         break;
+// 
+//                     case -1:
+//                         //printf(" + data series %08x:\n", CRAM_aux);
+//                         s->data_series |= CRAM_aux;
+//                         break;
+// 
+//                     default:
+//                         for (j = 0; j < s->hdr->num_blocks; j++) {
+//                             if (s->block[j]->content_type == EXTERNAL &&
+//                                 s->block[j]->content_id == bnum1) {
+//                                 if (block_used[j]) {
+//                                     //printf(" + data series %08x:\n",
+//                                     //       CRAM_aux);
+//                                     s->data_series |= CRAM_aux;
+//                                 }
+//                             }
+//                         }
+//                         break;
+//                     }
+// 
+//                     if (bnum2 == -2 || bnum1 == bnum2)
+//                         break;
+// 
+//                     bnum1 = bnum2; // 2nd pass
+//                 }
+// 
+//                 m = m->next;
+//             }
+//         }
+//     } while (orig_ds != s->data_series);
+// 
+//     free(block_used);
+//     return 0;
+// }
 
 // the below code fragment can be found in:
 // cram/cram_codecs.c
-void cram_byte_array_stop_decode_free(cram_codec *c) {
-    if (!c) return;
-
-    free(c);
-}
-
-// the below code fragment can be found in:
-// cram/cram_io.c
-void cram_free_block(cram_block *b) {
-    if (!b)
-        return;
-    if (b->data)
-        free(b->data);
-    free(b);
-}
+// void cram_byte_array_stop_decode_free(cram_codec *c) {
+//     if (!c) return;
+// 
+//     free(c);
+// }
 
 // the below code fragment can be found in:
 // cram/cram_io.c
-static void cram_init_tables(cram_fd *fd) {
-    int i;
+// void cram_free_block(cram_block *b) {
+//     if (!b)
+//         return;
+//     if (b->data)
+//         free(b->data);
+//     free(b);
+// }
 
-    memset(fd->L1, 4, 256);
-    fd->L1['A'] = 0; fd->L1['a'] = 0;
-    fd->L1['C'] = 1; fd->L1['c'] = 1;
-    fd->L1['G'] = 2; fd->L1['g'] = 2;
-    fd->L1['T'] = 3; fd->L1['t'] = 3;
-
-    memset(fd->L2, 5, 256);
-    fd->L2['A'] = 0; fd->L2['a'] = 0;
-    fd->L2['C'] = 1; fd->L2['c'] = 1;
-    fd->L2['G'] = 2; fd->L2['g'] = 2;
-    fd->L2['T'] = 3; fd->L2['t'] = 3;
-    fd->L2['N'] = 4; fd->L2['n'] = 4;
-
-    if (CRAM_MAJOR_VERS(fd->version) == 1) {
-        for (i = 0; i < 0x200; i++) {
-            int f = 0;
-
-            if (i & CRAM_FPAIRED)      f |= BAM_FPAIRED;
-            if (i & CRAM_FPROPER_PAIR) f |= BAM_FPROPER_PAIR;
-            if (i & CRAM_FUNMAP)       f |= BAM_FUNMAP;
-            if (i & CRAM_FREVERSE)     f |= BAM_FREVERSE;
-            if (i & CRAM_FREAD1)       f |= BAM_FREAD1;
-            if (i & CRAM_FREAD2)       f |= BAM_FREAD2;
-            if (i & CRAM_FSECONDARY)   f |= BAM_FSECONDARY;
-            if (i & CRAM_FQCFAIL)      f |= BAM_FQCFAIL;
-            if (i & CRAM_FDUP)         f |= BAM_FDUP;
-
-            fd->bam_flag_swap[i]  = f;
-        }
-
-        for (i = 0; i < 0x1000; i++) {
-            int g = 0;
-
-            if (i & BAM_FPAIRED)           g |= CRAM_FPAIRED;
-            if (i & BAM_FPROPER_PAIR)  g |= CRAM_FPROPER_PAIR;
-            if (i & BAM_FUNMAP)        g |= CRAM_FUNMAP;
-            if (i & BAM_FREVERSE)      g |= CRAM_FREVERSE;
-            if (i & BAM_FREAD1)        g |= CRAM_FREAD1;
-            if (i & BAM_FREAD2)        g |= CRAM_FREAD2;
-            if (i & BAM_FSECONDARY)    g |= CRAM_FSECONDARY;
-            if (i & BAM_FQCFAIL)       g |= CRAM_FQCFAIL;
-            if (i & BAM_FDUP)          g |= CRAM_FDUP;
-
-            fd->cram_flag_swap[i] = g;
-        }
-    } else {
-        /* NOP */
-        for (i = 0; i < 0x1000; i++)
-            fd->bam_flag_swap[i] = i;
-        for (i = 0; i < 0x1000; i++)
-            fd->cram_flag_swap[i] = i;
-    }
-
-    memset(fd->cram_sub_matrix, 4, 32*32);
-    for (i = 0; i < 32; i++) {
-        fd->cram_sub_matrix[i]['A'&0x1f]=0;
-        fd->cram_sub_matrix[i]['C'&0x1f]=1;
-        fd->cram_sub_matrix[i]['G'&0x1f]=2;
-        fd->cram_sub_matrix[i]['T'&0x1f]=3;
-        fd->cram_sub_matrix[i]['N'&0x1f]=4;
-    }
-    for (i = 0; i < 20; i+=4) {
-        int j;
-        for (j = 0; j < 20; j++) {
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-        }
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+0]&0x1f]=0;
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+1]&0x1f]=1;
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+2]&0x1f]=2;
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+3]&0x1f]=3;
-    }
-}
+// the below code fragment can be found in:
+// cram/cram_io.c
+// static void cram_init_tables(cram_fd *fd) {
+//     int i;
+// 
+//     memset(fd->L1, 4, 256);
+//     fd->L1['A'] = 0; fd->L1['a'] = 0;
+//     fd->L1['C'] = 1; fd->L1['c'] = 1;
+//     fd->L1['G'] = 2; fd->L1['g'] = 2;
+//     fd->L1['T'] = 3; fd->L1['t'] = 3;
+// 
+//     memset(fd->L2, 5, 256);
+//     fd->L2['A'] = 0; fd->L2['a'] = 0;
+//     fd->L2['C'] = 1; fd->L2['c'] = 1;
+//     fd->L2['G'] = 2; fd->L2['g'] = 2;
+//     fd->L2['T'] = 3; fd->L2['t'] = 3;
+//     fd->L2['N'] = 4; fd->L2['n'] = 4;
+// 
+//     if (CRAM_MAJOR_VERS(fd->version) == 1) {
+//         for (i = 0; i < 0x200; i++) {
+//             int f = 0;
+// 
+//             if (i & CRAM_FPAIRED)      f |= BAM_FPAIRED;
+//             if (i & CRAM_FPROPER_PAIR) f |= BAM_FPROPER_PAIR;
+//             if (i & CRAM_FUNMAP)       f |= BAM_FUNMAP;
+//             if (i & CRAM_FREVERSE)     f |= BAM_FREVERSE;
+//             if (i & CRAM_FREAD1)       f |= BAM_FREAD1;
+//             if (i & CRAM_FREAD2)       f |= BAM_FREAD2;
+//             if (i & CRAM_FSECONDARY)   f |= BAM_FSECONDARY;
+//             if (i & CRAM_FQCFAIL)      f |= BAM_FQCFAIL;
+//             if (i & CRAM_FDUP)         f |= BAM_FDUP;
+// 
+//             fd->bam_flag_swap[i]  = f;
+//         }
+// 
+//         for (i = 0; i < 0x1000; i++) {
+//             int g = 0;
+// 
+//             if (i & BAM_FPAIRED)           g |= CRAM_FPAIRED;
+//             if (i & BAM_FPROPER_PAIR)  g |= CRAM_FPROPER_PAIR;
+//             if (i & BAM_FUNMAP)        g |= CRAM_FUNMAP;
+//             if (i & BAM_FREVERSE)      g |= CRAM_FREVERSE;
+//             if (i & BAM_FREAD1)        g |= CRAM_FREAD1;
+//             if (i & BAM_FREAD2)        g |= CRAM_FREAD2;
+//             if (i & BAM_FSECONDARY)    g |= CRAM_FSECONDARY;
+//             if (i & BAM_FQCFAIL)       g |= CRAM_FQCFAIL;
+//             if (i & BAM_FDUP)          g |= CRAM_FDUP;
+// 
+//             fd->cram_flag_swap[i] = g;
+//         }
+//     } else {
+//         /* NOP */
+//         for (i = 0; i < 0x1000; i++)
+//             fd->bam_flag_swap[i] = i;
+//         for (i = 0; i < 0x1000; i++)
+//             fd->cram_flag_swap[i] = i;
+//     }
+// 
+//     memset(fd->cram_sub_matrix, 4, 32*32);
+//     for (i = 0; i < 32; i++) {
+//         fd->cram_sub_matrix[i]['A'&0x1f]=0;
+//         fd->cram_sub_matrix[i]['C'&0x1f]=1;
+//         fd->cram_sub_matrix[i]['G'&0x1f]=2;
+//         fd->cram_sub_matrix[i]['T'&0x1f]=3;
+//         fd->cram_sub_matrix[i]['N'&0x1f]=4;
+//     }
+//     for (i = 0; i < 20; i+=4) {
+//         int j;
+//         for (j = 0; j < 20; j++) {
+//             fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
+//             fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
+//             fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
+//             fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
+//         }
+//         fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+0]&0x1f]=0;
+//         fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+1]&0x1f]=1;
+//         fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+2]&0x1f]=2;
+//         fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+3]&0x1f]=3;
+//     }
+// }
 
