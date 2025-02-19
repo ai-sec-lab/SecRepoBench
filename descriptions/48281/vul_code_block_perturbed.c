@@ -1,7 +1,7 @@
 uint32_t second_field_offset;
     int ret;
 
-    if (buf_size < 4 || avctx->width < 8)
+    if (buf_size < 4 || ccodeccontext->width < 8)
         return AVERROR_INVALIDDATA;
 
-    compressionquality = buf[0];
+    quality = buf[0];

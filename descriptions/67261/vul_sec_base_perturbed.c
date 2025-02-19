@@ -4338,19 +4338,19 @@ void txtin_finalize(GF_Filter *filter)
 }
 
 
-static const char *txtin_probe_data(const u8 *data, u32 data_size, GF_FilterProbeScore *score)
+static const char *txtin_probe_data(const u8 *buffer, u32 data_size, GF_FilterProbeScore *score)
 {
 	char *dst = NULL;
 	char *res=NULL;
-	u32 resultlength=0;
+	u32 res_size=0;
 
-	GF_Err e = gf_utf_get_string_from_bom((char *)data, data_size, &dst, &res, &resultlength);
+	GF_Err e = gf_utf_get_string_from_bom((char *)buffer, data_size, &dst, &res, &res_size);
 	if (e) return NULL;
 
-	data = res;
+	buffer = res;
 	//strip all spaces and \r\n\t
-	while (data[0] && strchr("\n\r\t ", (char) data[0]))
-		data ++;
+	while (buffer[0] && strchr("\n\r\t ", (char) buffer[0]))
+		buffer ++;
 
 #define PROBE_OK(_score, _mime) \
 		*score = _score;\
@@ -4358,36 +4358,36 @@ static const char *txtin_probe_data(const u8 *data, u32 data_size, GF_FilterProb
 		return _mime; \
 
 
-	if (!strncmp(data, "WEBVTT", 6)) {
+	if (!strncmp(buffer, "WEBVTT", 6)) {
 		PROBE_OK(GF_FPROBE_SUPPORTED, "subtitle/vtt")
 	}
-	if (gf_strmemstr(data, resultlength, " --> ")) {
+	if (gf_strmemstr(buffer, res_size, " --> ")) {
 		PROBE_OK(GF_FPROBE_MAYBE_SUPPORTED, "subtitle/srt")
 	}
-	if (!strncmp(data, "FWS", 3) || !strncmp(data, "CWS", 3)) {
+	if (!strncmp(buffer, "FWS", 3) || !strncmp(buffer, "CWS", 3)) {
 		PROBE_OK(GF_FPROBE_MAYBE_SUPPORTED, "application/x-shockwave-flash")
 	}
-	if (!strncmp(data, "[Script Info", 12)) {
+	if (!strncmp(buffer, "[Script Info", 12)) {
 		PROBE_OK(GF_FPROBE_MAYBE_SUPPORTED, "subtitle/ssa")
 	}
 
-	if ((data[0]=='{') && gf_strmemstr(data, resultlength, "}{")) {
+	if ((buffer[0]=='{') && gf_strmemstr(buffer, res_size, "}{")) {
 		PROBE_OK(GF_FPROBE_MAYBE_SUPPORTED, "subtitle/sub")
 
 	}
 	/*XML formats*/
-	if (!gf_strmemstr(data, resultlength, "?>") ) {
+	if (!gf_strmemstr(buffer, res_size, "?>") ) {
 		if (dst) gf_free(dst);
 		return NULL;
 	}
 
-	if (gf_strmemstr(data, resultlength, "<x-quicktime-tx3g") || gf_strmemstr(data, resultlength, "<text3GTrack")) {
+	if (gf_strmemstr(buffer, res_size, "<x-quicktime-tx3g") || gf_strmemstr(buffer, res_size, "<text3GTrack")) {
 		PROBE_OK(GF_FPROBE_MAYBE_SUPPORTED, "quicktime/text")
 	}
-	if (gf_strmemstr(data, resultlength, "TextStream")) {
+	if (gf_strmemstr(buffer, res_size, "TextStream")) {
 		PROBE_OK(GF_FPROBE_MAYBE_SUPPORTED, "subtitle/ttxt")
 	}
-	if (gf_strmemstr(data, resultlength, "<tt ") || gf_strmemstr(data, resultlength, ":tt ")) {
+	if (gf_strmemstr(buffer, res_size, "<tt ") || gf_strmemstr(buffer, res_size, ":tt ")) {
 		PROBE_OK(GF_FPROBE_MAYBE_SUPPORTED, "subtitle/ttml")
 	}
 

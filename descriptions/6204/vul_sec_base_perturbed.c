@@ -2214,7 +2214,7 @@ static MagickBooleanType LoadColorCache(LinkedListInfo *cache,const char *xml,
 %
 */
 MagickExport MagickBooleanType QueryColorCompliance(const char *name,
-  const ComplianceType compliance,PixelInfo *color,ExceptionInfo *exception)
+  const ComplianceType compliance,PixelInfo *pixelinfo,ExceptionInfo *exception)
 {
   extern const char
     BackgroundColor[];
@@ -2242,8 +2242,8 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
   */
   assert(name != (const char *) NULL);
   (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",name);
-  assert(color != (PixelInfo *) NULL);
-  GetPixelInfo((Image *) NULL,color);
+  assert(pixelinfo != (PixelInfo *) NULL);
+  GetPixelInfo((Image *) NULL,pixelinfo);
   if ((name == (char *) NULL) || (*name == '\0'))
     name=BackgroundColor;
   while (isspace((int) ((unsigned char) *name)) != 0)
@@ -2326,20 +2326,20 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
           } while (isxdigit((int) ((unsigned char) *name)) != 0);
           depth=4*(n/4);
         }
-      color->colorspace=sRGBColorspace;
-      color->depth=depth;
-      color->alpha_trait=UndefinedPixelTrait;
+      pixelinfo->colorspace=sRGBColorspace;
+      pixelinfo->depth=depth;
+      pixelinfo->alpha_trait=UndefinedPixelTrait;
       range=GetQuantumRange(depth);
-      color->red=(double) ScaleAnyToQuantum(pixel.red,range);
-      color->green=(double) ScaleAnyToQuantum(pixel.green,range);
-      color->blue=(double) ScaleAnyToQuantum(pixel.blue,range);
-      color->alpha=(double) OpaqueAlpha;
+      pixelinfo->red=(double) ScaleAnyToQuantum(pixel.red,range);
+      pixelinfo->green=(double) ScaleAnyToQuantum(pixel.green,range);
+      pixelinfo->blue=(double) ScaleAnyToQuantum(pixel.blue,range);
+      pixelinfo->alpha=(double) OpaqueAlpha;
       if ((n % 3) != 0)
         {
-          color->alpha_trait=BlendPixelTrait;
-          color->alpha=(double) ScaleAnyToQuantum(pixel.alpha,range);
+          pixelinfo->alpha_trait=BlendPixelTrait;
+          pixelinfo->alpha=(double) ScaleAnyToQuantum(pixel.alpha,range);
         }
-      color->black=0.0;
+      pixelinfo->black=0.0;
       return(MagickTrue);
     }
   if (strchr(name,'(') != (char *) NULL)
@@ -2348,7 +2348,7 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
         colorspace[MagickPathExtent];
 
       MagickBooleanType
-        isicccolor;
+        icc_color;
 
       /*
         Parse color of the form rgb(100,255,0).
@@ -2359,12 +2359,12 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
           break;
       colorspace[i--]='\0';
       scale=(double) ScaleCharToQuantum(1);
-      isicccolor=MagickFalse;
+      icc_color=MagickFalse;
       if (LocaleNCompare(colorspace,"device-",7) == 0)
         {
           (void) CopyMagickString(colorspace,colorspace+7,MagickPathExtent);
           scale=(double) QuantumRange;
-          isicccolor=MagickTrue;
+          icc_color=MagickTrue;
         }
       if (LocaleCompare(colorspace,"icc-color") == 0)
         {
@@ -2378,14 +2378,14 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
           colorspace[j--]='\0';
           i+=j+3;
           scale=(double) QuantumRange;
-          isicccolor=MagickTrue;
+          icc_color=MagickTrue;
         }
       LocaleLower(colorspace);
-      color->alpha_trait=UndefinedPixelTrait;
+      pixelinfo->alpha_trait=UndefinedPixelTrait;
       if ((i > 0) && (colorspace[i] == 'a'))
         {
           colorspace[i]='\0';
-          color->alpha_trait=BlendPixelTrait;
+          pixelinfo->alpha_trait=BlendPixelTrait;
         }
       type=ParseCommandOption(MagickColorspaceOptions,MagickFalse,colorspace);
       if (type < 0)
@@ -2394,11 +2394,11 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
             OptionWarning,"UnrecognizedColor","`%s'",name);
           return(MagickFalse);
         }
-      color->colorspace=(ColorspaceType) type;
-      if ((isicccolor == MagickFalse) && (color->colorspace == RGBColorspace))
+      pixelinfo->colorspace=(ColorspaceType) type;
+      if ((icc_color == MagickFalse) && (pixelinfo->colorspace == RGBColorspace))
         {
-          color->colorspace=sRGBColorspace;  /* as required by SVG standard */
-          color->depth=8;
+          pixelinfo->colorspace=sRGBColorspace;  /* as required by SVG standard */
+          pixelinfo->depth=8;
         }
       SetGeometryInfo(&geometry_info);
       flags=ParseGeometry(name+i+1,&geometry_info);
@@ -2410,63 +2410,63 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
           ColorspaceType
             colorspaceType;
 
-          colorspaceType=color->colorspace;
+          colorspaceType=pixelinfo->colorspace;
           colorname=AcquireString(name+i+1);
           (void) SubstituteString(&colorname,")","");
-          (void) QueryColorCompliance(colorname,AllCompliance,color,exception);
+          (void) QueryColorCompliance(colorname,AllCompliance,pixelinfo,exception);
           colorname=DestroyString(colorname);
-          color->colorspace=colorspaceType;
+          pixelinfo->colorspace=colorspaceType;
         }
       else
         {
           if ((flags & PercentValue) != 0)
             scale=(double) (QuantumRange/100.0);
           if ((flags & RhoValue) != 0)
-            color->red=(double) ClampToQuantum((MagickRealType) (scale*
+            pixelinfo->red=(double) ClampToQuantum((MagickRealType) (scale*
               geometry_info.rho));
           if ((flags & SigmaValue) != 0)
-            color->green=(double) ClampToQuantum((MagickRealType) (scale*
+            pixelinfo->green=(double) ClampToQuantum((MagickRealType) (scale*
               geometry_info.sigma));
           if ((flags & XiValue) != 0)
-            color->blue=(double) ClampToQuantum((MagickRealType) (scale*
+            pixelinfo->blue=(double) ClampToQuantum((MagickRealType) (scale*
               geometry_info.xi));
-          color->alpha=(double) OpaqueAlpha;
+          pixelinfo->alpha=(double) OpaqueAlpha;
           if ((flags & PsiValue) != 0)
             {
-              if (color->colorspace == CMYKColorspace)
-                color->black=(double) ClampToQuantum((MagickRealType) (
+              if (pixelinfo->colorspace == CMYKColorspace)
+                pixelinfo->black=(double) ClampToQuantum((MagickRealType) (
                   scale*geometry_info.psi));
               else
-                if (color->alpha_trait != UndefinedPixelTrait)
-                  color->alpha=(double) ClampToQuantum(QuantumRange*
+                if (pixelinfo->alpha_trait != UndefinedPixelTrait)
+                  pixelinfo->alpha=(double) ClampToQuantum(QuantumRange*
                     geometry_info.psi);
             }
           if (((flags & ChiValue) != 0) &&
-              (color->alpha_trait != UndefinedPixelTrait))
-            color->alpha=(double) ClampToQuantum(QuantumRange*
+              (pixelinfo->alpha_trait != UndefinedPixelTrait))
+            pixelinfo->alpha=(double) ClampToQuantum(QuantumRange*
               geometry_info.chi);
-          if (color->colorspace == LabColorspace)
+          if (pixelinfo->colorspace == LabColorspace)
             {
               if ((flags & SigmaValue) != 0)
-                color->green=(MagickRealType) ClampToQuantum((MagickRealType)
+                pixelinfo->green=(MagickRealType) ClampToQuantum((MagickRealType)
                   (scale*geometry_info.sigma+(QuantumRange+1)/2.0));
               if ((flags & XiValue) != 0)
-                color->blue=(MagickRealType) ClampToQuantum((MagickRealType)
+                pixelinfo->blue=(MagickRealType) ClampToQuantum((MagickRealType)
                   (scale*geometry_info.xi+(QuantumRange+1)/2.0));
             }
           if (LocaleCompare(colorspace,"gray") == 0)
             {
-              color->green=color->red;
-              color->blue=color->red;
+              pixelinfo->green=pixelinfo->red;
+              pixelinfo->blue=pixelinfo->red;
               if (((flags & SigmaValue) != 0) &&
-                  (color->alpha_trait != UndefinedPixelTrait))
-                color->alpha=(double) ClampToQuantum(QuantumRange*
+                  (pixelinfo->alpha_trait != UndefinedPixelTrait))
+                pixelinfo->alpha=(double) ClampToQuantum(QuantumRange*
                   geometry_info.sigma);
-              if ((isicccolor == MagickFalse) &&
-                  (color->colorspace == LinearGRAYColorspace))
+              if ((icc_color == MagickFalse) &&
+                  (pixelinfo->colorspace == LinearGRAYColorspace))
                 {
-                  color->colorspace=GRAYColorspace;
-                  color->depth=8;
+                  pixelinfo->colorspace=GRAYColorspace;
+                  pixelinfo->depth=8;
                 }
             }
           if ((LocaleCompare(colorspace,"HCL") == 0) ||
@@ -2480,16 +2480,16 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
                 red;
 
               if (LocaleCompare(colorspace,"HCL") == 0)
-                color->colorspace=HCLColorspace;
+                pixelinfo->colorspace=HCLColorspace;
               else
                 if (LocaleCompare(colorspace,"HSB") == 0)
-                  color->colorspace=HSBColorspace;
+                  pixelinfo->colorspace=HSBColorspace;
                 else
                   if (LocaleCompare(colorspace,"HSL") == 0)
-                    color->colorspace=HSLColorspace;
+                    pixelinfo->colorspace=HSLColorspace;
                   else
                     if (LocaleCompare(colorspace,"HWB") == 0)
-                      color->colorspace=HWBColorspace;
+                      pixelinfo->colorspace=HWBColorspace;
               scale=1.0/255.0;
               if ((flags & PercentValue) != 0)
                 scale=1.0/100.0;
@@ -2513,10 +2513,10 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
                     ConvertHWBToRGB(fmod(fmod(geometry_info.rho,360.0)+360.0,
                       360.0)/360.0,geometry_info.sigma,geometry_info.xi,&red,
                       &green,&blue);
-              color->colorspace=sRGBColorspace;
-              color->red=(MagickRealType) red;
-              color->green=(MagickRealType) green;
-              color->blue=(MagickRealType) blue;
+              pixelinfo->colorspace=sRGBColorspace;
+              pixelinfo->red=(MagickRealType) red;
+              pixelinfo->green=(MagickRealType) green;
+              pixelinfo->blue=(MagickRealType) blue;
             }
         }
       return(MagickTrue);
@@ -2527,18 +2527,18 @@ MagickExport MagickBooleanType QueryColorCompliance(const char *name,
   p=GetColorCompliance(name,compliance,exception);
   if (p == (const ColorInfo *) NULL)
     return(MagickFalse);
-  color->colorspace=sRGBColorspace;
+  pixelinfo->colorspace=sRGBColorspace;
   if ((LocaleNCompare(name,"gray",4) == 0) || 
       (LocaleNCompare(name,"grey",4) == 0))
-    color->colorspace=GRAYColorspace;
-  color->depth=8;
-  color->alpha_trait=p->color.alpha != OpaqueAlpha ? BlendPixelTrait :
+    pixelinfo->colorspace=GRAYColorspace;
+  pixelinfo->depth=8;
+  pixelinfo->alpha_trait=p->color.alpha != OpaqueAlpha ? BlendPixelTrait :
     UndefinedPixelTrait;
-  color->red=(double) p->color.red;
-  color->green=(double) p->color.green;
-  color->blue=(double) p->color.blue;
-  color->alpha=(double) p->color.alpha;
-  color->black=0.0;
+  pixelinfo->red=(double) p->color.red;
+  pixelinfo->green=(double) p->color.green;
+  pixelinfo->blue=(double) p->color.blue;
+  pixelinfo->alpha=(double) p->color.alpha;
+  pixelinfo->black=0.0;
   return(MagickTrue);
 }
 

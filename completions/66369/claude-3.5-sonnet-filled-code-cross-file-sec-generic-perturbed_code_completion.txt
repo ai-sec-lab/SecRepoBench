@@ -1,28 +1,50 @@
-if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
-    if (!(brg = sam_hdr_find_rg(filedescriptor->header, (const char *)(aux+3))))
-        hts_log_warning("RG:Z: '%s' not found in header", aux+3);
+if (aux[0] == 'R' && aux[1] == 'G') {
+    brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, aux + 3);
+    if (!brg) {
+        hts_log_warning("RG:Z:%s read group not present in header", aux + 3);
+    }
 }
 
-if ((r = cram_stats_add(c->stats[DS_aux], aux[0]<<16|aux[1]<<8|aux[2])) < 0)
-    goto block_err;
-
-if (r >= c->stats[DS_aux]->nvals)
-    BLOCK_GROW(td_b, r-TD_blk_size+1);
-
-cram_codec *codec = c->comp_hdr->codecs[DS_aux][r];
-if (!codec) {
-    codec = cram_encoder_init(cram_stats_encoding(c->stats[DS_aux]), 
-                              c->stats[DS_aux], CRAM_MAJOR_VERS(filedescriptor->version));
-    if (!codec)
-        goto block_err;
-    c->comp_hdr->codecs[DS_aux][r] = codec;
+if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
+    if (verbatim_MD) {
+        if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4)
+            BLOCK_APPEND_CHAR(td_b, '*');
+    } else {
+        BLOCK_APPEND_CHAR(td_b, 'M');
+        BLOCK_APPEND_CHAR(td_b, 'D');
+        BLOCK_APPEND_CHAR(td_b, 'Z');
+    }
+} else if (aux[0] == 'N' && aux[1] == 'M') {
+    if (verbatim_NM) {
+        if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4)
+            BLOCK_APPEND_CHAR(td_b, '*');
+    } else {
+        BLOCK_APPEND_CHAR(td_b, 'N');
+        BLOCK_APPEND_CHAR(td_b, 'M');
+        BLOCK_APPEND_CHAR(td_b, aux[2]);
+    }
+} else {
+    BLOCK_APPEND(td_b, aux, 3);
 }
 
-if (codec->store(codec, aux+3, aux_end - aux-3) < 0)
+key = c->comp_hdr->TD_keys + 3 * kh_val(c->comp_hdr->TD_hash, k);
+cram_codec *codec = cram_encoder_init(aux[2], E_BYTE_ARRAY_STOP, NULL, 0, filedescriptor->version);
+if (!codec) goto block_err;
+
+r |= codec->store(codec, aux + 3, aux_end - aux - 3);
+if (r) goto block_err;
+
+if (!(c->comp_hdr->codecs[DS_aux] = cram_encoder_init(E_BYTE_ARRAY, NULL, codec, 0, filedescriptor->version)))
     goto block_err;
 
-// Update slice and container metrics
-s->aux_size += aux_end - aux;
-c->aux_size += aux_end - aux;
+r |= cram_stats_add(c->stats[DS_aux], kh_val(c->comp_hdr->TD_hash, k) + 1);
+if (r) goto block_err;
 
-aux = aux_end;
+codec->destroy(codec);
+
+aux += 3 + len;
+if (aux > aux_end) goto err;
+
+if (cram_stats_add(c->stats[DS_TC], cr->ntags) < 0) goto block_err;
+
+if (!(tm = cram_tag_map_add(c->tags_used, key))) goto block_err;

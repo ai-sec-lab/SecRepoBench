@@ -1,4 +1,4 @@
-if (uc == ueend)
+if (currentposition == ue)
 			goto out;
-		if (*uc == ']')
+		if (*currentposition == ']')
 			goto done;

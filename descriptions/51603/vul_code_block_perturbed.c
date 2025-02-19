@@ -1,4 +1,4 @@
-struct magic *m = &Thenewvariablenameformeshouldbemyself->mp[0];
+struct magic *m = &myself->mp[0];
 
 	if (m->factor_op != FILE_FACTOR_OP_NONE) {
 		file_magwarn(ms,

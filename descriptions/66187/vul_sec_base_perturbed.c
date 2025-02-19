@@ -347,7 +347,7 @@ char *gf_text_get_utf8_line(char *linebuffer, u32 lineSize, FILE *txt_in, s32 un
 					j++;
 				}
 				/*UTF8 4 bytes char*/
-				else if ( (linebuffer[i] & 0xf8) == 0xf0) {
+				else if ( (szLine[i] & 0xf8) == 0xf0) {
 					if (j+2 >= GF_ARRAY_LENGTH(szLineConv))
 						break;
 					szLineConv[j] = linebuffer[i];

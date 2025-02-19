@@ -1,51 +1,50 @@
 BITCODE_RL obj_size = bit_read_RL(dat);
-LOG_TRACE(", size: " FORMAT_RL " [RL]", obj_size);
-if (obj_size > size)
+if (obj_size != obj->size)
   {
-    LOG_ERROR("Invalid object size " FORMAT_RL " > %u", obj_size, size);
-    obj_size = size;
-    error |= DWG_ERR_VALUEOUTOFBOUNDS;
-  }
-if (obj_size < 2)
-  {
-    LOG_ERROR("Invalid object size " FORMAT_RL " < 2", obj_size);
-    obj_size = 2;
-    error |= DWG_ERR_VALUEOUTOFBOUNDS;
-  }
-obj->size = obj_size;
-
-if (dat->byte + obj_size > oldpos + size)
-  {
-    LOG_ERROR("Invalid object size " FORMAT_RL " > %u", obj_size,
-              (unsigned)(oldpos + size - dat->byte));
-    obj_size = (BITCODE_RL)(oldpos + size - dat->byte);
-    error |= DWG_ERR_VALUEOUTOFBOUNDS;
-  }
-if (dat->version >= R_11)
-  {
-    BITCODE_RS crc;
-    dat->byte += obj_size - 2;
-    crc = bit_read_RS(dat);
-    LOG_TRACE(", crc: %04X [RS]", crc);
-    if (dat->byte == oldpos + obj_size)
+    BITCODE_RL offset = obj_size - obj->size;
+    LOG_WARN("Object size mismatch: %d != %d", obj_size, obj->size);
+    if (offset > 0)
       {
-        BITCODE_RS calc_crc = bit_calc_CRC(0xC0C1, &dat->chain[oldpos], obj_size - 2);
-        if (crc != calc_crc)
-          {
-            LOG_ERROR("Wrong CRC %04X, expected %04X", crc, calc_crc);
-            error |= DWG_ERR_WRONGCRC;
-          }
+        obj->unknown_bits = bit_read_TF(dat, offset);
+        LOG_TRACE("unknown_bits: %d [TF]\n", offset);
       }
     else
       {
-        LOG_ERROR("Wrong object size " FORMAT_RL ", expected %u", obj_size,
-                  (unsigned)(dat->byte - oldpos));
+        LOG_ERROR("Negative object size difference");
         error |= DWG_ERR_VALUEOUTOFBOUNDS;
       }
   }
-if (dat->byte < oldpos + obj_size)
+
+SINCE(R_11)
+{
+  BITCODE_RS crc;
+  crc = bit_calc_CRC(0xC0C1, dat->chain + obj->address, obj_size);
+  BITCODE_RS crc_read = bit_read_RS(dat);
+  if (crc != crc_read)
+    {
+      LOG_ERROR("Object CRC mismatch: calculated %04X != read %04X", crc, crc_read);
+      error |= DWG_ERR_WRONGCRC;
+    }
+}
+
+if (dat->byte - oldpos != obj_size)
   {
-    BITCODE_RL unknown_size = (BITCODE_RL)(oldpos + obj_size - dat->byte);
-    LOG_TRACE(", unknown: %d", unknown_size);
-    bit_read_fixed(dat, unknown_size);
+    BITCODE_RL offset = obj_size - (dat->byte - oldpos);
+    if (offset > 0)
+      {
+        obj->unknown_bits = bit_read_TF(dat, offset);
+        LOG_TRACE("unknown_bits: %d [TF]\n", offset);
+      }
+    else
+      {
+        LOG_ERROR("Invalid object size");
+        error |= DWG_ERR_VALUEOUTOFBOUNDS;
+      }
+  }
+
+if (obj->size <= 0 || obj->size > 0x1000000) // 16MB
+  {
+    LOG_ERROR("Invalid object size %d", obj->size);
+    obj->size = 0;
+    error |= DWG_ERR_VALUEOUTOFBOUNDS;
   }

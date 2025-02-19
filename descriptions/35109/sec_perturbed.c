@@ -258,23 +258,23 @@ check_name_arg(mrb_state *mrb, int posarg, const char *name, size_t len)
 } while (0)
 
 static const char *
-get_num(mrb_state *mrb, const char *p, const char *end, int *valp)
+get_num(mrb_state *mrb, const char *p, const char *limit, int *valp)
 {
-  mrb_int nextnumber = (int)*valp;
-  for (; p < end && ISDIGIT(*p); p++) {
-    if (mrb_int_mul_overflow(10, nextnumber, &nextnumber)) {
+  mrb_int next_n = (int)*valp;
+  for (; p < limit && ISDIGIT(*p); p++) {
+    if (mrb_int_mul_overflow(10, next_n, &next_n)) {
       return NULL;
     }
-    if (MRB_INT_MAX - (*p - '0') < nextnumber) {
+    if (MRB_INT_MAX - (*p - '0') < next_n) {
       return NULL;
     }
-    nextnumber += *p - '0';
+    next_n += *p - '0';
   }
-  if (nextnumber > INT_MAX || nextnumber < 0) return NULL;
-  if (p >= end) {
+  if (next_n > INT_MAX || next_n < 0) return NULL;
+  if (p >= limit) {
     mrb_raise(mrb, E_ARGUMENT_ERROR, "malformed format string - %%*[0-9]");
   }
-  *valp = (int)nextnumber;
+  *valp = (int)next_n;
   return p;
 }
 

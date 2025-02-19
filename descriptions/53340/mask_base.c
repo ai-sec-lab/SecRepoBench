@@ -530,13 +530,6 @@ static int read_restart_header(MLPDecodeContext *m, GetBitContext *gbp,
     max_channel        = get_bits(gbp, 4);
     max_matrix_channel = get_bits(gbp, 4);
 
-    if (max_matrix_channel > std_max_matrix_channel) {
-        av_log(m->avctx, AV_LOG_ERROR,
-               "Max matrix channel cannot be greater than %d.\n",
-               std_max_matrix_channel);
-        return AVERROR_INVALIDDATA;
-    }
-
     // <MASK>
 
     if (max_channel + 1 > MAX_CHANNELS || max_channel + 1 < min_channel)

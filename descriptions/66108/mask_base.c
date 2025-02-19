@@ -639,14 +639,7 @@ restart:
 		}
 		sync = start + bytes_skipped;
 
-		size = gf_mp3_frame_size(ctx->hdr);
-
-
 		// <MASK>
-		//otherwise wait for next frame, unless if end of stream
-		else if (pck) {
-			break;
-		}
 		//ready to send packet
 		mp3_dmx_check_pid(filter, ctx);
 

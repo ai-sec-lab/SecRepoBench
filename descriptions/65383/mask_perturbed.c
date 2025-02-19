@@ -2752,7 +2752,7 @@ static int cram_add_insertion(cram_container *c, cram_slice *s, cram_record *r,
  */
 static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
                                       cram_container *c,
-                                      cram_slice *s, cram_record *cr,
+                                      cram_slice *slice, cram_record *cr,
                                       int verbatim_NM, int verbatim_MD,
                                       int NM, kstring_t *MD, int cf_tag,
                                       int no_ref, int *err) {

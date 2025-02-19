@@ -954,7 +954,7 @@ void cram_decode_estimate_sizes(cram_block_compression_hdr *hdr, cram_slice *s,
 cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
     cram_block_slice_hdr *hdr;
     unsigned char *cp;
-    unsigned char *cp_end;
+    unsigned char *cplimit;
     int i;
 
     if (b->method != RAW) {
@@ -964,7 +964,7 @@ cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
             return NULL;
     }
     cp =  (unsigned char *)BLOCK_DATA(b);
-    cp_end = cp + b->uncomp_size;
+    cplimit = cp + b->uncomp_size;
 
     if (b->content_type != MAPPED_SLICE &&
         b->content_type != UNMAPPED_SLICE)
@@ -978,19 +978,19 @@ cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
     if (b->content_type == MAPPED_SLICE) {
         // <MASK>
     }
-    cp += safe_itf8_get((char *)cp,  (char *)cp_end, &hdr->num_records);
+    cp += safe_itf8_get((char *)cp,  (char *)cplimit, &hdr->num_records);
     hdr->record_counter = 0;
     if (CRAM_MAJOR_VERS(fd->version) == 2) {
-        int32_t intvalue = 0;
-        cp += safe_itf8_get((char *)cp, (char *)cp_end, &intvalue);
-        hdr->record_counter = intvalue;
+        int32_t i32 = 0;
+        cp += safe_itf8_get((char *)cp, (char *)cplimit, &i32);
+        hdr->record_counter = i32;
     } else if (CRAM_MAJOR_VERS(fd->version) >= 3) {
-        cp += safe_ltf8_get((char *)cp, (char *)cp_end, &hdr->record_counter);
+        cp += safe_ltf8_get((char *)cp, (char *)cplimit, &hdr->record_counter);
     }
 
-    cp += safe_itf8_get((char *)cp, (char *)cp_end, &hdr->num_blocks);
+    cp += safe_itf8_get((char *)cp, (char *)cplimit, &hdr->num_blocks);
 
-    cp += safe_itf8_get((char *)cp, (char *)cp_end, &hdr->num_content_ids);
+    cp += safe_itf8_get((char *)cp, (char *)cplimit, &hdr->num_content_ids);
     if (hdr->num_content_ids < 1 ||
         hdr->num_content_ids >= SIZE_MAX / sizeof(int32_t)) {
         /* Slice must have at least one data block,
@@ -1005,7 +1005,7 @@ cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
     }
 
     for (i = 0; i < hdr->num_content_ids; i++) {
-        int l = safe_itf8_get((char *)cp, (char *)cp_end,
+        int l = safe_itf8_get((char *)cp, (char *)cplimit,
                               &hdr->block_content_ids[i]);
         if (l <= 0) {
             free(hdr->block_content_ids);
@@ -1016,11 +1016,11 @@ cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
     }
 
     if (b->content_type == MAPPED_SLICE) {
-        cp += safe_itf8_get((char *)cp, (char *) cp_end, &hdr->ref_base_id);
+        cp += safe_itf8_get((char *)cp, (char *) cplimit, &hdr->ref_base_id);
     }
 
     if (CRAM_MAJOR_VERS(fd->version) != 1) {
-        if (cp_end - cp < 16) {
+        if (cplimit - cp < 16) {
             free(hdr->block_content_ids);
             free(hdr);
             return NULL;

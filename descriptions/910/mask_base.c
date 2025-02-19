@@ -1541,7 +1541,7 @@ void* CMSEXPORT cmsReadTag(cmsHPROFILE hProfile, cmsTagSignature sig)
     Offset    = Icc -> TagOffsets[n];
     TagSize   = Icc -> TagSizes[n];
 
-    // <MASK>       // Alredy read by the type base logic
+    // <MASK>
 
     // Get type handler
     TypeHandler = _cmsGetTagTypeHandler(Icc ->ContextID, BaseType);

@@ -1,12 +1,12 @@
-switch (*uc++) {
+switch (*currentpos++) {
 		case ',':
 			continue;
 		case '}': /* { */
-			*ucp = uc;
-			DPRINTF("Good object: ", uc, *ucp);
+			*ucp = currentpos;
+			DPRINTF("Good object: ", currentpos, *ucp);
 			return 1;
 		default:
-			*ucp = uc - 1;
-			DPRINTF("not more", uc, *ucp);
+			*ucp = currentpos - 1;
+			DPRINTF("not more", currentpos, *ucp);
 			goto out;
 		}

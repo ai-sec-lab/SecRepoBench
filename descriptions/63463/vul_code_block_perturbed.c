@@ -1,21 +1,21 @@
 PRE (R_11) // no crc16
                 {
-                  if (obj->address + obj->size != dat->byte)
+                  if (obj->address + obj->size != bitchain->byte)
                     {
                       LOG_ERROR ("offset %ld",
-                                 (long)(obj->address + obj->size - dat->byte));
-                      if (obj->address + obj->size > dat->byte)
+                                 (long)(obj->address + obj->size - bitchain->byte));
+                      if (obj->address + obj->size > bitchain->byte)
                         {
-                          BITCODE_RL byteoffset
+                          BITCODE_RL offset
                               = (BITCODE_RL)(obj->address + obj->size
-                                             - dat->byte);
-                          obj->num_unknown_rest = 8 * byteoffset;
-                          obj->unknown_rest = (BITCODE_TF)calloc (byteoffset, 1);
+                                             - bitchain->byte);
+                          obj->num_unknown_rest = 8 * offset;
+                          obj->unknown_rest = (BITCODE_TF)calloc (offset, 1);
                           if (obj->unknown_rest)
                             {
                               memcpy (obj->unknown_rest,
-                                      &dat->chain[dat->byte], byteoffset);
-                              LOG_TRACE_TF (obj->unknown_rest, byteoffset);
+                                      &bitchain->chain[bitchain->byte], offset);
+                              LOG_TRACE_TF (obj->unknown_rest, offset);
                             }
                           else
                             {
@@ -24,25 +24,25 @@ PRE (R_11) // no crc16
                             }
                         }
                       if (obj->size > 2)
-                        dat->byte = obj->address + obj->size;
+                        bitchain->byte = obj->address + obj->size;
                     }
                 }
                 LATER_VERSIONS
                 {
-                  if (obj->address + obj->size != dat->byte + 2)
+                  if (obj->address + obj->size != bitchain->byte + 2)
                     {
                       LOG_ERROR ("offset %ld", (long)(obj->address + obj->size
-                                                      - (dat->byte + 2)));
-                      if (obj->address + obj->size > dat->byte + 2)
+                                                      - (bitchain->byte + 2)));
+                      if (obj->address + obj->size > bitchain->byte + 2)
                         {
-                          BITCODE_RL byteoffset
+                          BITCODE_RL offset
                               = (BITCODE_RL)(obj->address + obj->size
-                                             - (dat->byte + 2));
-                          obj->num_unknown_rest = 8 * byteoffset;
-                          obj->unknown_rest = bit_read_TF (dat, byteoffset);
+                                             - (bitchain->byte + 2));
+                          obj->num_unknown_rest = 8 * offset;
+                          obj->unknown_rest = bit_read_TF (bitchain, offset);
                           if (obj->unknown_rest)
                             {
-                              LOG_TRACE_TF (obj->unknown_rest, byteoffset);
+                              LOG_TRACE_TF (obj->unknown_rest, offset);
                             }
                           else
                             {
@@ -51,8 +51,8 @@ PRE (R_11) // no crc16
                             }
                         }
                       if (obj->address + obj->size >= start && start > 60)
-                        dat->byte = obj->address + obj->size - 2;
+                        bitchain->byte = obj->address + obj->size - 2;
                     }
-                  if (!bit_check_CRC (dat, obj->address, 0xC0C1))
+                  if (!bit_check_CRC (bitchain, obj->address, 0xC0C1))
                     error |= DWG_ERR_WRONGCRC;
                 }

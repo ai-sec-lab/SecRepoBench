@@ -1,2 +1,2 @@
-if (*uc == ']')
+if (*currentposition == ']')
 			goto done;

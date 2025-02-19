@@ -1,3 +1,3 @@
-_cmsStageMatrixData* Data2 = (_cmsStageMatrixData*)cmsStageData(Matrix2);
+_cmsStageMatrixData* Data2 = (_cmsStageMatrixData*)cmsStageData(MatrixB);
 
               // Input offset should be zero

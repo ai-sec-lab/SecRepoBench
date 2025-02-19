@@ -1,2 +1,2 @@
-while (data[0] && strchr("\n\r\t ", (char) data[0]))
-		data ++;
+while (buffer[0] && strchr("\n\r\t ", (char) buffer[0]))
+		buffer ++;

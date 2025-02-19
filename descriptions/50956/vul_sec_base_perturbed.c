@@ -1663,9 +1663,9 @@ static
 cmsBool OptimizeMatrixShaper(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt32Number* InputFormat, cmsUInt32Number* OutputFormat, cmsUInt32Number* dwFlags)
 {
        cmsStage* Curve1, *Curve2;
-       cmsStage* Matrix1, *Matrix2;
+       cmsStage* Matrix1, *MatrixB;
        cmsMAT3 res;
-       cmsBool isIdentityMatrix;
+       cmsBool IdentityMat;
        cmsPipeline* Dest, *Src;
        cmsFloat64Number* Offset;
 
@@ -1686,14 +1686,14 @@ cmsBool OptimizeMatrixShaper(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt3
        // Both of those constructs are possible (first because abs. colorimetric). 
        // additionally, In the first case, the input matrix offset should be zero.
 
-       isIdentityMatrix = FALSE;
+       IdentityMat = FALSE;
        if (cmsPipelineCheckAndRetreiveStages(Src, 4,
               cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType,
-              &Curve1, &Matrix1, &Matrix2, &Curve2)) {
+              &Curve1, &Matrix1, &MatrixB, &Curve2)) {
 
               // Get both matrices
               _cmsStageMatrixData* Data1 = (_cmsStageMatrixData*)cmsStageData(Matrix1);
-              _cmsStageMatrixData* Data2 = (_cmsStageMatrixData*)cmsStageData(Matrix2);
+              _cmsStageMatrixData* Data2 = (_cmsStageMatrixData*)cmsStageData(MatrixB);
 
               // Input offset should be zero
               if (Data1->Offset != NULL) return FALSE;
@@ -1708,7 +1708,7 @@ cmsBool OptimizeMatrixShaper(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt3
               if (_cmsMAT3isIdentity(&res) && Offset == NULL) {
 
                      // We can get rid of full matrix
-                     isIdentityMatrix = TRUE;
+                     IdentityMat = TRUE;
               }
 
        }
@@ -1729,7 +1729,7 @@ cmsBool OptimizeMatrixShaper(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt3
                      if (_cmsMAT3isIdentity(&res) && Offset == NULL) {
 
                             // We can get rid of full matrix
-                            isIdentityMatrix = TRUE;
+                            IdentityMat = TRUE;
                      }
               }
               else
@@ -1745,7 +1745,7 @@ cmsBool OptimizeMatrixShaper(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt3
     if (!cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageDup(Curve1)))
         goto Error;
 
-    if (!isIdentityMatrix) {
+    if (!IdentityMat) {
 
            if (!cmsPipelineInsertStage(Dest, cmsAT_END, cmsStageAllocMatrix(Dest->ContextID, 3, 3, (const cmsFloat64Number*)&res, Offset)))
                   goto Error;
@@ -1755,7 +1755,7 @@ cmsBool OptimizeMatrixShaper(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt3
         goto Error;
 
     // If identity on matrix, we can further optimize the curves, so call the join curves routine
-    if (isIdentityMatrix) {
+    if (IdentityMat) {
 
         OptimizeByJoiningCurves(&Dest, Intent, InputFormat, OutputFormat, dwFlags);
     }

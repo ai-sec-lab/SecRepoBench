@@ -1,50 +1,50 @@
 static int
-json_parse_object(const unsigned char **ucp, const unsigned char *end, 
+json_parse_object(const unsigned char **ucp, const unsigned char *ue, 
 	size_t *st, size_t lvl)
 {
-	const unsigned char *uc = *ucp;
-	DPRINTF("Parse object: ", uc, *ucp);
-	while (uc < end) {
-		uc = json_skip_space(uc, end);
-		if (uc == end)
+	const unsigned char *currentpos = *ucp;
+	DPRINTF("Parse object: ", currentpos, *ucp);
+	while (currentpos < ue) {
+		currentpos = json_skip_space(currentpos, ue);
+		if (currentpos == ue)
 			goto out;
-		if (*uc++ != '"') {
-			DPRINTF("not string", uc, *ucp);
-			goto out;
-		}
-		DPRINTF("next field", uc, *ucp);
-		if (!json_parse_string(&uc, end)) {
-			DPRINTF("not string", uc, *ucp);
+		if (*currentpos++ != '"') {
+			DPRINTF("not string", currentpos, *ucp);
 			goto out;
 		}
-		uc = json_skip_space(uc, end);
-		if (uc == end)
-			goto out;
-		if (*uc++ != ':') {
-			DPRINTF("not colon", uc, *ucp);
+		DPRINTF("next field", currentpos, *ucp);
+		if (!json_parse_string(&currentpos, ue)) {
+			DPRINTF("not string", currentpos, *ucp);
 			goto out;
 		}
-		if (!json_parse(&uc, end, st, lvl + 1)) {
-			DPRINTF("not json", uc, *ucp);
+		currentpos = json_skip_space(currentpos, ue);
+		if (currentpos == ue)
+			goto out;
+		if (*currentpos++ != ':') {
+			DPRINTF("not colon", currentpos, *ucp);
 			goto out;
 		}
-		if (uc == end)
+		if (!json_parse(&currentpos, ue, st, lvl + 1)) {
+			DPRINTF("not json", currentpos, *ucp);
 			goto out;
-		switch (*uc++) {
+		}
+		if (currentpos == ue)
+			goto out;
+		switch (*currentpos++) {
 		case ',':
 			continue;
 		case '}': /* { */
-			*ucp = uc;
-			DPRINTF("Good object: ", uc, *ucp);
+			*ucp = currentpos;
+			DPRINTF("Good object: ", currentpos, *ucp);
 			return 1;
 		default:
-			*ucp = uc - 1;
-			DPRINTF("not more", uc, *ucp);
+			*ucp = currentpos - 1;
+			DPRINTF("not more", currentpos, *ucp);
 			goto out;
 		}
 	}
 out:
-	DPRINTF("Bad object: ", uc, *ucp);
-	*ucp = uc;
+	DPRINTF("Bad object: ", currentpos, *ucp);
+	*ucp = currentpos;
 	return 0;
 }

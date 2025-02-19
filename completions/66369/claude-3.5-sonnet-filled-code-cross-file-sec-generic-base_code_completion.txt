@@ -1,41 +1,92 @@
 if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
-    // Handle Read Group tag
     char *rg = (char *)aux + 3;
-    int rg_len = strlen(rg);
+    khint_t k;
+    int new;
+
     k = kh_put(m_s2i, c->comp_hdr->RG_hash, rg, &new);
     if (new < 0) goto err;
     if (new) {
-        kh_val(c->comp_hdr->RG_hash, k) = c->comp_hdr->nRG++;
-        if (c->comp_hdr->nRG >= c->comp_hdr->RG_size) {
-            c->comp_hdr->RG_size = c->comp_hdr->RG_size ? c->comp_hdr->RG_size*2 : 1024;
-            c->comp_hdr->RG = realloc(c->comp_hdr->RG, c->comp_hdr->RG_size * sizeof(char *));
-            if (!c->comp_hdr->RG) goto err;
-        }
-        c->comp_hdr->RG[kh_val(c->comp_hdr->RG_hash, k)] = strdup(rg);
+        kh_val(c->comp_hdr->RG_hash, k) = c->comp_hdr->nRG;
+        c->comp_hdr->nRG++;
     }
-    cr->rg = kh_val(c->comp_hdr->RG_hash, k);
-    brg = sam_hrecs_find_rg(fd->header->hrecs, rg);
-} else {
-    // Handle other tags
-    char *key = string_ndup(c->comp_hdr->TD_keys, (char *)aux, 2);
-    if (!key) goto err;
-    k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
-    if (new < 0) goto err;
-    if (new) {
-        kh_val(c->comp_hdr->TD_hash, k) = c->comp_hdr->nTL++;
-        if (c->comp_hdr->nTL >= c->comp_hdr->TL_size) {
-            c->comp_hdr->TL_size = c->comp_hdr->TL_size ? c->comp_hdr->TL_size*2 : 1024;
-            c->comp_hdr->TL = realloc(c->comp_hdr->TL, c->comp_hdr->TL_size * sizeof(unsigned char *));
-            if (!c->comp_hdr->TL) goto err;
-        }
-        c->comp_hdr->TL[kh_val(c->comp_hdr->TD_hash, k)] = (unsigned char *)strdup((char *)aux);
-    }
-    tm = &s->aux_block[kh_val(c->comp_hdr->TD_hash, k)];
-    if (!tm->codec) {
-        tm->codec = cram_encoder_init(aux[2], E_BYTE_ARRAY_STOP, NULL);
-        if (!tm->codec) goto err;
-    }
-    BLOCK_APPEND(tm->blk, aux+3, aux_size-3);
+    brg = &c->comp_hdr->RG[kh_val(c->comp_hdr->RG_hash, k)];
 }
 
-aux += aux_size;
+aux += 3;
+while (aux[0] != '\0' && aux < aux_end) {
+    int r;
+    int32_t i32;
+    char *key = (char *)BLOCK_END(td_b);
+
+    if (key - (char *)BLOCK_DATA(td_b) + 3 >= BLOCK_SIZE(td_b)) {
+        if (cram_expand_block(td_b, BLOCK_SIZE(td_b) * 2) < 0)
+            goto block_err;
+        key = (char *)BLOCK_END(td_b);
+    }
+
+    // Add key
+    *key++ = aux[0];
+    *key++ = aux[1];
+    *key++ = aux[2];
+    BLOCK_SIZE(td_b) += 3;
+
+    // Add value
+    switch(aux[2]) {
+    case 'A': case 'C': case 'c': case 'S': case 's':
+    case 'I': case 'i': case 'f':
+        if (aux + 8 > aux_end) goto err;
+        memcpy(&i32, aux+3, 4);
+        r = cram_stats_add(c->aux_B_stats[DS_aux_S], i32);
+        if (r < 0) goto block_err;
+        aux += 7;
+        break;
+
+    case 'd':
+        if (aux + 11 > aux_end) goto err;
+        r = cram_stats_add(c->aux_B_stats[DS_aux_F], *(double *)(aux+3));
+        if (r < 0) goto block_err;
+        aux += 10;
+        break;
+
+    case 'Z': case 'H':
+        {
+            char *aux_start = aux+3;
+            while (aux[3] && aux < aux_end)
+                aux++;
+            if (aux >= aux_end) goto err;
+            r = cram_stats_add(c->aux_B_stats[DS_aux_Z],
+                               (int)((unsigned char *)aux - (unsigned char *)aux_start + 1));
+            if (r < 0) goto block_err;
+        }
+        break;
+
+    case 'B':
+        {
+            int type = aux[3];
+            int32_t count = (int32_t)((((unsigned char *)aux)[4]<< 0) +
+                                      (((unsigned char *)aux)[5]<< 8) +
+                                      (((unsigned char *)aux)[6]<<16) +
+                                      (((unsigned char *)aux)[7]<<24));
+            int data_size = aux[8];
+            if (count < 0 || data_size <= 0) goto err;
+            if (aux + 8 + data_size * count > aux_end) goto err;
+            r = cram_stats_add(c->aux_B_stats[DS_aux_B], data_size * count + 5);
+            if (r < 0) goto block_err;
+            aux += 8 + data_size * count;
+        }
+        break;
+
+    default:
+        hts_log_error("Unknown aux type '%c'", aux[2]);
+        return NULL;
+    }
+    aux++;
+
+    tm = c->comp_hdr->tag_encoding_map[DS_aux + 256 * key[-2] + key[-1]];
+    if (!tm) {
+        tm = cram_encoder_init(E_BYTE_ARRAY_STOP, NULL);
+        if (!tm) goto block_err;
+        c->comp_hdr->tag_encoding_map[DS_aux + 256 * key[-2] + key[-1]] = tm;
+    }
+    r = tm->codec->store(s, tm, key, 3);
+    if (r < 0) goto block_err;
