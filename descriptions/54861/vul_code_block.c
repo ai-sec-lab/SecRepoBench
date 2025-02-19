@@ -1,3 +1,0 @@
-
-    for (i = 0; i < 4; i++)
-        linesize_align[i] = STRIDE_ALIGN;

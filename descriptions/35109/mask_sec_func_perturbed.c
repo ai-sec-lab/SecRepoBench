@@ -1,8 +1,8 @@
 static const char *
-get_num(mrb_state *mrb, const char *p, const char *end, int *valp)
+get_num(mrb_state *mrb, const char *p, const char *limit, int *valp)
 {
-  mrb_int nextnumber = (int)*valp;
+  mrb_int next_n = (int)*valp;
   // <MASK>
-  *valp = (int)nextnumber;
+  *valp = (int)next_n;
   return p;
 }

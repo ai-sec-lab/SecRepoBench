@@ -488,35 +488,35 @@ static void compute_quant_matrix(int *output, int qscale)
     for (i = 0; i < 64; i++) output[i] = unscaled_quant_matrix[ff_zigzag_direct[i]] * qscale;
 }
 
-static int speedhq_decode_frame(AVCodecContext *avctx, AVFrame *frame,
+static int speedhq_decode_frame(AVCodecContext *ccodeccontext, AVFrame *frame,
                                 int *got_frame, AVPacket *avpkt)
 {
-    SHQContext * const s = avctx->priv_data;
+    SHQContext * const s = ccodeccontext->priv_data;
     const uint8_t *buf   = avpkt->data;
     int buf_size         = avpkt->size;
-    uint8_t compressionquality;
+    uint8_t quality;
     uint32_t second_field_offset;
     int ret;
 
-    if (buf_size < 4 || avctx->width < 8 || avctx->width % 8 != 0)
+    if (buf_size < 4 || ccodeccontext->width < 8 || ccodeccontext->width % 8 != 0)
         return AVERROR_INVALIDDATA;
 
-    compressionquality = buf[0];
-    if (compressionquality >= 100) {
+    quality = buf[0];
+    if (quality >= 100) {
         return AVERROR_INVALIDDATA;
     }
 
-    compute_quant_matrix(s->quant_matrix, 100 - compressionquality);
+    compute_quant_matrix(s->quant_matrix, 100 - quality);
 
     second_field_offset = AV_RL24(buf + 1);
     if (second_field_offset >= buf_size - 3) {
         return AVERROR_INVALIDDATA;
     }
 
-    avctx->coded_width = FFALIGN(avctx->width, 16);
-    avctx->coded_height = FFALIGN(avctx->height, 16);
+    ccodeccontext->coded_width = FFALIGN(ccodeccontext->width, 16);
+    ccodeccontext->coded_height = FFALIGN(ccodeccontext->height, 16);
 
-    if ((ret = ff_get_buffer(avctx, frame, 0)) < 0) {
+    if ((ret = ff_get_buffer(ccodeccontext, frame, 0)) < 0) {
         return ret;
     }
     frame->key_frame = 1;

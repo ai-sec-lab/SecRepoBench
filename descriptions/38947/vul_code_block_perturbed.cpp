@@ -1,7 +1,7 @@
 // get file format version and print to log
-    ++it;
+    ++elementiterator;
     
-    if ((*it).tokens[0].empty()) {
+    if ((*elementiterator).tokens[0].empty()) {
         ASSIMP_LOG_ERROR("Invalid LWS file detectedm abort import.");
         return;
     }

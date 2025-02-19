@@ -176,37 +176,37 @@ out:
 }
 
 static int
-json_parse_array(const unsigned char **ucp, const unsigned char *ueend,
+json_parse_array(const unsigned char **ucp, const unsigned char *ue,
 	size_t *st, size_t lvl)
 {
-	const unsigned char *uc = *ucp;
+	const unsigned char *currentposition = *ucp;
 
-	DPRINTF("Parse array: ", uc, *ucp);
-	while (uc < ueend) {
-		uc = json_skip_space(uc, ueend);
-		if (*uc == ']')
+	DPRINTF("Parse array: ", currentposition, *ucp);
+	while (currentposition < ue) {
+		currentposition = json_skip_space(currentposition, ue);
+		if (*currentposition == ']')
 			goto done;
-		if (!json_parse(&uc, ueend, st, lvl + 1))
+		if (!json_parse(&currentposition, ue, st, lvl + 1))
 			goto out;
-		if (uc == ueend)
+		if (currentposition == ue)
 			goto out;
-		switch (*uc) {
+		switch (*currentposition) {
 		case ',':
-			uc++;
+			currentposition++;
 			continue;
 		case ']':
 		done:
 			st[JSON_ARRAYN]++;
-			DPRINTF("Good array: ", uc, *ucp);
-			*ucp = uc + 1;
+			DPRINTF("Good array: ", currentposition, *ucp);
+			*ucp = currentposition + 1;
 			return 1;
 		default:
 			goto out;
 		}
 	}
 out:
-	DPRINTF("Bad array: ", uc,  *ucp);
-	*ucp = uc;
+	DPRINTF("Bad array: ", currentposition,  *ucp);
+	*ucp = currentposition;
 	return 0;
 }
 

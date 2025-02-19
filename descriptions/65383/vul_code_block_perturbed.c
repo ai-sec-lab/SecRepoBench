@@ -12,7 +12,7 @@ case 'H': {
             aux += 3;
             aux_s = aux;
             while (aux < aux_end && *aux++);
-            if (codec->encode(s, codec, aux_s, aux - aux_s) < 0)
+            if (codec->encode(slice, codec, aux_s, aux - aux_s) < 0)
                 goto err;
             break;
         }
@@ -22,7 +22,7 @@ case 'H': {
                 goto err;
 
             int type = aux[3], blen;
-            uint32_t Thenewvariablenameforcountcouldbeelementcount = (((uint32_t)((unsigned char *)aux)[4]) << 0 |
+            uint32_t count = (((uint32_t)((unsigned char *)aux)[4]) << 0 |
                               ((uint32_t)((unsigned char *)aux)[5]) << 8 |
                               ((uint32_t)((unsigned char *)aux)[6]) <<16 |
                               ((uint32_t)((unsigned char *)aux)[7]) <<24);
@@ -46,13 +46,13 @@ case 'H': {
             // We use BYTE_ARRAY_LEN with external length, so store that first
             switch (type) {
             case 'c': case 'C':
-                blen = Thenewvariablenameforcountcouldbeelementcount;
+                blen = count;
                 break;
             case 's': case 'S':
-                blen = 2*Thenewvariablenameforcountcouldbeelementcount;
+                blen = 2*count;
                 break;
             case 'i': case 'I': case 'f':
-                blen = 4*Thenewvariablenameforcountcouldbeelementcount;
+                blen = 4*count;
                 break;
             default:
                 hts_log_error("Unknown sub-type '%c' for aux type 'B'", type);
@@ -63,7 +63,7 @@ case 'H': {
             if (aux_end - aux < blen)
                 goto err;
 
-            if (codec->encode(s, codec, aux, blen) < 0)
+            if (codec->encode(slice, codec, aux, blen) < 0)
                 goto err;
             aux += blen;
             break;

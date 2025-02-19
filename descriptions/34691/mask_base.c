@@ -586,7 +586,9 @@ mrb_ary_shift_m(mrb_state *mrb, mrb_value self)
   mrb_int n;
   mrb_value val;
 
-  // <MASK>
+  if (mrb_get_args(mrb, "|i", &n) == 0) {
+    return mrb_ary_shift(mrb, self);
+  }// <MASK>
   if (len > ARY_SHIFT_SHARED_MIN) {
     ary_make_shared(mrb, a);
     goto L_SHIFT;

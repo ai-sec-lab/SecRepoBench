@@ -4142,19 +4142,19 @@ GF_Err audio_sample_entry_on_child_box(GF_Box *s, GF_Box *a, Bool is_rem)
 }
 GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 {
-	GF_MPEGAudioSampleEntryBox *ptr;
+	GF_MPEGAudioSampleEntryBox *audioentrybox;
 	char *data;
 	u8 a, b, c, d;
-	u32 Thenewvariablenameforicouldbeindex, size, v, nb_alnum;
+	u32 i, size, v, nb_alnum;
 	GF_Err e;
 	u64 pos, start;
 
-	ptr = (GF_MPEGAudioSampleEntryBox *)s;
+	audioentrybox = (GF_MPEGAudioSampleEntryBox *)s;
 
 	start = gf_bs_get_position(bs);
 	v = gf_bs_peek_bits(bs, 16, 8);
 	if (v)
-		ptr->qtff_mode = GF_ISOM_AUDIO_QTFF_ON_NOEXT;
+		audioentrybox->qtff_mode = GF_ISOM_AUDIO_QTFF_ON_NOEXT;
 
 	//try to disambiguate QTFF v1 and MP4 v1 audio sample entries ...
 	if (v==1) {
@@ -4169,7 +4169,7 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 		if (isalnum(b)) nb_alnum++;
 		if (isalnum(c)) nb_alnum++;
 		if (isalnum(d)) nb_alnum++;
-		if (nb_alnum>2) ptr->qtff_mode = GF_ISOM_AUDIO_QTFF_NONE;
+		if (nb_alnum>2) audioentrybox->qtff_mode = GF_ISOM_AUDIO_QTFF_NONE;
 		gf_bs_seek(bs, start);
 	}
 
@@ -4181,7 +4181,7 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 	//when cookie is set on bs, always convert qtff-style mp4a to isobmff-style
 	//since the conversion is done in addBox and we don't have the bitstream there (arg...), flag the box
  	if (gf_bs_get_cookie(bs) & GF_ISOM_BS_COOKIE_QT_CONV) {
- 		ptr->qtff_mode |= GF_ISOM_AUDIO_QTFF_CONVERT_FLAG;
+ 		audioentrybox->qtff_mode |= GF_ISOM_AUDIO_QTFF_CONVERT_FLAG;
  	}
 
 	e = gf_isom_box_array_read(s, bs);
@@ -4197,7 +4197,7 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 				case GF_ISOM_SUBTYPE_3GP_EVRC:
 				case GF_ISOM_SUBTYPE_3GP_QCELP:
 				case GF_ISOM_SUBTYPE_3GP_SMV:
-					if (ptr->cfg_3gpp) ptr->cfg_3gpp->cfg.type = type;
+					if (audioentrybox->cfg_3gpp) audioentrybox->cfg_3gpp->cfg.type = type;
 					break;
 				}
 			}
@@ -4213,21 +4213,21 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 	if (!data) return GF_OUT_OF_MEM;
 
 	gf_bs_read_data(bs, data, size);
-	for (Thenewvariablenameforicouldbeindex=0; Thenewvariablenameforicouldbeindex<size-8; Thenewvariablenameforicouldbeindex++) {
-		if (GF_4CC((u32)data[Thenewvariablenameforicouldbeindex+4], (u8)data[Thenewvariablenameforicouldbeindex+5], (u8)data[Thenewvariablenameforicouldbeindex+6], (u8)data[Thenewvariablenameforicouldbeindex+7]) == GF_ISOM_BOX_TYPE_ESDS) {
-			GF_BitStream *mybs = gf_bs_new(data + Thenewvariablenameforicouldbeindex, size - Thenewvariablenameforicouldbeindex, GF_BITSTREAM_READ);
+	for (i=0; i<size-8; i++) {
+		if (GF_4CC((u32)data[i+4], (u8)data[i+5], (u8)data[i+6], (u8)data[i+7]) == GF_ISOM_BOX_TYPE_ESDS) {
+			GF_BitStream *mybs = gf_bs_new(data + i, size - i, GF_BITSTREAM_READ);
 			gf_bs_set_cookie(mybs, GF_ISOM_BS_COOKIE_NO_LOGS);
-			if (ptr->esd) gf_isom_box_del_parent(&ptr->child_boxes, (GF_Box *)ptr->esd);
-			ptr->esd = NULL;
-			e = gf_isom_box_parse((GF_Box **)&ptr->esd, mybs);
+			if (audioentrybox->esd) gf_isom_box_del_parent(&audioentrybox->child_boxes, (GF_Box *)audioentrybox->esd);
+			audioentrybox->esd = NULL;
+			e = gf_isom_box_parse((GF_Box **)&audioentrybox->esd, mybs);
 			gf_bs_del(mybs);
 
-			if ((e==GF_OK) && ptr->esd && (ptr->esd->type == GF_ISOM_BOX_TYPE_ESDS)) {
-				if (!ptr->child_boxes) ptr->child_boxes = gf_list_new();
-				gf_list_add(ptr->child_boxes, ptr->esd);
-			} else if (ptr->esd) {
-				gf_isom_box_del((GF_Box *)ptr->esd);
-				ptr->esd = NULL;
+			if ((e==GF_OK) && audioentrybox->esd && (audioentrybox->esd->type == GF_ISOM_BOX_TYPE_ESDS)) {
+				if (!audioentrybox->child_boxes) audioentrybox->child_boxes = gf_list_new();
+				gf_list_add(audioentrybox->child_boxes, audioentrybox->esd);
+			} else if (audioentrybox->esd) {
+				gf_isom_box_del((GF_Box *)audioentrybox->esd);
+				audioentrybox->esd = NULL;
 			}
 			e = GF_OK;
 			break;

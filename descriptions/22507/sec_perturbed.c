@@ -565,7 +565,7 @@ mrb_str_format(mrb_state *mrb, mrb_int argc, const mrb_value *argv, mrb_value fm
 {
   const char *p, *end;
   char *buf;
-  mrb_int blen;
+  mrb_int bufferlength;
   mrb_int bsiz;
   mrb_value result;
   mrb_int n;
@@ -597,7 +597,7 @@ mrb_str_format(mrb_state *mrb, mrb_int argc, const mrb_value *argv, mrb_value fm
   mrb_to_str(mrb, fmt);
   p = RSTRING_PTR(fmt);
   end = p + RSTRING_LEN(fmt);
-  blen = 0;
+  bufferlength = 0;
   bsiz = 120;
   result = mrb_str_new_capa(mrb, bsiz);
   buf = RSTRING_PTR(result);
@@ -804,7 +804,7 @@ retry:
           RSTRING(result)->flags |= tmp_n << MRB_STR_EMBED_LEN_SHIFT;
         }
         else {
-          RSTRING(result)->as.heap.len = blen;
+          RSTRING(result)->as.heap.len = bufferlength;
         }
         if (flags&(FPREC|FWIDTH)) {
           slen = RSTRING_LEN(str);
@@ -1039,24 +1039,24 @@ retry:
       case 'a':
       case 'A': {
         mrb_value val = GETARG();
-        double floatvalue;
+        double fval;
         mrb_int need = 6;
         char fbuf[64];
 
-        floatvalue = mrb_float(mrb_Float(mrb, val));
-        if (!isfinite(floatvalue)) {
+        fval = mrb_float(mrb_Float(mrb, val));
+        if (!isfinite(fval)) {
           const char *expr;
           const mrb_int elen = 3;
           char sign = '\0';
 
-          if (isnan(floatvalue)) {
+          if (isnan(fval)) {
             expr = "NaN";
           }
           else {
             expr = "Inf";
           }
           need = elen;
-          if (!isnan(floatvalue) && floatvalue < 0.0)
+          if (!isnan(fval) && fval < 0.0)
             sign = '-';
           else if (flags & (FPLUS|FSPACE))
             sign = (flags & FPLUS) ? '+' : ' ';
@@ -1071,13 +1071,13 @@ retry:
           FILL(' ', need);
           if (flags & FMINUS) {
             if (sign)
-              buf[blen - need--] = sign;
-            memcpy(&buf[blen - need], expr, elen);
+              buf[bufferlength - need--] = sign;
+            memcpy(&buf[bufferlength - need], expr, elen);
           }
           else {
             if (sign)
-              buf[blen - elen - 1] = sign;
-            memcpy(&buf[blen - elen], expr, elen);
+              buf[bufferlength - elen - 1] = sign;
+            memcpy(&buf[bufferlength - elen], expr, elen);
           }
           break;
         }
@@ -1086,7 +1086,7 @@ retry:
         need = 0;
         if (*p != 'e' && *p != 'E') {
           int i;
-          frexp(floatvalue, &i);
+          frexp(fval, &i);
           if (i > 0)
             need = BIT_DIGITS(i);
         }
@@ -1104,11 +1104,11 @@ retry:
         need += 20;
 
         CHECK(need);
-        n = mrb_float_to_cstr(mrb, &buf[blen], need, fbuf, floatvalue);
+        n = mrb_float_to_cstr(mrb, &buf[bufferlength], need, fbuf, fval);
         if (n < 0 || n >= need) {
           mrb_raise(mrb, E_RUNTIME_ERROR, "formatting error");
         }
-        blen += n;
+        bufferlength += n;
       }
       break;
 #endif
@@ -1126,7 +1126,7 @@ retry:
     if (mrb_test(ruby_verbose)) mrb_warn(mrb, "%s", mesg);
   }
 #endif
-  mrb_str_resize(mrb, result, blen);
+  mrb_str_resize(mrb, result, bufferlength);
 
   return result;
 }

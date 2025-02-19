@@ -1,58 +1,56 @@
-BITCODE_RL obj_size = bit_read_RL(dat);
-LOG_TRACE(", size: " FORMAT_RL " [RL]", obj_size);
-if (obj_size < 2 || obj_size > size)
+BITCODE_RL obj_size = bit_read_RL (dat);
+LOG_TRACE (" obj_size: " FORMAT_RL "\n", obj_size);
+if (obj_size > size || obj_size < 2)
   {
-    LOG_ERROR("Invalid object size " FORMAT_RL " at pos 0x%zx", obj_size, dat->byte - 4);
-    obj_size = size - 2;
+    LOG_ERROR ("Invalid object size " FORMAT_RL " > %u or < 2", obj_size, size);
+    obj_size = size;
     error |= DWG_ERR_VALUEOUTOFBOUNDS;
   }
 obj->size = obj_size;
-
+if (obj->size + 2 > (BITCODE_RL)(dat->byte - oldpos))
+  {
+    BITCODE_RL offset = obj->size + 2 - (dat->byte - oldpos);
+    LOG_TRACE ("-unknown: %u\n", offset);
+    bit_read_fixed (dat, offset);
+  }
+else if (obj->size + 2 < (BITCODE_RL)(dat->byte - oldpos))
+  {
+    BITCODE_RL offset = (dat->byte - oldpos) - (obj->size + 2);
+    LOG_WARN ("Object size %u + 2 < %u", obj->size, (unsigned)(dat->byte - oldpos));
+    dat->byte -= offset;
+    obj->size = (dat->byte - oldpos - 2) & 0xFFFFFFFF;
+  }
 if (dat->version >= R_11)
   {
     BITCODE_RS crc;
-    dat->byte += obj_size - 2;
-    crc = bit_read_RS(dat);
-    LOG_TRACE(", crc: %04X [RS]", crc);
-    if (dat->byte - 2 - oldpos != obj_size)
+    crc = bit_read_RS (dat);
+    LOG_TRACE ("crc: %04X [RS]\n", crc);
+    if (!dwg->header.crc_method)
+      dwg->header.crc_method = 0x8005;
+    if (dat->byte == oldpos + obj->size + 2)
       {
-        long off = obj_size - (dat->byte - 2 - oldpos);
-        LOG_WARN("Illegal object size: %ld", off);
-        if (off > 0)
-          bit_advance_position(dat, 8 * off);
-        else if (off < 0)
-          dat->byte += off;
+        BITCODE_RS calc_crc = bit_calc_CRC (0xC0C1, &dat->chain[oldpos], obj->size);
+        if (calc_crc != crc)
+          {
+            LOG_ERROR ("Wrong CRC %04X, should be %04X", crc, calc_crc);
+            error |= DWG_ERR_WRONGCRC;
+          }
       }
+    else
+      LOG_ERROR ("Wrong object size %d != %d", (int)(dat->byte - oldpos), obj->size + 2);
   }
-
-if (obj->size + 2 > size)
+if (dat->byte != oldpos + obj->size + 2)
   {
-    LOG_ERROR("Invalid object size " FORMAT_RL " > %d at pos 0x%zx",
-              obj->size, size, oldpos);
-    obj->size = size - 2;
-    error |= DWG_ERR_VALUEOUTOFBOUNDS;
-  }
-if (obj->address + obj->size != dat->byte - 2)
-  {
-    long off = (long)((obj->address + obj->size) - (dat->byte - 2));
-    long absoff = labs(off);
-    if (absoff > 0 && absoff < 0xffffff)
+    long off = dat->byte - (oldpos + obj->size + 2);
+    long oldoff = obj->size;
+    if (dat->byte > oldpos + obj->size + 2)
       {
-        LOG_WARN("Illegal object size: %ld", off);
-        if (off > 0)
-          {
-            obj->unknown_bits = (BITCODE_TF)calloc(absoff, 1);
-            if (obj->unknown_bits)
-              {
-                memcpy(obj->unknown_bits, &dat->chain[dat->byte], absoff);
-                LOG_TRACE("unknown_bits: ");
-                LOG_TRACE_TF(obj->unknown_bits, absoff);
-                dat->byte += absoff;
-              }
-          }
-        else
-          {
-            dat->byte += off;
-          }
+        obj->size = (dat->byte - oldpos - 2) & 0xFFFFFFFF;
+        LOG_WARN ("Object size %ld increased by %ld", oldoff, obj->size - oldoff);
+      }
+    else
+      {
+        LOG_WARN ("Object size %ld decreased by %ld", oldoff, off);
+        bit_advance_position (dat, off);
       }
   }

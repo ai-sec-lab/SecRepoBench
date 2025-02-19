@@ -1,0 +1,1314 @@
+static Image *ReadMIFFImage(const ImageInfo *image_info,
+  ExceptionInfo *exception)
+{
+#define BZipMaxExtent(x)  ((x)+((x)/100)+600)
+#define LZMAMaxExtent(x)  ((x)+((x)/3)+128)
+#define ThrowMIFFException(exception,message) \
+{ \
+  if (quantum_info != (QuantumInfo *) NULL) \
+    quantum_info=DestroyQuantumInfo(quantum_info); \
+  if (compress_pixels != (unsigned char *) NULL) \
+    compress_pixels=(unsigned char *) RelinquishMagickMemory(compress_pixels); \
+  ThrowReaderException((exception),(message)); \
+}
+#define ZipMaxExtent(x)  ((x)+(((x)+7) >> 3)+(((x)+63) >> 6)+11)
+
+#if defined(MAGICKCORE_BZLIB_DELEGATE)
+  bz_stream
+    bzip_info;
+#endif
+
+  char
+    id[MagickPathExtent],
+    keyword[MagickPathExtent],
+    *headeroptions;
+
+  double
+    version;
+
+  GeometryInfo
+    geometry_info;
+
+  Image
+    *image;
+
+  int
+    c;
+
+  LinkedListInfo
+    *profiles;
+
+#if defined(MAGICKCORE_LZMA_DELEGATE)
+  lzma_stream
+    initialize_lzma = LZMA_STREAM_INIT,
+    lzma_info = LZMA_STREAM_INIT;
+
+  lzma_allocator
+    allocator;
+#endif
+
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    pixel;
+
+  MagickStatusType
+    flags;
+
+  QuantumFormatType
+    quantum_format;
+
+  QuantumInfo
+    *quantum_info;
+
+  QuantumType
+    quantum_type;
+
+  ssize_t
+    i;
+
+  size_t
+    compress_extent,
+    extent,
+    length,
+    packet_size;
+
+  ssize_t
+    count;
+
+  unsigned char
+    *compress_pixels,
+    *pixels;
+
+  size_t
+    colors;
+
+  ssize_t
+    y;
+
+#if defined(MAGICKCORE_ZLIB_DELEGATE)
+  z_stream
+    zip_info;
+#endif
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Decode image header;  header terminates one character beyond a ':'.
+  */
+  c=ReadBlobByte(image);
+  if (c == EOF)
+    ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+  *id='\0';
+  compress_pixels=(unsigned char *) NULL;
+  quantum_info=(QuantumInfo *) NULL;
+  (void) memset(keyword,0,sizeof(keyword));
+  version=0.0;
+  (void) version;
+  do
+  {
+    /*
+      Decode image header;  header terminates one character beyond a ':'.
+    */
+    SetGeometryInfo(&geometry_info);
+    length=MagickPathExtent;
+    headeroptions=AcquireString((char *) NULL);
+    quantum_format=UndefinedQuantumFormat;
+    profiles=(LinkedListInfo *) NULL;
+    colors=0;
+    image->depth=8UL;
+    image->compression=NoCompression;
+    while ((isgraph((int) ((unsigned char) c)) != 0) && (c != (int) ':'))
+    {
+      char
+        *p;
+
+      if (c == (int) '{')
+        {
+          char
+            *comment;
+
+          /*
+            Read comment-- any text between { }.
+          */
+          length=MagickPathExtent;
+          comment=AcquireString((char *) NULL);
+          for (p=comment; comment != (char *) NULL; p++)
+          {
+            c=ReadBlobByte(image);
+            if (c == (int) '\\')
+              c=ReadBlobByte(image);
+            else
+              if ((c == EOF) || (c == (int) '}'))
+                break;
+            if ((size_t) (p-comment+1) >= length)
+              {
+                *p='\0';
+                length<<=1;
+                comment=(char *) ResizeQuantumMemory(comment,
+                  OverAllocateMemory(length+MagickPathExtent),sizeof(*comment));
+                if (comment == (char *) NULL)
+                  break;
+                p=comment+strlen(comment);
+              }
+            *p=(char) c;
+          }
+          if (comment == (char *) NULL)
+            {
+              headeroptions=DestroyString(headeroptions);
+              ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
+            }
+          *p='\0';
+          (void) SetImageProperty(image,"comment",comment,exception);
+          comment=DestroyString(comment);
+          c=ReadBlobByte(image);
+        }
+      else
+        if (isalnum((int) ((unsigned char) c)) != MagickFalse)
+          {
+            /*
+              Get the keyword.
+            */
+            length=MagickPathExtent-1;
+            p=keyword;
+            do
+            {
+              if (c == (int) '=')
+                break;
+              if ((size_t) (p-keyword) < (MagickPathExtent-1))
+                *p++=(char) c;
+              c=ReadBlobByte(image);
+            } while (c != EOF);
+            *p='\0';
+            p=headeroptions;
+            while ((isspace((int) ((unsigned char) c)) != 0) && (c != EOF))
+              c=ReadBlobByte(image);
+            if (c == (int) '=')
+              {
+                /*
+                  Get the keyword value.
+                */
+                c=ReadBlobByte(image);
+                while ((c != (int) '}') && (c != EOF))
+                {
+                  if ((size_t) (p-headeroptions+1) >= length)
+                    {
+                      *p='\0';
+                      length<<=1;
+                      headeroptions=(char *) ResizeQuantumMemory(headeroptions,length+
+                        MagickPathExtent,sizeof(*headeroptions));
+                      if (headeroptions == (char *) NULL)
+                        break;
+                      p=headeroptions+strlen(headeroptions);
+                    }
+                  *p++=(char) c;
+                  c=ReadBlobByte(image);
+                  if (c == '\\')
+                    {
+                      c=ReadBlobByte(image);
+                      if (c == (int) '}')
+                        {
+                          *p++=(char) c;
+                          c=ReadBlobByte(image);
+                        }
+                    }
+                  if (*headeroptions != '{')
+                    if (isspace((int) ((unsigned char) c)) != 0)
+                      break;
+                }
+                if (headeroptions == (char *) NULL)
+                  ThrowMIFFException(ResourceLimitError,
+                    "MemoryAllocationFailed");
+              }
+            *p='\0';
+            if (*headeroptions == '{')
+              (void) CopyMagickString(headeroptions,headeroptions+1,strlen(headeroptions));
+            /*
+              Assign a value to the specified keyword.
+            */
+            switch (*keyword)
+            {
+              case 'a':
+              case 'A':
+              {
+                if (LocaleCompare(keyword,"alpha-trait") == 0)
+                  {
+                    ssize_t
+                      alpha_trait;
+
+                    alpha_trait=ParseCommandOption(MagickPixelTraitOptions,
+                      MagickFalse,headeroptions);
+                    if (alpha_trait < 0)
+                      break;
+                    image->alpha_trait=(PixelTrait) alpha_trait;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'b':
+              case 'B':
+              {
+                if (LocaleCompare(keyword,"background-color") == 0)
+                  {
+                    (void) QueryColorCompliance(headeroptions,AllCompliance,
+                      &image->background_color,exception);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"blue-primary") == 0)
+                  {
+                    flags=ParseGeometry(headeroptions,&geometry_info);
+                    image->chromaticity.blue_primary.x=geometry_info.rho;
+                    image->chromaticity.blue_primary.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->chromaticity.blue_primary.y=
+                        image->chromaticity.blue_primary.x;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"border-color") == 0)
+                  {
+                    (void) QueryColorCompliance(headeroptions,AllCompliance,
+                      &image->border_color,exception);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'c':
+              case 'C':
+              {
+                if (LocaleCompare(keyword,"class") == 0)
+                  {
+                    ssize_t
+                      storage_class;
+
+                    storage_class=ParseCommandOption(MagickClassOptions,
+                      MagickFalse,headeroptions);
+                    if (storage_class < 0)
+                      break;
+                    image->storage_class=(ClassType) storage_class;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"colors") == 0)
+                  {
+                    colors=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"colorspace") == 0)
+                  {
+                    ssize_t
+                      colorspace;
+
+                    colorspace=ParseCommandOption(MagickColorspaceOptions,
+                      MagickFalse,headeroptions);
+                    if (colorspace < 0)
+                      break;
+                    image->colorspace=(ColorspaceType) colorspace;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"compression") == 0)
+                  {
+                    ssize_t
+                      compression;
+
+                    compression=ParseCommandOption(MagickCompressOptions,
+                      MagickFalse,headeroptions);
+                    if (compression < 0)
+                      break;
+                    image->compression=(CompressionType) compression;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"columns") == 0)
+                  {
+                    image->columns=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'd':
+              case 'D':
+              {
+                if (LocaleCompare(keyword,"delay") == 0)
+                  {
+                    image->delay=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"depth") == 0)
+                  {
+                    image->depth=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"dispose") == 0)
+                  {
+                    ssize_t
+                      dispose;
+
+                    dispose=ParseCommandOption(MagickDisposeOptions,MagickFalse,
+                      headeroptions);
+                    if (dispose < 0)
+                      break;
+                    image->dispose=(DisposeType) dispose;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'e':
+              case 'E':
+              {
+                if (LocaleCompare(keyword,"endian") == 0)
+                  {
+                    ssize_t
+                      endian;
+
+                    endian=ParseCommandOption(MagickEndianOptions,MagickFalse,
+                      headeroptions);
+                    if (endian < 0)
+                      break;
+                    image->endian=(EndianType) endian;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'g':
+              case 'G':
+              {
+                if (LocaleCompare(keyword,"gamma") == 0)
+                  {
+                    image->gamma=StringToDouble(headeroptions,(char **) NULL);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"gravity") == 0)
+                  {
+                    ssize_t
+                      gravity;
+
+                    gravity=ParseCommandOption(MagickGravityOptions,MagickFalse,
+                      headeroptions);
+                    if (gravity < 0)
+                      break;
+                    image->gravity=(GravityType) gravity;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"green-primary") == 0)
+                  {
+                    flags=ParseGeometry(headeroptions,&geometry_info);
+                    image->chromaticity.green_primary.x=geometry_info.rho;
+                    image->chromaticity.green_primary.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->chromaticity.green_primary.y=
+                        image->chromaticity.green_primary.x;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'i':
+              case 'I':
+              {
+                if (LocaleCompare(keyword,"id") == 0)
+                  {
+                    // The masked region is responsible for copying the options string into 
+                    // the 'id' buffer, which is used to store the image format identifier. 
+                    // It ensures that the 'id' buffer is filled with the correct identifier 
+                    // from the options provided.
+                    // <MASK>
+                    break;
+                  }
+                if (LocaleCompare(keyword,"iterations") == 0)
+                  {
+                    image->iterations=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'm':
+              case 'M':
+              {
+                if (LocaleCompare(keyword,"matte") == 0)
+                  {
+                    ssize_t
+                      matte;
+
+                    matte=ParseCommandOption(MagickBooleanOptions,MagickFalse,
+                      headeroptions);
+                    if (matte < 0)
+                      break;
+                    image->alpha_trait=matte == 0 ? UndefinedPixelTrait :
+                      BlendPixelTrait;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"mattecolor") == 0)
+                  {
+                    (void) QueryColorCompliance(headeroptions,AllCompliance,
+                      &image->matte_color,exception);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"montage") == 0)
+                  {
+                    (void) CloneString(&image->montage,headeroptions);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'o':
+              case 'O':
+              {
+                if (LocaleCompare(keyword,"orientation") == 0)
+                  {
+                    ssize_t
+                      orientation;
+
+                    orientation=ParseCommandOption(MagickOrientationOptions,
+                      MagickFalse,headeroptions);
+                    if (orientation < 0)
+                      break;
+                    image->orientation=(OrientationType) orientation;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'p':
+              case 'P':
+              {
+                if (LocaleCompare(keyword,"page") == 0)
+                  {
+                    char
+                      *geometry;
+
+                    geometry=GetPageGeometry(headeroptions);
+                    (void) ParseAbsoluteGeometry(geometry,&image->page);
+                    geometry=DestroyString(geometry);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"pixel-intensity") == 0)
+                  {
+                    ssize_t
+                      intensity;
+
+                    intensity=ParseCommandOption(MagickPixelIntensityOptions,
+                      MagickFalse,headeroptions);
+                    if (intensity < 0)
+                      break;
+                    image->intensity=(PixelIntensityMethod) intensity;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"profile") == 0)
+                  {
+                    if (profiles == (LinkedListInfo *) NULL)
+                      profiles=NewLinkedList(0);
+                    (void) AppendValueToLinkedList(profiles,
+                      AcquireString(headeroptions));
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'q':
+              case 'Q':
+              {
+                if (LocaleCompare(keyword,"quality") == 0)
+                  {
+                    image->quality=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                if ((LocaleCompare(keyword,"quantum-format") == 0) ||
+                    (LocaleCompare(keyword,"quantum:format") == 0))
+                  {
+                    ssize_t
+                      format;
+
+                    format=ParseCommandOption(MagickQuantumFormatOptions,
+                      MagickFalse,headeroptions);
+                    if (format < 0)
+                      break;
+                    quantum_format=(QuantumFormatType) format;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'r':
+              case 'R':
+              {
+                if (LocaleCompare(keyword,"red-primary") == 0)
+                  {
+                    flags=ParseGeometry(headeroptions,&geometry_info);
+                    image->chromaticity.red_primary.x=geometry_info.rho;
+                    image->chromaticity.red_primary.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->chromaticity.red_primary.y=
+                        image->chromaticity.red_primary.x;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"rendering-intent") == 0)
+                  {
+                    ssize_t
+                      rendering_intent;
+
+                    rendering_intent=ParseCommandOption(MagickIntentOptions,
+                      MagickFalse,headeroptions);
+                    if (rendering_intent < 0)
+                      break;
+                    image->rendering_intent=(RenderingIntent) rendering_intent;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"resolution") == 0)
+                  {
+                    flags=ParseGeometry(headeroptions,&geometry_info);
+                    image->resolution.x=geometry_info.rho;
+                    image->resolution.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->resolution.y=image->resolution.x;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"rows") == 0)
+                  {
+                    image->rows=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 's':
+              case 'S':
+              {
+                if (LocaleCompare(keyword,"scene") == 0)
+                  {
+                    image->scene=StringToUnsignedLong(headeroptions);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 't':
+              case 'T':
+              {
+                if (LocaleCompare(keyword,"ticks-per-second") == 0)
+                  {
+                    image->ticks_per_second=(ssize_t) StringToLong(headeroptions);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"tile-offset") == 0)
+                  {
+                    char
+                      *geometry;
+
+                    geometry=GetPageGeometry(headeroptions);
+                    (void) ParseAbsoluteGeometry(geometry,&image->tile_offset);
+                    geometry=DestroyString(geometry);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"type") == 0)
+                  {
+                    ssize_t
+                      type;
+
+                    type=ParseCommandOption(MagickTypeOptions,MagickFalse,
+                      headeroptions);
+                    if (type < 0)
+                      break;
+                    image->type=(ImageType) type;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'u':
+              case 'U':
+              {
+                if (LocaleCompare(keyword,"units") == 0)
+                  {
+                    ssize_t
+                      units;
+
+                    units=ParseCommandOption(MagickResolutionOptions,
+                      MagickFalse,headeroptions);
+                    if (units < 0)
+                      break;
+                    image->units=(ResolutionType) units;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'v':
+              case 'V':
+              {
+                if (LocaleCompare(keyword,"version") == 0)
+                  {
+                    version=StringToDouble(headeroptions,(char **) NULL);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              case 'w':
+              case 'W':
+              {
+                if (LocaleCompare(keyword,"white-point") == 0)
+                  {
+                    flags=ParseGeometry(headeroptions,&geometry_info);
+                    image->chromaticity.white_point.x=geometry_info.rho;
+                    image->chromaticity.white_point.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->chromaticity.white_point.y=
+                        image->chromaticity.white_point.x;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+              default:
+              {
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
+                break;
+              }
+            }
+          }
+        else
+          c=ReadBlobByte(image);
+      while (isspace((int) ((unsigned char) c)) != 0)
+        c=ReadBlobByte(image);
+    }
+    headeroptions=DestroyString(headeroptions);
+    (void) ReadBlobByte(image);
+    /*
+      Verify that required image information is defined.
+    */
+    if ((LocaleCompare(id,"ImageMagick") != 0) ||
+        (image->storage_class == UndefinedClass) ||
+        (image->compression == UndefinedCompression) ||
+        (image->colorspace == UndefinedColorspace) ||
+        (image->columns == 0) || (image->rows == 0) ||
+        (image->depth == 0) || (image->depth > 64))
+      {
+        if (profiles != (LinkedListInfo *) NULL)
+          profiles=DestroyLinkedList(profiles,RelinquishMagickMemory);
+        if (image->previous == (Image *) NULL)
+          ThrowMIFFException(CorruptImageError,"ImproperImageHeader");
+        DeleteImageFromList(&image);
+        (void) ThrowMagickException(exception,GetMagickModule(),
+          CorruptImageError,"ImproperImageHeader","`%s'",image->filename);
+        break;
+      }
+    if (image->montage != (char *) NULL)
+      {
+        char
+          *p;
+
+        /*
+          Image directory.
+        */
+        extent=MagickPathExtent;
+        image->directory=AcquireString((char *) NULL);
+        p=image->directory;
+        length=0;
+        do
+        {
+          *p='\0';
+          if ((length+MagickPathExtent) >= extent)
+            {
+              /*
+                Allocate more memory for the image directory.
+              */
+              extent<<=1;
+              image->directory=(char *) ResizeQuantumMemory(image->directory,
+                extent+MagickPathExtent,sizeof(*image->directory));
+              if (image->directory == (char *) NULL)
+                ThrowMIFFException(CorruptImageError,"UnableToReadImageData");
+              p=image->directory+length;
+            }
+          c=ReadBlobByte(image);
+          if (c == EOF)
+            break;
+          *p++=(char) c;
+          length++;
+        } while (c != (int) '\0');
+      }
+    if (profiles != (LinkedListInfo *) NULL)
+      {
+        const char
+          *name;
+
+        StringInfo
+          *profile;
+
+        /*
+          Read image profiles.
+        */
+        ResetLinkedListIterator(profiles);
+        name=(const char *) GetNextValueInLinkedList(profiles);
+        while (name != (const char *) NULL)
+        {
+          length=ReadBlobMSBLong(image);
+          if ((length == 0) || ((MagickSizeType) length > GetBlobSize(image)))
+            break;
+          profile=AcquireStringInfo(length);
+          if (profile == (StringInfo *) NULL)
+            break;
+          count=ReadBlob(image,length,GetStringInfoDatum(profile));
+          if (count != (ssize_t) length)
+            {
+              profile=DestroyStringInfo(profile);
+              break;
+            }
+          status=SetImageProfile(image,name,profile,exception);
+          profile=DestroyStringInfo(profile);
+          if (status == MagickFalse)
+            break;
+          name=(const char *) GetNextValueInLinkedList(profiles);
+        }
+        profiles=DestroyLinkedList(profiles,RelinquishMagickMemory);
+      }
+    image->depth=GetImageQuantumDepth(image,MagickFalse);
+    if (image->storage_class == PseudoClass)
+      {
+        unsigned char
+          *colormap;
+
+        /*
+          Create image colormap.
+        */
+        packet_size=(size_t) (3UL*image->depth/8UL);
+        if ((MagickSizeType) colors > GetBlobSize(image))
+          ThrowMIFFException(CorruptImageError,"InsufficientImageDataInFile");
+        if (((MagickSizeType) packet_size*colors) > GetBlobSize(image))
+          ThrowMIFFException(CorruptImageError,"InsufficientImageDataInFile");
+        status=AcquireImageColormap(image,colors != 0 ? colors : 256,exception);
+        if (status == MagickFalse)
+          ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
+        if (colors != 0)
+          {
+            const unsigned char
+              *p;
+
+            /*
+              Read image colormap from file.
+            */
+            colormap=(unsigned char *) AcquireQuantumMemory(image->colors,
+              packet_size*sizeof(*colormap));
+            if (colormap == (unsigned char *) NULL)
+              ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
+            count=ReadBlob(image,packet_size*image->colors,colormap);
+            p=colormap;
+            switch (image->depth)
+            {
+              case 8:
+              {
+                unsigned char
+                  char_pixel;
+
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  p=PushCharPixel(p,&char_pixel);
+                  image->colormap[i].red=(MagickRealType)
+                    ScaleCharToQuantum(char_pixel);
+                  p=PushCharPixel(p,&char_pixel);
+                  image->colormap[i].green=(MagickRealType)
+                    ScaleCharToQuantum(char_pixel);
+                  p=PushCharPixel(p,&char_pixel);
+                  image->colormap[i].blue=(MagickRealType)
+                    ScaleCharToQuantum(char_pixel);
+                }
+                break;
+              }
+              case 16:
+              {
+                unsigned short
+                  short_pixel;
+
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  p=PushShortPixel(MSBEndian,p,&short_pixel);
+                  image->colormap[i].red=(MagickRealType)
+                    ScaleShortToQuantum(short_pixel);
+                  p=PushShortPixel(MSBEndian,p,&short_pixel);
+                  image->colormap[i].green=(MagickRealType)
+                    ScaleShortToQuantum(short_pixel);
+                  p=PushShortPixel(MSBEndian,p,&short_pixel);
+                  image->colormap[i].blue=(MagickRealType)
+                    ScaleShortToQuantum(short_pixel);
+                }
+                break;
+              }
+              case 32:
+              default:
+              {
+                unsigned int
+                  long_pixel;
+
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  p=PushLongPixel(MSBEndian,p,&long_pixel);
+                  image->colormap[i].red=(MagickRealType)
+                    ScaleLongToQuantum(long_pixel);
+                  p=PushLongPixel(MSBEndian,p,&long_pixel);
+                  image->colormap[i].green=(MagickRealType)
+                    ScaleLongToQuantum(long_pixel);
+                  p=PushLongPixel(MSBEndian,p,&long_pixel);
+                  image->colormap[i].blue=(MagickRealType)
+                    ScaleLongToQuantum(long_pixel);
+                }
+                break;
+              }
+            }
+            colormap=(unsigned char *) RelinquishMagickMemory(colormap);
+          }
+      }
+    if ((image_info->ping != MagickFalse) && (image_info->number_scenes != 0))
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    status=SetImageExtent(image,image->columns,image->rows,exception);
+    if (status == MagickFalse)
+      return(DestroyImageList(image));
+    status=ResetImagePixels(image,exception);
+    if (status == MagickFalse)
+      return(DestroyImageList(image));
+    /*
+      Allocate image pixels.
+    */
+    quantum_info=AcquireQuantumInfo(image_info,image);
+    if (quantum_info == (QuantumInfo *) NULL)
+      ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    if (quantum_format != UndefinedQuantumFormat)
+      {
+        status=SetQuantumFormat(image,quantum_info,quantum_format);
+        if (status == MagickFalse)
+          ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
+      }
+    packet_size=(size_t) (quantum_info->depth/8);
+    if (image->storage_class == DirectClass)
+      packet_size=(size_t) (3*quantum_info->depth/8);
+    if (IsGrayColorspace(image->colorspace) != MagickFalse)
+      packet_size=quantum_info->depth/8;
+    if (image->alpha_trait != UndefinedPixelTrait)
+      packet_size+=quantum_info->depth/8;
+    if (image->colorspace == CMYKColorspace)
+      packet_size+=quantum_info->depth/8;
+    if (image->compression == RLECompression)
+      packet_size++;
+    compress_extent=MagickMax(MagickMax(BZipMaxExtent(packet_size*
+      image->columns),LZMAMaxExtent(packet_size*image->columns)),
+      ZipMaxExtent(packet_size*image->columns));
+    if (compress_extent < (packet_size*image->columns))
+      ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    compress_pixels=(unsigned char *) AcquireQuantumMemory(compress_extent,
+      sizeof(*compress_pixels));
+    if (compress_pixels == (unsigned char *) NULL)
+      ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    /*
+      Read image pixels.
+    */
+    quantum_type=RGBQuantum;
+    if (image->alpha_trait != UndefinedPixelTrait)
+      quantum_type=RGBAQuantum;
+    if (image->colorspace == CMYKColorspace)
+      {
+        quantum_type=CMYKQuantum;
+        if (image->alpha_trait != UndefinedPixelTrait)
+          quantum_type=CMYKAQuantum;
+      }
+    if (IsGrayColorspace(image->colorspace) != MagickFalse)
+      {
+        quantum_type=GrayQuantum;
+        if (image->alpha_trait != UndefinedPixelTrait)
+          quantum_type=GrayAlphaQuantum;
+      }
+    if (image->storage_class == PseudoClass)
+      {
+        quantum_type=IndexQuantum;
+        if (image->alpha_trait != UndefinedPixelTrait)
+          quantum_type=IndexAlphaQuantum;
+      }
+    status=MagickTrue;
+    GetPixelInfo(image,&pixel);
+#if defined(MAGICKCORE_BZLIB_DELEGATE)
+   (void) memset(&bzip_info,0,sizeof(bzip_info));
+#endif
+#if defined(MAGICKCORE_LZMA_DELEGATE)
+    (void) memset(&allocator,0,sizeof(allocator));
+#endif
+#if defined(MAGICKCORE_ZLIB_DELEGATE)
+    (void) memset(&zip_info,0,sizeof(zip_info));
+#endif
+    switch (image->compression)
+    {
+#if defined(MAGICKCORE_BZLIB_DELEGATE)
+      case BZipCompression:
+      {
+        int
+          code;
+
+        bzip_info.bzalloc=AcquireBZIPMemory;
+        bzip_info.bzfree=RelinquishBZIPMemory;
+        bzip_info.opaque=(void *) image;
+        code=BZ2_bzDecompressInit(&bzip_info,(int) image_info->verbose,
+          MagickFalse);
+        if (code != BZ_OK)
+          status=MagickFalse;
+        break;
+      }
+#endif
+#if defined(MAGICKCORE_LZMA_DELEGATE)
+      case LZMACompression:
+      {
+        int
+          code;
+
+        allocator.alloc=AcquireLZMAMemory;
+        allocator.free=RelinquishLZMAMemory;
+        allocator.opaque=(void *) image;
+        lzma_info=initialize_lzma;
+        lzma_info.allocator=(&allocator);
+        code=lzma_auto_decoder(&lzma_info,(uint64_t) -1,0);
+        if (code != LZMA_OK)
+          status=MagickFalse;
+        break;
+      }
+#endif
+#if defined(MAGICKCORE_ZLIB_DELEGATE)
+      case LZWCompression:
+      case ZipCompression:
+      {
+        int
+          code;
+
+        zip_info.zalloc=AcquireZIPMemory;
+        zip_info.zfree=RelinquishZIPMemory;
+        zip_info.opaque=(voidpf) image;
+        code=inflateInit(&zip_info);
+        if (code != Z_OK)
+          status=MagickFalse;
+        break;
+      }
+#endif
+      case RLECompression:
+        break;
+      default:
+        break;
+    }
+    pixels=(unsigned char *) GetQuantumPixels(quantum_info);
+    length=0;
+    for (y=0; y < (ssize_t) image->rows; y++)
+    {
+      ssize_t
+        x;
+
+      Quantum
+        *magick_restrict q;
+
+      if (status == MagickFalse)
+        break;
+      q=QueueAuthenticPixels(image,0,y,image->columns,1,exception);
+      if (q == (Quantum *) NULL)
+        break;
+      extent=0;
+      switch (image->compression)
+      {
+#if defined(MAGICKCORE_BZLIB_DELEGATE)
+        case BZipCompression:
+        {
+          bzip_info.next_out=(char *) pixels;
+          bzip_info.avail_out=(unsigned int) (packet_size*image->columns);
+          do
+          {
+            int
+              code;
+
+            if (bzip_info.avail_in == 0)
+              {
+                bzip_info.next_in=(char *) compress_pixels;
+                length=(size_t) BZipMaxExtent(packet_size*image->columns);
+                if (version != 0.0)
+                  length=(size_t) ReadBlobMSBLong(image);
+                if (length <= compress_extent)
+                  bzip_info.avail_in=(unsigned int) ReadBlob(image,length,
+                    (unsigned char *) bzip_info.next_in);
+                if ((length > compress_extent) ||
+                    ((size_t) bzip_info.avail_in != length))
+                  {
+                    (void) BZ2_bzDecompressEnd(&bzip_info);
+                    ThrowMIFFException(CorruptImageError,
+                      "UnableToReadImageData");
+                  }
+              }
+            code=BZ2_bzDecompress(&bzip_info);
+            if ((code != BZ_OK) && (code != BZ_STREAM_END))
+              {
+                status=MagickFalse;
+                break;
+              }
+            if (code == BZ_STREAM_END)
+              break;
+          } while (bzip_info.avail_out != 0);
+          extent=ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+            quantum_type,pixels,exception);
+          break;
+        }
+#endif
+#if defined(MAGICKCORE_LZMA_DELEGATE)
+        case LZMACompression:
+        {
+          lzma_info.next_out=pixels;
+          lzma_info.avail_out=packet_size*image->columns;
+          do
+          {
+            int
+              code;
+
+            if (lzma_info.avail_in == 0)
+              {
+                lzma_info.next_in=compress_pixels;
+                length=(size_t) ReadBlobMSBLong(image);
+                if (length <= compress_extent)
+                  lzma_info.avail_in=(unsigned int) ReadBlob(image,length,
+                    (unsigned char *) lzma_info.next_in);
+                if ((length > compress_extent) ||
+                    (lzma_info.avail_in != length))
+                  {
+                    lzma_end(&lzma_info);
+                    ThrowMIFFException(CorruptImageError,
+                      "UnableToReadImageData");
+                  }
+              }
+            code=lzma_code(&lzma_info,LZMA_RUN);
+            if ((code != LZMA_OK) && (code != LZMA_STREAM_END))
+              {
+                status=MagickFalse;
+                break;
+              }
+            if (code == LZMA_STREAM_END)
+              break;
+          } while (lzma_info.avail_out != 0);
+          extent=ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+            quantum_type,pixels,exception);
+          break;
+        }
+#endif
+#if defined(MAGICKCORE_ZLIB_DELEGATE)
+        case LZWCompression:
+        case ZipCompression:
+        {
+          zip_info.next_out=pixels;
+          zip_info.avail_out=(uInt) (packet_size*image->columns);
+          do
+          {
+            int
+              code;
+
+            if (zip_info.avail_in == 0)
+              {
+                zip_info.next_in=compress_pixels;
+                length=(size_t) ZipMaxExtent(packet_size*image->columns);
+                if (version != 0.0)
+                  length=(size_t) ReadBlobMSBLong(image);
+                if (length <= compress_extent)
+                  zip_info.avail_in=(unsigned int) ReadBlob(image,length,
+                    zip_info.next_in);
+                if ((length > compress_extent) ||
+                    ((size_t) zip_info.avail_in != length))
+                  {
+                    (void) inflateEnd(&zip_info);
+                    ThrowMIFFException(CorruptImageError,
+                      "UnableToReadImageData");
+                  }
+              }
+            code=inflate(&zip_info,Z_SYNC_FLUSH);
+            if ((code != Z_OK) && (code != Z_STREAM_END))
+              {
+                status=MagickFalse;
+                break;
+              }
+            if (code == Z_STREAM_END)
+              break;
+          } while (zip_info.avail_out != 0);
+          extent=ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+            quantum_type,pixels,exception);
+          break;
+        }
+#endif
+        case RLECompression:
+        {
+          for (x=0; x < (ssize_t) image->columns; x++)
+          {
+            if (length == 0)
+              {
+                count=ReadBlob(image,packet_size,pixels);
+                if (count != (ssize_t) packet_size)
+                  ThrowMIFFException(CorruptImageError,"UnableToReadImageData");
+                PushRunlengthPacket(image,pixels,&length,&pixel,exception);
+              }
+            length--;
+            if (image->storage_class == PseudoClass)
+              SetPixelIndex(image,ClampToQuantum(pixel.index),q);
+            else
+              {
+                SetPixelRed(image,ClampToQuantum(pixel.red),q);
+                SetPixelGreen(image,ClampToQuantum(pixel.green),q);
+                SetPixelBlue(image,ClampToQuantum(pixel.blue),q);
+                if (image->colorspace == CMYKColorspace)
+                  SetPixelBlack(image,ClampToQuantum(pixel.black),q);
+              }
+            if (image->alpha_trait != UndefinedPixelTrait)
+              SetPixelAlpha(image,ClampToQuantum(pixel.alpha),q);
+            q+=GetPixelChannels(image);
+          }
+          extent=(size_t) x;
+          break;
+        }
+        default:
+        {
+          const void
+            *stream;
+
+          stream=ReadBlobStream(image,packet_size*image->columns,pixels,&count);
+          if (count != (ssize_t) (packet_size*image->columns))
+            ThrowMIFFException(CorruptImageError,"UnableToReadImageData");
+          extent=ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+            quantum_type,(unsigned char *) stream,exception);
+          break;
+        }
+      }
+      if (extent < image->columns)
+        break;
+      if (SyncAuthenticPixels(image,exception) == MagickFalse)
+        break;
+    }
+    SetQuantumImageType(image,quantum_type);
+    switch (image->compression)
+    {
+#if defined(MAGICKCORE_BZLIB_DELEGATE)
+      case BZipCompression:
+      {
+        int
+          code;
+
+        if (version == 0.0)
+          {
+            MagickOffsetType
+              offset;
+
+            offset=SeekBlob(image,-((MagickOffsetType) bzip_info.avail_in),
+              SEEK_CUR);
+            if (offset < 0)
+              {
+                (void) BZ2_bzDecompressEnd(&bzip_info);
+                ThrowMIFFException(CorruptImageError,"ImproperImageHeader");
+              }
+          }
+        code=BZ2_bzDecompressEnd(&bzip_info);
+        if (code != BZ_OK)
+          status=MagickFalse;
+        break;
+      }
+#endif
+#if defined(MAGICKCORE_LZMA_DELEGATE)
+      case LZMACompression:
+      {
+        int
+          code;
+
+        code=lzma_code(&lzma_info,LZMA_FINISH);
+        if ((code != LZMA_STREAM_END) && (code != LZMA_OK))
+          status=MagickFalse;
+        lzma_end(&lzma_info);
+        break;
+      }
+#endif
+#if defined(MAGICKCORE_ZLIB_DELEGATE)
+      case LZWCompression:
+      case ZipCompression:
+      {
+        int
+          code;
+
+        if (version == 0.0)
+          {
+            MagickOffsetType
+              offset;
+
+            offset=SeekBlob(image,-((MagickOffsetType) zip_info.avail_in),
+              SEEK_CUR);
+            if (offset < 0)
+              {
+                (void) inflateEnd(&zip_info);
+                ThrowMIFFException(CorruptImageError,"ImproperImageHeader");
+              }
+          }
+        code=inflateEnd(&zip_info);
+        if (code != Z_OK)
+          status=MagickFalse;
+        break;
+      }
+#endif
+      default:
+        break;
+    }
+    quantum_info=DestroyQuantumInfo(quantum_info);
+    compress_pixels=(unsigned char *) RelinquishMagickMemory(compress_pixels);
+    if (((y != (ssize_t) image->rows)) || (status == MagickFalse))
+      {
+        image=DestroyImageList(image);
+        return((Image *) NULL);
+      }
+    if (EOFBlob(image) != MagickFalse)
+      {
+        ThrowFileException(exception,CorruptImageError,"UnexpectedEndOfFile",
+          image->filename);
+        break;
+      }
+    /*
+      Proceed to next image.
+    */
+    if (image_info->number_scenes != 0)
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    do
+    {
+      c=ReadBlobByte(image);
+    } while ((isgraph((int) ((unsigned char) c)) == 0) && (c != EOF));
+    if ((c != EOF) && ((c == 'i') || (c == 'I')))
+      {
+        /*
+          Allocate next image structure.
+        */
+        AcquireNextImage(image_info,image,exception);
+        if (GetNextImageInList(image) == (Image *) NULL)
+          {
+            status=MagickFalse;
+            break;
+          }
+        image=SyncNextImageInList(image);
+        status=SetImageProgress(image,LoadImagesTag,TellBlob(image),
+          GetBlobSize(image));
+        if (status == MagickFalse)
+          break;
+      }
+  } while (c != EOF && ((c == 'i') || (c == 'I')));
+  (void) CloseBlob(image);
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  return(GetFirstImageInList(image));
+}

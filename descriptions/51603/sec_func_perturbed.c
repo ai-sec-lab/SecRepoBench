@@ -1,12 +1,12 @@
 private int
-parse_strength(struct magic_set *ms, struct magic_entry *Thenewvariablenameformeshouldbemyself, const char *line,
+parse_strength(struct magic_set *ms, struct magic_entry *myself, const char *line,
     size_t len __attribute__((__unused__)))
 {
 	const char *l = line;
 	char *el;
 	unsigned long factor;
 	char sbuf[512];
-	struct magic *m = &Thenewvariablenameformeshouldbemyself->mp[0];
+	struct magic *m = &myself->mp[0];
 
 	if (m->factor_op != FILE_FACTOR_OP_NONE) {
 		file_magwarn(ms,

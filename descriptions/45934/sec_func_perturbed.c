@@ -21,7 +21,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
   char
     id[MagickPathExtent],
     keyword[MagickPathExtent],
-    *options;
+    *headeroptions;
 
   double
     version;
@@ -40,7 +40,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
 
 #if defined(MAGICKCORE_LZMA_DELEGATE)
   lzma_stream
-    lzmainitializer = LZMA_STREAM_INIT,
+    initialize_lzma = LZMA_STREAM_INIT,
     lzma_info = LZMA_STREAM_INIT;
 
   lzma_allocator
@@ -128,7 +128,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
     */
     SetGeometryInfo(&geometry_info);
     length=MagickPathExtent;
-    options=AcquireString((char *) NULL);
+    headeroptions=AcquireString((char *) NULL);
     quantum_format=UndefinedQuantumFormat;
     profiles=(LinkedListInfo *) NULL;
     colors=0;
@@ -171,7 +171,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
           }
           if (comment == (char *) NULL)
             {
-              options=DestroyString(options);
+              headeroptions=DestroyString(headeroptions);
               ThrowMIFFException(ResourceLimitError,"MemoryAllocationFailed");
             }
           *p='\0';
@@ -196,7 +196,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               c=ReadBlobByte(image);
             } while (c != EOF);
             *p='\0';
-            p=options;
+            p=headeroptions;
             while ((isspace((int) ((unsigned char) c)) != 0) && (c != EOF))
               c=ReadBlobByte(image);
             if (c == (int) '=')
@@ -207,15 +207,15 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                 c=ReadBlobByte(image);
                 while ((c != (int) '}') && (c != EOF))
                 {
-                  if ((size_t) (p-options+1) >= length)
+                  if ((size_t) (p-headeroptions+1) >= length)
                     {
                       *p='\0';
                       length<<=1;
-                      options=(char *) ResizeQuantumMemory(options,length+
-                        MagickPathExtent,sizeof(*options));
-                      if (options == (char *) NULL)
+                      headeroptions=(char *) ResizeQuantumMemory(headeroptions,length+
+                        MagickPathExtent,sizeof(*headeroptions));
+                      if (headeroptions == (char *) NULL)
                         break;
-                      p=options+strlen(options);
+                      p=headeroptions+strlen(headeroptions);
                     }
                   *p++=(char) c;
                   c=ReadBlobByte(image);
@@ -228,17 +228,17 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                           c=ReadBlobByte(image);
                         }
                     }
-                  if (*options != '{')
+                  if (*headeroptions != '{')
                     if (isspace((int) ((unsigned char) c)) != 0)
                       break;
                 }
-                if (options == (char *) NULL)
+                if (headeroptions == (char *) NULL)
                   ThrowMIFFException(ResourceLimitError,
                     "MemoryAllocationFailed");
               }
             *p='\0';
-            if (*options == '{')
-              (void) CopyMagickString(options,options+1,strlen(options));
+            if (*headeroptions == '{')
+              (void) CopyMagickString(headeroptions,headeroptions+1,strlen(headeroptions));
             /*
               Assign a value to the specified keyword.
             */
@@ -253,13 +253,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       alpha_trait;
 
                     alpha_trait=ParseCommandOption(MagickPixelTraitOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (alpha_trait < 0)
                       break;
                     image->alpha_trait=(PixelTrait) alpha_trait;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'b':
@@ -267,13 +267,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"background-color") == 0)
                   {
-                    (void) QueryColorCompliance(options,AllCompliance,
+                    (void) QueryColorCompliance(headeroptions,AllCompliance,
                       &image->background_color,exception);
                     break;
                   }
                 if (LocaleCompare(keyword,"blue-primary") == 0)
                   {
-                    flags=ParseGeometry(options,&geometry_info);
+                    flags=ParseGeometry(headeroptions,&geometry_info);
                     image->chromaticity.blue_primary.x=geometry_info.rho;
                     image->chromaticity.blue_primary.y=geometry_info.sigma;
                     if ((flags & SigmaValue) == 0)
@@ -283,11 +283,11 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                   }
                 if (LocaleCompare(keyword,"border-color") == 0)
                   {
-                    (void) QueryColorCompliance(options,AllCompliance,
+                    (void) QueryColorCompliance(headeroptions,AllCompliance,
                       &image->border_color,exception);
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'c':
@@ -299,7 +299,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       storage_class;
 
                     storage_class=ParseCommandOption(MagickClassOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (storage_class < 0)
                       break;
                     image->storage_class=(ClassType) storage_class;
@@ -307,7 +307,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                   }
                 if (LocaleCompare(keyword,"colors") == 0)
                   {
-                    colors=StringToUnsignedLong(options);
+                    colors=StringToUnsignedLong(headeroptions);
                     break;
                   }
                 if (LocaleCompare(keyword,"colorspace") == 0)
@@ -316,7 +316,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       colorspace;
 
                     colorspace=ParseCommandOption(MagickColorspaceOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (colorspace < 0)
                       break;
                     image->colorspace=(ColorspaceType) colorspace;
@@ -328,7 +328,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       compression;
 
                     compression=ParseCommandOption(MagickCompressOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (compression < 0)
                       break;
                     image->compression=(CompressionType) compression;
@@ -336,10 +336,10 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                   }
                 if (LocaleCompare(keyword,"columns") == 0)
                   {
-                    image->columns=StringToUnsignedLong(options);
+                    image->columns=StringToUnsignedLong(headeroptions);
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'd':
@@ -347,12 +347,12 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"delay") == 0)
                   {
-                    image->delay=StringToUnsignedLong(options);
+                    image->delay=StringToUnsignedLong(headeroptions);
                     break;
                   }
                 if (LocaleCompare(keyword,"depth") == 0)
                   {
-                    image->depth=StringToUnsignedLong(options);
+                    image->depth=StringToUnsignedLong(headeroptions);
                     break;
                   }
                 if (LocaleCompare(keyword,"dispose") == 0)
@@ -361,13 +361,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       dispose;
 
                     dispose=ParseCommandOption(MagickDisposeOptions,MagickFalse,
-                      options);
+                      headeroptions);
                     if (dispose < 0)
                       break;
                     image->dispose=(DisposeType) dispose;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'e':
@@ -379,13 +379,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       endian;
 
                     endian=ParseCommandOption(MagickEndianOptions,MagickFalse,
-                      options);
+                      headeroptions);
                     if (endian < 0)
                       break;
                     image->endian=(EndianType) endian;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'g':
@@ -393,7 +393,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"gamma") == 0)
                   {
-                    image->gamma=StringToDouble(options,(char **) NULL);
+                    image->gamma=StringToDouble(headeroptions,(char **) NULL);
                     break;
                   }
                 if (LocaleCompare(keyword,"gravity") == 0)
@@ -402,7 +402,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       gravity;
 
                     gravity=ParseCommandOption(MagickGravityOptions,MagickFalse,
-                      options);
+                      headeroptions);
                     if (gravity < 0)
                       break;
                     image->gravity=(GravityType) gravity;
@@ -410,7 +410,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                   }
                 if (LocaleCompare(keyword,"green-primary") == 0)
                   {
-                    flags=ParseGeometry(options,&geometry_info);
+                    flags=ParseGeometry(headeroptions,&geometry_info);
                     image->chromaticity.green_primary.x=geometry_info.rho;
                     image->chromaticity.green_primary.y=geometry_info.sigma;
                     if ((flags & SigmaValue) == 0)
@@ -418,7 +418,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                         image->chromaticity.green_primary.x;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'i':
@@ -429,15 +429,15 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                     if (*id != '\0')
                       ThrowMIFFException(CorruptImageError,
                         "ImproperImageHeader");
-                    (void) CopyMagickString(id,options,MagickPathExtent);
+                    (void) CopyMagickString(id,headeroptions,MagickPathExtent);
                     break;
                   }
                 if (LocaleCompare(keyword,"iterations") == 0)
                   {
-                    image->iterations=StringToUnsignedLong(options);
+                    image->iterations=StringToUnsignedLong(headeroptions);
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'm':
@@ -449,7 +449,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       matte;
 
                     matte=ParseCommandOption(MagickBooleanOptions,MagickFalse,
-                      options);
+                      headeroptions);
                     if (matte < 0)
                       break;
                     image->alpha_trait=matte == 0 ? UndefinedPixelTrait :
@@ -458,16 +458,16 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                   }
                 if (LocaleCompare(keyword,"mattecolor") == 0)
                   {
-                    (void) QueryColorCompliance(options,AllCompliance,
+                    (void) QueryColorCompliance(headeroptions,AllCompliance,
                       &image->matte_color,exception);
                     break;
                   }
                 if (LocaleCompare(keyword,"montage") == 0)
                   {
-                    (void) CloneString(&image->montage,options);
+                    (void) CloneString(&image->montage,headeroptions);
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'o':
@@ -479,13 +479,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       orientation;
 
                     orientation=ParseCommandOption(MagickOrientationOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (orientation < 0)
                       break;
                     image->orientation=(OrientationType) orientation;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'p':
@@ -496,7 +496,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                     char
                       *geometry;
 
-                    geometry=GetPageGeometry(options);
+                    geometry=GetPageGeometry(headeroptions);
                     (void) ParseAbsoluteGeometry(geometry,&image->page);
                     geometry=DestroyString(geometry);
                     break;
@@ -507,7 +507,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       intensity;
 
                     intensity=ParseCommandOption(MagickPixelIntensityOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (intensity < 0)
                       break;
                     image->intensity=(PixelIntensityMethod) intensity;
@@ -518,10 +518,10 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                     if (profiles == (LinkedListInfo *) NULL)
                       profiles=NewLinkedList(0);
                     (void) AppendValueToLinkedList(profiles,
-                      AcquireString(options));
+                      AcquireString(headeroptions));
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'q':
@@ -529,7 +529,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"quality") == 0)
                   {
-                    image->quality=StringToUnsignedLong(options);
+                    image->quality=StringToUnsignedLong(headeroptions);
                     break;
                   }
                 if ((LocaleCompare(keyword,"quantum-format") == 0) ||
@@ -539,13 +539,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       format;
 
                     format=ParseCommandOption(MagickQuantumFormatOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (format < 0)
                       break;
                     quantum_format=(QuantumFormatType) format;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'r':
@@ -553,7 +553,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"red-primary") == 0)
                   {
-                    flags=ParseGeometry(options,&geometry_info);
+                    flags=ParseGeometry(headeroptions,&geometry_info);
                     image->chromaticity.red_primary.x=geometry_info.rho;
                     image->chromaticity.red_primary.y=geometry_info.sigma;
                     if ((flags & SigmaValue) == 0)
@@ -567,7 +567,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       rendering_intent;
 
                     rendering_intent=ParseCommandOption(MagickIntentOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (rendering_intent < 0)
                       break;
                     image->rendering_intent=(RenderingIntent) rendering_intent;
@@ -575,7 +575,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                   }
                 if (LocaleCompare(keyword,"resolution") == 0)
                   {
-                    flags=ParseGeometry(options,&geometry_info);
+                    flags=ParseGeometry(headeroptions,&geometry_info);
                     image->resolution.x=geometry_info.rho;
                     image->resolution.y=geometry_info.sigma;
                     if ((flags & SigmaValue) == 0)
@@ -584,10 +584,10 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                   }
                 if (LocaleCompare(keyword,"rows") == 0)
                   {
-                    image->rows=StringToUnsignedLong(options);
+                    image->rows=StringToUnsignedLong(headeroptions);
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 's':
@@ -595,10 +595,10 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"scene") == 0)
                   {
-                    image->scene=StringToUnsignedLong(options);
+                    image->scene=StringToUnsignedLong(headeroptions);
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 't':
@@ -606,7 +606,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"ticks-per-second") == 0)
                   {
-                    image->ticks_per_second=(ssize_t) StringToLong(options);
+                    image->ticks_per_second=(ssize_t) StringToLong(headeroptions);
                     break;
                   }
                 if (LocaleCompare(keyword,"tile-offset") == 0)
@@ -614,7 +614,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                     char
                       *geometry;
 
-                    geometry=GetPageGeometry(options);
+                    geometry=GetPageGeometry(headeroptions);
                     (void) ParseAbsoluteGeometry(geometry,&image->tile_offset);
                     geometry=DestroyString(geometry);
                     break;
@@ -625,13 +625,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       type;
 
                     type=ParseCommandOption(MagickTypeOptions,MagickFalse,
-                      options);
+                      headeroptions);
                     if (type < 0)
                       break;
                     image->type=(ImageType) type;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'u':
@@ -643,13 +643,13 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                       units;
 
                     units=ParseCommandOption(MagickResolutionOptions,
-                      MagickFalse,options);
+                      MagickFalse,headeroptions);
                     if (units < 0)
                       break;
                     image->units=(ResolutionType) units;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'v':
@@ -657,10 +657,10 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"version") == 0)
                   {
-                    version=StringToDouble(options,(char **) NULL);
+                    version=StringToDouble(headeroptions,(char **) NULL);
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               case 'w':
@@ -668,7 +668,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               {
                 if (LocaleCompare(keyword,"white-point") == 0)
                   {
-                    flags=ParseGeometry(options,&geometry_info);
+                    flags=ParseGeometry(headeroptions,&geometry_info);
                     image->chromaticity.white_point.x=geometry_info.rho;
                     image->chromaticity.white_point.y=geometry_info.sigma;
                     if ((flags & SigmaValue) == 0)
@@ -676,12 +676,12 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
                         image->chromaticity.white_point.x;
                     break;
                   }
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
               default:
               {
-                (void) SetImageProperty(image,keyword,options,exception);
+                (void) SetImageProperty(image,keyword,headeroptions,exception);
                 break;
               }
             }
@@ -691,7 +691,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
       while (isspace((int) ((unsigned char) c)) != 0)
         c=ReadBlobByte(image);
     }
-    options=DestroyString(options);
+    headeroptions=DestroyString(headeroptions);
     (void) ReadBlobByte(image);
     /*
       Verify that required image information is defined.
@@ -979,7 +979,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
         allocator.alloc=AcquireLZMAMemory;
         allocator.free=RelinquishLZMAMemory;
         allocator.opaque=(void *) image;
-        lzma_info=lzmainitializer;
+        lzma_info=initialize_lzma;
         lzma_info.allocator=(&allocator);
         code=lzma_auto_decoder(&lzma_info,(uint64_t) -1,0);
         if (code != LZMA_OK)
