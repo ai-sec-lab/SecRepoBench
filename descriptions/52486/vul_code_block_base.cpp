@@ -1,4 +1,8 @@
-{
+scpd = 0;
+      wordnum = oldwordnum;
+      numsyllable = oldnumsyllable;
+
+      if (soldi != 0) {
         i = soldi;
         st.assign(word);  // XXX add more optim.
         soldi = 0;

@@ -1,1 +1,0 @@
-err = MATIO_E_NO_ERROR;

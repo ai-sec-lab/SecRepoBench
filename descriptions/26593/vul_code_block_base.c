@@ -1,4 +1,8 @@
-val = atoi(time);
+int len;
+    size_t val;
+
+    len = strlen(time);
+    val = atoi(time);
 
     /* String time to seconds */
     if (time[len - 1] == 'D' || time[len - 1] == 'd') {
@@ -10,5 +14,3 @@ val = atoi(time);
     else if (time[len - 1] == 'M' || time[len - 1] == 'm') {
         val *= 60;
     }
-
-    return val;

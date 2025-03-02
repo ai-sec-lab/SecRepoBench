@@ -34,7 +34,7 @@ int HashMgr::decode_flags(unsigned short** result, const std::string& flags, Fil
       unsigned short* dest = *result;
       const char* src = flags.c_str();
       for (size_t p = 0; p < flags.size(); ++p) {
-        // <MASK>
+        if (flags[p] == ',') // <MASK>
       }
       int i = atoi(src);
       if (i >= DEFAULTFLAGS || i < 0) {

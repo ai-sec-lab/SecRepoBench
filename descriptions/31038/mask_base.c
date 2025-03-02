@@ -1412,14 +1412,10 @@ static int get_vlmeta_from_trailer(blosc2_frame_s* frame, blosc2_schunk* schunk,
       return BLOSC2_ERROR_DATA;
     }
 
-    // Read the size of the content
-    int32_t content_len;
-    trailer_pos += sizeof(content_len);
-    if (trailer_len < trailer_pos) {
-      return BLOSC2_ERROR_READ_BUFFER;
-    }
-    big_store(&content_len, content_marker + 1, sizeof(content_len));
     // <MASK>
+    char* content = malloc((size_t)content_len);
+    memcpy(content, content_marker + 1 + 4, (size_t)content_len);
+    metalayer->content = (uint8_t*)content;
   }
   return 1;
 }

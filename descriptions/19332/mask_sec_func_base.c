@@ -166,7 +166,18 @@ static ndpi_int_stun_t ndpi_int_check_stun(struct ndpi_detection_module_struct *
     if((msg_type & 0x3EEF) <= 0x000B) /* http://www.3cx.com/blog/voip-howto/stun-details/ */ {
       u_int offset = 20;
 
+      /*
+       This can either be the standard RTCP or Ms Lync RTCP that
+       later will become Ms Lync RTP. In this case we need to
+       be careful before deciding about the protocol before dissecting the packet
+
+       MS Lync = Skype
+       https://en.wikipedia.org/wiki/Skype_for_Business
+       */
+
       // <MASK>
+
+      goto udp_stun_found;
     } else if(msg_type == 0x0800) {
       flow->guessed_host_protocol_id = NDPI_PROTOCOL_WHATSAPP_CALL;
       return(NDPI_IS_STUN);

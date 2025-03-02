@@ -39,4 +39,3 @@ if (pfx->OperatorStack[pfx->usedOprStack-1] == oQuery) {
     (void) AddAddressingElement (pfx, rGoto, NULL_ADDRESS);
     /* address will be after the subexpression */
   }
-  return MagickTrue;

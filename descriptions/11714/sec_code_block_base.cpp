@@ -1,4 +1,9 @@
-if (unlikely (env.argStack.get_count () < ((k+1) * n)))
+unsigned int n, k;
+
+    env.process_blend ();
+    k = env.get_region_count ();
+    n = env.argStack.pop_uint ();
+    if (unlikely (env.argStack.get_count () < ((k+1) * n)))
     {
       env.set_error ();
       return;

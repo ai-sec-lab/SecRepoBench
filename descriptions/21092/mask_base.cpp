@@ -76,11 +76,6 @@ struct SegmentMaps : ArrayOf<AxisValueMap>
     }
 
     // <MASK>
-
-    if (unlikely (arrayZ[i-1].fromCoord == arrayZ[i].fromCoord))
-      return arrayZ[i-1].toCoord;
-
-    int denom = arrayZ[i].fromCoord - arrayZ[i-1].fromCoord;
     return arrayZ[i-1].toCoord +
 	   ((arrayZ[i].toCoord - arrayZ[i-1].toCoord) *
 	    (value - arrayZ[i-1].fromCoord) + denom/2) / denom;

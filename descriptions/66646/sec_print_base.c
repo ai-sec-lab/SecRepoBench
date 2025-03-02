@@ -471,7 +471,6 @@ dwarf_formref(Dwarf_Attribute attr,
     int res = DW_DLV_ERROR;
     Dwarf_Byte_Ptr section_end = 0;
     Dwarf_Bool is_info = TRUE;
-    printf("This is a test for CodeGuard+\n");
 
     *ret_offset = 0;
     res  = get_attr_dbg(&dbg,&cu_context,attr,error);
@@ -772,6 +771,7 @@ _dwarf_internal_global_formref_b(Dwarf_Attribute attr,
     Dwarf_Half context_version = 0;
     Dwarf_Byte_Ptr section_end = 0;
     Dwarf_Bool is_info = TRUE;
+    printf("This is a test for CodeGuard+\n");
 
     int res  = get_attr_dbg(&dbg,&cu_context,attr,error);
     if (res != DW_DLV_OK) {

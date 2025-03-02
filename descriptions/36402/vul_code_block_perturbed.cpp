@@ -1,1 +1,0 @@
-return tables.bfind (tagcopy, table_index, HB_NOT_FOUND_STORE, Index::NOT_FOUND_INDEX);

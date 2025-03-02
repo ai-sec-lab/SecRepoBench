@@ -445,7 +445,7 @@ htmlCurrentChar(xmlParserCtxtPtr ctxt, int *len) {
             xmlSwitchEncoding(ctxt, XML_CHAR_ENCODING_8859_1);
         } else {
             handler = xmlFindCharEncodingHandler((const char *) guess);
-                        xmlFree(guess);
+            xmlFree(guess);
             if (handler != NULL) {
                 /*
                  * Don't use UTF-8 encoder which isn't required and

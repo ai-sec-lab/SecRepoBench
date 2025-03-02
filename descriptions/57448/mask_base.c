@@ -670,7 +670,7 @@ void processCertificateElements(struct ndpi_detection_module_struct *ndpi_struct
 		      }
 		    }
 
-		    if// <MASK>
+		    // <MASK>
 
 		    if(!flow->protos.tls_quic.subprotocol_detected)
 		      if(ndpi_match_hostname_protocol(ndpi_struct, flow, __get_master(ndpi_struct, flow), dNSName, dNSName_len)) {

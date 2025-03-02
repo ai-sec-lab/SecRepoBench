@@ -1,4 +1,3 @@
-case 78:
 #line 1207 "grammar.y" /* yacc.c:1663  */
     {
         // Free all the loop variable identifiers and set loop_depth to 0. This
@@ -60,5 +59,3 @@ case 78:
         fail_if_error(yr_parser_emit_with_arg(
             yyscanner, OP_POP_M, var_frame + 2, NULL, NULL));
       }
-#line 2898 "grammar.c" /* yacc.c:1663  */
-    break;

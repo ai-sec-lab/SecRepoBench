@@ -92,13 +92,16 @@ MagickExport MagickBooleanType DrawImage(Image *image,const DrawInfo *draw_info,
   primitive_extent=(double) strlen(primitive);
   (void) SetImageArtifact(image,"MVG",primitive);
   n=0;
-  number_stops=0;
-  stops=(StopInfo *) NULL;
-  /*
-    Allocate primitive info memory.
-  */
-  graphic_context=(DrawInfo **) AcquireMagickMemory(sizeof(*graphic_context));
   // <MASK>
+  if (primitive_info == (PrimitiveInfo *) NULL)
+    {
+      primitive=DestroyString(primitive);
+      for ( ; n >= 0; n--)
+        graphic_context[n]=DestroyDrawInfo(graphic_context[n]);
+      graphic_context=(DrawInfo **) RelinquishMagickMemory(graphic_context);
+      ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+        image->filename);
+    }
   graphic_context[n]=CloneDrawInfo((ImageInfo *) NULL,draw_info);
   graphic_context[n]->viewbox=image->page;
   if ((image->page.width == 0) || (image->page.height == 0))

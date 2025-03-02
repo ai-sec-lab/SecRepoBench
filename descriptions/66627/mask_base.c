@@ -622,7 +622,6 @@ Mat_H5ReadFieldNames(matvar_t *matvar, hid_t dset_id, hsize_t *nfields)
 {
     hsize_t i;
     hid_t attr_id, space_id;
-    herr_t herr;
     // <MASK>
     if ( *nfields > 0 ) {
         hid_t field_id;

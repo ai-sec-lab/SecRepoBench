@@ -12,7 +12,7 @@ static plist_t parse_primitive(const char* js, jsmntok_info_t* ti, int* index)
         val = plist_new_bool(0);
     } else if (!strncmp("true", str_val, str_len)) {
         val = plist_new_bool(1);
-    } else if (!strncmp("null", str_val, str_len)) // <MASK>
+    } else // <MASK>
     (*index)++;
     return val;
 }

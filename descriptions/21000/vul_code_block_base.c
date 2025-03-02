@@ -1,4 +1,5 @@
-u_int16_t msg_len, offset, to_add;
+{
+    u_int16_t msg_len, offset, to_add;
 
     if(packet->payload[0] == 0x0)
       offset = 13, to_add = 13;
@@ -9,3 +10,4 @@ u_int16_t msg_len, offset, to_add;
 
     if((msg_len+to_add) == packet->payload_packet_len)
       goto capwap_found;
+  }

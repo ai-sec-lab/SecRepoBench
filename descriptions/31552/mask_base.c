@@ -1375,11 +1375,7 @@ static int blosc_d(
 
       token = src[0];
       src += 1;
-      ctbytes += 1;
-
-      if (token & 0x1) // <MASK>
-      nbytes = neblock;
-      cbytes = 0;  // everything is encoded in the cbytes token
+      // <MASK>
     }
     else if (cbytes == neblock) {
       memcpy(_dest, src, (unsigned int)neblock);

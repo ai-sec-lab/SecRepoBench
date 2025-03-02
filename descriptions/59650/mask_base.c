@@ -285,12 +285,7 @@ namespace pcpp
 		{
 			TLVRecordType resRec(NULL); // for NRVO optimization
 
-			if (record.isNull())
-				return resRec;
-
 			// <MASK>
-
-			return resRec;
 		}
 
 		/**

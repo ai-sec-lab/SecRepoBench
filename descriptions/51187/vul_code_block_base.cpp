@@ -1,4 +1,4 @@
-  const std::string* word = &in_word;
+const std::string* word = &in_word;
   const std::string* desc = in_desc;
 
   std::string *word_copy = NULL;

@@ -7,11 +7,6 @@ uint8_t* get_coffsets(blosc2_frame_s *frame, int32_t header_len, int64_t cbytes,
   }
   if (frame->cframe != NULL) {
     // <MASK>
-    // For in-memory frames, the coffset is just one pointer away
-    uint8_t* off_start = frame->cframe + off_pos;
-    if (off_cbytes != NULL) {
-      *off_cbytes = *(int32_t*) (off_start + BLOSC2_CHUNK_CBYTES);
-    }
     return off_start;
   }
 

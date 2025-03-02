@@ -1,5 +1,4 @@
-
-  if (al > std::numeric_limits<short>::max()) {
+if (al > std::numeric_limits<short>::max()) {
     HUNSPELL_WARNING(stderr, "error: affix len %d is over max limit\n", al);
     free_flag(aff, al);
     return 1;

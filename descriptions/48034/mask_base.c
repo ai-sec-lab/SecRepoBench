@@ -297,18 +297,13 @@ static int search_valid_dns(struct ndpi_detection_module_struct *ndpi_struct,
 	    break;
 	  }
 
+	  if((data_len = getNameLength(x, packet->payload,
+				       packet->payload_packet_len)) == 0) {
+	    break;
+	  } else
+	    x += data_len;
+
 	  // <MASK>
-	  rsp_ttl  = ntohl(*((u_int32_t*)&packet->payload[x+2]));
-
-	  if(rsp_ttl == 0)
-	    ndpi_set_risk(ndpi_struct, flow, NDPI_DNS_SUSPICIOUS_TRAFFIC, "DNS Record with zero TTL");	  
-
-#ifdef DNS_DEBUG
-	  printf("[DNS] TTL = %u\n", rsp_ttl);
-	  printf("[DNS] [response] response_type=%d\n", rsp_type);
-#endif
-
-	  ndpi_check_dns_type(ndpi_struct, flow, rsp_type);
 
 	  flow->protos.dns.rsp_type = rsp_type;
 

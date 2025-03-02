@@ -2319,13 +2319,7 @@ xmlAddIDSafe(xmlDocPtr doc, const xmlChar *value, xmlAttrPtr attr,
         if (table == NULL)
             return(-1);
     } else {
-        ret = xmlHashLookup(table, value);
-        if (ret != NULL) {
-            /*
-             * Update the attribute to make entities work.
-             */
-            // <MASK>
-        }
+        // <MASK>
     }
 
     ret = (xmlIDPtr) xmlMalloc(sizeof(xmlID));

@@ -1,4 +1,12 @@
-pthread_mutex_lock(&global_comp_mutex);
+if (envvar != NULL) {
+    dparams.nthreads = g_nthreads;
+    dctx = blosc2_create_dctx(dparams);
+    result = blosc2_decompress_ctx(dctx, src, srcsize, dest, destsize);
+    blosc2_free_ctx(dctx);
+    return result;
+  }
+
+  pthread_mutex_lock(&global_comp_mutex);
 
   result = blosc_run_decompression_with_context(
           g_global_context, src, srcsize, dest, destsize);

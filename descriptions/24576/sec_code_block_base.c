@@ -1,4 +1,13 @@
-if(packet[0] == 0x0f || packet[0] == 0x8f) {
+case DLT_PPP_SERIAL:
+    chdlc = (struct ndpi_chdlc *) &packet[eth_offset];
+    ip_offset = sizeof(struct ndpi_chdlc); /* CHDLC_OFF = 4 */
+    type = ntohs(chdlc->proto_code);
+    break;
+
+    /* Cisco PPP - 9 or 104 */
+  case DLT_C_HDLC:
+  case DLT_PPP:
+    if(packet[0] == 0x0f || packet[0] == 0x8f) {
       chdlc = (struct ndpi_chdlc *) &packet[eth_offset];
       ip_offset = sizeof(struct ndpi_chdlc); /* CHDLC_OFF = 4 */
       type = ntohs(chdlc->proto_code);
@@ -7,3 +16,5 @@ if(packet[0] == 0x0f || packet[0] == 0x8f) {
       type = ntohs(*((u_int16_t*)&packet[eth_offset]));
     }
     break;
+
+    /* IEEE 802.3 Ethernet - 1 */

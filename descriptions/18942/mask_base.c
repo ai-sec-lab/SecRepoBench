@@ -2832,7 +2832,10 @@ yyreduce:
 #line 2833 "grammar.c" /* yacc.c:1663  */
     break;
 
-  // <MASK>
+  case 78:
+// <MASK>
+#line 2898 "grammar.c" /* yacc.c:1663  */
+    break;
 
   case 80:
 #line 1315 "grammar.y" /* yacc.c:1663  */

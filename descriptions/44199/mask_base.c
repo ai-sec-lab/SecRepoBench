@@ -724,4 +724,6 @@ PLIST_API int plist_from_json(const char *json, uint32_t length, plist_t * plist
 
     int startindex = 0;
     // <MASK>
+    free(tokens);
+    return PLIST_ERR_SUCCESS;
 }

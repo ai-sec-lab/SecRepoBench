@@ -79,7 +79,6 @@ int flb_gzip_compress(void *in_data, size_t in_len,
 
     out_size = in_len + 32;
     out_buf = flb_malloc(out_size);
-
     if (!out_buf) {
         flb_errno();
         flb_error("[gzip] could not allocate outgoing buffer");

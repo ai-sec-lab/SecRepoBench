@@ -94,6 +94,8 @@ struct glyf
     }
 
     // <MASK>
+
+    return result;
   }
 
   bool

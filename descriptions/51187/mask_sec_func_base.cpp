@@ -5,7 +5,8 @@ int HashMgr::add_word(const std::string& in_word,
                       const std::string* in_desc,
                       bool onlyupcase,
                       int captype) {
-// <MASK>
+
+  // <MASK>
 
   // limit of hp->blen
   if (word->size() > std::numeric_limits<unsigned char>::max()) {

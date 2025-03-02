@@ -1354,7 +1354,11 @@ struct Lookup
       if (!markFilteringSet.sanitize (c)) return_trace (false);
     }
 
+    if (unlikely (!get_subtables<TSubTable> ().sanitize (c, this, get_type ())))
+      return_trace (false);
+
     // <MASK>
+    return_trace (true);
   }
 
   private:

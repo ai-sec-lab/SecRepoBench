@@ -32,6 +32,3 @@
 	      }
 	    }
 	  }
-	  
-	  flow->l4.tcp.mail_imap_stage += 1;
-	  saw_command = 1;

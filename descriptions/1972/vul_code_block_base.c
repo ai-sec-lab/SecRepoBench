@@ -59,18 +59,3 @@ switch (content->type) {
 		xmlSnprintfElementContent(buf, size, content->c2, 0);
 	    break;
     }
-    if (englob)
-        strcat(buf, ")");
-    switch (content->ocur) {
-        case XML_ELEMENT_CONTENT_ONCE:
-	    break;
-        case XML_ELEMENT_CONTENT_OPT:
-	    strcat(buf, "?");
-	    break;
-        case XML_ELEMENT_CONTENT_MULT:
-	    strcat(buf, "*");
-	    break;
-        case XML_ELEMENT_CONTENT_PLUS:
-	    strcat(buf, "+");
-	    break;
-    }

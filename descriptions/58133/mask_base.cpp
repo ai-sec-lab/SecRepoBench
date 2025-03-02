@@ -742,11 +742,6 @@ int HashMgr::decode_flags(unsigned short** result, const std::string& flags, Fil
       unsigned short* dest = *result;
       const char* src = flags.c_str();
       // <MASK>
-      *dest = (unsigned short)i;
-      if (*dest == 0)
-        HUNSPELL_WARNING(stderr, "error: line %d: 0 is wrong flag id\n",
-                         af->getlinenum());
-      break;
     }
     case FLAG_UNI: {  // UTF-8 characters
       std::vector<w_char> w;

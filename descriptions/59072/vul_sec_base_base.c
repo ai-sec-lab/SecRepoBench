@@ -2048,7 +2048,6 @@ has_op2_string:;
 		}
 
 		if (result == op1) {
-			/* special case, perform operations on result */
 			if (free_op1_string) {
 				/* op1_string will be used as the result, so we should not free it */
 				i_zval_ptr_dtor(result);

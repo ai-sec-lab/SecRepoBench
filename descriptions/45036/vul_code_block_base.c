@@ -1,4 +1,5 @@
-mpls.u32 = *((uint32_t *) &packet[ip_offset]);
+ETH_P_MPLS_MULTI:
+    mpls.u32 = *((uint32_t *) &packet[ip_offset]);
     mpls.u32 = ntohl(mpls.u32);
     workflow->stats.mpls_count++;
     type = ETH_P_IP, ip_offset += 4;

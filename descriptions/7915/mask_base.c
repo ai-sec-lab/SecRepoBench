@@ -736,13 +736,6 @@ static PathInfo *ConvertPrimitiveToPath(const PrimitiveInfo *primitive_info)
     Converts a PrimitiveInfo structure into a vector path structure.
   */
   // <MASK>
-  coordinates=0;
-  n=0;
-  p.x=(-1.0);
-  p.y=(-1.0);
-  q.x=(-1.0);
-  q.y=(-1.0);
-  start=0;
   for (i=0; primitive_info[i].primitive != UndefinedPrimitive; i++)
   {
     code=LineToCode;

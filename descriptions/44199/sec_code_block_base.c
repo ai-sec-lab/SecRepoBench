@@ -15,5 +15,3 @@ jsmntok_info_t ti = { tokens, parser.toknext };
         default:
             break;
     }
-    free(tokens);
-    return PLIST_ERR_SUCCESS;

@@ -1,4 +1,10 @@
-if (unlikely (!c->check_success (!obj_indices.in_error ())))
+if (c->length () - table_initpos == CmapSubtableFormat14::min_size)
+    {
+      c->revert (snap);
+      return;
+    }
+
+    if (unlikely (!c->check_success (!obj_indices.in_error ())))
       return;
 
     int tail_len = init_tail - c->tail;
@@ -9,7 +15,3 @@ if (unlikely (!c->check_success (!obj_indices.in_error ())))
 
     /* Correct the incorrect write order by reversing the order of the variation
        records array. */
-    _reverse_variation_records ();
-
-    /* Now that records are in the right order, we can set up the offsets. */
-    _add_links_to_variation_records (c, obj_indices);

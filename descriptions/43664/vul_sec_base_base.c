@@ -2099,8 +2099,7 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 		  if(flow->protos.tls_quic.tls_supported_versions == NULL)
 		    flow->protos.tls_quic.tls_supported_versions = ndpi_strdup(version_str);
 		}
-	      } 
-		  else if(extension_id == 65486 /* encrypted server name */) {
+	      } else if(extension_id == 65486 /* encrypted server name */) {
 		/*
 		   - https://tools.ietf.org/html/draft-ietf-tls-esni-06
 		   - https://blog.cloudflare.com/encrypted-sni/
@@ -2155,8 +2154,7 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 		  }
 		}
 		}
-	      }
-	      else if(extension_id == 65445 || /* QUIC transport parameters (drafts version) */
+	      } else if(extension_id == 65445 || /* QUIC transport parameters (drafts version) */
 		        extension_id == 57) { /* QUIC transport parameters (final version) */
 		u_int16_t s_offset = offset+extension_offset;
 		uint16_t final_offset;

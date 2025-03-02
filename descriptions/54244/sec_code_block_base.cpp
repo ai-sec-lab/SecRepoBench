@@ -1,4 +1,4 @@
-((rv) &&
+(rv) &&
              (checked_prefix || (words && words[wnum]) ||
               (compoundflag && TESTAFF(rv->astr, compoundflag, rv->alen)) ||
               ((oldwordnum == 0) && compoundbegin &&
@@ -26,6 +26,4 @@
                  ((word[i - 1] == word[i + 1]))  // may be word[i+1] == '\0'
                  )) ||
                (checkcompoundcase && scpd == 0 && !words && i < word.size() &&
-                cpdcase_check(word, i))))
-            // LANG_hu section: spec. Hungarian rule
-            ||
+                cpdcase_check(word, i)))

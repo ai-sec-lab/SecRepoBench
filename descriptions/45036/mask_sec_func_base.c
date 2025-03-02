@@ -229,8 +229,7 @@ struct ndpi_proto ndpi_workflow_process_packet(struct ndpi_workflow * workflow,
     break;
 
   case ETH_P_MPLS_UNI:
-  case ETH_P_MPLS_MULTI:
-    // <MASK>
+  case // <MASK>
 
   case ETH_P_PPPoE:
     workflow->stats.pppoe_count++;

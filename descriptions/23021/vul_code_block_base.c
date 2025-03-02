@@ -1,3 +1,8 @@
+u_int name_offset, padding_offset = body_offset + 4;
+
+		name_offset = padding_offset;
+		for(i=0; i<14; i++) if(packet->payload[name_offset] != 0x1b) name_offset++; /* ASN.1 */
+
 #ifdef KERBEROS_DEBUG
 		printf("name_offset=%u [%02X %02X] [byte 0 must be 0x1b]\n", name_offset, packet->payload[name_offset], packet->payload[name_offset+1]);
 #endif

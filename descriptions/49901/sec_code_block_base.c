@@ -1,4 +1,5 @@
-if(payload_len < 4)
+VALUE_UNISTR:
+      if(payload_len < 4)
 	return 0;
 
       v->value.ptr.raw = payload + 4;
@@ -8,3 +9,7 @@ if(payload_len < 4)
 
       if(t == VALUE_DATA)
 	siz--;
+
+      v->value_size = siz;
+      ret = siz + sizeof(siz);
+      break;

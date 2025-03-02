@@ -1,6 +1,4 @@
-if (*p == '[')
-            {
-              level++;
+level++;
               q=subexpression;
               for (p++; *p != '\0'; )
               {
@@ -20,6 +18,3 @@ if (*p == '[')
                 &depth,&beta,exception);
               i=(ssize_t) alpha;
               p++;
-            }
-          if (*p == '.')
-            p++;

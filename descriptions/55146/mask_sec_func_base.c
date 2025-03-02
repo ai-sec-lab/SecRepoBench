@@ -115,12 +115,15 @@ static int node_from_openstep(parse_ctx ctx, plist_t *plist)
                 byte_array_append(bytes, &b, 1);
                 ctx->pos++;
             }
-            if (ctx->err) {
-                byte_array_free(bytes);
-                plist_free_data(data);
-                goto err_out;
-            }
             // <MASK>
+            ctx->pos++;
+            data->buff = bytes->data;
+            data->length = bytes->len;
+            bytes->data = NULL;
+            byte_array_free(bytes);
+            *plist = plist_new_node(data);
+            parse_skip_ws(ctx);
+            break;
         } else if (*ctx->pos == '"' || *ctx->pos == '\'') {
             char c = *ctx->pos;
             ctx->pos++;

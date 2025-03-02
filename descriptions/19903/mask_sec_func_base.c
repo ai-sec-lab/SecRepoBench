@@ -497,4 +497,10 @@ static double FxEvaluateSubexpression(FxInfo *fx_info,
       }
     }
   // <MASK>
+  subexpression=DestroyString(subexpression);
+  q=(char *) expression;
+  alpha=InterpretSiPrefixValue(expression,&q);
+  if (q == expression)
+    alpha=FxGetSymbol(fx_info,channel,x,y,expression,depth+1,exception);
+  FxReturn(alpha);
 }

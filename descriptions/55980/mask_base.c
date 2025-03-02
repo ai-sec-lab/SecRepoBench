@@ -11400,8 +11400,7 @@ xmlCheckCdataPush(const xmlChar *utf, int len, int complete) {
  *
  * Returns zero if no parsing was possible
  */
-static int
-xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
     int ret = 0;
     int avail, tlen;
     xmlChar cur, next;
@@ -12105,9 +12104,8 @@ done:
     xmlGenericError(xmlGenericErrorContext, "PP: done %d\n", ret);
 #endif
     return(ret);
-    // <MASK>
-        return(0);
-    }
+// <MASK>
+}
 
 /**
  * xmlParseChunk:

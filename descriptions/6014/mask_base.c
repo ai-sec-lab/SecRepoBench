@@ -1524,13 +1524,7 @@ static char *ParseEntities(char *xml,char **entities,int state)
       /*
         Normalize spaces for non-CDATA attributes.
       */
-      for (xml=p; *xml != '\0'; xml++)
-      {
-        // <MASK>
-      }
-      xml--;
-      if ((xml >= p) && (*xml == ' '))
-        *xml='\0';
+      // <MASK>
     }
   return(p == q ? ConstantString(p) : p);
 }

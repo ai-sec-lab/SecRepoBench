@@ -8,3 +8,8 @@ if (value <= arrayZ[0].fromCoord)
 
     if (value >= arrayZ[i].fromCoord)
       return value - arrayZ[i].fromCoord + arrayZ[i].toCoord;
+
+    if (unlikely (arrayZ[i-1].fromCoord == arrayZ[i].fromCoord))
+      return arrayZ[i-1].toCoord;
+
+    int denom = arrayZ[i].fromCoord - arrayZ[i-1].fromCoord;

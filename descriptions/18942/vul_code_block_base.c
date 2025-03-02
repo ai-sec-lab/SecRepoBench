@@ -1,4 +1,3 @@
-case 78:
 #line 1207 "grammar.y" /* yacc.c:1663  */
     {
         // Free all the loop variable identifiers and set loop_depth to 0. This
@@ -15,11 +14,11 @@ case 78:
         compiler->loop_depth = 0;
         YYERROR;
       }
-#line 2853 "grammar.c" /* yacc.c:1663  */
+#line 2861 "grammar.c" /* yacc.c:1663  */
     break;
 
   case 79:
-#line 1274 "grammar.y" /* yacc.c:1663  */
+#line 1282 "grammar.y" /* yacc.c:1663  */
     {
         // var_frame is used for accessing local variables used in this loop.
         // All local variables are accessed using var_frame as a reference,
@@ -52,5 +51,3 @@ case 78:
         fail_if_error(yr_parser_emit_with_arg(
             yyscanner, OP_POP_M, var_frame + 2, NULL, NULL));
       }
-#line 2890 "grammar.c" /* yacc.c:1663  */
-    break;

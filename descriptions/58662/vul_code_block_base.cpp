@@ -23,3 +23,6 @@ for (const auto gid_klass_pair : + (++it))
 
     if (likely (record)) record->last = prev_gid;
     rangeRecord.len = num_ranges;
+    rangeRecord.as_array ().qsort (RangeRecord<Types>::cmp_range); // To handle unsorted glyph order.
+
+    return_trace (true);

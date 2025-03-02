@@ -150,12 +150,13 @@ xmlStaticCopyNode(xmlNodePtr node, xmlDocPtr doc, xmlNodePtr parent,
         insert = ret;
         while (cur != NULL) {
             xmlNodePtr copy = xmlStaticCopyNode(cur, doc, insert, 2);
-            if (copy == NULL) {
-                xmlFreeNode(ret);
-                return(NULL);
-            }
-
             // <MASK>
+
+            if (cur->children != NULL) {
+                cur = cur->children;
+                insert = copy;
+                continue;
+            }
 
             while (1) {
                 if (cur->next != NULL) {

@@ -1,4 +1,4 @@
-if (flags[p] == ',') {
+{
           int i = atoi(src);
           if (i >= DEFAULTFLAGS && af != NULL) {
             HUNSPELL_WARNING(

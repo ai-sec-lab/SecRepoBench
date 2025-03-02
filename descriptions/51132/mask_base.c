@@ -743,17 +743,7 @@ static int multiline_parser_conf_file(const char *cfg, struct flb_cf *cf,
             goto fconf_error;
         }
 
-        /* type */
-        tmp = get_parser_key(config, cf, s, "type");
-        if (!tmp) {
-            flb_error("[multiline_parser] no 'type' defined in file '%s'", cfg);
-            goto fconf_error;
-        }
-        else {
-            // <MASK>
-        }
-
-        /* match_string */
+        // <MASK>
         match_string = get_parser_key(config, cf, s, "match_string");
 
         /* negate */

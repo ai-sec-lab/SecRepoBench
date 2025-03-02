@@ -1,4 +1,6 @@
-mz_ulong crc;
+void *out_buf;
+    z_stream strm;
+    mz_ulong crc;
 
 
     /*
@@ -17,3 +19,10 @@ mz_ulong crc;
      *   size of input
      */
     out_size = 10 + 8 + max_input_expansion + in_len;
+    out_buf = flb_malloc(out_size);
+
+    if (!out_buf) {
+        flb_errno();
+        flb_error("[gzip] could not allocate outgoing buffer");
+        return -1;
+    }

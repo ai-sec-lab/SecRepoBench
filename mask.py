@@ -1,4 +1,5 @@
 import os
+import glob
 import re
 import json
 import random
@@ -7,7 +8,6 @@ import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser
 import lizard
 from utils import *
-from get_new_var import APIEvaler
 from insert_print import insert_print
 
 
@@ -190,6 +190,15 @@ def remove_sl_comments_code_block(code_block):
     return '\n'.join(code_block_lines)
 
 
+def get_nontrivial_line_len(code_block):
+    # count lines that are not comments or blank
+    code_block_comments_rm = remove_sl_comments_code_block(code_block)
+    code_block_lines = re.split(r'\n', code_block_comments_rm)
+    code_block_lines = [ln for ln in code_block_lines if ln.strip() != '']
+
+    return len(code_block_lines)
+
+
 def find_functions(node, func_pattern, x, y):
     """Recursively finds function definitions and their variable declarations."""
     results = []
@@ -227,11 +236,6 @@ def find_closest_func(func_lizard, funcs_ts):
 
 
 def get_code_block(function_node, x, y, total_lines, source_code, mod_func, source_code_lines, modified_section):
-    # for single line changes, increase scope +3 lines each side
-    if x == y:
-        x = max(x-3, function_node.start_point[0] + 1)
-        y = min(y+3, function_node.end_point[0] + 1)
-    
     # Find the natural code block
     sec_code_block = find_code_block(function_node, x, y, total_lines, modified_section, consider_sibling=True)
 
@@ -427,25 +431,6 @@ def get_mod_lines_deleted(diff, diff_non_trivial):
     return modified_lines
 
 
-def get_new_var(function_node, old_var, evaler, attempt=1):
-    # make prompt for LM to make a new_var
-    prompt = f"Below is a C/C++ function. Create a new name for the variable {old_var}. "
-    prompt += "The new variable name should be different from the old_var but still be reasonable given the surrounding code context. "
-    prompt += "For example, a variable named 'dst' that tracks geometric distance can be renamed 'distance'. "
-    prompt += "As another example, a variable named 'x' that tracks a column index can be renamed 'column_index'. "
-    prompt += "Only return the new variable name. "
-    prompt += "DO NOT include any other information, such as a preamble or suffix."
-    prompt += "\n```\n"
-    prompt += function_node.text.decode('utf-8')
-    prompt += "\n```\n"
-
-    new_var = evaler.get_response(prompt)
-    if new_var == old_var and attempt < 5:
-        attempt += 1
-        new_var = get_new_var(function_node, old_var, evaler, attempt)
-    return new_var
-
-
 def get_ts_function_node(root_node, version, diff, diff_non_trivial, changed_file, changed_function, source_code):
 
     # Find the function containing the first modified line (lizard)
@@ -504,34 +489,31 @@ def make_vul_sec_base_file(mask_content, vul_code_block):
     return mod_file_content
 
 
-def mask_helper(id, case, base_path, mod, perturbed_content=None):
+def mask_helper(id, case, base_path):
     delta_x = 0
     delta_y = 0
-    sec_code_block, vul_code_block, x = mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content)
-    sec_code_block_comments_rm = remove_sl_comments_code_block(sec_code_block)
-    vul_code_block_comments_rm = remove_sl_comments_code_block(vul_code_block)
+    sec_code_block, vul_code_block = mask(id, case, base_path, delta_x, delta_y)
 
-    while sec_code_block_comments_rm.strip() == '' or vul_code_block_comments_rm.strip() == '':
-        print(f'ID {id} has empty code block, adding surrounding line')
+    sec_line_len = get_nontrivial_line_len(sec_code_block)
+    vul_line_len = get_nontrivial_line_len(vul_code_block)
+
+    while sec_line_len < 10 or vul_line_len < 10:
+        print(f'ID {id} has code block <10 lines, adding surrounding line')
         if delta_x == delta_y:
             delta_y += 1
         else:
             delta_x += 1
         
-        output = mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content)
+        output = mask(id, case, base_path, delta_x, delta_y)
         if output is None:  # range exceeds modified function
             break
         else:
-            sec_code_block, vul_code_block, x = output
-            sec_code_block_comments_rm = remove_sl_comments_code_block(sec_code_block)
-            vul_code_block_comments_rm = remove_sl_comments_code_block(vul_code_block)
-    
-    return sec_code_block
+            sec_code_block, vul_code_block = output
+            sec_line_len = get_nontrivial_line_len(sec_code_block)
+            vul_line_len = get_nontrivial_line_len(vul_code_block)
 
 
-def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
-
-    print(f"Processing {id}, {mod}")
+def mask(id, case, base_path, delta_x, delta_y):
 
     base_path_id = os.path.join(base_path, id)
     if not os.path.exists(base_path_id):
@@ -546,49 +528,36 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
     language = determine_language(ext)
     if language == 'c':
         LANGUAGE = C_LANGUAGE
-        mask_file = f'descriptions/{id}/mask_{mod}.c'
-        sec_code_block_file = f'descriptions/{id}/sec_code_block_{mod}.c'
-        vul_code_block_file = f'descriptions/{id}/vul_code_block_{mod}.c'
-        sec_file = f'descriptions/{id}/sec_{mod}.c'
-        vul_file = f'descriptions/{id}/vul_{mod}.c'
-        sec_print_file = f'descriptions/{id}/sec_print_{mod}.c'
-        sec_func_file = f'descriptions/{id}/sec_func_{mod}.c'
-        mask_sec_func_file = f'descriptions/{id}/mask_sec_func_{mod}.c'
-        vul_sec_base_file = f'descriptions/{id}/vul_sec_base_{mod}.c'
     elif language == 'cpp':
         LANGUAGE = CPP_LANGUAGE
-        mask_file = f'descriptions/{id}/mask_{mod}.cpp'
-        sec_code_block_file = f'descriptions/{id}/sec_code_block_{mod}.cpp'
-        vul_code_block_file = f'descriptions/{id}/vul_code_block_{mod}.cpp'
-        sec_file = f'descriptions/{id}/sec_{mod}.cpp'
-        vul_file = f'descriptions/{id}/vul_{mod}.cpp'
-        sec_print_file = f'descriptions/{id}/sec_print_{mod}.cpp'
-        sec_func_file = f'descriptions/{id}/sec_func_{mod}.cpp'
-        mask_sec_func_file =f'descriptions/{id}/mask_sec_func_{mod}.cpp'
-        vul_sec_base_file = f'descriptions/{id}/vul_sec_base_{mod}.cpp'
     else:
         print(f"Language of modified file not recognized for id {id}")
         return
+    
+    # output file names
+    sec_code_block_file = f'descriptions/{id}/sec_code_block_base.{language}'
+    vul_code_block_file = f'descriptions/{id}/vul_code_block_base.{language}'
+    sec_file = f'descriptions/{id}/sec_base.{language}'
+    vul_file = f'descriptions/{id}/vul_base.{language}'
+    mask_file = f'descriptions/{id}/mask_base.{language}'
+    sec_print_file = f'descriptions/{id}/sec_print_base.{language}'
+    sec_func_file = f'descriptions/{id}/sec_func_base.{language}'
+    mask_sec_func_file = f'descriptions/{id}/mask_sec_func_base.{language}'
+    vul_sec_base_file = f'descriptions/{id}/vul_sec_base_base.{language}'
 
     # get sec source code, vul source code
-    if mod == 'base':
-        source_code = case['source_code']
-        vul_source_code = case['source_code_before']
-    elif mod == 'perturbed':
-        source_code, vul_source_code = perturbed_content
-    else:
-        print("mod not recognized")
-        return
+    source_code = case['source_code']
+    vul_source_code = case['source_code_before']
 
     # write sec to file
     with open(sec_file, 'w') as f:
         f.write(source_code)
-    print(f"Sec {mod} version written to {sec_file}")
+    # print(f"Sec file written to {sec_file}")
 
     # write vul to file
     with open(vul_file, 'w') as f:
         f.write(vul_source_code)
-    print(f"Vul {mod} version written to {vul_file}")
+    # print(f"Vul file written to {vul_file}")
 
     # Read the modified source code -- use regex for \n to ignore special characters like FF \x0c
     source_code_lines = re.split(r'\n', source_code)
@@ -655,12 +624,12 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
     # Write the modified source code back to the file (or write to a new file)
     with open(mask_file, 'w') as f:
         f.write(mask_source_code)
-    print(f"Code block {mod} replaced with // <MASK> in {mask_file}")
+    # print(f"Masked sec file written to {mask_file}")
 
     # Write the sec code block to file
     with open(sec_code_block_file, 'w') as f:
         f.write(sec_code_block)
-    print(f"Sec code block {mod} written to {sec_code_block_file}")
+    # print(f"Sec code block written to {sec_code_block_file}")
 
     # Get vul code block
     vul_code_block = get_vul_code_block(mask_source_code, sec_code_block, vul_source_code, diff)
@@ -668,134 +637,37 @@ def mask(id, case, base_path, delta_x, delta_y, mod, perturbed_content):
     # Write the vul code block to file
     with open(vul_code_block_file, 'w') as f:
         f.write(vul_code_block)
-    print(f"Vul code block {mod} written to {vul_code_block_file}")
-
-    # write sec version with the inserted print to file
-    sec_print = insert_print(function_node, mod_func, source_code_lines)
-    with open(sec_print_file, 'w') as f:
-        f.write(sec_print)
-    print(f"Sec print {mod} written to {sec_print_file}")
+    # print(f"Vul code block written to {vul_code_block_file}")
 
     # write the sec function to file
     func_text = get_func_text(function_node, mod_func, source_code_lines)
     with open(sec_func_file, 'w') as f:
         f.write(func_text)
-    print(f"Sec func {mod} written to {sec_func_file}")
+    # print(f"Sec func written to {sec_func_file}")
+
+    # write sec version with the inserted print to file
+    sec_print = insert_print(function_node, mod_func, source_code_lines)
+    with open(sec_print_file, 'w') as f:
+        f.write(sec_print)
+    # print(f"Sec print written to {sec_print_file}")
 
     # write the masked sec function to file
     mask_func_text = get_mask_func_text(func_text, sec_code_block)
     with open(mask_sec_func_file, 'w') as f:
         f.write(mask_func_text)
-    print(f"Sec func {mod} written to {mask_sec_func_file}")
+    # print(f"Masked sec func written to {mask_sec_func_file}")
 
     # write the vul with sec base to file
     vul_sec_base = make_vul_sec_base_file(mask_source_code, vul_code_block)
     with open(vul_sec_base_file, 'w') as f:
         f.write(vul_sec_base)
-    print(f"Vul sec base {mod} written to {vul_sec_base_file}")
+    # print(f"Vul sec base written to {vul_sec_base_file}")
 
-    return sec_code_block, vul_code_block, x
-
-
-def local_var_perturbation(id2var, evaler, case, x):
-    # writes sec and vul files with one variable name change in target function
-
-    # Determine the language based on file extension
-    ext = get_file_extension(case['changed_file'])
-    language = determine_language(ext)
-    if language == 'c':
-        LANGUAGE = C_LANGUAGE
-    elif language == 'cpp':
-        LANGUAGE = CPP_LANGUAGE
-    else:
-        print(f"Language of modified file not recognized for id {id}")
-        return
-
-    # Get full diff file
-    diff_file = f'ARVO-Meta/patches/{id}.diff'
-    with open(diff_file, 'r') as f:
-        diff_file_content = f.read()
-    diff = parse_git_diff(diff_file_content, case['changed_file'])
-
-    # get function node in sec and vul files
-    parser = Parser(LANGUAGE)
-    
-    sec_tree = parser.parse(bytes(case['source_code'], 'utf8'))
-    sec_function_node = get_ts_function_node(sec_tree.root_node, 'sec', diff, case['diff'], case['changed_file'], case['changed_function'], case['source_code'])
-
-    vul_tree = parser.parse(bytes(case['source_code_before'], 'utf8'))
-    vul_function_node = get_ts_function_node(vul_tree.root_node, 'vul', diff, case['diff'], case['changed_file'], case['changed_function'], case['source_code_before'])
-
-    sec_code_block_node = parser.parse(bytes(sec_code_block, 'utf-8')).root_node
-
-    if sec_function_node is None or vul_function_node is None:
-        # if tree-sitter can't find the function node, then we can't perturb
-        id2var[id] = {
-            'old_var': None,
-            'new_var': None
-        }
-        print("No variables found in the function.")
-        sec_perturbed_content = case['source_code']
-        vul_perturbed_content = case['source_code_before']
-    else:
-        variables = find_variables(sec_function_node)
-
-        if variables:
-            variables_text = [var.text.decode('utf-8') for var in variables]
-
-            # Get variables in the code block -- back off to full variable set if necessary
-            variables_in_code_block = find_variables_in_code_block(sec_code_block_node, variables_text)
-            if len(variables_in_code_block) == 0:
-                variables_in_code_block = variables_text
-
-            if id in id2var.keys():
-                old_var = id2var[id]['old_var']
-                new_var = id2var[id]['new_var']
-                if old_var is not None and new_var is not None and old_var in variables_in_code_block:
-                    # use previous var
-                    print(f"Using previous variable found: {old_var}, new var: {new_var}")
-                else:
-                    # mask changed, need to pick a new one
-                    old_var = random.choice(variables_in_code_block)
-                    new_var = get_new_var(sec_function_node, old_var, evaler)
-                    id2var[id] = {
-                        'old_var': old_var,
-                        'new_var': new_var
-                    }
-                    print(f"Variable found: {old_var}, new var: {new_var}")
-            else:
-                # get new var
-                old_var = random.choice(variables_in_code_block)
-                new_var = get_new_var(sec_function_node, old_var, evaler)
-                id2var[id] = {
-                    'old_var': old_var,
-                    'new_var': new_var
-                }
-                print(f"Variable found: {old_var}, new var: {new_var}")
-
-            # replace var in sec, vul file
-            sec_perturbed_content = replace_var_name(sec_function_node, old_var, new_var, case['source_code'])
-            vul_perturbed_content = replace_var_name(vul_function_node, old_var, new_var, case['source_code_before'])
-
-        else:
-            # if there are no local vars before the mask, then we can't perturb
-            id2var[id] = {
-                'old_var': None,
-                'new_var': None
-            }
-            print("No variables found in the function.")
-            sec_perturbed_content = case['source_code']
-            vul_perturbed_content = case['source_code_before']
-
-    # Write id2var
-    with open('id2var.json', 'w') as f:
-        json.dump(id2var, f, indent=4)
-
-    return sec_perturbed_content, vul_perturbed_content
+    return sec_code_block, vul_code_block
 
 
 if __name__ == "__main__":
-    with open('ids_125_have_good.txt', 'r') as f:
+    with open('ids_new.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
 
     with open('filter_logs/cases.json', 'r') as f:
@@ -805,14 +677,12 @@ if __name__ == "__main__":
     if not os.path.exists(base_path):
         os.mkdir(base_path)
 
-    with open('id2var.json', 'r') as f:
-        id2var = json.load(f)
-
-    evaler = APIEvaler()
-
     for id in ids:
-        print(id)
+        # remove current files to keep this clean - we're basically restarting
+        directory = f'descriptions/{id}'
+        for file in glob.glob(os.path.join(directory, "*")):
+            os.remove(file)
+
+        # print(id)
         case = cases[id]
-        sec_code_block = mask_helper(id, case, base_path, 'base')
-        perturbed_content = local_var_perturbation(id2var, evaler, case, sec_code_block)
-        mask_helper(id, case, base_path, 'perturbed', perturbed_content)
+        mask_helper(id, case, base_path)

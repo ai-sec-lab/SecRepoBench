@@ -1,4 +1,6 @@
-if (handler != NULL) {
+{
+            handler = xmlFindCharEncodingHandler((const char *) guess);
+            if (handler != NULL) {
                 /*
                  * Don't use UTF-8 encoder which isn't required and
                  * can produce invalid UTF-8.
@@ -10,3 +12,4 @@ if (handler != NULL) {
                              "Unsupported encoding %s", guess, NULL);
             }
             xmlFree(guess);
+        }

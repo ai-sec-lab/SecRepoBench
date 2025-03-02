@@ -142,13 +142,7 @@ static double GetFillAlpha(PolygonInfo *polygon_info,const double mid,
   p=polygon_info->edges;
   for (j=0; j < (ssize_t) polygon_info->number_edges; j++, p++)
   {
-    if ((double) y <= p->bounds.y1)
-      break;
-    if (((double) y > p->bounds.y2) || ((double) x <= p->bounds.x1))
-      continue;
     // <MASK>
-    if ((((q+1)->x-q->x)*(y-q->y)) <= (((q+1)->y-q->y)*(x-q->x)))
-      winding_number+=p->direction != 0 ? 1 : -1;
   }
   if (fill_rule != NonZeroRule)
     {

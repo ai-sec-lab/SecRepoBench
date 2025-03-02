@@ -2348,27 +2348,7 @@ xmlAddIDSafe(xmlDocPtr doc, const xmlChar *value, xmlAttrPtr attr,
         xmlFreeID(ret);
         return(-1);
     }
-    if (streaming) {
-	/*
-	 * Operating in streaming mode, attr is gonna disappear
-	 */
-	if (doc->dict != NULL)
-	    ret->name = xmlDictLookup(doc->dict, attr->name, -1);
-	else
-	    ret->name = xmlStrdup(attr->name);
-        if (ret->name == NULL) {
-            xmlFreeID(ret);
-            return(-1);
-        }
-	ret->attr = NULL;
-    } else {
-	ret->attr = attr;
-	ret->name = NULL;
-    }
-    ret->lineno = xmlGetLineNo(attr->parent);
-
     // <MASK>
-    return(1);
 }
 
 /**

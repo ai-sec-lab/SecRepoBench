@@ -116,7 +116,13 @@ int flb_config_map_set(struct mk_list *properties, struct mk_list *map, void *co
         if (m->flags & FLB_CONFIG_MAP_MULT) {
             /* Create node */
             entry = flb_calloc(1, sizeof(struct flb_config_map_val));
-            // <MASK>
+            if (!entry) {
+                flb_errno();
+                return -1;
+            }
+
+            /* Populate value */
+            if // <MASK>
 
             /* Add entry to the map 'mult' list tail */
             mk_list_add(&entry->_head, m->value.mult);

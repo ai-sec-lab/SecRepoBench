@@ -118,13 +118,6 @@ _populate_gids_to_retain (hb_face_t *face,
   hb_codepoint_t gid = HB_SET_VALUE_INVALID;
   hb_set_t *all_gids_to_retain = hb_set_create ();
   // <MASK>
-  while (all_gids_to_retain->next (&gid))
-    glyphs->push (gid);
-
-  glyf.fini ();
-  cmap.fini ();
-
-  return all_gids_to_retain;
 }
 
 static void

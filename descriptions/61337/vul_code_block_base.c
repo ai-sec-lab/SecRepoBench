@@ -1,3 +1,5 @@
+{
+            handler = xmlFindCharEncodingHandler((const char *) guess);
             xmlFree(guess);
             if (handler != NULL) {
                 /*
@@ -10,3 +12,4 @@
                 htmlParseErr(ctxt, XML_ERR_INVALID_ENCODING,
                              "Unsupported encoding %s", guess, NULL);
             }
+        }

@@ -1,4 +1,6 @@
-if (gid >= num_glyphs)
+{
+    hb_codepoint_t gid = 1;
+    if (gid >= num_glyphs)
       return;
     for (unsigned i = 0;; i++)
     {
@@ -10,3 +12,4 @@ if (gid >= num_glyphs)
       if (gid >= num_glyphs)
         break;
     }
+  }

@@ -1,4 +1,4 @@
-for (x=0; x < (ssize_t) number_pixels; x++)
+x++)
           {
             p=PushDoublePixel(quantum_info,p,&pixel);
             SetPixelRed(image,ClampToQuantum(pixel),q);
@@ -13,4 +13,3 @@ for (x=0; x < (ssize_t) number_pixels; x++)
             p+=quantum_info->pad;
             q+=GetPixelChannels(image);
           }
-          break;

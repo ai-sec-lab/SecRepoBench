@@ -1,4 +1,5 @@
-if (header->caplen < ip_offset + ip_len + sizeof(struct ndpi_udphdr) + 4)
+/* https://en.wikipedia.org/wiki/TZSP */
+      if (header->caplen < ip_offset + ip_len + sizeof(struct ndpi_udphdr) + 4)
         return(nproto); /* Too short for TZSP*/
 
       u_int offset           = ip_offset+ip_len+sizeof(struct ndpi_udphdr);

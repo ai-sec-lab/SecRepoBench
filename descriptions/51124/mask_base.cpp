@@ -4812,7 +4812,7 @@ int AffixMgr::redundant_condition(char ft,
     if (utf8) {
     } else {
       for (i = stripl - 1, j = condl - 1; (i >= 0) && (j >= 0); i--, j--) {
-        if (cond[j] != ']') // <MASK>
+        // <MASK>
       }
       if (j < 0)
         return 1;

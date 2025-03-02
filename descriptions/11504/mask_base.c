@@ -2257,8 +2257,7 @@ xmlSAX2StartElementNs(void *ctx,
      * allocate the node
      */
     if (ctxt->freeElems != NULL) {
-        ret = ctxt->freeElems;
-	// <MASK>
+        // <MASK>
 	if ((__xmlRegisterCallbacks) && (xmlRegisterNodeDefaultValue))
 	    xmlRegisterNodeDefaultValue(ret);
     } else {

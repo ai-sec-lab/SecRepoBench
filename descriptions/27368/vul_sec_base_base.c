@@ -77,7 +77,7 @@ int flb_gzip_compress(void *in_data, size_t in_len,
     z_stream strm;
     mz_ulong crc;
 
-    
+
     /*
      * GZIP relies on an algorithm with worst-case expansion
      * of 5 bytes per 32KB data. This means we need to create a variable

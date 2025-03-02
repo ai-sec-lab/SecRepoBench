@@ -1,4 +1,5 @@
-/*
+(prefix == NULL) {
+                    /*
                      * name is not necessarily null-terminated.
                      */
                     if ((strncmp((const char *) entry->name,
@@ -7,3 +8,9 @@
                         found = 1;
                         break;
                     }
+                } else {
+                    if (xmlStrQEqual(prefix, name, entry->name)) {
+                        found = 1;
+                        break;
+                    }
+                }

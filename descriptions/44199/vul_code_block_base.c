@@ -14,5 +14,3 @@ switch (tokens[startindex].type) {
         default:
             break;
     }
-    free(tokens);
-    return PLIST_ERR_SUCCESS;

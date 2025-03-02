@@ -71,19 +71,7 @@ static ndpi_protocol_category_t ndpi_http_check_content(struct ndpi_detection_mo
 	int i;
 
 	if(packet->content_disposition_line.ptr[attachment_len] == '\"') {
-	  if(packet->content_disposition_line.ptr[packet->content_disposition_line.len-1] != '\"') {
-	    // <MASK>
-	  }
-	  else if(filename_len >= 2) {
-	    //case: filename="file_name"
-	    flow->http.filename = ndpi_malloc(filename_len-1);
-
-	    if(flow->http.filename != NULL) {
-	      strncpy(flow->http.filename, (char*)packet->content_disposition_line.ptr+attachment_len+1,
-		      filename_len-2);
-	      flow->http.filename[filename_len-2] = '\0';
-	    }
-	  }
+	  if// <MASK>
 	} else {
 	  //case: filename=file_name
 	  flow->http.filename = ndpi_malloc(filename_len+1);

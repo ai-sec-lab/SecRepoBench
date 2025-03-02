@@ -20,9 +20,7 @@ static void ndpi_search_setup_capwap(struct ndpi_detection_module_struct *ndpi_s
   
   if(((sport == NDPI_CAPWAP_CONTROL_PORT) || (dport == NDPI_CAPWAP_CONTROL_PORT))
      && ((packet->payload[0] == 0x0) || (packet->payload[0] == 0x1))
-     ) {
-    // <MASK>
-  }
+     ) // <MASK>
   
   if(
      (((dport == NDPI_CAPWAP_DATA_PORT) && (packet->iph->daddr != 0xFFFFFFFF)) || (sport == NDPI_CAPWAP_DATA_PORT))

@@ -27,7 +27,10 @@ static int search_valid_dns(struct ndpi_detection_module_struct *ndpi_struct,
 
   if(*is_query) {
     /* DNS Request */
-    if// <MASK>
+    if((dns_header->num_queries > 0) && (dns_header->num_queries <= NDPI_MAX_DNS_REQUESTS)
+       && (((dns_header->flags & 0x2800) == 0x2800 /* Dynamic DNS Update */)
+	   || ((dns_header->num_answers == 0) && (dns_header->authority_rrs == 0)))) // <MASK> else
+      return(1 /* invalid */);
   } else {
     /* DNS Reply */
     flow->protos.dns.reply_code = dns_header->flags & 0x0F;

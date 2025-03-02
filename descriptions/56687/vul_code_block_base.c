@@ -1,6 +1,14 @@
-mrb_define_method(mrb, io, "close_on_exec=", io_set_close_on_exec, MRB_ARGS_REQ(1));
+mrb_define_method(mrb, io, "initialize_copy", io_init_copy, MRB_ARGS_REQ(1));
+  mrb_define_method(mrb, io, "_check_readable", io_check_readable, MRB_ARGS_NONE());
+  mrb_define_method(mrb, io, "isatty",     io_isatty,     MRB_ARGS_NONE());
+  mrb_define_method(mrb, io, "sync",       io_sync,       MRB_ARGS_NONE());
+  mrb_define_method(mrb, io, "sync=",      io_set_sync,   MRB_ARGS_REQ(1));
+  mrb_define_method(mrb, io, "sysread",    io_sysread,    MRB_ARGS_ARG(1,1));
+  mrb_define_method(mrb, io, "sysseek",    io_sysseek,    MRB_ARGS_ARG(1,1));
+  mrb_define_method(mrb, io, "syswrite",   io_syswrite,   MRB_ARGS_REQ(1));
+  mrb_define_method(mrb, io, "seek",       io_seek,       MRB_ARGS_ARG(1,1));
+  mrb_define_method(mrb, io, "close",      io_close,      MRB_ARGS_NONE());   /* 15.2.20.5.1 */
+  mrb_define_method(mrb, io, "close_write",    io_close_write,       MRB_ARGS_NONE());
+  mrb_define_method(mrb, io, "close_on_exec=", io_set_close_on_exec, MRB_ARGS_REQ(1));
   mrb_define_method(mrb, io, "close_on_exec?", io_close_on_exec_p,   MRB_ARGS_NONE());
   mrb_define_method(mrb, io, "closed?",    io_closed,     MRB_ARGS_NONE());   /* 15.2.20.5.2 */
-  mrb_define_method(mrb, io, "pid",        io_pid,        MRB_ARGS_NONE());
-  mrb_define_method(mrb, io, "fileno",     io_fileno,     MRB_ARGS_NONE());
-  mrb_define_method(mrb, io, "write",      io_write,      MRB_ARGS_ANY());

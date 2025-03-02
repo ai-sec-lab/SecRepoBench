@@ -18,11 +18,6 @@ xmlXIncludeDoProcess(xmlXIncludeCtxtPtr ctxt, xmlNodePtr tree) {
 	/* TODO: need to work on entities -> stack */
         if (xmlXIncludeTestNode(ctxt, cur) == 1) {
 // <MASK>
-            /*
-             * Mark direct includes.
-             */
-            if (ref != NULL)
-                ref->replace = 1;
         } else if ((cur->children != NULL) &&
                    ((cur->type == XML_DOCUMENT_NODE) ||
                     (cur->type == XML_ELEMENT_NODE))) {

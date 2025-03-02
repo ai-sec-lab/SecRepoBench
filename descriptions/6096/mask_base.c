@@ -2365,13 +2365,7 @@ static double FxEvaluateSubexpression(FxInfo *fx_info,
         }
       }
     }
-  if (strchr("(",(int) *expression) != (char *) NULL)
-    {
-      (*depth)++;
-      // <MASK>
-      (*depth)--;
-      FxResult(gamma);
-    }
+  // <MASK>
   switch (*expression)
   {
     case '+':

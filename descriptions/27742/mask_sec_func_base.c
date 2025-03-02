@@ -60,17 +60,7 @@ flb_sds_t flb_pack_msgpack_to_json_format(const char *data, uint64_t bytes,
 
     msgpack_unpacked_init(&result);
     while (msgpack_unpack_next(&result, data, bytes, &off) == ok) {
-        /* Each array must have two entries: time and record */
-        root = result.data;
         // <MASK>
-        map_size = map.via.map.size;
-
-        if (date_key != NULL) {
-            msgpack_pack_map(&tmp_pck, map_size + 1);
-        }
-        else {
-            msgpack_pack_map(&tmp_pck, map_size);
-        }
 
         if (date_key != NULL) {
             /* Append date key */

@@ -1259,6 +1259,21 @@ xmlSnprintfElementContent(char *buf, int size, xmlElementContentPtr content, int
     }
     if (englob) strcat(buf, "(");
     // <MASK>
+    if (englob)
+        strcat(buf, ")");
+    switch (content->ocur) {
+        case XML_ELEMENT_CONTENT_ONCE:
+	    break;
+        case XML_ELEMENT_CONTENT_OPT:
+	    strcat(buf, "?");
+	    break;
+        case XML_ELEMENT_CONTENT_MULT:
+	    strcat(buf, "*");
+	    break;
+        case XML_ELEMENT_CONTENT_PLUS:
+	    strcat(buf, "+");
+	    break;
+    }
 }
 
 /****************************************************************

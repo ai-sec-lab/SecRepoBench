@@ -27,6 +27,3 @@ if (scpd > 0) {
 
 	if (i > st.size())
 	    return NULL;
-
-        ch = st[i];
-        st[i] = '\0';

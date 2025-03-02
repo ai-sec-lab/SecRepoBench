@@ -52,5 +52,3 @@ hb_vector_t<glyf_impl::SubsetGlyph> glyphs;
     bool result = glyf_prime->serialize (c->serializer, hb_iter (glyphs), use_short_loca, c->plan);
     if (c->plan->normalized_coords && !c->plan->pinned_at_default)
       _free_compiled_subset_glyphs (glyphs);
-
-    return result;

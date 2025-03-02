@@ -1,4 +1,3 @@
-static int
 xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
     int ret = 0;
     int avail, tlen;
@@ -703,20 +702,20 @@ done:
     xmlGenericError(xmlGenericErrorContext, "PP: done %d\n", ret);
 #endif
     return(ret);
-    encoding_error:
-        if (ctxt->input->end - ctxt->input->cur < 4) {
-        __xmlErrEncoding(ctxt, XML_ERR_INVALID_CHAR,
-                "Input is not proper UTF-8, indicate encoding !\n",
-                NULL, NULL);
-        } else {
-            char buffer[150];
+encoding_error:
+    if (ctxt->input->end - ctxt->input->cur < 4) {
+	__xmlErrEncoding(ctxt, XML_ERR_INVALID_CHAR,
+		     "Input is not proper UTF-8, indicate encoding !\n",
+		     NULL, NULL);
+    } else {
+        char buffer[150];
 
-        snprintf(buffer, 149, "Bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
-                ctxt->input->cur[0], ctxt->input->cur[1],
-                ctxt->input->cur[2], ctxt->input->cur[3]);
-        __xmlErrEncoding(ctxt, XML_ERR_INVALID_CHAR,
-                "Input is not proper UTF-8, indicate encoding !\n%s",
-                BAD_CAST buffer, NULL);
-        }
-        return(0);
+	snprintf(buffer, 149, "Bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+			ctxt->input->cur[0], ctxt->input->cur[1],
+			ctxt->input->cur[2], ctxt->input->cur[3]);
+	__xmlErrEncoding(ctxt, XML_ERR_INVALID_CHAR,
+		     "Input is not proper UTF-8, indicate encoding !\n%s",
+		     BAD_CAST buffer, NULL);
     }
+    return(0);
+}

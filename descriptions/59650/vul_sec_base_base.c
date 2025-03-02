@@ -288,7 +288,7 @@ namespace pcpp
 			if (record.isNull())
 				return resRec;
 
-						// record pointer is out-bounds of the TLV records memory
+			// record pointer is out-bounds of the TLV records memory
 			if ((record.getRecordBasePtr() - tlvDataBasePtr) < 0)
 				return resRec;
 
@@ -299,7 +299,6 @@ namespace pcpp
 			resRec.assign(record.getRecordBasePtr() + record.getTotalSize());
 			if (resRec.getTotalSize() == 0)
 				resRec.assign(NULL);
-
 
 			return resRec;
 		}

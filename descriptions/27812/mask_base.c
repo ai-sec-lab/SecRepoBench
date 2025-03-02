@@ -916,16 +916,45 @@ int32_t frame_get_usermeta(blosc2_frame* frame, uint8_t** usermeta) {
   int32_t nchunks;
   int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
                             NULL, NULL, NULL, NULL, NULL);
-  if (ret < 0) {
-    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
-    return -1;
-  }
-  int64_t trailer_offset = get_trailer_offset(frame, header_len, cbytes);
-  if (trailer_offset < 0) {
-    BLOSC_TRACE_ERROR("Unable to get the trailer offset from frame.");
-    return -1;
-  }
   // <MASK>
+  if (frame->sdata != NULL) {
+    memcpy(&usermeta_len_network, frame->sdata + trailer_offset + FRAME_TRAILER_USERMETA_LEN_OFFSET, sizeof(int32_t));
+  } else {
+    FILE* fp = fopen(frame->fname, "rb");
+    fseek(fp, trailer_offset + FRAME_TRAILER_USERMETA_LEN_OFFSET, SEEK_SET);
+    size_t rbytes = fread(&usermeta_len_network, 1, sizeof(int32_t), fp);
+    if (rbytes != sizeof(int32_t)) {
+      BLOSC_TRACE_ERROR("Cannot access the usermeta_len out of the fileframe.");
+      fclose(fp);
+      return -1;
+    }
+    fclose(fp);
+  }
+  int32_t usermeta_len;
+  swap_store(&usermeta_len, &usermeta_len_network, sizeof(int32_t));
+
+  if (usermeta_len == 0) {
+    *usermeta = NULL;
+    return 0;
+  }
+
+  *usermeta = malloc(usermeta_len);
+  if (frame->sdata != NULL) {
+    memcpy(*usermeta, frame->sdata + trailer_offset + FRAME_TRAILER_USERMETA_OFFSET, usermeta_len);
+  }
+  else {
+    FILE* fp = fopen(frame->fname, "rb+");
+    fseek(fp, trailer_offset + FRAME_TRAILER_USERMETA_OFFSET, SEEK_SET);
+    size_t rbytes = fread(*usermeta, 1, usermeta_len, fp);
+    if (rbytes != (size_t)usermeta_len) {
+      BLOSC_TRACE_ERROR("Cannot read the complete usermeta chunk in frame. %ld != %ld.",
+              (long)rbytes, (long)usermeta_len);
+      return -1;
+    }
+    fclose(fp);
+  }
+
+  return usermeta_len;
 }
 
 

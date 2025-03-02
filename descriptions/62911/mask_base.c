@@ -534,14 +534,7 @@ xmlDictFindEntry(const xmlDict *dict, const xmlChar *prefix,
 
         do {
             if (entry->hashValue == hashValue) {
-                if (prefix == NULL) {
-                    // <MASK>
-                } else {
-                    if (xmlStrQEqual(prefix, name, entry->name)) {
-                        found = 1;
-                        break;
-                    }
-                }
+                if // <MASK>
             }
 
             displ++;

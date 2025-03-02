@@ -1,2 +1,23 @@
-p ->FromInput = p ->ToOutput = NULL;
+(*InputFormat == 0 && *OutputFormat == 0) {
+            p ->FromInput = p ->ToOutput = NULL;
             *dwFlags |= cmsFLAGS_CAN_CHANGE_FORMATTER;
+        }
+        else {
+
+            cmsUInt32Number BytesPerPixelInput;
+
+            p ->FromInput = _cmsGetFormatter(ContextID, *InputFormat,  cmsFormatterInput, CMS_PACK_FLAGS_16BITS).Fmt16;
+            p ->ToOutput  = _cmsGetFormatter(ContextID, *OutputFormat, cmsFormatterOutput, CMS_PACK_FLAGS_16BITS).Fmt16;
+
+            if (p ->FromInput == NULL || p ->ToOutput == NULL) {
+
+                cmsSignalError(ContextID, cmsERROR_UNKNOWN_EXTENSION, "Unsupported raster format");
+                cmsDeleteTransform(p);
+                return NULL;
+            }
+
+            BytesPerPixelInput = T_BYTES(p ->InputFormat);
+            if (BytesPerPixelInput == 0 || BytesPerPixelInput >= 2)
+                   *dwFlags |= cmsFLAGS_CAN_CHANGE_FORMATTER;
+
+        }

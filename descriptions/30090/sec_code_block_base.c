@@ -1,4 +1,10 @@
-if (v->type != MSGPACK_OBJECT_STR) {
+if (i >= map_size || !k || !v) {
+        msgpack_unpacked_destroy(&result);
+        return *out_size;
+    }
+
+    /* Ensure we have an accurate type */
+    if (v->type != MSGPACK_OBJECT_STR) {
         msgpack_unpacked_destroy(&result);
         return *out_size;
     }
@@ -20,34 +26,3 @@ if (v->type != MSGPACK_OBJECT_STR) {
     else {
         time_lookup = flb_parser_tm2time(&tm);
     }
-
-    /* Compose a new map without the time_key field */
-    msgpack_sbuffer_init(&mp_sbuf);
-    msgpack_packer_init(&mp_pck, &mp_sbuf, msgpack_sbuffer_write);
-
-    if (parser->time_keep == FLB_FALSE) {
-        msgpack_pack_map(&mp_pck, map_size - 1);
-    }
-    else {
-        msgpack_pack_map(&mp_pck, map_size);
-    }
-
-    for (i = 0; i < map_size; i++) {
-        if (i == skip) {
-            continue;
-        }
-        msgpack_pack_object(&mp_pck, map.via.map.ptr[i].key);
-        msgpack_pack_object(&mp_pck, map.via.map.ptr[i].val);
-    }
-
-    /* Export the proper buffer */
-    flb_free(tmp_out_buf);
-    *out_buf = mp_sbuf.data;
-    *out_size = mp_sbuf.size;
-
-    t = out_time;
-    t->tm.tv_sec  = time_lookup;
-    t->tm.tv_nsec = (tmfrac * 1000000000);
-
-    msgpack_unpacked_destroy(&result);
-    return *out_size;

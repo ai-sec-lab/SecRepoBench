@@ -1515,16 +1515,7 @@ static MagickBooleanType DrawDashPolygon(const DrawInfo *draw_info,
     j,
     n;
 
-  assert(draw_info != (const DrawInfo *) NULL);
-  if (image->debug != MagickFalse)
-    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"    begin draw-dash");
   // <MASK>
-  clone_info->miterlimit=0;
-  dash_polygon[0]=primitive_info[0];
-  scale=ExpandAffine(&draw_info->affine);
-  length=scale*(draw_info->dash_pattern[0]-0.5);
-  offset=fabs(draw_info->dash_offset) >= DrawEpsilon ?
-    scale*draw_info->dash_offset : 0.0;
   j=1;
   for (n=0; offset > 0.0; j=0)
   {

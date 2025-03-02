@@ -9,3 +9,4 @@ encoding_error:
 		     "Input is not proper UTF-8, indicate encoding !\n%s",
 		     BAD_CAST buffer, NULL);
     }
+    return(0);

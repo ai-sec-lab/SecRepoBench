@@ -2179,14 +2179,6 @@ int blosc2_decompress(const void* src, int32_t srcsize, void* dest, int32_t dest
      that this should be the last env var so that it can take the
      previous ones into account */
   envvar = getenv("BLOSC_NOLOCK");
-  if (envvar != NULL) {
-    dparams.nthreads = g_nthreads;
-    dctx = blosc2_create_dctx(dparams);
-    result = blosc2_decompress_ctx(dctx, src, srcsize, dest, destsize);
-    blosc2_free_ctx(dctx);
-    return result;
-  }
-
   // <MASK>
 }
 

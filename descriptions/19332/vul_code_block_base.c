@@ -1,13 +1,4 @@
-/*
-       This can either be the standard RTCP or Ms Lync RTCP that
-       later will become Ms Lync RTP. In this case we need to
-       be careful before deciding about the protocol before dissecting the packet
-
-       MS Lync = Skype
-       https://en.wikipedia.org/wiki/Skype_for_Business
-       */
-
-      while((offset+2) < payload_length) {
+while((offset+2) < payload_length) {
         u_int16_t attribute = ntohs(*((u_int16_t*)&payload[offset]));
         u_int16_t len = ntohs(*((u_int16_t*)&payload[offset+2]));
         u_int16_t x = (len + 4) % 4;
@@ -144,5 +135,3 @@
 
         offset += len + 4;
       }
-
-      goto udp_stun_found;

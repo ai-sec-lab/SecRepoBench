@@ -1534,7 +1534,31 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 #endif
 
       if((cipher_offset+cipher_len) <= total_len) {
-	// <MASK>
+	u_int8_t safari_ciphers = 0, chrome_ciphers = 0, this_is_not_safari = 0, looks_like_safari_on_big_sur = 0;
+
+	// <MASK> /* for */
+
+	/* NOTE:
+	   we do not check for duplicates as with signatures because
+	   this is time consuming and we want to avoid overhead whem possible
+	*/
+	if(this_is_not_safari)
+	  flow->protos.tls_quic_stun.tls_quic.browser_heuristics.is_safari_tls = 0;
+	else if((safari_ciphers == 12) || (this_is_not_safari && looks_like_safari_on_big_sur))
+	  flow->protos.tls_quic_stun.tls_quic.browser_heuristics.is_safari_tls = 1;
+
+	if(chrome_ciphers == 13)
+	  flow->protos.tls_quic_stun.tls_quic.browser_heuristics.is_chrome_tls = 1;
+
+	/* Note that both Safari and Chrome can overlap */
+#ifdef DEBUG_HEURISTIC
+	printf("[CIPHERS] [is_chrome_tls: %u (%u)][is_safari_tls: %u (%u)][this_is_not_safari: %u]\n",
+	       flow->protos.tls_quic_stun.tls_quic.browser_heuristics.is_chrome_tls,
+	       chrome_ciphers,
+	       flow->protos.tls_quic_stun.tls_quic.browser_heuristics.is_safari_tls,
+	       safari_ciphers,
+	       this_is_not_safari);
+#endif
       } else {
 	invalid_ja3 = 1;
 #ifdef DEBUG_TLS

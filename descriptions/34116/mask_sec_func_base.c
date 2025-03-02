@@ -107,14 +107,7 @@ int flb_parser_json_do(struct flb_parser *parser,
         k = &map.via.map.ptr[i].key;
         v = &map.via.map.ptr[i].val;
 
-        if (k->via.str.size != slen) {
-            continue;
-        }
-
-        /* Ensure the pointer we are about to read is not NULL */
-        if (k->via.str.ptr == NULL) {
-            // <MASK>
-        }
+        // <MASK>
 
         if (strncmp(k->via.str.ptr, time_key, k->via.str.size) == 0) {
             /* We found the key, break the loop and keep the index */

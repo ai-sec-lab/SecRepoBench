@@ -1,4 +1,10 @@
-/* Check and set IP header size and total packet length */
+if(recheck_type)
+    goto ether_type_check;
+
+  workflow->stats.vlan_count += vlan_packet;
+
+ iph_check:
+  /* Check and set IP header size and total packet length */
   if (header->caplen < ip_offset + sizeof(struct ndpi_iphdr))
     return(nproto); /* Too short for next IP header*/
 

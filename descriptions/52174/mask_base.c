@@ -403,14 +403,7 @@ void ndpi_search_irc_tcp(struct ndpi_detection_module_struct *ndpi_struct, struc
 	  || (memcmp(packet->payload, "NOTICE ", 7) == 0)
 	  || (memcmp(packet->payload, "PRIVMSG ", 8) == 0)
 	  || (memcmp(packet->payload, "VERSION ", 8) == 0)) {
-	char *user = ndpi_strnstr((char*)packet->payload, "USER ", packet->payload_packet_len);
-
-	if(user) {
-	  // <MASK>
-	}
-	
-	NDPI_LOG_DBG2(ndpi_struct,
-		      "USER, NICK, PASS, NOTICE, PRIVMSG one time");
+	// <MASK>
 	if (flow->l4.tcp.irc_stage == 2) {
 	  NDPI_LOG_INFO(ndpi_struct, "found irc");
 	  ndpi_int_irc_add_connection(ndpi_struct, flow, NDPI_CONFIDENCE_DPI);

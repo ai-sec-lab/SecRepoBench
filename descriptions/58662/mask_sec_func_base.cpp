@@ -24,7 +24,4 @@ bool serialize (hb_serialize_context_t *c,
     if (unlikely (!record)) return_trace (false);
 
     // <MASK>
-    rangeRecord.as_array ().qsort (RangeRecord<Types>::cmp_range); // To handle unsorted glyph order.
-
-    return_trace (true);
   }

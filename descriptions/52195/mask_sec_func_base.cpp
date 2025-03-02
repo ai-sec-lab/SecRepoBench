@@ -295,26 +295,7 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
           rv_first = rv;
           st[i] = ch;
 
-          do {  // striple loop
-
-            // <MASK>
-
-            rv = lookup(st.c_str() + i, st.size() - i);  // perhaps without prefix
-
-            // search homonym with compound flag
-            while ((rv) &&
-                   ((needaffix && TESTAFF(rv->astr, needaffix, rv->alen)) ||
-                    !((compoundflag && !words &&
-                       TESTAFF(rv->astr, compoundflag, rv->alen)) ||
-                      (compoundend && !words &&
-                       TESTAFF(rv->astr, compoundend, rv->alen)) ||
-                      (!defcpdtable.empty() && words &&
-                       defcpd_check(&words, wnum + 1, rv, NULL, 1))) ||
-                    (scpd != 0 && checkcpdtable[scpd - 1].cond2 != FLAG_NULL &&
-                     !TESTAFF(rv->astr, checkcpdtable[scpd - 1].cond2,
-                              rv->alen)))) {
-              rv = rv->next_homonym;
-            }
+          do {  // <MASK>
 
             // check FORCEUCASE
             if (rv && forceucase &&

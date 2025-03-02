@@ -161,7 +161,21 @@ inline int PfxEntry::test_condition(const std::string& s) {
           return 0;  // word <= condition
         break;
       }
-      // <MASK>
+      case '.':
+        if (pos == std::string::npos) {  // dots are not metacharacters in groups: [.]
+          p = nextchar(p);
+          // skip the next character
+          ++st;
+          while ((opts & aeUTF8) && st < s.size() && (s[st] & 0xc0) == 0x80)
+            ++st;
+          if (st == s.size() && p)
+            return 0;  // word <= condition
+          break;
+        }
+      /* FALLTHROUGH */
+      default: {
+        // <MASK>
+      }
     }
     if (!p)
       return 1;

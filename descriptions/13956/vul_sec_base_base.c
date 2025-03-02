@@ -97,7 +97,6 @@ static const char* str_table_entry(
   if (index < 0)
     return NULL;
 
-
   if (str_entry >= str_table_limit)
     return NULL;
 

@@ -1,4 +1,8 @@
-if (len == 0) {
+int len;
+    size_t val;
+
+    len = strlen(time);
+    if (len == 0) {
         return 0;
     }
     val = atoi(time);
@@ -13,5 +17,3 @@ if (len == 0) {
     else if (time[len - 1] == 'M' || time[len - 1] == 'm') {
         val *= 60;
     }
-
-    return val;

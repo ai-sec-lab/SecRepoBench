@@ -1,4 +1,3 @@
-static int
 xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
     int ret = 0;
     int avail, tlen;
@@ -703,6 +702,5 @@ done:
     xmlGenericError(xmlGenericErrorContext, "PP: done %d\n", ret);
 #endif
     return(ret);
-    // <MASK>
-        return(0);
-    }
+// <MASK>
+}

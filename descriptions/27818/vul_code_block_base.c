@@ -12,4 +12,4 @@ if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
                 }
                 length += MAX_SHORT_LITLEN;
                 ctx->literalsPtr++;
-                if (unlikely((size_t)(op+length)<(size_t)(op))) { LIZARD_LOG_DECOMPRESS_LIZv1("2"); goto _output_error; }
+                if (unlikely((size_t)(op+length)<(size_t)(op))) { LIZARD_LOG_DECOMPRESS_LIZv1("2"); goto _output_error; }  /* overflow detection */

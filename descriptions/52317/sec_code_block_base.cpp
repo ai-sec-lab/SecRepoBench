@@ -1,4 +1,5 @@
-if (i < word.size()) {
+if (langnum == LANG_hu) {
+              if (i < word.size()) {
                 // calculate syllable number of the word
                 numsyllable += get_syllable(word.substr(i));
               }
@@ -38,3 +39,4 @@ if (i < word.size()) {
                   }
                 }
               }
+            }

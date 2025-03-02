@@ -8,3 +8,10 @@ while (initial_gids_to_retain->next (&gid))
 
   glyphs->alloc (all_gids_to_retain->get_population ());
   gid = HB_SET_VALUE_INVALID;
+  while (all_gids_to_retain->next (&gid))
+    glyphs->push (gid);
+
+  glyf.fini ();
+  cmap.fini ();
+
+  return all_gids_to_retain;

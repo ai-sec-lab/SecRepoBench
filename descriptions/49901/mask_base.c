@@ -91,12 +91,7 @@ static size_t dissect_softether_type(enum softether_value_type t,
 
     case VALUE_DATA:
     case VALUE_STR:
-    case VALUE_UNISTR:
-      // <MASK>
-
-      v->value_size = siz;
-      ret = siz + sizeof(siz);
-      break;
+    case // <MASK>
 
     case VALUE_INT64:
       if(payload_len < 8)

@@ -26,6 +26,9 @@ udiv(mrb_state *mrb, mpz_t *qq, mpz_t *rr, mpz_t *xx, mpz_t *yy)
   size_t ns = lzb(yy->p[yd-1]);
   ulshift(mrb, &x, xx, ns);
   ulshift(mrb, &y, yy, ns);
+  size_t xd = digits(&x);
+  mpz_realloc(mrb, &q, xd);
+  mp_limb2 z = y.p[yd-1];
   // <MASK>
   urshift(mrb, rr, &x, ns);
   trim(&q);

@@ -1,10 +1,4 @@
-if (!entry) {
-                flb_errno();
-                return -1;
-            }
-
-            /* Populate value */
-            if (m->type == FLB_CONFIG_MAP_STR) {
+(m->type == FLB_CONFIG_MAP_STR) {
                 entry->val.str = flb_sds_create(kv->val);
             }
             else if (m->type == FLB_CONFIG_MAP_INT) {

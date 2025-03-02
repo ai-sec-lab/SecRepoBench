@@ -1,1 +1,0 @@
-return bitrate_table[lidx][bitrateIdx];

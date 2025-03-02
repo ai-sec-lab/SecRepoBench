@@ -19,16 +19,7 @@ void ndpi_parse_packet_line_info(struct ndpi_detection_module_struct *ndpi_str, 
       return; /* Return if only one byte remains (prevent invalid reads past end-of-buffer) */
 
     if(get_u_int16_t(packet->payload, a) == ntohs(0x0d0a)) {
-      /* If end of line char sequence CR+NL "\r\n", process line */
-
-      if(((a + 3) <= packet->payload_packet_len)
-	 && (get_u_int16_t(packet->payload, a+2) == ntohs(0x0d0a))) {
-	/* \r\n\r\n */
-	int diff; /* No unsigned ! */
-	u_int32_t a1 = a + 4;
-
-	// <MASK>
-      }
+      // <MASK>
 
       packet->line[packet->parsed_lines].len =
 	(u_int16_t)(((unsigned long) &packet->payload[a]) - ((unsigned long) packet->line[packet->parsed_lines].ptr));

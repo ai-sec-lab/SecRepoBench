@@ -204,21 +204,23 @@ def find_code_block(node, x, y, total_lines, modified_section, consider_sibling=
             return None  # This node doesn't cover the range
 
     # Find the smallest node covering the range within the function body
-    minimal_node = recursive_find(function_body_node, modified_section)
+    smallest_single_node = recursive_find(function_body_node, modified_section)
 
-    if minimal_node is None:
+    if smallest_single_node is None:
         # If no node covers the range, default to function body
-        minimal_node = function_body_node
+        return function_body_node
+
+    spanning_nodes = [smallest_single_node]
 
     if consider_sibling:
         # Now, attempt to find a minimal combination of adjacent siblings
-        # within the minimal_node
-        if minimal_node.children:
+        # within the smallest_single_node
+        if smallest_single_node.children:
             # Exclude braces if it's a compound_statement
-            if minimal_node.type == 'compound_statement':
-                statements = [child for child in minimal_node.children if child.type not in ('{', '}')]
+            if smallest_single_node.type == 'compound_statement':
+                statements = [child for child in smallest_single_node.children if child.type not in ('{', '}')]
             else:
-                statements = minimal_node.children
+                statements = smallest_single_node.children
 
             selected_nodes = None
 
@@ -241,10 +243,66 @@ def find_code_block(node, x, y, total_lines, modified_section, consider_sibling=
             selected_nodes = statements[start_node_i:end_node_i+1]
 
             if selected_nodes:
-                return selected_nodes
+                spanning_nodes = selected_nodes
 
-    # If no smaller combination is found, return the minimal node
-    return minimal_node
+    # if code block is less than 15 lines, try to make it so
+    def expand_to_15ish_lines(spanning_nodes):
+        line_len = spanning_nodes[-1].end_point[0] - spanning_nodes[0].start_point[0] + 1
+        if line_len >= 15:
+            return spanning_nodes
+    
+        # case 1: choose smaller from upper and lower sibling
+        if spanning_nodes[0].prev_named_sibling is not None and spanning_nodes[-1].next_named_sibling is not None:
+            upper_line_len = spanning_nodes[-1].end_point[0] - spanning_nodes[0].prev_named_sibling.start_point[0] + 1
+            lower_line_len = spanning_nodes[-1].next_named_sibling.end_point[0] - spanning_nodes[0].start_point[0] + 1
+
+            if upper_line_len <= lower_line_len:
+                if upper_line_len > 100:
+                    return spanning_nodes
+                else:
+                    spanning_nodes = [spanning_nodes[0].prev_named_sibling] + spanning_nodes
+                    return expand_to_15ish_lines(spanning_nodes)
+
+            elif lower_line_len < upper_line_len:
+                line_len = spanning_nodes[-1].next_named_sibling.end_point[0] - spanning_nodes[0].start_point[0] + 1
+                if line_len > 100:
+                    return spanning_nodes
+                else:
+                    spanning_nodes = spanning_nodes + [spanning_nodes[-1].next_named_sibling]
+                    return expand_to_15ish_lines(spanning_nodes)
+
+        # case 2: only have upper sibling
+        elif spanning_nodes[0].prev_named_sibling is not None:
+            line_len = spanning_nodes[-1].end_point[0] - spanning_nodes[0].prev_named_sibling.start_point[0] + 1
+            if line_len > 100:
+                return spanning_nodes
+            else:
+                spanning_nodes = [spanning_nodes[0].prev_named_sibling] + spanning_nodes
+                return expand_to_15ish_lines(spanning_nodes)
+
+        # case 3: only have lower sibling
+        elif spanning_nodes[-1].next_named_sibling is not None:
+            line_len = spanning_nodes[-1].next_named_sibling.end_point[0] - spanning_nodes[0].start_point[0] + 1
+            if line_len > 100:
+                return spanning_nodes
+            else:
+                spanning_nodes = spanning_nodes + [spanning_nodes[-1].next_named_sibling]
+                return expand_to_15ish_lines(spanning_nodes)
+
+        # case 4: no siblings, try parent
+        else:
+            line_len = spanning_nodes[0].parent.end_point[0] - spanning_nodes[0].parent.start_point[0] + 1
+            if line_len > 100 or spanning_nodes[0] == function_body_node:
+                return spanning_nodes
+            else:
+                spanning_nodes = [spanning_nodes[0].parent]
+                return expand_to_15ish_lines(spanning_nodes)
+
+    # If the code block is less than 15 lines, try to increase it
+    spanning_nodes = expand_to_15ish_lines(spanning_nodes)
+
+    return spanning_nodes
+
 
 def get_function_name(node):
     def traverse(node):
@@ -337,6 +395,67 @@ def find_variables(node):
     recursive_find(node)
     return variables
 
+def find_variables_before_code_block(node, mask_line):
+    variables = []
+
+    def recursive_find(current_node):
+        if current_node.type == 'declaration':
+            for child in current_node.children:
+                if child.type == 'identifier':
+                    variables.append(child)
+                elif child.type == 'pointer_declarator':
+                    for grandchild in child.children:
+                        if grandchild.type == 'identifier':
+                            variables.append(grandchild)
+                elif child.type == 'reference_declarator':
+                    for grandchild in child.children:
+                        if grandchild.type == 'identifier':
+                            variables.append(grandchild)
+                elif child.type == 'array_declarator':
+                    for grandchild in child.children:
+                        if grandchild.type == 'identifier':
+                            variables.append(grandchild)
+                elif child.type == 'init_declarator':
+                    for grandchild in child.children:
+                        if grandchild.type == 'identifier':
+                            variables.append(grandchild)
+                        elif grandchild.type == 'pointer_declarator':
+                            for greatgrandchild in grandchild.children:
+                                if greatgrandchild.type == 'identifier':
+                                    variables.append(greatgrandchild)
+                        elif grandchild.type == 'reference_declarator':
+                            for greatgrandchild in grandchild.children:
+                                if greatgrandchild.type == 'identifier':
+                                    variables.append(greatgrandchild)
+                        elif grandchild.type == 'array_declarator':
+                            for greatgrandchild in grandchild.children:
+                                if greatgrandchild.type == 'identifier':
+                                    variables.append(greatgrandchild)
+
+        elif current_node.type == 'parameter_declaration':
+            for child in current_node.children:
+                if child.type == 'identifier':
+                    variables.append(child)
+                if child.type == 'pointer_declarator':
+                    for grandchild in child.children:
+                        if grandchild.type == 'identifier':
+                            variables.append(grandchild)
+                if child.type == 'reference_declarator':
+                    for grandchild in child.children:
+                        if grandchild.type == 'identifier':
+                            variables.append(grandchild)
+                if child.type == 'array_declarator':
+                    for grandchild in child.children:
+                        if grandchild.type == 'identifier':
+                            variables.append(grandchild)
+
+        for child in current_node.children:
+            if child.start_point[0] + 1 < mask_line:
+                recursive_find(child)
+
+    recursive_find(node)
+    return [var.text.decode('utf-8') for var in variables]
+
 def find_variables_in_code_block(code_block_node, variables_text):
     variables = set()
 
@@ -352,8 +471,11 @@ def find_variables_in_code_block(code_block_node, variables_text):
     recursive_find(code_block_node)
     return list(variables)
 
-def replace_var_name(func_node, old_var, new_var, source_code):
-    source_code_lines = re.split(r'\n', source_code)
+
+def replace_var_name(node, old_var, new_var):
+    source_code = node.text.decode('utf-8')
+    source_code_lines = re.split('\n', source_code)
+
     variable_nodes = []
 
     def traverse(node):
@@ -362,11 +484,11 @@ def replace_var_name(func_node, old_var, new_var, source_code):
         for child in node.children:
             traverse(child)
 
-    traverse(func_node)
+    traverse(node.root_node)
 
     replacements = []
     for node in variable_nodes:
-        if node.text.decode('utf8') == old_var:
+        if node.text.decode('utf-8') == old_var:
             assert source_code_lines[node.start_point.row][node.start_point.column:node.end_point.column] == old_var
             replacements.append((node.start_point.row, node.start_point.column, node.end_point.column))
 
@@ -376,6 +498,7 @@ def replace_var_name(func_node, old_var, new_var, source_code):
 
     source_code = '\n'.join(source_code_lines)
     return source_code
+
 
 def tokenize_nltk(text):
     words = word_tokenize(text)

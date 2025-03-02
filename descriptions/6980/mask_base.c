@@ -1308,7 +1308,12 @@ static double FxGetSymbol(FxInfo *fx_info,const PixelChannel channel,
             case 'v': i=1; break;
           }
           p++;
-          // <MASK>
+          if (*p == '[')
+            {
+              // <MASK>
+            }
+          if (*p == '.')
+            p++;
         }
       if ((*p == 'p') && (isalpha((int) ((unsigned char) *(p+1))) == 0))
         {

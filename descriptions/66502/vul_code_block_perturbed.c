@@ -1,7 +1,0 @@
-if (ret->attr != NULL) {
-                ret->attr->id = NULL;
-                ret->attr = attribute;
-            }
-	    attribute->atype = XML_ATTRIBUTE_ID;
-            attribute->id = ret;
-            return(0);

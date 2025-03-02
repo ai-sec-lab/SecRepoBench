@@ -222,12 +222,6 @@ ether_type_check:
     break;
   }
 
-  if(recheck_type)
-    goto ether_type_check;
-
-  workflow->stats.vlan_count += vlan_packet;
-
- iph_check:
   // <MASK>
 
   if(iph->version == IPVERSION) {

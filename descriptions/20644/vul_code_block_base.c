@@ -1,4 +1,10 @@
-/* Check and set IP header size and total packet length */
+if(recheck_type)
+    goto ether_type_check;
+
+  workflow->stats.vlan_count += vlan_packet;
+
+ iph_check:
+  /* Check and set IP header size and total packet length */
   iph = (struct ndpi_iphdr *) &packet[ip_offset];
 
   /* just work on Ethernet packets that contain IP */

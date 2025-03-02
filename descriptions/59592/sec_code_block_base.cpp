@@ -41,5 +41,3 @@ hb_vector_t<unsigned> padded_offsets;
 						 padded_offsets.iter (),
 						 use_short_loca))))
       return_trace (false);
-
-    return result;

@@ -453,9 +453,7 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
             // hungarian convention: when syllable number of prefix is more,
             // than 1, the prefix+word counts as two words.
 
-            if (langnum == LANG_hu) {
-              // <MASK>
-            }
+            // <MASK>
 
             // increment word number, if the second word has a compoundroot flag
             if ((rv) && (compoundroot) &&

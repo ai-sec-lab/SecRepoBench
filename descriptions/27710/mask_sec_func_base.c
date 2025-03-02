@@ -1,19 +1,6 @@
 flb_sds_t flb_signv4_uri_normalize_path(char *uri, size_t len)
 {
-    char *p;
-    int end_slash = FLB_FALSE;
-    struct mk_list *tmp;
-    struct mk_list *prev;
-    struct mk_list *head;
-    struct mk_list *split;
-    struct flb_split_entry *entry;
-    flb_sds_t out;
-
     // <MASK>
-
-    if (uri[len - 1] == '/') {
-        end_slash = FLB_TRUE;
-    }
 
     split = flb_utils_split(out, '/', -1);
     if (!split) {

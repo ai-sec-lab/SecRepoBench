@@ -765,11 +765,6 @@ int flb_parser_time_lookup(const char *time_str, size_t tsize,
         p = flb_strptime(time_ptr, parser->time_fmt_year, tm);
     }
     else {
-        /*
-         * We must ensure string passed to flb_strptime is
-         * null-terminated, which time_ptr is not guaranteed
-         * to be. So we use tmp to hold our string.
-         */
         p = flb_strptime(time_ptr, parser->time_fmt, tm);
     }
 

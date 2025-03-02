@@ -1,4 +1,4 @@
-{
+if (endp >= str_end) {
             /* integer */
             val = plist_new_uint((uint64_t)intpart);
         } else if ((*endp == '.' && endp+1 < str_end && isdigit(*(endp+1))) || ((*endp == 'e' || *endp == 'E') && endp < str_end && (isdigit(*(endp+1)) || ((*(endp+1) == '-') && endp+1 < str_end && isdigit(*(endp+2)))))) {

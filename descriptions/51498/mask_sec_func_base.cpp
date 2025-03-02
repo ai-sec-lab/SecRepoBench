@@ -72,6 +72,9 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
 
         // <MASK>
 
+        ch = st[i];
+        st[i] = '\0';
+
         sfx = NULL;
         pfx = NULL;
 

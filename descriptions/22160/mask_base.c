@@ -1122,16 +1122,7 @@ static Image *ReadDPXImage(const ImageInfo *image_info,ExceptionInfo *exception)
            profile=DestroyStringInfo(profile);
         }
     }
-  for ( ; offset < (MagickOffsetType) dpx.file.image_offset; offset++)
-    if (ReadBlobByte(image) == EOF)
-      break;
   // <MASK>
-  if (image_info->ping != MagickFalse)
-    {
-      (void) CloseBlob(image);
-      return(GetFirstImageInList(image));
-    }
-  status=SetImageExtent(image,image->columns,image->rows,exception);
   if (status == MagickFalse)
     return(DestroyImageList(image));
   status=ResetImagePixels(image,exception);

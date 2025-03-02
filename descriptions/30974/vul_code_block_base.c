@@ -5,3 +5,8 @@ int64_t off_pos = header_len + cbytes;
       BLOSC_TRACE_ERROR("Cannot read the offsets outside of frame boundary.");
       return NULL;
     }
+    // For in-memory frames, the coffset is just one pointer away
+    uint8_t* off_start = frame->cframe + off_pos;
+    if (off_cbytes != NULL) {
+      *off_cbytes = *(int32_t*) (off_start + BLOSC2_CHUNK_CBYTES);
+    }

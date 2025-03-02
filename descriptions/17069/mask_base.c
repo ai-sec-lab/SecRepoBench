@@ -792,7 +792,66 @@ FLAC__bool FLAC__bitreader_read_rice_signed_block(FLAC__BitReader *br, int vals[
 	ucbits = FLAC__BITS_PER_WORD - br->consumed_bits;
 	b = br->buffer[cwords] << br->consumed_bits;  /* keep unconsumed bits aligned to left */
 
-	// <MASK>
+	while(val < end) {
+		/* read the unary MSBs and end bit */
+		x = y = COUNT_ZERO_MSBS2(b);
+		if(x == FLAC__BITS_PER_WORD) {
+			x = ucbits;
+			do {
+				/* didn't find stop bit yet, have to keep going... */
+				cwords++;
+				if (cwords >= words)
+					goto incomplete_msbs;
+				b = br->buffer[cwords];
+				y = COUNT_ZERO_MSBS2(b);
+				x += y;
+			} while(y == FLAC__BITS_PER_WORD);
+		}
+		b <<= y;
+		b <<= 1; /* account for stop bit */
+		ucbits = (ucbits - x - 1) % FLAC__BITS_PER_WORD;
+		msbs = x;
+
+		/* read the binary LSBs */
+		x = (FLAC__uint32)(b >> (FLAC__BITS_PER_WORD - parameter)); /* parameter < 32, so we can cast to 32-bit uint32_t */
+		if(parameter <= ucbits) {
+			ucbits -= parameter;
+			b <<= parameter;
+		} else {
+			/* there are still bits left to read, they will all be in the next word */
+			cwords++;
+			if (cwords >= words)
+				goto incomplete_lsbs;
+			b = br->buffer[cwords];
+			ucbits += FLAC__BITS_PER_WORD - parameter;
+			x |= (FLAC__uint32)(b >> ucbits);
+			b <<= FLAC__BITS_PER_WORD - ucbits;
+		}
+		lsbs = x;
+
+		/* compose the value */
+		x = (msbs << parameter) | lsbs;
+		*val++ = (int)(x >> 1) ^ -(int)(x & 1);
+
+		continue;
+
+		/* at this point we've eaten up all the whole words */
+process_tail:
+		do {
+			// <MASK>
+		} while(cwords >= words && val < end);
+	}
+
+	if(ucbits == 0 && cwords < words) {
+		/* don't leave the head word with no unconsumed bits */
+		cwords++;
+		ucbits = FLAC__BITS_PER_WORD;
+	}
+
+	br->consumed_bits = FLAC__BITS_PER_WORD - ucbits;
+	br->consumed_words = cwords;
+
+	return true;
 }
 
 #if 0 /* UNUSED */

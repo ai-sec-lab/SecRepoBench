@@ -1744,7 +1744,6 @@ int get_coffset(blosc2_frame_s* frame, int32_t header_len, int64_t cbytes, int32
   if (rc < 0) {
     BLOSC_TRACE_ERROR("Problems retrieving a chunk offset.");
   }
-
   return rc;
 }
 

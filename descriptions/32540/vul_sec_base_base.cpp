@@ -105,7 +105,7 @@ struct hb_closure_context_t :
     if (done_lookups_glyph_count->get (lookup_index) != glyphs->get_population ())
     {
       done_lookups_glyph_count->set (lookup_index, glyphs->get_population ());
-
+      
       if (!done_lookups_glyph_set->get (lookup_index))
         done_lookups_glyph_set->set (lookup_index, hb_set_create ());
 

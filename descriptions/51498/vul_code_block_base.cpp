@@ -24,6 +24,3 @@ if (scpd > 0) {
 
           cmax = len - cpdmin + 1;
         }
-
-        ch = st[i];
-        st[i] = '\0';

@@ -1,4 +1,12 @@
-if (id == NULL || id->attr != attr) {
+if (table == NULL)
+        return(-1);
+
+    ID = xmlNodeListGetString(doc, attr->children, 1);
+    if (ID == NULL)
+	return(-1);
+    id = xmlHashLookup(table, ID);
+    xmlFree(ID);
+    if (id == NULL || id->attr != attr) {
 	return(-1);
     }
     id->name = attr->name;

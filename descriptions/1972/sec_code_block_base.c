@@ -61,18 +61,3 @@ switch (content->type) {
 	    break;
     }
     if (size - strlen(buf) <= 2) return;
-    if (englob)
-        strcat(buf, ")");
-    switch (content->ocur) {
-        case XML_ELEMENT_CONTENT_ONCE:
-	    break;
-        case XML_ELEMENT_CONTENT_OPT:
-	    strcat(buf, "?");
-	    break;
-        case XML_ELEMENT_CONTENT_MULT:
-	    strcat(buf, "*");
-	    break;
-        case XML_ELEMENT_CONTENT_PLUS:
-	    strcat(buf, "+");
-	    break;
-    }

@@ -27,14 +27,7 @@ xmlAddIDSafe(xmlDocPtr doc, const xmlChar *value, xmlAttrPtr attr,
             return(-1);
     } else {
         ret = xmlHashLookup(table, value);
-        if (ret != NULL) {
-            /*
-             * Update the attribute unless we are parsing in streaming
-             * mode. If the attribute is copied from an entity we want
-             * the ID reference the copy.
-             */
-            // <MASK>
-        }
+        if (ret != NULL) // <MASK>
     }
 
     ret = (xmlIDPtr) xmlMalloc(sizeof(xmlID));

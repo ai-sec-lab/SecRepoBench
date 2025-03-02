@@ -109,15 +109,7 @@ has_op2_string:;
 		}
 
 		if (result == op1) {
-			/* special case, perform operations on result */
 			// <MASK>
-			if (op1_string == op2_string) {
-				if (free_op2_string) {
-					zend_string_release(op2_string);
-					free_op2_string = false;
-				}
-				op2_string = result_str;
-			}
 		} else {
 			result_str = zend_string_alloc(result_len, 0);
 			memcpy(ZSTR_VAL(result_str), ZSTR_VAL(op1_string), op1_len);

@@ -1,4 +1,9 @@
-/* Check for coalesced text nodes */
+if (copy == NULL) {
+                xmlFreeNode(ret);
+                return(NULL);
+            }
+
+            /* Check for coalesced text nodes */
             if (insert->last != copy) {
                 if (insert->last == NULL) {
                     insert->children = copy;
@@ -7,10 +12,4 @@
                     insert->last->next = copy;
                 }
                 insert->last = copy;
-            }
-
-            if (cur->children != NULL) {
-                cur = cur->children;
-                insert = copy;
-                continue;
             }

@@ -676,6 +676,12 @@ PHP_METHOD(SplObjectStorage, serialize)
 /* {{{ Unserializes storage */
 PHP_METHOD(SplObjectStorage, unserialize)
 {
+	spl_SplObjectStorage *intern = Z_SPLOBJSTORAGE_P(ZEND_THIS);
+
+	char *buf;
+	size_t buf_len;
+	const unsigned char *p, *s;
+	php_unserialize_data_t var_hash;
 	// <MASK>
 
 	if (*p != ';') {

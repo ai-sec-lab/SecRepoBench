@@ -4,4 +4,5 @@ static MagickBooleanType inline ProcessTernaryOpr (FxInfo * pfx, TernaryT * pter
 */
 {
   // <MASK>
+  return MagickTrue;
 }

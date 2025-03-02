@@ -41,4 +41,3 @@ if (pfx->usedOprStack == 0)
     (void) AddAddressingElement (pfx, rGoto, NULL_ADDRESS);
     /* address will be after the subexpression */
   }
-  return MagickTrue;

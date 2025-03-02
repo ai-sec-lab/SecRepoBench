@@ -10,16 +10,7 @@ bool serialize (hb_serialize_context_t *c,
     if (unlikely (!c->extend_min (*this))) return_trace (false);
     this->count.set (fdCount);
     this->offSize.set (offSize_);
-    if (!unlikely (c->allocate_size<HBUINT8> (offSize_ * (fdCount + 1))))
-      return_trace (false);
-
-    /* serialize font dict offsets */
-    unsigned int  offset = 1;
-    unsigned int  fid = 0;
-    for (unsigned i = 0; i < fontDicts.length; i++// <MASK>
-    CFFIndexOf<COUNT, FontDict>::set_offset_at (fid, offset);
-
-    /* serialize font dicts */
+    // <MASK>
     for (unsigned int i = 0; i < fontDicts.length; i++)
       if (fdmap.includes (i))
       {

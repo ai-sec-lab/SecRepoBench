@@ -1,17 +1,4 @@
-case '.':
-        if (pos == std::string::npos) {  // dots are not metacharacters in groups: [.]
-          p = nextchar(p);
-          // skip the next character
-          ++st;
-          while ((opts & aeUTF8) && st < s.size() && (s[st] & 0xc0) == 0x80)
-            ++st;
-          if (st == s.size() && p)
-            return 0;  // word <= condition
-          break;
-        }
-      /* FALLTHROUGH */
-      default: {
-        if (s[st] == *p) {
+if (s[st] == *p) {
           ++st;
           p = nextchar(p);
           if ((opts & aeUTF8) && (s[st - 1] & 0x80)) {  // multibyte
@@ -39,4 +26,3 @@ case '.':
           p = nextchar(p);
         } else
           return 0;
-      }

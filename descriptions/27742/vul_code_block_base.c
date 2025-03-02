@@ -1,4 +1,6 @@
-if (root.via.array.size != 2) {
+/* Each array must have two entries: time and record */
+        root = result.data;
+        if (root.via.array.size != 2) {
             continue;
         }
 
@@ -7,3 +9,11 @@ if (root.via.array.size != 2) {
 
         /* Get the record/map */
         map = root.via.array.ptr[1];
+        map_size = map.via.map.size;
+
+        if (date_key != NULL) {
+            msgpack_pack_map(&tmp_pck, map_size + 1);
+        }
+        else {
+            msgpack_pack_map(&tmp_pck, map_size);
+        }

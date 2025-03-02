@@ -333,7 +333,6 @@ ether_type_check:
 	}
       }
     } else if((sport == TZSP_PORT) || (dport == TZSP_PORT)) {
-      /* https://en.wikipedia.org/wiki/TZSP */
       // <MASK>
     } else if(sport == NDPI_CAPWAP_DATA_PORT) {
       /* We dissect ONLY CAPWAP traffic */

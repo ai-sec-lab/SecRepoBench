@@ -510,12 +510,7 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
             numsyllable = oldnumsyllable2;
             wordnum = oldwordnum2;
 
-            // perhaps second word is a compound word (recursive call)
-            if (wordnum + 2 < maxwordnum) {
-              // <MASK>
-            } else {
-              rv = NULL;
-            }
+            // <MASK>
             if (rv) {
               // forbid compound word, if it is a non-compound word with typical
               // fault, or a dictionary word pair

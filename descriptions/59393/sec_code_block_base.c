@@ -1,4 +1,7 @@
-while(i < len - 3) {
+{
+  int i = 0;
+
+  while(i < len - 3) {
     if((buffer[i] == 'x')
        && (buffer[i+1] == 'n')
        && (buffer[i+2] == '-')
@@ -10,3 +13,4 @@ while(i < len - 3) {
 
   // not a punycode string
   return 0;
+}

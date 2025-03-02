@@ -6844,14 +6844,6 @@ static Image *ReadOneMNGImage(MngInfo* mng_info,const ImageInfo *image_info,
 
     // <MASK>
 
-    if (image->columns == 0 || image->rows == 0)
-      {
-        (void) CloseBlob(image);
-        return(DestroyImageList(image));
-      }
-
-    mng_info->image=image;
-
     if (mng_type)
       {
         MngBox

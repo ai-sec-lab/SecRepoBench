@@ -1237,19 +1237,7 @@ static double FxChannelStatistics(FxInfo *fx_info,Image *image,
   return(QuantumScale*StringToDouble(statistic,(char **) NULL));
 }
 
-static double
-  FxEvaluateSubexpression(FxInfo *,const PixelChannel,const ssize_t,
-    const ssize_t,const char *,const size_t,double *,ExceptionInfo *);
-
-static inline MagickBooleanType IsFxFunction(const char *expression,
-  const char *name,const size_t length)
-{
-  int
-    c;
-
-  c=name[length];
-  // <MASK>
-}
+// <MASK>
 
 static MagickOffsetType FxGCD(MagickOffsetType alpha,MagickOffsetType beta)
 {

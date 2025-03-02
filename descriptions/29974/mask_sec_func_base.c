@@ -65,15 +65,7 @@ dissect_tcpopt_sack(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* d
         /* XXX - check whether it goes past end of packet */
         rightedge = tvb_get_ntohl(tvb, offset + 4)-base_ack;
         optlen -= 4;
-        proto_tree_add_uint_format(field_tree, hf_tcp_option_sack_sre, tvb,
-                                   offset+4, 4, rightedge,
-                                   "right edge = %u%s", rightedge,
-                                   (tcp_analyze_seq && tcp_relative_seq) ? " (relative)" : "");
-        tcp_info_append_uint(pinfo, "SLE", leftedge);
-        tcp_info_append_uint(pinfo, "SRE", rightedge);
         // <MASK>
-
-        /* Update tap info */
         if (tcph != NULL && (tcph->num_sack_ranges < MAX_TCP_SACK_RANGES)) {
             tcph->sack_left_edge[tcph->num_sack_ranges] = leftedge;
             tcph->sack_right_edge[tcph->num_sack_ranges] = rightedge;

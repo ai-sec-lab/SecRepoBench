@@ -1,4 +1,5 @@
-int err, ndims;
+herr_t herr;
+    int err, ndims;
 
     attr_id = H5Aopen_by_name(dset_id, ".", "MATLAB_fields", H5P_DEFAULT, H5P_DEFAULT);
     space_id = H5Aget_space(attr_id);

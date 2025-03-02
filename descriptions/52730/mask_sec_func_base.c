@@ -76,17 +76,6 @@ fasthuf_initialize (
         uint64_t codeLen =
             fasthuf_read_bits (6, &currBits, &currBitCount, &currByte);
 
-        if (codeLen < (uint64_t) SHORT_ZEROCODE_RUN)
-        {
-            if (codeLen == 0) continue;
-
-            if (codeLen < fhd->_minCodeLength) fhd->_minCodeLength = codeLen;
-
-            if (codeLen > fhd->_maxCodeLength) fhd->_maxCodeLength = codeLen;
-
-            codeCount[codeLen]++;
-        }
-        else if (codeLen == (uint64_t) LONG_ZEROCODE_RUN)
         // <MASK>
 
         if (symbol > (uint64_t) maxSymbol)

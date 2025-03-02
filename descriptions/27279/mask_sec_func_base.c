@@ -122,16 +122,7 @@ struct flb_http_client *flb_http_client(struct flb_upstream_conn *u_conn,
         c->body_len = body_len;
     }
 
-    add_host_and_content_length(c);
-
-    /* Check proxy data */
-    if (proxy) {
-        flb_debug("[http_client] Using http_proxy: %s", proxy);
-        // <MASK>
-    }
-
-    /* 'Read' buffer size */
-    c->resp.data = flb_malloc(FLB_HTTP_DATA_SIZE_MAX);
+    // <MASK>
     if (!c->resp.data) {
         flb_errno();
         flb_http_client_destroy(c);

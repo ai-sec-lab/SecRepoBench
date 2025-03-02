@@ -354,9 +354,7 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
             // when compound forms consist of 2 words, or if more,
             // then the syllable number of root words must be 6, or lesser.
 
-            if (// <MASK>
-                (scpd == 0 || checkcpdtable[scpd - 1].cond2 == FLAG_NULL ||
-                 TESTAFF(rv->astr, checkcpdtable[scpd - 1].cond2, rv->alen))) {
+            if (// <MASK>) {
               // forbid compound word, if it is a non-compound word with typical
               // fault
               if ((checkcompoundrep && cpdrep_check(word, len)) ||

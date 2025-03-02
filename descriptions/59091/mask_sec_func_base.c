@@ -865,15 +865,14 @@ _dwarf_read_line_table_header(Dwarf_Debug dbg,
     /*  For two-level line tables, read the
         subprograms table. */
     if (version == EXPERIMENTAL_LINE_TABLES_VERSION) {
-        Dwarf_Unsigned subprog_format_count = 0;
-        Dwarf_Unsigned *subprog_entry_types = 0;
-        Dwarf_Unsigned *subprog_entry_forms = 0;
-        Dwarf_Unsigned subprogs_count = 0;
-        Dwarf_Unsigned i = 0;
-        Dwarf_Unsigned j = 0;
-        int dres = 0;
-
         // <MASK>
+        subprog_entry_types = malloc(sizeof(Dwarf_Unsigned) *
+            subprog_format_count);
+        if (subprog_entry_types == NULL) {
+            _dwarf_error_string(dbg, err, DW_DLE_ALLOC_FAIL,
+                "DW_DLE_ALLOC_FAIL allocating subprog_entry_types");
+            return DW_DLV_ERROR;
+        }
         if (subprog_format_count > total_length) {
             IssueExpError(dbg,err,
                 "Subprog format count Count too "

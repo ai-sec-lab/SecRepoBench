@@ -39,35 +39,3 @@
 
 	}
       }
-
-      flow->bittorrent_stage++;
-
-      if(flow->bittorrent_stage < 5) {
-	/* We have detected bittorrent but we need to wait until we get a hash */
-
-	if(packet->payload_packet_len > 19 /* min size */) {
-	  if(ndpi_strnstr((const char *)packet->payload, ":target20:", packet->payload_packet_len)
-	     || ndpi_strnstr((const char *)packet->payload, ":find_node1:", packet->payload_packet_len)
-	     || ndpi_strnstr((const char *)packet->payload, "d1:ad2:id20:", packet->payload_packet_len)
-	     || ndpi_strnstr((const char *)packet->payload, ":info_hash20:", packet->payload_packet_len)
-	     || ndpi_strnstr((const char *)packet->payload, ":filter64", packet->payload_packet_len)
-	     || ndpi_strnstr((const char *)packet->payload, "d1:rd2:id20:", packet->payload_packet_len)
-	     || (bt_proto = ndpi_strnstr((const char *)packet->payload, BITTORRENT_PROTO_STRING, packet->payload_packet_len))
-	     ) {
-	  bittorrent_found:
-	    if(bt_proto != NULL && ((u_int8_t *)&bt_proto[27] - packet->payload +
-				    sizeof(flow->protos.bittorrent.hash)) < packet->payload_packet_len) {
-	      memcpy(flow->protos.bittorrent.hash, &bt_proto[27], sizeof(flow->protos.bittorrent.hash));
-	      flow->extra_packets_func = NULL; /* Nothing else to do */
-	    }
-
-	    NDPI_LOG_INFO(ndpi_struct, "found BT: plain\n");
-	    ndpi_add_connection_as_bittorrent(ndpi_struct, flow, -1, 0, NDPI_CONFIDENCE_DPI);
-	    return;
-	  }
-	}
-
-	return;
-      }
-
-      ndpi_skip_bittorrent(ndpi_struct, flow, packet);

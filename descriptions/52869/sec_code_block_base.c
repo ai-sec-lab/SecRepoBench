@@ -8,3 +8,8 @@
 #endif
             ctxt->incTotal++;
             ref = xmlXIncludeExpandNode(ctxt, cur);
+            /*
+             * Mark direct includes.
+             */
+            if (ref != NULL)
+                ref->replace = 1;

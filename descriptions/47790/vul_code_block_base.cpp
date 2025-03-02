@@ -1,4 +1,6 @@
-for (unsigned i = 0;; i++)
+{
+    hb_codepoint_t gid = 1;
+    for (unsigned i = 0;; i++)
     {
       hb_codepoint_t sid = ranges[i].first;
       unsigned count = ranges[i].nLeft + 1;
@@ -8,3 +10,4 @@ for (unsigned i = 0;; i++)
       if (gid >= num_glyphs)
         break;
     }
+  }

@@ -2374,15 +2374,7 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 
 		size_t sa_size = ndpi_min(tot_signature_algorithms_len / 2, MAX_NUM_TLS_SIGNATURE_ALGORITHMS);
 
-#ifdef TLS_HANDLE_SIGNATURE_ALGORITMS
-		if (s_offset + 2 * sa_size <= packet->payload_packet_len) {
-		  flow->protos.tls_quic.num_tls_signature_algorithms = sa_size;
-		  memcpy(flow->protos.tls_quic.client_signature_algorithms,
-			 &packet->payload[s_offset], 2 /* 16 bit */ * sa_size);
-		}
-#endif
-
-		// <MASK>
+// <MASK>
 
 		for(i=0; i<tot_signature_algorithms_len && s_offset + (int)i + 2 < packet->payload_packet_len; i+=2) {
 		  u_int16_t signature_algo = (u_int16_t)ntohs(*((u_int16_t*)&packet->payload[s_offset+i]));

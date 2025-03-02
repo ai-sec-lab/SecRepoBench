@@ -88,18 +88,7 @@ struct ndpi_proto ndpi_workflow_process_packet(struct ndpi_workflow * workflow,
     break;
 
     /* Cisco PPP in HDLC-like framing - 50 */
-  case DLT_PPP_SERIAL:
-    chdlc = (struct ndpi_chdlc *) &packet[eth_offset];
-    ip_offset = sizeof(struct ndpi_chdlc); /* CHDLC_OFF = 4 */
-    type = ntohs(chdlc->proto_code);
-    break;
-
-    /* Cisco PPP - 9 or 104 */
-  case DLT_C_HDLC:
-  case DLT_PPP:
-    // <MASK>
-
-    /* IEEE 802.3 Ethernet - 1 */
+  // <MASK>
   case DLT_EN10MB:
     ethernet = (struct ndpi_ethhdr *) &packet[eth_offset];
     ip_offset = sizeof(struct ndpi_ethhdr) + eth_offset;

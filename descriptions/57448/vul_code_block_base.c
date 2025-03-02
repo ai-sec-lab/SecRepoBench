@@ -1,4 +1,4 @@
-(flow->protos.tls_quic.server_names == NULL)
+if(flow->protos.tls_quic.server_names == NULL)
 		      flow->protos.tls_quic.server_names = ndpi_strdup(dNSName),
 			flow->protos.tls_quic.server_names_len = strlen(dNSName);
 		    else {

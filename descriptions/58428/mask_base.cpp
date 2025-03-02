@@ -183,17 +183,7 @@ struct SimpleGlyph
   bool get_contour_points (contour_point_vector_t &points_ /* OUT */,
 			   bool phantom_only = false) const
   {
-    const HBUINT16 *endPtsOfContours = &StructAfter<HBUINT16> (header);
-    int num_contours = header.numberOfContours;
-    assert (num_contours > 0);
-    /* One extra item at the end, for the instruction-count below. */
-    if (unlikely (!bytes.check_range (&endPtsOfContours[num_contours]))) return false;
-    unsigned int num_points = endPtsOfContours[num_contours - 1] + 1;
-
-    points_.alloc (num_points + 4, true); // Allocate for phantom points, to avoid a possible copy
     // <MASK>
-
-    /* Skip instructions */
     const HBUINT8 *p = &StructAtOffset<HBUINT8> (&endPtsOfContours[num_contours + 1],
 						 endPtsOfContours[num_contours]);
 

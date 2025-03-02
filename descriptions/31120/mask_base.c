@@ -1733,17 +1733,7 @@ int sort_offset(const void* a, const void* b) {
 
 int get_coffset(blosc2_frame_s* frame, int32_t header_len, int64_t cbytes, int32_t nchunk, int64_t *offset) {
   // Get the offset to nchunk
-  uint8_t *coffsets = get_coffsets(frame, header_len, cbytes, NULL);
-  if (coffsets == NULL) {
-    BLOSC_TRACE_ERROR("Cannot get the offset for chunk %d for the frame.", nchunk);
-    return BLOSC2_ERROR_DATA;
-  }
-
-  // Get the 64-bit offset
-  int rc = blosc_getitem(coffsets, nchunk, 1, offset);
   // <MASK>
-
-  return rc;
 }
 
 

@@ -1192,19 +1192,7 @@ mcopy(struct magic_set *ms, union VALUETYPE *p, int type, int indir,
 			return 0;
 
 		case FILE_REGEX: {
-			const char *b;
-			const char *c;
-			const char *last;	/* end of search region */
-			const char *buf;	/* start of search region */
 			// <MASK>
-
-			if (m->str_flags & REGEX_LINE_COUNT) {
-				linecnt = m->str_range;
-				bytecnt = linecnt * 80;
-			} else {
-				linecnt = 0;
-				bytecnt = m->str_range;
-			}
 
 			if (bytecnt == 0 || bytecnt > nbytes - offset)
 				bytecnt = nbytes - offset;

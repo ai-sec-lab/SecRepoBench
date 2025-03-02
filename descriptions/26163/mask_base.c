@@ -5287,15 +5287,6 @@ static int fp_read_radix_16(fp_int *a, const char *str)
   k = 0;
   for (i = (int)(XSTRLEN(str) - 1); i >= 0; i--) {
       ch = str[i];
-      if (ch >= '0' && ch <= '9')
-          ch -= (char)'0';
-      else if (ch >= 'A' && ch <= 'F')
-          ch -= (char)'A' - 10;
-      else if (ch >= 'a' && ch <= 'f')
-          ch -= (char)'a' - 10;
-      else
-          return FP_VAL;
-
       // <MASK>
   }
 

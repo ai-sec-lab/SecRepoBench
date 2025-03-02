@@ -1,4 +1,4 @@
-{
+if (cond[j] != ']') {
           if (cond[j] != strip[i]) {
             HUNSPELL_WARNING(stderr,
                              "warning: line %d: incompatible stripping "

@@ -6,3 +6,10 @@ if (free_op1_string) {
 			/* special case, perform operations on result */
 			result_str = zend_string_extend(op1_string, result_len, 0);
 			/* account for the case where result_str == op1_string == op2_string and the realloc is done */
+			if (op1_string == op2_string) {
+				if (free_op2_string) {
+					zend_string_release(op2_string);
+					free_op2_string = false;
+				}
+				op2_string = result_str;
+			}

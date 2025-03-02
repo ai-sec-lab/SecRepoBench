@@ -44,10 +44,7 @@ htmlCurrentChar(xmlParserCtxtPtr ctxt, int *len) {
         guess = htmlFindEncoding(ctxt);
         if (guess == NULL) {
             xmlSwitchEncoding(ctxt, XML_CHAR_ENCODING_8859_1);
-        } else {
-            handler = xmlFindCharEncodingHandler((const char *) guess);
-            // <MASK>
-        }
+        } else // <MASK>
         ctxt->input->flags |= XML_INPUT_HAS_ENCODING;
     }
 

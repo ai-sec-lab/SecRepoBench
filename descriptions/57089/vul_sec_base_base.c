@@ -3151,7 +3151,7 @@ htmlParseScript(htmlParserCtxtPtr ctxt) {
 	    }
 	    nbchar = 0;
 	}
-		GROW;
+	GROW;
 	NEXTL(l);
 	cur = CUR_CHAR(l);
     }

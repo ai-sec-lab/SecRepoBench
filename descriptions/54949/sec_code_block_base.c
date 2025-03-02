@@ -1,4 +1,5 @@
-/* attempt to parse this as 'strings' data */
+{
+            /* attempt to parse this as 'strings' data */
             plist_free(*plist);
             *plist = NULL;
             plist_t pl = plist_new_dict();
@@ -11,3 +12,4 @@
             } else {
                 *plist = pl;
             }
+        }

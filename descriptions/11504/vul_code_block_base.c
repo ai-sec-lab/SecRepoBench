@@ -1,4 +1,5 @@
-ctxt->freeElems = ret->next;
+ret = ctxt->freeElems;
+	ctxt->freeElems = ret->next;
 	ctxt->freeElemsNr--;
 	memset(ret, 0, sizeof(xmlNode));
 	ret->type = XML_ELEMENT_NODE;

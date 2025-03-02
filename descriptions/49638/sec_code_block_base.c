@@ -1,4 +1,9 @@
-if (ip_port_separator < (char const *)packet->payload + NDPI_STATICSTRING_LEN("IP="))
+if (ip_port_separator == NULL)
+  {
+    return 1;
+  }
+
+  if (ip_port_separator < (char const *)packet->payload + NDPI_STATICSTRING_LEN("IP="))
   {
     return 1;
   }

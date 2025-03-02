@@ -1799,7 +1799,9 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
         }
 
         // first word is acceptable in compound words?
-        if (// <MASK> ((!rv) && (langnum == LANG_hu) && hu_mov_rule &&
+        if ((// <MASK>)
+            // LANG_hu section: spec. Hungarian rule
+            || ((!rv) && (langnum == LANG_hu) && hu_mov_rule &&
                 (rv = affix_check(st, 0, i)) &&
                 (sfx && sfx->getCont() &&
                  (  // XXX hardwired Hungarian dic. codes

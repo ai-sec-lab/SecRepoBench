@@ -1,4 +1,5 @@
-result_str = zend_string_extend(op1_string, result_len, 0);
+/* special case, perform operations on result */
+			result_str = zend_string_extend(op1_string, result_len, 0);
 			/* Free result after zend_string_extend(), as it may throw an out-of-memory error. If we
 			 * free it before we would leave the released variable on the stack with shutdown trying
 			 * to free it again. */
@@ -8,3 +9,10 @@ result_str = zend_string_extend(op1_string, result_len, 0);
 				free_op1_string = false;
 			}
 			/* account for the case where result_str == op1_string == op2_string and the realloc is done */
+			if (op1_string == op2_string) {
+				if (free_op2_string) {
+					zend_string_release(op2_string);
+					free_op2_string = false;
+				}
+				op2_string = result_str;
+			}

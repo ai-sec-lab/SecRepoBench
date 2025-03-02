@@ -18,11 +18,6 @@ static int dissect_softether_ip_port(struct ndpi_flow_struct *flow,
   ip_port_separator = ndpi_strnstr((char const *)packet->payload + NDPI_STATICSTRING_LEN("IP="),
                                    ",PORT=",
                                    packet->payload_packet_len - NDPI_STATICSTRING_LEN("IP="));
-  if (ip_port_separator == NULL)
-  {
-    return 1;
-  }
-
   // <MASK>
 
   port_len = ndpi_min(sizeof(flow->protos.softether.port) - 1,

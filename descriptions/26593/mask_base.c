@@ -467,11 +467,9 @@ int flb_utils_hex2int(char *hex, int len)
 
 int flb_utils_time_to_seconds(const char *time)
 {
-    int len;
-    size_t val;
-
-    len = strlen(time);
     // <MASK>
+
+    return val;
 }
 
 int flb_utils_bool(const char *val)

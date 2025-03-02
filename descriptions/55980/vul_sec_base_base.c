@@ -12105,7 +12105,7 @@ done:
     xmlGenericError(xmlGenericErrorContext, "PP: done %d\n", ret);
 #endif
     return(ret);
-    encoding_error:
+encoding_error:
     {
         char buffer[150];
 
@@ -12116,8 +12116,8 @@ done:
 		     "Input is not proper UTF-8, indicate encoding !\n%s",
 		     BAD_CAST buffer, NULL);
     }
-        return(0);
-    }
+    return(0);
+}
 
 /**
  * xmlParseChunk:

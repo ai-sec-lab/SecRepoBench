@@ -1,4 +1,4 @@
-{
+if (!strncmp("null", str_val, str_len)) {
         plist_data_t data = plist_new_plist_data();
         data->type = PLIST_NULL;
         val = plist_new_node(data);

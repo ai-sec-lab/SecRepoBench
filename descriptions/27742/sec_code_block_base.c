@@ -1,4 +1,6 @@
-if (root.type != MSGPACK_OBJECT_ARRAY) {
+/* Each array must have two entries: time and record */
+        root = result.data;
+        if (root.type != MSGPACK_OBJECT_ARRAY) {
             continue;
         }
         if (root.via.array.size != 2) {
@@ -12,4 +14,12 @@ if (root.type != MSGPACK_OBJECT_ARRAY) {
         map = root.via.array.ptr[1];
         if (map.type != MSGPACK_OBJECT_MAP) {
             continue;
+        }
+        map_size = map.via.map.size;
+
+        if (date_key != NULL) {
+            msgpack_pack_map(&tmp_pck, map_size + 1);
+        }
+        else {
+            msgpack_pack_map(&tmp_pck, map_size);
         }

@@ -28,12 +28,3 @@ if(header->caplen < ip_offset + ip_len + sizeof(struct ndpi_vxlanhdr)) {
     |                VXLAN Network Identifier (VNI) |   Reserved    |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
   */
-  if((udp->dest == vxlan_dst_port || udp->source == vxlan_dst_port) &&
-    (packet[offset] == 0x8) &&
-    (packet[offset + 1] == 0x0) &&
-    (packet[offset + 2] == 0x0) &&
-    (packet[offset + 3] == 0x0) &&
-    (packet[offset + 7] ==  0x0)) {
-    return true;
-    }
-  return false;

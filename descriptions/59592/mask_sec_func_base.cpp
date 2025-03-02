@@ -18,4 +18,6 @@ bool subset (hb_subset_context_t *c) const
     }
 
     // <MASK>
+
+    return result;
   }

@@ -1,4 +1,8 @@
-if (!fits_in_pe(pe, row_offset + matched_bits, sizeof(uint32_t)))
+// If the Valid bit is not set for this table, skip it...
+    if (!((yr_le64toh(tilde_header->Valid) >> bit_check) & 0x01))
+      continue;
+
+    if (!fits_in_pe(pe, row_offset + matched_bits, sizeof(uint32_t)))
       return;
 
     num_rows = yr_le32toh(*(row_offset + matched_bits));
@@ -8,5 +12,3 @@ if (!fits_in_pe(pe, row_offset + matched_bits, sizeof(uint32_t)))
     // rows for the BIT_MODULE section.
     if (num_rows > 10000)
       return;
-
-    // Those tables which exist, but that we don't care about must be

@@ -1,4 +1,5 @@
-// calculate syllable number of the word
+if (langnum == LANG_hu) {
+              // calculate syllable number of the word
               numsyllable += get_syllable(word.substr(i));
 
               // - affix syllable num.
@@ -36,3 +37,4 @@
                   }
                 }
               }
+            }

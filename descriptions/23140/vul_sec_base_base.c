@@ -113,7 +113,6 @@ ZEND_API zend_attribute *zend_add_attribute(HashTable **attributes, zend_bool pe
 	attr->offset = offset;
 	attr->argc = argc;
 
-	/* Initialize arguments to avoid partial initialization in case of fatal errors. */
 	zend_hash_next_index_insert_ptr(*attributes, attr);
 
 	return attr;

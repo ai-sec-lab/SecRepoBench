@@ -21,16 +21,41 @@ static uint8_t *decrypt_initial_packet(struct ndpi_detection_module_struct *ndpi
 
   /* Packet numbers are protected with AES128-CTR,
      Initial packets are protected with AEAD_AES_128_GCM. */
-  if(!quic_ciphers_prepare(&ciphers, GCRY_MD_SHA256,
-                           GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
-                           client_secret, version)) {
-    NDPI_LOG_DBG(ndpi_struct, "Error quic_cipher_prepare\n");
+  // <MASK>
+
+  if (pn_offset + payload_length > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Too short %d %d\n", pn_offset + payload_length,
+                 packet->payload_packet_len);
+    quic_ciphers_reset(&ciphers);
     return NULL;
   }
 
-  /* Type(1) + version(4) + DCIL + DCID + SCIL + SCID */
-  pn_offset = 1 + 4 + 1 + dest_conn_id_len + 1 + source_conn_id_len;
-  pn_offset += quic_len(&packet->payload[pn_offset], &token_length);
-  pn_offset += token_length;
-  // <MASK>
+  if(!quic_decrypt_header(&packet->payload[0], pn_offset, &ciphers.hp_cipher,
+			  GCRY_CIPHER_AES128, &first_byte, &pkn32, 0)) {
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  NDPI_LOG_DBG2(ndpi_struct, "first_byte 0x%x pkn32 0x%x\n", first_byte, pkn32);
+
+  pkn_len = (first_byte & 3) + 1;
+  /* TODO: is it always true in Initial Packets? */
+  packet_number = pkn32;
+
+  offset = pn_offset + pkn_len;
+  if (!(pn_offset + payload_length >= offset + 16)) {
+    NDPI_LOG_DBG(ndpi_struct, "No room for Auth Tag %d %d",
+                 pn_offset + payload_length, offset);
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  quic_decrypt_message(&ciphers.pp_cipher, &packet->payload[0], pn_offset + payload_length,
+		       offset, first_byte, pkn_len, packet_number, &decryption);
+
+  quic_ciphers_reset(&ciphers);
+
+  if(decryption.data_len) {
+    *clear_payload_len = decryption.data_len;
+    return decryption.data;
+  }
+  return NULL;
 }

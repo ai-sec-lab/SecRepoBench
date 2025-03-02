@@ -5,19 +5,7 @@ Mat_H5ReadFieldNames(matvar_t *matvar, hid_t dset_id, hsize_t *nfields)
     hid_t field_id, attr_id, space_id;
     hvl_t *fieldnames_vl;
     herr_t herr;
-    int err;
-
-    attr_id = H5Aopen_by_name(dset_id, ".", "MATLAB_fields", H5P_DEFAULT, H5P_DEFAULT);
-    space_id = H5Aget_space(attr_id);
-    err = H5Sget_simple_extent_dims(space_id, nfields, NULL);
-    if ( err < 0 ) {
-        H5Sclose(space_id);
-        H5Aclose(attr_id);
-        return MATIO_E_GENERIC_READ_ERROR;
-    } else {
-        // <MASK>
-    }
-    fieldnames_vl = (hvl_t *)calloc((size_t)(*nfields), sizeof(*fieldnames_vl));
+    // <MASK>
     if ( fieldnames_vl == NULL ) {
         H5Sclose(space_id);
         H5Aclose(attr_id);

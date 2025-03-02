@@ -782,21 +782,7 @@ _dwarf_internal_global_formref_b(Dwarf_Attribute attr,
     is_info = cu_context->cc_is_info;
     switch (attr->ar_attribute_form) {
 
-    case DW_FORM_ref1:
-        // <MASK>
-
-    case DW_FORM_ref2:
-        READ_UNALIGNED_CK(dbg, offset, Dwarf_Unsigned,
-            attr->ar_debug_ptr, DWARF_HALF_SIZE,
-            error,section_end);
-        goto fixoffset;
-
-    case DW_FORM_ref4:
-        READ_UNALIGNED_CK(dbg, offset, Dwarf_Unsigned,
-            attr->ar_debug_ptr, DWARF_32BIT_SIZE,
-            error,section_end);
-        goto fixoffset;
-
+    // <MASK>
     case DW_FORM_ref8:
         READ_UNALIGNED_CK(dbg, offset, Dwarf_Unsigned,
             attr->ar_debug_ptr, DWARF_64BIT_SIZE,

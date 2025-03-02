@@ -160,6 +160,9 @@ void ndpi_search_mail_imap_tcp(struct ndpi_detection_module_struct *ndpi_struct,
 	    && (packet->payload[command_start + 3] == 'I' || packet->payload[command_start + 3] == 'i')
 	    && (packet->payload[command_start + 4] == 'N' || packet->payload[command_start + 4] == 'n')) {
 	  // <MASK>
+	  
+	  flow->l4.tcp.mail_imap_stage += 1;
+	  saw_command = 1;
 	} else if((packet->payload[command_start] == 'F' || packet->payload[command_start] == 'f')
 		   && (packet->payload[command_start + 1] == 'E' || packet->payload[command_start + 1] == 'e')
 		   && (packet->payload[command_start + 2] == 'T' || packet->payload[command_start + 2] == 't')

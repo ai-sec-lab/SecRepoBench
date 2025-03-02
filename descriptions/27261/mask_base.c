@@ -73,16 +73,7 @@ int flb_gzip_compress(void *in_data, size_t in_len,
     int footer_start;
     uint8_t *pb;
     size_t out_size;
-    void *out_buf;
-    z_stream strm;
     // <MASK>
-    out_buf = flb_malloc(out_size);
-
-    if (!out_buf) {
-        flb_errno();
-        flb_error("[gzip] could not allocate outgoing buffer");
-        return -1;
-    }
 
     /* Initialize streaming buffer context */
     memset(&strm, '\0', sizeof(strm));

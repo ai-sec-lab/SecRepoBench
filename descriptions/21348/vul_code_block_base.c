@@ -1,4 +1,5 @@
-u_int offset           = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+/* https://en.wikipedia.org/wiki/TZSP */
+      u_int offset           = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
       u_int8_t version       = packet[offset];
       u_int8_t ts_type       = packet[offset+1];
       u_int16_t encapsulates = ntohs(*((u_int16_t*)&packet[offset+2]));

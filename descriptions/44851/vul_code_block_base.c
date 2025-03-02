@@ -1,4 +1,8 @@
-if ((double) x > p->bounds.x2)
+if ((double) y <= p->bounds.y1)
+      break;
+    if (((double) y > p->bounds.y2) || ((double) x <= p->bounds.x1))
+      continue;
+    if ((double) x > p->bounds.x2)
       {
         winding_number+=p->direction != 0 ? 1 : -1;
         continue;
@@ -8,3 +12,5 @@ if ((double) x > p->bounds.x2)
       if ((double) y <= p->points[i].y)
         break;
     q=p->points+i-1;
+    if ((((q+1)->x-q->x)*(y-q->y)) <= (((q+1)->y-q->y)*(x-q->x)))
+      winding_number+=p->direction != 0 ? 1 : -1;

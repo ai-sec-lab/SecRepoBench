@@ -1782,9 +1782,6 @@ struct ClassDefFormat2_4
     if (unlikely (!record)) return_trace (false);
 
     // <MASK>
-    rangeRecord.as_array ().qsort (RangeRecord<Types>::cmp_range); // To handle unsorted glyph order.
-
-    return_trace (true);
   }
 
   bool subset (hb_subset_context_t *c,

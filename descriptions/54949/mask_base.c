@@ -848,9 +848,7 @@ PLIST_API int plist_from_openstep(const char *plist_ostep, uint32_t length, plis
         if (!*plist) {
             /* whitespace only file is considered an empty dictionary */
             *plist = plist_new_dict();
-        } else if (ctx.pos < ctx.end && *ctx.pos == '=') {
-            // <MASK>
-        }
+        } else if (ctx.pos < ctx.end && *ctx.pos == '=') // <MASK>
     }
 
     return err;

@@ -1,4 +1,5 @@
-const char* p;
+(utf8) {
+    const char* p;
     for (p = word + pos - 1; (*p & 0xc0) == 0x80; p--)
       ;
     std::string pair(p);
@@ -10,3 +11,9 @@ const char* p;
          (unicodetoupper(b, langnum) == b)) &&
         (a != '-') && (b != '-'))
       return 1;
+  } else {
+    unsigned char a = *(word + pos - 1);
+    unsigned char b = *(word + pos);
+    if ((csconv[a].ccase || csconv[b].ccase) && (a != '-') && (b != '-'))
+      return 1;
+  }

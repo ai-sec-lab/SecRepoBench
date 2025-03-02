@@ -34,11 +34,9 @@ void serialize (hb_serialize_context_t *c,
 	obj_indices.push (result);
     }
 
-    if (c->length () - table_initpos == CmapSubtableFormat14::min_size)
-    {
-      c->revert (snap);
-      return;
-    }
-
     // <MASK>
+    _reverse_variation_records ();
+
+    /* Now that records are in the right order, we can set up the offsets. */
+    _add_links_to_variation_records (c, obj_indices);
   }

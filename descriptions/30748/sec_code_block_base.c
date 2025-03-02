@@ -1,4 +1,11 @@
-if (content_len < 0) {
+// Read the size of the content
+    int32_t content_len;
+    header_pos += sizeof(content_len);
+    if (header_len < header_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    swap_store(&content_len, content_marker + 1, sizeof(content_len));
+    if (content_len < 0) {
       return BLOSC2_ERROR_DATA;
     }
     metalayer->content_len = content_len;
@@ -8,6 +15,3 @@ if (content_len < 0) {
     if (header_len < header_pos) {
       return BLOSC2_ERROR_READ_BUFFER;
     }
-    char* content = malloc((size_t)content_len);
-    memcpy(content, content_marker + 1 + 4, (size_t)content_len);
-    metalayer->content = (uint8_t*)content;

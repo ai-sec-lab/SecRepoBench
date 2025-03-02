@@ -12,3 +12,5 @@
                 ((!checkcompounddup || (rv != rv_first)))
                 // test CHECKCOMPOUNDPATTERN conditions
                 &&
+                (scpd == 0 || checkcpdtable[scpd - 1].cond2 == FLAG_NULL ||
+                 TESTAFF(rv->astr, checkcpdtable[scpd - 1].cond2, rv->alen))
