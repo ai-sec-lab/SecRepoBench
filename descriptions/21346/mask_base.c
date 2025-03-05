@@ -674,7 +674,7 @@ void ndpi_search_irc_tcp(struct ndpi_detection_module_struct *ndpi_struct, struc
 	    if (memcmp(&packet->line[i].ptr[j], "DCC ", 4) == 0) {
 	      j += 4;
 	      NDPI_LOG_DBG2(ndpi_struct, "found DCC.");
-	      if // <MASK>
+	      // <MASK>
 	    }
 	  }
 	}

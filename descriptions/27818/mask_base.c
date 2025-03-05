@@ -59,8 +59,8 @@ FORCE_INLINE int Lizard_decompress_LIZv1(
 
         if (token >= 32)
         {
-            // <MASK>
-                if (unlikely((size_t)(ctx->literalsPtr+length)<(size_t)(ctx->literalsPtr))) { LIZARD_LOG_DECOMPRESS_LIZv1("3"); goto _output_error; }   /* overflow detection */
+            if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
+                // <MASK>
             }
 
             /* copy literals */

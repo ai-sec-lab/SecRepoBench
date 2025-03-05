@@ -1,0 +1,33 @@
+static plist_t parse_primitive(const char* js, jsmntok_info_t* ti, int* index)
+{
+    if (ti->tokens[*index].type != JSMN_PRIMITIVE) {
+        PLIST_JSON_ERR("%s: token type != JSMN_PRIMITIVE\n", __func__);
+        return NULL;
+    }
+    plist_t val = NULL;
+    const char* str_val = js + ti->tokens[*index].start;
+    const char* str_end = js + ti->tokens[*index].end;
+    size_t str_len = ti->tokens[*index].end - ti->tokens[*index].start;
+    if (!strncmp("false", str_val, str_len)) {
+        val = plist_new_bool(0);
+    } else if (!strncmp("true", str_val, str_len)) {
+        val = plist_new_bool(1);
+    } else if (!strncmp("null", str_val, str_len)) {
+        plist_data_t data = plist_new_plist_data();
+        data->type = PLIST_NULL;
+        val = plist_new_node(data);
+    } else if (isdigit(str_val[0]) || (str_val[0] == '-' && str_val+1 < str_end && isdigit(str_val[1]))) {
+        char* endp = (char*)str_val;
+        int64_t intpart = parse_decimal(str_val, str_end, &endp);
+        // Determine if the parsed numeric value is an integer or floating point.
+        // If it's an integer, create a plist node for an unsigned integer.
+        // If it's a floating point, convert and accumulate the fractional and exponent parts.
+        // Create a plist node for a real number if the value is a valid floating point number.
+        // Handle errors for invalid characters or unrepresentable floating point values.
+        // <MASK>
+    } else {
+        PLIST_JSON_ERR("%s: invalid primitive value '%.*s' encountered\n", __func__, (int)str_len, str_val);
+    }
+    (*index)++;
+    return val;
+}

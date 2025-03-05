@@ -1,4 +1,4 @@
-(memcmp(&packet->line[i].ptr[j], "SEND ", 5) == 0
+if (memcmp(&packet->line[i].ptr[j], "SEND ", 5) == 0
 		  || (memcmp(&packet->line[i].ptr[j], "CHAT", 4) == 0)
 		  || (memcmp(&packet->line[i].ptr[j], "chat", 4) == 0)
 		  || (j+7 < packet->line[i].len && memcmp(&packet->line[i].ptr[j], "sslchat", 7) == 0)

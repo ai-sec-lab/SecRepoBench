@@ -1,6 +1,4 @@
-x++)
-          {
-            p=PushDoublePixel(quantum_info,p,&pixel);
+p=PushDoublePixel(quantum_info,p,&pixel);
             SetPixelRed(image,ClampToQuantum(pixel),q);
             p=PushDoublePixel(quantum_info,p,&pixel);
             SetPixelGreen(image,ClampToQuantum(pixel),q);
@@ -12,4 +10,3 @@ x++)
             SetPixelAlpha(image,ClampToQuantum(pixel),q);
             p+=quantum_info->pad;
             q+=GetPixelChannels(image);
-          }

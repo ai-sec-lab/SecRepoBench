@@ -46,7 +46,16 @@
     #define FLB_ALLOCSZ_ATTR(x,...)
 #endif
 
-// <MASK>
+#ifdef FLB_HAVE_TESTS_OSSFUZZ
+/*
+ * Return 1 or 0 based on a probability.
+ */
+int flb_malloc_p;
+
+static inline int flb_fuzz_get_probability(int val) {
+  // <MASK>
+}
+#endif
 
 static inline FLB_ALLOCSZ_ATTR(1)
 void *flb_malloc(const size_t size) {

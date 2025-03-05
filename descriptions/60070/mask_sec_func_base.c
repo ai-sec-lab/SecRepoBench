@@ -2,10 +2,5 @@ static void thrift_set_method(struct ndpi_detection_module_struct *ndpi_struct,
                               struct ndpi_flow_struct *flow,
                               char const * const method, size_t method_length)
 {
-  if (thrift_validate_method(method, method_length) == 0) {
-    ndpi_set_risk(ndpi_struct, flow, NDPI_INVALID_CHARACTERS, "Invalid method name");
-    flow->protos.thrift.method[0] = '\0';
-  } else {
-    strncpy(flow->protos.thrift.method, method, ndpi_min(sizeof(flow->protos.thrift.method), method_length));
-  }
+  // <MASK>
 }

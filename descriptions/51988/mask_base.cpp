@@ -1351,7 +1351,7 @@ int AffixMgr::cpdpat_check(const char* word,
 // forbid compounding with neighbouring upper and lower case characters at word
 // bounds
 int AffixMgr::cpdcase_check(const char* word, int pos) {
-  if // <MASK>
+  // <MASK>
   return 0;
 }
 

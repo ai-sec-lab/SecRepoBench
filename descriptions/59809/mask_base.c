@@ -249,7 +249,10 @@ namespace pcpp
 			return *this;
 		}
 
-		// <MASK>
+		TLVRecordType getFirstTLVRecord(uint8_t* tlvDataBasePtr, size_t tlvDataLen) const
+		{
+			// <MASK>
+		}
 
 		/**
 		 * Get a TLV record that follows a given TLV record in a byte stream

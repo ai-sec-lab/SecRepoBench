@@ -1,4 +1,4 @@
 int AffixMgr::cpdcase_check(const char* word, int pos) {
-  if // <MASK>
+  // <MASK>
   return 0;
 }

@@ -46,8 +46,8 @@ FORCE_INLINE int Lizard_decompress_LIZv1(
 
         if (token >= 32)
         {
-            // <MASK>
-                if (unlikely((size_t)(ctx->literalsPtr+length)<(size_t)(ctx->literalsPtr))) { LIZARD_LOG_DECOMPRESS_LIZv1("3"); goto _output_error; }   /* overflow detection */
+            if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
+                // <MASK>
             }
 
             /* copy literals */
@@ -104,3 +104,90 @@ FORCE_INLINE int Lizard_decompress_LIZv1(
 
             DECOMPLOG_CODEWORDS_LIZv1("T32+ literal=%u match=%u offset=%d ipos=%d opos=%d\n", (U32)litLength, (U32)length, (int)-last_off, (U32)(ctx->flagsPtr-blockBase), (U32)(op-dest));
         }
+        else
+        if (token < LIZARD_LAST_LONG_OFF)
+        {
+            if (unlikely(ctx->offset24Ptr > ctx->offset24End - 3)) { LIZARD_LOG_DECOMPRESS_LIZv1("8"); goto _output_error; } 
+            length = token + MM_LONGOFF;
+            last_off = -(intptr_t)MEM_readLE24(ctx->offset24Ptr); 
+            ctx->offset24Ptr += 3;
+            DECOMPLOG_CODEWORDS_LIZv1("T0-30 literal=%u match=%u offset=%d\n", 0, (U32)length, (int)-last_off);
+        }
+        else 
+        { 
+            if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("9"); goto _output_error; } 
+            length = *ctx->literalsPtr;
+            if unlikely(length >= 254) {
+                if (length == 254) {
+                    length = MEM_readLE16(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 2;
+                } else {
+                    length = MEM_readLE24(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 3;
+                }
+            }
+            ctx->literalsPtr++;
+            length += LIZARD_LAST_LONG_OFF + MM_LONGOFF;
+
+            if (unlikely(ctx->offset24Ptr > ctx->offset24End - 3)) { LIZARD_LOG_DECOMPRESS_LIZv1("10"); goto _output_error; } 
+            last_off = -(intptr_t)MEM_readLE24(ctx->offset24Ptr); 
+            ctx->offset24Ptr += 3;
+        }
+
+
+        match = op + last_off;
+        if ((checkOffset) && ((unlikely((uintptr_t)(-last_off) > (uintptr_t)op) || (match < lowLimit)))) { LIZARD_LOG_DECOMPRESS_LIZv1("lowPrefix[%p]-dictSize[%d]=lowLimit[%p] match[%p]=op[%p]-last_off[%d]\n", lowPrefix, (int)dictSize, lowLimit, match, op, (int)last_off); goto _output_error; }  /* Error : offset outside buffers */
+
+        /* check external dictionary */
+        if ((dict==usingExtDict) && (match < lowPrefix)) {
+            if (unlikely(op + length > oend - WILDCOPYLENGTH)) { LIZARD_LOG_DECOMPRESS_LIZv1("12"); goto _output_error; }  /* doesn't respect parsing restriction */
+
+            if (length <= (intptr_t)(lowPrefix - match)) {
+                /* match can be copied as a single segment from external dictionary */
+                memmove(op, dictEnd - (lowPrefix-match), length);
+                op += length;
+            } else {
+                /* match encompass external dictionary and current block */
+                size_t const copySize = (size_t)(lowPrefix-match);
+                size_t const restSize = length - copySize;
+                memcpy(op, dictEnd - copySize, copySize);
+                op += copySize;
+                if (restSize > (size_t)(op-lowPrefix)) {  /* overlap copy */
+                    BYTE* const endOfMatch = op + restSize;
+                    const BYTE* copyFrom = lowPrefix;
+                    while (op < endOfMatch) *op++ = *copyFrom++;
+                } else {
+                    memcpy(op, lowPrefix, restSize);
+                    op += restSize;
+            }   }
+            continue;
+        }
+
+        /* copy match within block */
+        cpy = op + length;
+        if (unlikely(cpy > oend - WILDCOPYLENGTH)) { LIZARD_LOG_DECOMPRESS_LIZv1("13match=%p lowLimit=%p\n", match, lowLimit); goto _output_error; }   /* Error : offset outside buffers */
+        Lizard_copy8(op, match);
+        Lizard_copy8(op+8, match+8);
+        if (length > 16)
+            Lizard_wildCopy16(op + 16, match + 16, cpy);
+        op = cpy;
+    }
+
+    /* last literals */
+    length = ctx->literalsEnd - ctx->literalsPtr;
+    cpy = op + length;
+    if ((ctx->literalsPtr+length != iend) || (cpy > oend)) { LIZARD_LOG_DECOMPRESS_LIZv1("14"); goto _output_error; }   /* Error : input must be consumed */
+    memcpy(op, ctx->literalsPtr, length);
+    ctx->literalsPtr += length;
+    op += length;
+
+    /* end of decoding */
+    ctx->last_off = last_off;
+    return (int) (op-dest);     /* Nb of output bytes decoded */
+
+    /* Overflow error detected */
+_output_error:
+    LIZARD_LOG_DECOMPRESS_LIZv1("_output_error=%d ctx->flagsPtr=%p blockBase=%p\n", (int) (-(ctx->flagsPtr-blockBase))-1, ctx->flagsPtr, blockBase);
+    LIZARD_LOG_DECOMPRESS_LIZv1("cpy=%p oend=%p ctx->literalsPtr+length[%d]=%p iend=%p\n", cpy, oend, (int)length, ctx->literalsPtr+length, iend);
+    return (int) (-(ctx->flagsPtr-blockBase))-1;
+}

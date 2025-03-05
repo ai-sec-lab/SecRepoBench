@@ -1,0 +1,238 @@
+static int node_from_openstep(parse_ctx ctx, plist_t *plist)
+{
+    plist_t subnode = NULL;
+    const char *p = NULL;
+    while (ctx->pos < ctx->end && !ctx->err) {
+        parse_skip_ws(ctx);
+        if (ctx->pos >= ctx->end) {
+            break;
+        }
+        plist_data_t data = plist_new_plist_data();
+        if (*ctx->pos == '{') {
+            data->type = PLIST_DICT;
+            subnode = plist_new_node(data);
+            ctx->pos++;
+            parse_dict_data(ctx, subnode);
+            if (ctx->err) {
+                goto err_out;
+            }
+            if (*ctx->pos != '}') {
+                PLIST_OSTEP_ERR("Missing terminating '}' at offset %ld\n", ctx->pos - ctx->start);
+                ctx->err++;
+                goto err_out;
+            }
+            ctx->pos++;
+            *plist = subnode;
+            parse_skip_ws(ctx);
+            break;
+        } else if (*ctx->pos == '(') {
+            data->type = PLIST_ARRAY;
+            subnode = plist_new_node(data);
+            ctx->pos++;
+            plist_t tmp = NULL;
+            while (ctx->pos < ctx->end && !ctx->err) {
+                parse_skip_ws(ctx);
+                if (*ctx->pos == ')') {
+                    break;
+                }
+                ctx->err = node_from_openstep(ctx, &tmp);
+                if (ctx->err != 0) {
+                    break;
+                }
+                if (!tmp) {
+                    ctx->err++;
+                    break;
+                }
+                plist_array_append_item(subnode, tmp);
+                tmp = NULL;
+                parse_skip_ws(ctx);
+                if (*ctx->pos != ',') {
+                    break;
+                }
+                ctx->pos++;
+            }
+            if (ctx->err) {
+                goto err_out;
+            }
+            if (*ctx->pos != ')') {
+                PLIST_OSTEP_ERR("Missing terminating ')' at offset %ld\n", ctx->pos - ctx->start);
+                ctx->err++;
+                goto err_out;
+            }
+            ctx->pos++;
+            *plist = subnode;
+            parse_skip_ws(ctx);
+            break;
+        } else if (*ctx->pos == '<') {
+            data->type = PLIST_DATA;
+            ctx->pos++;
+            bytearray_t *bytes = byte_array_new(256);
+            while (ctx->pos < ctx->end && !ctx->err) {
+                parse_skip_ws(ctx);
+                if (*ctx->pos == '>') {
+                    break;
+                }
+                if (!isxdigit(*ctx->pos)) {
+                    PLIST_OSTEP_ERR("Invalid byte group in data at offset %ld\n", ctx->pos - ctx->start);
+                    ctx->err++;
+                    break;
+                }
+                uint8_t b = HEX_DIGIT(*ctx->pos);
+                ctx->pos++;
+                if (ctx->pos >= ctx->end) {
+                    PLIST_OSTEP_ERR("Unexpected end of data at offset %ld\n", ctx->pos - ctx->start);
+                    ctx->err++;
+                    break;
+                }
+                if (!isxdigit(*ctx->pos)) {
+                    PLIST_OSTEP_ERR("Invalid byte group in data at offset %ld\n", ctx->pos - ctx->start);
+                    ctx->err++;
+                    break;
+                }
+                b = (b << 4) + HEX_DIGIT(*ctx->pos);
+                byte_array_append(bytes, &b, 1);
+                ctx->pos++;
+            }
+            if (ctx->err) {
+                byte_array_free(bytes);
+                plist_free_data(data);
+                goto err_out;
+            }
+            if (*ctx->pos != '>') {
+                byte_array_free(bytes);
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("Missing terminating '>' at offset %ld\n", ctx->pos - ctx->start);
+                ctx->err++;
+                goto err_out;
+            }
+            ctx->pos++;
+            data->buff = bytes->data;
+            data->length = bytes->len;
+            bytes->data = NULL;
+            byte_array_free(bytes);
+            *plist = plist_new_node(data);
+            parse_skip_ws(ctx);
+            break;
+        } else if (*ctx->pos == '"' || *ctx->pos == '\'') {
+            char c = *ctx->pos;
+            ctx->pos++;
+            p = ctx->pos;
+            int num_escapes = 0;
+            // Parse a quoted string from the input context, handling escape characters.
+            // Traverse the input until a matching closing quote is found, ensuring it is not escaped.
+            // Count escape characters encountered during parsing for later processing.
+            // If the end of input is reached without finding the closing quote, log an error and set the error flag.
+            // Calculate the length of the parsed string and allocate memory to store it.
+            // Proceed to the next character after the closing quote for further parsing.
+            // <MASK>
+            if (num_escapes > 0) {
+                size_t i = 0;
+                size_t o = 0;
+                while (i < slen) {
+                    if (p[i] == '\\') {
+                        /* handle escape sequence */
+                        i++;
+                        switch (p[i]) {
+                            case '0':
+                            case '1':
+                            case '2':
+                            case '3':
+                            case '4':
+                            case '5':
+                            case '6':
+                            case '7': {
+                                // max 3 digits octal
+                                unsigned char chr = 0;
+                                int maxd = 3;
+                                while ((i < slen) && (p[i] >= '0' && p[i] <= '7') && --maxd) {
+                                    chr = (chr << 3) + p[i] - '0';
+                                    i++;
+                                }
+                                strbuf[o++] = (char)chr;
+                            }   break;
+                            case 'U': {
+                                i++;
+                                // max 4 digits hex
+                                uint16_t wchr = 0;
+                                int maxd = 4;
+                                while ((i < slen) && isxdigit(p[i]) && maxd--) {
+                                    wchr = (wchr << 4) + ((p[i] <= '9') ? (p[i] - '0') : ((p[i] <= 'F') ? (p[i] - 'A' + 10) : (p[i] - 'a' + 10)));
+                                    i++;
+                                }
+                                if (wchr >= 0x800) {
+                                    strbuf[o++] = (char)(0xE0 + ((wchr >> 12) & 0xF));
+                                    strbuf[o++] = (char)(0x80 + ((wchr >> 6) & 0x3F));
+                                    strbuf[o++] = (char)(0x80 + (wchr & 0x3F));
+                                } else if (wchr >= 0x80) {
+                                    strbuf[o++] = (char)(0xC0 + ((wchr >> 6) & 0x1F));
+                                    strbuf[o++] = (char)(0x80 + (wchr & 0x3F));
+                                } else {
+                                    strbuf[o++] = (char)(wchr & 0x7F);
+                                }
+                            }   break;
+                            case 'a': strbuf[o++] = '\a'; i++; break;
+                            case 'b': strbuf[o++] = '\b'; i++; break;
+                            case 'f': strbuf[o++] = '\f'; i++; break;
+                            case 'n': strbuf[o++] = '\n'; i++; break;
+                            case 'r': strbuf[o++] = '\r'; i++; break;
+                            case 't': strbuf[o++] = '\t'; i++; break;
+                            case 'v': strbuf[o++] = '\v'; i++; break;
+                            case '"': strbuf[o++] = '"';  i++; break;
+                            case '\'': strbuf[o++] = '\''; i++; break;
+                            default:
+                                break;
+                        }
+                    } else {
+                        strbuf[o++] = p[i++];
+                    }
+                }
+                strbuf[o] = '\0';
+                slen = o;
+            } else {
+                strncpy(strbuf, p, slen);
+                strbuf[slen] = '\0';
+            }
+            data->type = PLIST_STRING;
+            data->strval = strbuf;
+            data->length = slen;
+            *plist = plist_new_node(data);
+            parse_skip_ws(ctx);
+            break;
+        } else {
+            // unquoted string
+            size_t slen = 0;
+            parse_skip_ws(ctx);
+            p = ctx->pos;
+            while (ctx->pos < ctx->end) {
+                if (!allowed_unquoted_chars[(uint8_t)*ctx->pos]) {
+                    break;
+                }
+                ctx->pos++;
+            }
+            slen = ctx->pos-p;
+            if (slen > 0) {
+                data->type = PLIST_STRING;
+                data->strval = strndup(p, slen);
+                data->length = slen;
+                *plist = plist_new_node(data);
+                parse_skip_ws(ctx);
+                break;
+            } else {
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("Unexpected character when parsing unquoted string at offset %ld\n", ctx->pos - ctx->start);
+                ctx->err++;
+                break;
+            }
+        }
+        ctx->pos++;
+    }
+
+err_out:
+    if (ctx->err) {
+        plist_free(subnode);
+        plist_free(*plist);
+        *plist = NULL;
+        return PLIST_ERR_PARSE;
+    }
+    return PLIST_ERR_SUCCESS;
+}

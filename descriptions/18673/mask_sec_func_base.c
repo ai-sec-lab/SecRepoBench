@@ -138,7 +138,10 @@ static void ImportCMYKAQuantum(const Image *image,QuantumInfo *quantum_info,
           double
             pixel;
 
-          for (x=0; x < (ssize_t) number_pixels; // <MASK>
+            for (x=0; x < (ssize_t) number_pixels; x++)
+            {
+              // <MASK>
+            }
           break;
         }
     }

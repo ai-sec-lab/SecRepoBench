@@ -4327,7 +4327,9 @@ void ndpi_fill_protocol_category(struct ndpi_detection_module_struct *ndpi_str, 
   flow->category = ret->category = ndpi_get_proto_category(ndpi_str, *ret);
 }
 
-// <MASK>
+static void ndpi_reset_packet_line_info(struct ndpi_packet_struct *packet) {
+  // <MASK>
+}
 
 /* ********************************************************************************* */
 

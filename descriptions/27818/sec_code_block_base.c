@@ -1,5 +1,4 @@
-if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
-                if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("1"); goto _output_error; } 
+if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("1"); goto _output_error; } 
                 length = *ctx->literalsPtr;
                 ctx->literalsPtr++;
                 if unlikely(length >= 254) {
@@ -15,3 +14,4 @@ if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
                 }
                 length += MAX_SHORT_LITLEN;
                 if (unlikely((size_t)(op+length)<(size_t)(op))) { LIZARD_LOG_DECOMPRESS_LIZv1("2"); goto _output_error; }  /* overflow detection */
+                if (unlikely((size_t)(ctx->literalsPtr+length)<(size_t)(ctx->literalsPtr))) { LIZARD_LOG_DECOMPRESS_LIZv1("3"); goto _output_error; }   /* overflow detection */

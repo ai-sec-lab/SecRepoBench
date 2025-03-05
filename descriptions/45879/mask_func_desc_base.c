@@ -1,0 +1,7 @@
+static inline int flb_fuzz_get_probability(int val) {
+  // Increment a global variable used to determine a probability threshold.
+  // Ensure the global variable remains within a specific range by using modulo operation.
+  // Compare the given value 'val' against the updated global variable.
+  // Return 1 if 'val' is greater than the global variable, otherwise return 0.
+  // <MASK>
+}

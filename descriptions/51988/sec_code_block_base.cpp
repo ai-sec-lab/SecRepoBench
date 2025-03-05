@@ -1,4 +1,4 @@
-(utf8) {
+if (utf8) {
     const char* p;
     for (p = word + pos - 1; p > word && (*p & 0xc0) == 0x80; p--)
       ;
