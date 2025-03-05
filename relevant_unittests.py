@@ -2,7 +2,7 @@ import json
 import re
 
 from projects import *
-test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2']
+test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
 def get_relevant_unittests(target_project, stdout):
@@ -16,10 +16,12 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r"Test: (?P<name>.*)\n"
     elif target_project == 'fluent-bit':
         pattern = r"Test (?P<name>.*)\.\.\."
-    elif target_project == 'php-src':
+    elif target_project == 'php-src' or target_project == 'imagemagick':
         pattern = r"Test Name: (?P<name>.*)\n"
     elif target_project == 'libxml2':
         pattern = r"## (?P<name>.*)\n"
+    elif target_project == 'mruby':
+        pattern = r"\n(?P<name>[^\[\]]+)(\[([0-9]|\.)+\])? : "
     
     # Find all matches with their positions
     matches = list(re.finditer(pattern, stdout))
@@ -55,7 +57,7 @@ def get_relevant_unittests(target_project, stdout):
         last_test_name = test_name
 
     # check after the last match
-    if any(last_test_pos < pos for pos in function_call_positions) and test_before:
+    if test_before and any(last_test_pos < pos for pos in function_call_positions):
         relevant_unittests.append(last_test_name)
 
     return relevant_unittests
@@ -63,15 +65,18 @@ def get_relevant_unittests(target_project, stdout):
 
 def main():
     # Say that file's test are used in test.c
-    target_projects = ['php-src']
+    # target_projects = ['ffmpeg', 'hunspell', 'harfbuzz', 'libxml2', 'c-blosc2', 'fluent-bit', 'gpac', 'lcms', 'assimp', 'file', 'libplist', 'libdwarf', 'yara', 'php-src']
+    # target_projects = ['ndpi', 'imagemagick', 'mruby']
+    target_projects = ['lcms']
 
     with open('/space1/cdilgren/project_benchmark/analyze_report/ids_each_step_by_proj.json', 'r') as f:
         ids_each_step_by_proj = json.load(f)
 
+    results = {}
     for target_project in target_projects:
+        print(f"Processing {target_project}")
         ids_pass_testcase_unittest = ids_each_step_by_proj['ids_pass_testcase_unittest'][target_project]
 
-        results = {}
         for id in ids_pass_testcase_unittest:
             with open(f'/data/oss-fuzz-bench/output/{id}/unittest_sec_print/stdout.txt', 'rb') as f:
                 stdout = f.read().decode('utf-8', errors='ignore')
@@ -85,3 +90,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
