@@ -2,7 +2,7 @@ import json
 import re
 
 from projects import *
-test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby']
+test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'openexr']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
 def get_relevant_unittests(target_project, stdout):
@@ -12,7 +12,7 @@ def get_relevant_unittests(target_project, stdout):
     pattern = unittest_patterns[target_project]
     if no_colon:
         pattern = r"\n(?P<status>[A-Z]+) (?P<name>.*) \("
-    if target_project == 'c-blosc2' or target_project == 'libdwarf':
+    if target_project == 'c-blosc2' or target_project == 'libdwarf' or target_project == 'openexr':
         pattern = r"Test: (?P<name>.*)\n"
     elif target_project == 'fluent-bit':
         pattern = r"Test (?P<name>.*)\.\.\."
@@ -25,8 +25,10 @@ def get_relevant_unittests(target_project, stdout):
     elif target_project == 'libarchive':
         pattern = r'(?m)^\d+/\d+\s+(?:Testing:|Test:)\s+(?P<name>\w+)'
     elif target_project == 'matio':
-        pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
-
+        pattern = r'(?P<name>mat73_(.*)at:[0-9]+:)'
+    elif target_project == 'htslib':
+        if 'This is a test for CodeGuard+' in stdout:
+            return 'test/test-regidx'
     
     # Find all matches with their positions
     matches = list(re.finditer(pattern, stdout))
@@ -74,7 +76,7 @@ def main():
     # Say that file's test are used in test.c
     # target_projects = ['ffmpeg', 'hunspell', 'harfbuzz', 'libxml2', 'c-blosc2', 'fluent-bit', 'gpac', 'lcms', 'assimp', 'file', 'libplist', 'libdwarf', 'yara', 'php-src']
     # target_projects = ['ndpi', 'imagemagick', 'mruby']
-    target_projects = ['mruby']
+    target_projects = ['openexr']
 
     with open('/space1/cdilgren/project_benchmark/analyze_report/ids_each_step_by_proj.json', 'r') as f:
         ids_each_step_by_proj = json.load(f)
