@@ -24,6 +24,9 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r"\n(?P<name>[^\[\]]+)(\[([0-9]|\.)+\])? : "
     elif target_project == 'libarchive':
         pattern = r'(?m)^\d+/\d+\s+(?:Testing:|Test:)\s+(?P<name>\w+)'
+    elif target_project == 'matio':
+        pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
+
     
     # Find all matches with their positions
     matches = list(re.finditer(pattern, stdout))
