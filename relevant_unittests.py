@@ -2,7 +2,7 @@ import json
 import re
 
 from projects import *
-test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick']
+test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
 def get_relevant_unittests(target_project, stdout):
@@ -21,7 +21,7 @@ def get_relevant_unittests(target_project, stdout):
     elif target_project == 'libxml2':
         pattern = r"## (?P<name>.*)\n"
     elif target_project == 'mruby':
-        pattern = r"\n(?P<name>[^\[\]]+)(\[([0-9]|\.)+\])? : "
+        pattern = r"\n(?P<name>[^:\n]+(?:::[^:\n]+)*) :"
     
     # Find all matches with their positions
     matches = list(re.finditer(pattern, stdout))
@@ -43,6 +43,8 @@ def get_relevant_unittests(target_project, stdout):
     for match in matches:
         test_name = match.group("name")
         test_pos = match.start()  # Position of test match in text
+        if target_project == 'mruby' and 'assert' in test_name:
+            continue
 
         # Check if any function call happened after last test but before this one
         if any(last_test_pos < pos < test_pos for pos in function_call_positions):
@@ -67,7 +69,7 @@ def main():
     # Say that file's test are used in test.c
     # target_projects = ['ffmpeg', 'hunspell', 'harfbuzz', 'libxml2', 'c-blosc2', 'fluent-bit', 'gpac', 'lcms', 'assimp', 'file', 'libplist', 'libdwarf', 'yara', 'php-src']
     # target_projects = ['ndpi', 'imagemagick', 'mruby']
-    target_projects = ['lcms']
+    target_projects = ['mruby']
 
     with open('/space1/cdilgren/project_benchmark/analyze_report/ids_each_step_by_proj.json', 'r') as f:
         ids_each_step_by_proj = json.load(f)
