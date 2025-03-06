@@ -2,7 +2,7 @@ import json
 import re
 
 from projects import *
-test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby']
+test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','pcapplusplus','openexr']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
 def get_relevant_unittests(target_project, stdout):
@@ -26,6 +26,10 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r'(?m)^\d+/\d+\s+(?:Testing:|Test:)\s+(?P<name>\w+)'
     elif target_project == 'matio':
         pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
+    elif target_project == 'openexr':
+        pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.]+)'
+    elif target_project == 'pcapplusplus' or target_project == 'wireshark':
+        pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.\+]+)'
 
     
     # Find all matches with their positions
