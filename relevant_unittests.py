@@ -22,6 +22,8 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r"## (?P<name>.*)\n"
     elif target_project == 'mruby':
         pattern = r"\n(?P<name>[^\[\]]+)(\[([0-9]|\.)+\])? : "
+    elif target_project == 'libsndfile':
+        pattern = r'(?m)^\d+/\d+\s+(?:Testing:|Test:)\s+(?P<name>\w+)'
     
     # Find all matches with their positions
     matches = list(re.finditer(pattern, stdout))
