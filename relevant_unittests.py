@@ -2,7 +2,7 @@ import json
 import re
 
 from projects import *
-test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','pcapplusplus','libarchive','openexr']
+test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','libarchive','openexr', 'libredwg', 'libxslt']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
 def get_relevant_unittests(target_project, stdout):
@@ -12,7 +12,7 @@ def get_relevant_unittests(target_project, stdout):
     pattern = unittest_patterns[target_project]
     if no_colon:
         pattern = r"\n(?P<status>[A-Z]+) (?P<name>.*) \("
-    if target_project == 'c-blosc2' or target_project == 'libdwarf' or target_project == 'openexr':
+    if target_project == 'c-blosc2' or target_project == 'libdwarf':
         pattern = r"Test: (?P<name>.*)\n"
     elif target_project == 'fluent-bit':
         pattern = r"Test (?P<name>.*)\.\.\."
@@ -30,9 +30,18 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
     elif target_project == 'openexr':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.]+)'
-    elif target_project == 'pcapplusplus' or target_project == 'wireshark' or target_project == 'libarchive':
+    elif target_project == 'pcapplusplus':
+        pattern = r'(?P<name>\w+)\s+: [A-Z]+\n'
+    elif target_project == 'wireshark' or target_project == 'libarchive':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.\+]+)'
-    # libxslt same
+    elif target_project=="flac":
+        pattern = r'(?:^|\n)testing\s+(?P<name>[A-Za-z0-9_]+)\(\)\.\.\.\s+This is a test for CodeGuard\+'
+    elif target_project == 'libredwg':
+        pattern = r'(?P<name>[0-9]?[a-z_]+((2|3)d)?)\nThis is'
+    elif target_project == 'libxslt':
+        pattern = r'## Running (?P<name>.*) tests'
+    elif target_project == 'libsndfile':
+        pattern = r'(?P<name>[a-z_\.0-9]+\s+: [a-z_\.0-9]+) ...'
 
     
     # Find all matches with their positions
@@ -81,7 +90,7 @@ def main():
     # Say that file's test are used in test.c
     # target_projects = ['ffmpeg', 'hunspell', 'harfbuzz', 'libxml2', 'c-blosc2', 'fluent-bit', 'gpac', 'lcms', 'assimp', 'file', 'libplist', 'libdwarf', 'yara', 'php-src']
     # target_projects = ['ndpi', 'imagemagick', 'mruby']
-    target_projects = ['openexr']
+    target_projects = ['pcapplusplus']
 
     with open('/space1/cdilgren/project_benchmark/analyze_report/ids_each_step_by_proj.json', 'r') as f:
         ids_each_step_by_proj = json.load(f)
