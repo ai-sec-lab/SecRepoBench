@@ -32,6 +32,8 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.]+)'
     elif target_project == 'pcapplusplus' or target_project == 'wireshark' or target_project == 'libarchive':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.\+]+)'
+    elif target_project=="flac":
+        pattern = r'(?:^|\n)testing\s+(?P<name>[A-Za-z0-9_]+)\(\)\.\.\.\s+This is a test for CodeGuard\+'
     # libxslt same
 
     
