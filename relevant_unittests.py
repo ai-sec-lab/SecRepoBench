@@ -2,7 +2,7 @@ import json
 import re
 
 from projects import *
-test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','pcapplusplus','openexr']
+test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','pcapplusplus','libarchive','openexr']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
 def get_relevant_unittests(target_project, stdout):
@@ -22,13 +22,11 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r"## (?P<name>.*)\n"
     elif target_project == 'mruby':
         pattern = r"\n(?P<name>[^:\n]+(?:::[^:\n]+)*) :"
-    elif target_project == 'libarchive':
-        pattern = r'(?m)^\d+/\d+\s+(?:Testing:|Test:)\s+(?P<name>\w+)'
     elif target_project == 'matio':
         pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
     elif target_project == 'openexr':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.]+)'
-    elif target_project == 'pcapplusplus' or target_project == 'wireshark':
+    elif target_project == 'pcapplusplus' or target_project == 'wireshark' or target_project == 'libarchive':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.\+]+)'
     # libxslt same
 
