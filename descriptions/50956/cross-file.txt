@@ -1,0 +1,476 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_8_matsh_sse.c
+cmsBool Optimize8MatrixShaperSSE(_cmsTransform2Fn* TransformFn,                                  
+                                  void** UserData,
+                                  _cmsFreeUserDataFn* FreeUserData,
+                                  cmsPipeline** Lut, 
+                                  cmsUInt32Number* InputFormat, 
+                                  cmsUInt32Number* OutputFormat, 
+                                  cmsUInt32Number* dwFlags)    
+{
+    cmsStage* Curve1, *Curve2;
+    cmsStage* Matrix1, *Matrix2;
+    _cmsStageMatrixData* Data1;
+    _cmsStageMatrixData* Data2;
+    cmsMAT3 res;
+    cmsBool IdentityMat = FALSE;
+    cmsPipeline* Dest, *Src;
+    cmsContext ContextID;
+    cmsUInt32Number nChans;
+    
+    // Check for SSE2 support
+    if (!(IsSSE2Available())) return FALSE;
+
+    // Only works on 3 to 3, probably RGB 
+    if ( !( (T_CHANNELS(*InputFormat) == 3 && T_CHANNELS(*OutputFormat) == 3) ) ) return FALSE;
+                   
+    // Only works on 8 bit input
+    if (T_BYTES(*InputFormat) != 1 || T_BYTES(*OutputFormat) != 1) return FALSE;
+
+    // Seems suitable, proceed
+    Src = *Lut;
+
+    // Check for shaper-matrix-matrix-shaper structure, that is what this optimizer stands for
+    if (!cmsPipelineCheckAndRetreiveStages(Src, 4, 
+        cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType, 
+        &Curve1, &Matrix1, &Matrix2, &Curve2)) return FALSE;
+
+    ContextID = cmsGetPipelineContextID(Src);
+    nChans    = T_CHANNELS(*InputFormat);
+
+    // Get both matrices, which are 3x3
+    Data1 = (_cmsStageMatrixData*) cmsStageData(Matrix1);
+    Data2 = (_cmsStageMatrixData*) cmsStageData(Matrix2);
+
+    // Input offset should be zero
+    if (Data1->Offset != NULL) return FALSE;
+
+    // Multiply both matrices to get the result
+    _cmsMAT3per(&res, (cmsMAT3*)Data2->Double, (cmsMAT3*)Data1->Double);
+
+    // Now the result is in res + Data2 -> Offset. Maybe is a plain identity?
+    IdentityMat = FALSE;
+    if (_cmsMAT3isIdentity(&res) && Data2->Offset == NULL) {
+
+        // We can get rid of full matrix
+        IdentityMat = TRUE;
+    }
+
+    // Allocate an empty LUT 
+    Dest =  cmsPipelineAlloc(ContextID, nChans, nChans);
+    if (!Dest) return FALSE;
+
+    // Assamble the new LUT
+    cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageDup(Curve1));
+    
+    if (!IdentityMat) {
+
+        cmsPipelineInsertStage(Dest, cmsAT_END,
+                    cmsStageAllocMatrix(ContextID, 3, 3, (const cmsFloat64Number*) &res, Data2 ->Offset));
+    } 
+
+
+    cmsPipelineInsertStage(Dest, cmsAT_END, cmsStageDup(Curve2));
+
+    // If identity on matrix, we can further optimize the curves, so call the join curves routine
+    if (IdentityMat) {
+
+      Optimize8ByJoiningCurves(TransformFn, UserData, FreeUserData, &Dest, InputFormat, OutputFormat, dwFlags);
+    }
+    else {
+        _cmsStageToneCurvesData* mpeC1 = (_cmsStageToneCurvesData*) cmsStageData(Curve1);
+        _cmsStageToneCurvesData* mpeC2 = (_cmsStageToneCurvesData*) cmsStageData(Curve2);
+                
+        // In this particular optimization, cache does not help as it takes more time to deal with 
+        // the cache that with the pixel handling
+        *dwFlags |= cmsFLAGS_NOCACHE;
+  
+
+        // Setup the optimizarion routines
+        *UserData = SetMatShaper(ContextID, mpeC1 ->TheCurves, &res, (cmsVEC3*) Data2 ->Offset, mpeC2->TheCurves);
+        *FreeUserData = FreeMatShaper; 
+
+        *TransformFn = MatShaperXform8SSE;         
+    }
+
+    *dwFlags &= ~cmsFLAGS_CAN_CHANGE_FORMATTER;
+    cmsPipelineFree(Src);
+    *Lut = Dest;
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_float_15mats.c
+cmsBool OptimizeMatrixShaper15(_cmsTransform2Fn* TransformFn,
+                                   void** UserData,
+                                   _cmsFreeUserDataFn* FreeUserData,
+                                   cmsPipeline** Lut,
+                                   cmsUInt32Number* InputFormat,
+                                   cmsUInt32Number* OutputFormat,
+                                   cmsUInt32Number* dwFlags)
+{
+       cmsStage* Curve1, *Curve2;
+       cmsStage* Matrix1, *Matrix2;
+       _cmsStageMatrixData* Data1;
+       _cmsStageMatrixData* Data2;
+       cmsMAT3 res;
+       cmsBool IdentityMat = FALSE;
+       cmsPipeline* Dest, *Src;
+       cmsContext ContextID;
+       cmsUInt32Number nChans;
+       
+       // Only works on RGB to RGB and gray
+
+       if (!(T_CHANNELS(*InputFormat) == 3 && T_CHANNELS(*OutputFormat) == 3)) return FALSE;
+
+       // Only works on 15 bit to 15 bit
+       if (T_BYTES(*InputFormat) != 2 || T_BYTES(*OutputFormat) != 2 || 
+              T_BIT15(*InputFormat) == 0 || T_BIT15(*OutputFormat) == 0) return FALSE;
+
+       // Seems suitable, proceed
+       Src = *Lut;
+
+       // Check for shaper-matrix-matrix-shaper structure, that is what this optimizer stands for
+       if (!cmsPipelineCheckAndRetreiveStages(Src, 4,
+              cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType,
+              &Curve1, &Matrix1, &Matrix2, &Curve2)) return FALSE;
+
+       ContextID = cmsGetPipelineContextID(Src);
+       nChans = T_CHANNELS(*InputFormat);
+
+       // Get both matrices, which are 3x3
+       Data1 = (_cmsStageMatrixData*)cmsStageData(Matrix1);
+       Data2 = (_cmsStageMatrixData*)cmsStageData(Matrix2);
+
+       // Input offset should be zero
+       if (Data1->Offset != NULL) return FALSE;
+
+       // Multiply both matrices to get the result
+       _cmsMAT3per(&res, (cmsMAT3*)Data2->Double, (cmsMAT3*)Data1->Double);
+
+       // Now the result is in res + Data2 -> Offset. Maybe is a plain identity?
+       IdentityMat = FALSE;
+       if (_cmsMAT3isIdentity(&res) && Data2->Offset == NULL) {
+
+              // We can get rid of full matrix
+              IdentityMat = TRUE;
+       }
+
+
+       // Allocate an empty LUT 
+       Dest = cmsPipelineAlloc(ContextID, nChans, nChans);
+       if (!Dest) return FALSE;
+
+       // Assamble the new LUT
+       cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageDup(Curve1));
+
+       if (!IdentityMat) {
+
+              cmsPipelineInsertStage(Dest, cmsAT_END,
+                     cmsStageAllocMatrix(ContextID, 3, 3, (const cmsFloat64Number*)&res, Data2->Offset));
+       }
+
+       cmsPipelineInsertStage(Dest, cmsAT_END, cmsStageDup(Curve2));
+       
+       {
+              _cmsStageToneCurvesData* mpeC1 = (_cmsStageToneCurvesData*)cmsStageData(Curve1);
+              _cmsStageToneCurvesData* mpeC2 = (_cmsStageToneCurvesData*)cmsStageData(Curve2);
+
+              // In this particular optimization, cach� does not help as it takes more time to deal with 
+              // the cach� that with the pixel handling
+              *dwFlags |= cmsFLAGS_NOCACHE;
+
+              // Setup the optimizarion routines
+              *UserData = SetMatShaper(ContextID, mpeC1->TheCurves, &res, (cmsVEC3*)Data2->Offset, mpeC2->TheCurves, IdentityMat);
+              *FreeUserData = FreeMatShaper;
+
+              *TransformFn = MatShaperXform;
+       }
+       
+
+       cmsPipelineFree(Src);
+       *dwFlags &= ~cmsFLAGS_CAN_CHANGE_FORMATTER;
+       *Lut = Dest;
+       return TRUE;
+}
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_8_matsh.c
+cmsBool Optimize8MatrixShaper(_cmsTransform2Fn* TransformFn,                                  
+                                  void** UserData,
+                                  _cmsFreeUserDataFn* FreeUserData,
+                                  cmsPipeline** Lut, 
+                                  cmsUInt32Number* InputFormat, 
+                                  cmsUInt32Number* OutputFormat, 
+                                  cmsUInt32Number* dwFlags)    
+{
+    cmsStage* Curve1, *Curve2;
+    cmsStage* Matrix1, *Matrix2;
+    _cmsStageMatrixData* Data1;
+    _cmsStageMatrixData* Data2;
+    cmsMAT3 res;
+    cmsBool IdentityMat = FALSE;
+    cmsPipeline* Dest, *Src;
+    cmsContext ContextID;
+    cmsUInt32Number nChans;
+    cmsFloat64Number factor = 1.0;
+
+    // Only works on RGB to RGB and gray to gray 
+
+    if ( !( (T_CHANNELS(*InputFormat) == 3 && T_CHANNELS(*OutputFormat) == 3) ||
+            (T_CHANNELS(*InputFormat) == 1 && T_CHANNELS(*OutputFormat) == 1) )) return FALSE;
+                   
+    // Only works on 8 bit input
+    if (T_BYTES(*InputFormat) != 1 || T_BYTES(*OutputFormat) != 1) return FALSE;
+
+    // Seems suitable, proceed
+    Src = *Lut;
+
+    // Check for shaper-matrix-matrix-shaper structure, that is what this optimizer stands for
+    if (!cmsPipelineCheckAndRetreiveStages(Src, 4, 
+        cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType, 
+        &Curve1, &Matrix1, &Matrix2, &Curve2)) return FALSE;
+
+    ContextID = cmsGetPipelineContextID(Src);
+    nChans    = T_CHANNELS(*InputFormat);
+
+    // Get both matrices, which are 3x3
+    Data1 = (_cmsStageMatrixData*) cmsStageData(Matrix1);
+    Data2 = (_cmsStageMatrixData*) cmsStageData(Matrix2);
+
+    // Input offset should be zero
+    if (Data1 ->Offset != NULL) return FALSE;
+
+    if (cmsStageInputChannels(Matrix1) == 1 && cmsStageOutputChannels(Matrix2) == 1)
+    {
+        // This is a gray to gray. Just multiply    
+         factor = Data1->Double[0]*Data2->Double[0] + 
+                  Data1->Double[1]*Data2->Double[1] + 
+                  Data1->Double[2]*Data2->Double[2];
+
+        if (fabs(1 - factor) < (1.0 / 65535.0)) IdentityMat = TRUE;
+    }
+    else
+    {            
+        // Multiply both matrices to get the result
+        _cmsMAT3per(&res, (cmsMAT3*) Data2 ->Double, (cmsMAT3*) Data1 ->Double);
+
+        // Now the result is in res + Data2 -> Offset. Maybe is a plain identity?
+        IdentityMat = FALSE;
+        if (_cmsMAT3isIdentity(&res) && Data2 ->Offset == NULL) {
+
+            // We can get rid of full matrix
+            IdentityMat = TRUE;
+        }
+    }
+
+      // Allocate an empty LUT 
+    Dest =  cmsPipelineAlloc(ContextID, nChans, nChans);
+    if (!Dest) return FALSE;
+
+    // Assamble the new LUT
+    cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageDup(Curve1));
+    
+    if (!IdentityMat) {
+
+        if (nChans == 1)
+             cmsPipelineInsertStage(Dest, cmsAT_END, 
+                    cmsStageAllocMatrix(ContextID, 1, 1, (const cmsFloat64Number*) &factor, Data2->Offset));
+        else
+            cmsPipelineInsertStage(Dest, cmsAT_END, 
+                    cmsStageAllocMatrix(ContextID, 3, 3, (const cmsFloat64Number*) &res, Data2 ->Offset));
+    } 
+
+
+    cmsPipelineInsertStage(Dest, cmsAT_END, cmsStageDup(Curve2));
+
+    // If identity on matrix, we can further optimize the curves, so call the join curves routine
+    if (IdentityMat) {
+
+      Optimize8ByJoiningCurves(TransformFn, UserData, FreeUserData, &Dest, InputFormat, OutputFormat, dwFlags);
+    }
+    else {
+        _cmsStageToneCurvesData* mpeC1 = (_cmsStageToneCurvesData*) cmsStageData(Curve1);
+        _cmsStageToneCurvesData* mpeC2 = (_cmsStageToneCurvesData*) cmsStageData(Curve2);
+                
+        // In this particular optimization, cach� does not help as it takes more time to deal with 
+        // the cach� that with the pixel handling
+        *dwFlags |= cmsFLAGS_NOCACHE;
+  
+
+        // Setup the optimizarion routines
+        *UserData = SetMatShaper(ContextID, mpeC1 ->TheCurves, &res, (cmsVEC3*) Data2 ->Offset, mpeC2->TheCurves);
+        *FreeUserData = FreeMatShaper; 
+
+        *TransformFn =  MatShaperXform8;         
+    }
+
+    *dwFlags &= ~cmsFLAGS_CAN_CHANGE_FORMATTER;
+    cmsPipelineFree(Src);
+    *Lut = Dest;
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_float_matsh.c
+cmsBool OptimizeFloatMatrixShaper(_cmsTransform2Fn* TransformFn,                                  
+                                  void** UserData,
+                                  _cmsFreeUserDataFn* FreeUserData,
+                                  cmsPipeline** Lut, 
+                                  cmsUInt32Number* InputFormat, 
+                                  cmsUInt32Number* OutputFormat, 
+                                  cmsUInt32Number* dwFlags)    
+{
+    cmsStage* Curve1, *Curve2;
+    cmsStage* Matrix1, *Matrix2;
+    _cmsStageMatrixData* Data1;
+    _cmsStageMatrixData* Data2;
+    cmsMAT3 res;
+    cmsBool IdentityMat = FALSE;
+    cmsPipeline* Dest, *Src;
+    cmsContext ContextID;
+    cmsUInt32Number nChans;
+    cmsFloat64Number factor = 1.0;
+
+
+    // Apply only to floating-point cases
+    if (!T_FLOAT(*InputFormat) || !T_FLOAT(*OutputFormat)) return FALSE;
+
+    // Only works on RGB to RGB and gray to gray 
+    if ( !( (T_CHANNELS(*InputFormat) == 3 && T_CHANNELS(*OutputFormat) == 3))  &&
+         !( (T_CHANNELS(*InputFormat) == 1 && T_CHANNELS(*OutputFormat) == 1))) return FALSE;
+                   
+    // Only works on float 
+    if (T_BYTES(*InputFormat) != 4 || T_BYTES(*OutputFormat) != 4) return FALSE;
+
+    // Seems suitable, proceed
+    Src = *Lut;
+
+    // Check for shaper-matrix-matrix-shaper structure, that is what this optimizer stands for
+    if (!cmsPipelineCheckAndRetreiveStages(Src, 4, 
+        cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType, 
+        &Curve1, &Matrix1, &Matrix2, &Curve2)) return FALSE;
+
+    ContextID = cmsGetPipelineContextID(Src);
+    nChans    = T_CHANNELS(*InputFormat);
+
+    // Get both matrices, which are 3x3
+    Data1 = (_cmsStageMatrixData*) cmsStageData(Matrix1);
+    Data2 = (_cmsStageMatrixData*) cmsStageData(Matrix2);
+
+    // Input offset should be zero
+    if (Data1 ->Offset != NULL) return FALSE;
+
+    if (cmsStageInputChannels(Matrix1) == 1 && cmsStageOutputChannels(Matrix2) == 1)
+    {
+        // This is a gray to gray. Just multiply    
+         factor = Data1->Double[0]*Data2->Double[0] + 
+                  Data1->Double[1]*Data2->Double[1] + 
+                  Data1->Double[2]*Data2->Double[2];
+
+        if (fabs(1 - factor) < (1.0 / 65535.0)) IdentityMat = TRUE;
+    }
+    else
+    {            
+        // Multiply both matrices to get the result
+        _cmsMAT3per(&res, (cmsMAT3*) Data2 ->Double, (cmsMAT3*) Data1 ->Double);
+
+        // Now the result is in res + Data2 -> Offset. Maybe is a plain identity?
+        IdentityMat = FALSE;
+        if (_cmsMAT3isIdentity(&res) && Data2 ->Offset == NULL) {
+
+            // We can get rid of full matrix
+            IdentityMat = TRUE;
+        }
+    }
+
+      // Allocate an empty LUT 
+    Dest =  cmsPipelineAlloc(ContextID, nChans, nChans);
+    if (!Dest) return FALSE;
+
+    // Assamble the new LUT
+    cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageDup(Curve1));
+    
+    if (!IdentityMat) {
+
+        if (nChans == 1)
+             cmsPipelineInsertStage(Dest, cmsAT_END, 
+                    cmsStageAllocMatrix(ContextID, 1, 1, (const cmsFloat64Number*) &factor, Data2->Offset));
+        else
+            cmsPipelineInsertStage(Dest, cmsAT_END, 
+                    cmsStageAllocMatrix(ContextID, 3, 3, (const cmsFloat64Number*) &res, Data2 ->Offset));
+    } 
+
+
+    cmsPipelineInsertStage(Dest, cmsAT_END, cmsStageDup(Curve2));
+
+    // If identity on matrix, we can further optimize the curves, so call the join curves routine
+    if (IdentityMat) {
+
+           OptimizeFloatByJoiningCurves(TransformFn, UserData, FreeUserData, &Dest, InputFormat, OutputFormat, dwFlags);
+    }
+    else {
+        _cmsStageToneCurvesData* mpeC1 = (_cmsStageToneCurvesData*) cmsStageData(Curve1);
+        _cmsStageToneCurvesData* mpeC2 = (_cmsStageToneCurvesData*) cmsStageData(Curve2);
+                
+        // In this particular optimization, cach� does not help as it takes more time to deal with 
+        // the cachthat with the pixel handling
+        *dwFlags |= cmsFLAGS_NOCACHE;
+
+        // Setup the optimizarion routines
+        *UserData = SetMatShaper(ContextID, mpeC1 ->TheCurves, &res, (cmsVEC3*) Data2 ->Offset, mpeC2->TheCurves);
+        *FreeUserData = FreeMatShaper; 
+
+        *TransformFn = MatShaperFloat;         
+    }
+
+    *dwFlags &= ~cmsFLAGS_CAN_CHANGE_FORMATTER;
+    cmsPipelineFree(Src);
+    *Lut = Dest;
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmsopt.c
+static
+cmsBool PreOptimize(cmsPipeline* Lut)
+{
+    cmsBool AnyOpt = FALSE, Opt;
+
+    do {
+
+        Opt = FALSE;
+
+        // Remove all identities
+        Opt |= _Remove1Op(Lut, cmsSigIdentityElemType);
+
+        // Remove XYZ2Lab followed by Lab2XYZ
+        Opt |= _Remove2Op(Lut, cmsSigXYZ2LabElemType, cmsSigLab2XYZElemType);
+
+        // Remove Lab2XYZ followed by XYZ2Lab
+        Opt |= _Remove2Op(Lut, cmsSigLab2XYZElemType, cmsSigXYZ2LabElemType);
+
+        // Remove V4 to V2 followed by V2 to V4
+        Opt |= _Remove2Op(Lut, cmsSigLabV4toV2, cmsSigLabV2toV4);
+
+        // Remove V2 to V4 followed by V4 to V2
+        Opt |= _Remove2Op(Lut, cmsSigLabV2toV4, cmsSigLabV4toV2);
+
+        // Remove float pcs Lab conversions
+        Opt |= _Remove2Op(Lut, cmsSigLab2FloatPCS, cmsSigFloatPCS2Lab);
+
+        // Remove float pcs Lab conversions
+        Opt |= _Remove2Op(Lut, cmsSigXYZ2FloatPCS, cmsSigFloatPCS2XYZ);
+
+        // Simplify matrix. 
+        Opt |= _MultiplyMatrix(Lut);
+
+        if (Opt) AnyOpt = TRUE;
+
+    } while (Opt);
+
+    return AnyOpt;
+}
+

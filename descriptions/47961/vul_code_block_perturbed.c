@@ -1,0 +1,2 @@
+if (*currentposition == ']')
+			goto done;

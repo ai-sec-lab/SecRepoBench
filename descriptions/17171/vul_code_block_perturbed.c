@@ -1,0 +1,1 @@
+xmlXPathReturnString (parsercontext, ret);

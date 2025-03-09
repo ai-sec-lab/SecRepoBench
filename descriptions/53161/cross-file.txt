@@ -1,0 +1,270 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// mrbgems/mruby-pack/src/pack.c
+static mrb_value
+pack_unpack(mrb_state *mrb, mrb_value str, int single)
+{
+  mrb_value result;
+  struct tmpl tmpl;
+  int count;
+  unsigned int flags;
+  enum pack_dir dir;
+  enum pack_type type;
+  int size;
+  int srcidx, srclen;
+  const unsigned char *sptr;
+
+  prepare_tmpl(mrb, &tmpl);
+
+  srcidx = 0;
+  srclen = (int)RSTRING_LEN(str);
+
+  result = mrb_ary_new(mrb);
+  while (has_tmpl(&tmpl)) {
+    read_tmpl(mrb, &tmpl, &dir, &type, &size, &count, &flags);
+
+    if (dir == PACK_DIR_INVALID)
+      continue;
+    else if (dir == PACK_DIR_NUL) {
+      check_x(mrb, srclen-srcidx, count, 'x');
+      srcidx += count;
+      continue;
+    }
+    else if (dir == PACK_DIR_BACK) {
+      check_x(mrb, srcidx, count, 'X');
+      srcidx -= count;
+      continue;
+    }
+    else if (dir == PACK_DIR_ABS) {
+      check_x(mrb, srclen, count, '@');
+      srcidx = count;
+      continue;
+    }
+
+    /* PACK_FLAG_COUNT2 directions */
+    sptr = (const unsigned char *)RSTRING_PTR(str) + srcidx;
+    switch (dir) {
+    case PACK_DIR_HEX:
+      srcidx += unpack_hex(mrb, sptr, srclen - srcidx, result, count, flags);
+      continue;
+    case PACK_DIR_STR:
+      srcidx += unpack_str(mrb, sptr, srclen - srcidx, result, count, flags);
+      continue;
+    case PACK_DIR_BASE64:
+      srcidx += unpack_base64(mrb, sptr, srclen - srcidx, result);
+      continue;
+    case PACK_DIR_QENC:
+      srcidx += unpack_qenc(mrb, sptr, srclen - srcidx, result);
+      continue;
+    default:
+      break;
+    }
+
+    while (count != 0 && srcidx < srclen) {
+      if (srclen - srcidx < size) {
+        while (count-- > 0) {
+          mrb_ary_push(mrb, result, mrb_nil_value());
+        }
+        break;
+      }
+
+      sptr = (const unsigned char*)RSTRING_PTR(str) + srcidx;
+      switch (dir) {
+      case PACK_DIR_CHAR:
+        srcidx += unpack_char(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_SHORT:
+        srcidx += unpack_short(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_LONG:
+        srcidx += unpack_long(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_QUAD:
+        srcidx += unpack_quad(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_BER:
+        srcidx += unpack_BER(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+#ifndef MRB_NO_FLOAT
+      case PACK_DIR_FLOAT:
+        srcidx += unpack_float(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_DOUBLE:
+        srcidx += unpack_double(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+#endif
+      case PACK_DIR_UTF8:
+        srcidx += unpack_utf8(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      default:
+        mrb_raise(mrb, E_RUNTIME_ERROR, "mruby-pack's bug");
+      }
+      if (count > 0) {
+        count--;
+      }
+    }
+    if (single) {
+      if (RARRAY_LEN(result) > 0) {
+        return RARRAY_PTR(result)[0];
+      }
+      return mrb_nil_value();
+    }
+  }
+  return result;
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-pack/src/pack.c
+static mrb_value
+mrb_pack_unpack(mrb_state *mrb, mrb_value str)
+{
+  return pack_unpack(mrb, str, 0);
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-sprintf/src/sprintf.c
+void
+mrb_mruby_sprintf_gem_init(mrb_state *mrb)
+{
+  struct RClass *krn = mrb->kernel_module;
+  mrb_define_module_function(mrb, krn, "sprintf", mrb_f_sprintf, MRB_ARGS_ANY());
+  mrb_define_module_function(mrb, krn, "format",  mrb_f_sprintf, MRB_ARGS_ANY());
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-bin-debugger/tools/mrdb/cmdbreak.c
+dbgcmd_state
+dbgcmd_break(mrb_state *mrb, mrdb_state *mrdb)
+{
+  mrb_debug_bptype type;
+  mrb_debug_context *dbg = mrdb->dbg;
+  const char *file = NULL;
+  uint32_t line = 0;
+  char *cname = NULL;
+  char *method = NULL;
+  int32_t ret;
+
+  type = parse_breakcommand(mrb, mrdb, &file, &line, &cname, &method);
+  switch (type) {
+    case MRB_DEBUG_BPTYPE_LINE:
+      ret = mrb_debug_set_break_line(mrb, dbg, file, line);
+      break;
+    case MRB_DEBUG_BPTYPE_METHOD:
+      ret = mrb_debug_set_break_method(mrb, dbg, cname, method);
+      break;
+    case MRB_DEBUG_BPTYPE_NONE:
+    default:
+      return DBGST_PROMPT;
+  }
+
+  if (ret >= 0) {
+    if (type == MRB_DEBUG_BPTYPE_LINE) {
+      printf(BREAK_SET_MSG_LINE, ret, file, line);
+    }
+    else if ((type == MRB_DEBUG_BPTYPE_METHOD)&&(cname == NULL)) {
+      printf(BREAK_SET_MSG_METHOD, ret, method);
+    }
+    else {
+      printf(BREAK_SET_MSG_CLASS_METHOD, ret, cname, method);
+    }
+  }
+  else {
+    switch (ret) {
+      case MRB_DEBUG_BREAK_INVALID_LINENO:
+        printf(BREAK_ERR_MSG_INVALIDLINENO, line, file);
+        break;
+      case MRB_DEBUG_BREAK_INVALID_FILE:
+        printf(BREAK_ERR_MSG_INVALIDFILE, file);
+        break;
+      case MRB_DEBUG_BREAK_NUM_OVER:
+        puts(BREAK_ERR_MSG_NUMOVER);
+        break;
+      case MRB_DEBUG_BREAK_NO_OVER:
+        puts(BREAK_ERR_MSG_NOOVER);
+        break;
+      case MRB_DEBUG_INVALID_ARGUMENT:
+        puts(BREAK_ERR_MSG_INVALIDARG);
+        break;
+      case MRB_DEBUG_NOBUF:
+        puts("T.B.D.");
+        break;
+      default:
+        break;
+    }
+  }
+
+  return DBGST_PROMPT;
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-io/src/io.c
+static int
+mrb_io_mode_to_flags(mrb_state *mrb, mrb_value mode)
+{
+  if (mrb_nil_p(mode)) {
+    return mrb_io_modestr_to_flags(mrb, "r");
+  }
+  else if (mrb_string_p(mode)) {
+    return mrb_io_modestr_to_flags(mrb, RSTRING_CSTR(mrb, mode));
+  }
+  else {
+    int flags = 0;
+    mrb_int flags0 = mrb_as_int(mrb, mode);
+
+    switch (flags0 & MRB_O_ACCMODE) {
+      case MRB_O_RDONLY:
+        flags |= O_RDONLY;
+        break;
+      case MRB_O_WRONLY:
+        flags |= O_WRONLY;
+        break;
+      case MRB_O_RDWR:
+        flags |= O_RDWR;
+        break;
+      default:
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "illegal access mode %v", mode);
+    }
+
+    if (flags0 & MRB_O_APPEND)        flags |= O_APPEND;
+    if (flags0 & MRB_O_CREAT)         flags |= O_CREAT;
+    if (flags0 & MRB_O_EXCL)          flags |= O_EXCL;
+    if (flags0 & MRB_O_TRUNC)         flags |= O_TRUNC;
+#ifdef O_NONBLOCK
+    if (flags0 & MRB_O_NONBLOCK)      flags |= O_NONBLOCK;
+#endif
+#ifdef O_NOCTTY
+    if (flags0 & MRB_O_NOCTTY)        flags |= O_NOCTTY;
+#endif
+#ifdef O_BINARY
+    if (flags0 & MRB_O_BINARY)        flags |= O_BINARY;
+#endif
+#ifdef O_SHARE_DELETE
+    if (flags0 & MRB_O_SHARE_DELETE)  flags |= O_SHARE_DELETE;
+#endif
+#ifdef O_SYNC
+    if (flags0 & MRB_O_SYNC)          flags |= O_SYNC;
+#endif
+#ifdef O_DSYNC
+    if (flags0 & MRB_O_DSYNC)         flags |= O_DSYNC;
+#endif
+#ifdef O_RSYNC
+    if (flags0 & MRB_O_RSYNC)         flags |= O_RSYNC;
+#endif
+#ifdef O_NOFOLLOW
+    if (flags0 & MRB_O_NOFOLLOW)      flags |= O_NOFOLLOW;
+#endif
+#ifdef O_NOATIME
+    if (flags0 & MRB_O_NOATIME)       flags |= O_NOATIME;
+#endif
+#ifdef O_DIRECT
+    if (flags0 & MRB_O_DIRECT)        flags |= O_DIRECT;
+#endif
+#ifdef O_TMPFILE
+    if (flags0 & MRB_O_TMPFILE)       flags |= O_TMPFILE;
+#endif
+
+    return flags;
+  }
+}
+

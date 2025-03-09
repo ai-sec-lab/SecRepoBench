@@ -91,22 +91,11 @@ void avcodec_align_dimensions2(AVCodecContext *s, int *width, int *height,
     case AV_PIX_FMT_GBRP9BE:
     case AV_PIX_FMT_GBRP10LE:
     case AV_PIX_FMT_GBRP10BE:
-    case AV_PIX_FMT_GBRP12LE:
-    case AV_PIX_FMT_GBRP12BE:
-    case AV_PIX_FMT_GBRP14LE:
-    case AV_PIX_FMT_GBRP14BE:
-    case AV_PIX_FMT_GBRP16LE:
-    case AV_PIX_FMT_GBRP16BE:
-    case AV_PIX_FMT_GBRAP12LE:
-    case AV_PIX_FMT_GBRAP12BE:
-    case AV_PIX_FMT_GBRAP16LE:
-    case AV_PIX_FMT_GBRAP16BE:
-        w_align = 16; //FIXME assume 16 pixel per macroblock
-        h_align = 16 * 2; // interlaced needs 2 macroblocks height
-        // Handle pixel format alignment for AV_PIX_FMT_GBRAP16BE.
-        // Set the width alignment to 16 pixels per macroblock.
-        // Set the height alignment to 32 pixels (16 * 2) to account for interlaced frames.
-        // <MASK>
+    // Handle pixel width and height format alignment for AV_PIX_FMT_GBRP12LE, 
+    // AV_PIX_FMT_GBRP12BE, AV_PIX_FMT_GBRP14LE, AV_PIX_FMT_GBRP14BE, 
+    // AV_PIX_FMT_GBRP16LE, AV_PIX_FMT_GBRP16BE, AV_PIX_FMT_GBRAP12LE, 
+    // AV_PIX_FMT_GBRAP12BE, AV_PIX_FMT_GBRAP16LE, and AV_PIX_FMT_GBRAP16BE.
+    // <MASK>
     case AV_PIX_FMT_YUV411P:
     case AV_PIX_FMT_YUVJ411P:
     case AV_PIX_FMT_UYYVYY411:
