@@ -39,21 +39,11 @@ static int jpeg2000_read_main_headers(Jpeg2000DecoderContext *decodercontext)
                 return AVERROR_INVALIDDATA;
             }
 
-            if (decodercontext->has_ppm) {
-                // Extract the size of the tile-part header from the packed headers stream.
-                // Read the next 32 bits as an unsigned integer to determine the size.
-                // <MASK>
-                bytestream2_init(&tp->header_tpg, decodercontext->packed_headers_stream.buffer, tp_header_size);
-                bytestream2_skip(&decodercontext->packed_headers_stream, tp_header_size);
-            }
-            if (tile->has_ppt && tile->tp_idx == 0) {
-                bytestream2_init(&tile->packed_headers_stream, tile->packed_headers, tile->packed_headers_size);
-            }
-
-            bytestream2_init(&tp->tpg, decodercontext->g.buffer, tp->tp_end - decodercontext->g.buffer);
-            bytestream2_skip(&decodercontext->g, tp->tp_end - decodercontext->g.buffer);
-
-            continue;
+            // Initialize the bytestream for tile-part headers using packed header streams if PPM is present.
+            // Initialize the bytestream for packed packet headers if PPT is present and it's the first tile-part.
+            // Set up the data stream for the current tile-part by calculating its size and skipping to its end in the buffer.
+            // Continue to the next iteration of the loop to process more headers or reach the end marker.
+            // <MASK>
         }
         if (marker == JPEG2000_EOC)
             break;

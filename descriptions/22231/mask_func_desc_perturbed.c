@@ -73,8 +73,7 @@ int cram_decode_slice(cram_fd *fd, cram_container *c, cram_slice *slice,
                 return -1;
             // Assign the decompressed data from the block as the reference sequence for the slice.
             // Set the start and end positions of this reference sequence based on the slice header.
-            // Check if the embedded reference is smaller than expected by comparing the slice's reference
-            // span with the decompressed block size. Log an error and return -1 if the reference is too small.
+            // Log an error and return -1 if the embedded reference is too small.
             // <MASK>
         } else if (!c->comp_hdr->no_ref) {
             //// Avoid Java cramtools bug by loading entire reference seq

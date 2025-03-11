@@ -143,7 +143,7 @@ static double GetFillAlpha(PolygonInfo *polygon_info,const double mid,
   for (j=0; j < (ssize_t) polygon_info->number_edges; j++, p++)
   {
     // Iterate through the edges of the polygon to determine their relation
-    // to the given point (x, y).
+    // to the given point.
     // Update the winding number based on the position of the point relative
     // to the polygon edges. Use the direction of the edge to adjust the
     // winding number.

@@ -14,10 +14,8 @@ MagickExport void ConcatenateStringInfo(StringInfo *infostring,
   if (~length < MagickPathExtent)
     ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
   // Concatenate the source StringInfo's data to the destination StringInfo's data.
-  // Ensure enough memory is allocated to accommodate the concatenated result,
-  // including additional space defined by MagickPathExtent. If the current
-  // destination data is NULL, allocate new memory; otherwise, resize existing memory.
+  // If the current destination data is NULL, allocate new memory; otherwise, 
+  // resize existing memory. 
   // Copy the source data to the end of the destination's data.
-  // Update the length of the destination StringInfo to reflect the new total length.
   // <MASK>
 }

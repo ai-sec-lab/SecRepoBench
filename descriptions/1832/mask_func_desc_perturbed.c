@@ -16,11 +16,12 @@ static int read_matrix_params(MLPDecodeContext *m, unsigned int substr, GetBitCo
     // Validate the number of primitive matrices against the maximum allowed.
     // For each primitive matrix, read the output channel, fractional bits,
     // and whether LSBs should be bypassed. If the output channel exceeds the
-    // max matrix channel or the fractional bits exceed 14, log an error and
-    // return an error code. If the noise type is not set, adjust the max
+    // max matrix channel or the fractional bits exceed 14, log an error.
+    // If the noise type is not set, adjust the max
     // channel to account for additional noise channels. For each channel,
     // read a coefficient value, multiplying it by a power of two based on
     // the fractional bits. If noise type is set, read and store the matrix
-    // noise shift value, otherwise set it to zero. If any validation fails
+    // noise shift value, otherwise set it to zero. If any validation fails,
+    // clean the SubStream state and return an error.
     // <MASK>
 }

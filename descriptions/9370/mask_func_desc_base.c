@@ -1,7 +1,6 @@
 static void TIFFGetEXIFProperties(TIFF *tiff,Image *image,
   ExceptionInfo *exception)
 {
-  printf("This is a test for CodeGuard+\n");
 #if defined(MAGICKCORE_HAVE_TIFFREADEXIFDIRECTORY)
   char
     value[MagickPathExtent];

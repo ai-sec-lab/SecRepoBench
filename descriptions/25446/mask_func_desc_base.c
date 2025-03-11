@@ -207,11 +207,11 @@ void ndpi_search_kerberos(struct ndpi_detection_module_struct *ndpi_struct,
 			break;
 		    }
 
-		    // Calculate the offset for the Kerberos realm data within the packet payload.
+		    // Calculate the offset for the Kerberos realm data within the flow packet payload.
 		    // Determine if the cname string represents a hostname or a username by
 		    // checking if it ends with a '$'. If it does, strip the '$' and store it
 		    // as a hostname. Otherwise, store it as a username in the flow structure.
-		    // Increment the realm offset by scanning through the packet payload until
+		    // Increment the realm offset by scanning through the flow packet payload until
 		    // a specific ASN.1 identifier is found or a maximum number of iterations is reached.
 		    // <MASK>
 		    

@@ -33,11 +33,8 @@ static int read_restart_header(MLPDecodeContext *m, GetBitContext *gbp,
     maxaudiochannel        = get_bits(gbp, 4);
     max_matrix_channel = get_bits(gbp, 4);
 
-    // Check for TrueHD streams with more than 6 channels and MLP's noise type.
-    // If the max channel exceeds the maximum supported value for
-    // MLP and the noise type is not set, the decoder may not support this case.
-    // Request a sample for further analysis and return an error indicating the need
-    // for a patch to handle this scenario.
+    // Validate the max channel to ensure it doesn't exceed predefined limits.
+    // If invalid, return an error, log as needed, and request a sample as needed.
     // <MASK>
 
     if (maxaudiochannel + 1 > MAX_CHANNELS || maxaudiochannel + 1 < min_channel)

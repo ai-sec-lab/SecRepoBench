@@ -1454,32 +1454,9 @@ MagickExport void LocaleLower(char *string)
     *q=(char) LocaleLowercase((int) *q);
 }
 
-/*
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%                                                                             %
-%                                                                             %
-%                                                                             %
-%   L o c a l e L o w e r c a s e                                             %
-%                                                                             %
-%                                                                             %
-%                                                                             %
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%
-%  LocaleLowercase() convert to lowercase.
-%
-%  The format of the LocaleLowercase method is:
-%
-%      void LocaleLowercase(const int c)
-%
-%  A description of each parameter follows:
-%
-%    o If c is a uppercase letter, return its lowercase equivalent.
-%
-*/
 MagickExport int LocaleLowercase(const int charcode)
 {
   // <MASK>
-  return(tolower(charcode));
 }
 
 /*

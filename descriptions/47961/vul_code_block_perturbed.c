@@ -1,2 +1,20 @@
-if (*currentposition == ']')
+uc = json_skip_space(uc, ueend);
+		if (*uc == ']')
 			goto done;
+		if (!json_parse(&uc, ueend, st, lvl + 1))
+			goto out;
+		if (uc == ueend)
+			goto out;
+		switch (*uc) {
+		case ',':
+			uc++;
+			continue;
+		case ']':
+		done:
+			st[JSON_ARRAYN]++;
+			DPRINTF("Good array: ", uc, *ucp);
+			*ucp = uc + 1;
+			return 1;
+		default:
+			goto out;
+		}

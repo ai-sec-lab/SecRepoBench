@@ -286,7 +286,7 @@ static AI_FORCE_INLINE bool isEndOfCache(size_t pos, size_t cacheSize) {
 
 template <class T>
 AI_FORCE_INLINE bool IOStreamBuffer<T>::getNextLine(std::vector<T> &buffer) {
-// <MASK>
+    // <MASK>
 }
 
 template <class T>

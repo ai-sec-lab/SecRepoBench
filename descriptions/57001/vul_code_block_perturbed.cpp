@@ -3,8 +3,8 @@ if(!GetNextLine(buffer,line)) {
             break;
         }
         unsigned int idx;
-        sz = line; SkipSpaces(&sz);
-        idx = strtoul10(sz,&sz);
+        vertex_data_ptr = line; SkipSpaces(&vertex_data_ptr);
+        idx = strtoul10(vertex_data_ptr,&vertex_data_ptr);
         if(!idx || idx > 9) {
 	        ASSIMP_LOG_ERROR("OFF: Faces with zero indices aren't allowed");
             --mesh->mNumFaces;
@@ -13,14 +13,3 @@ if(!GetNextLine(buffer,line)) {
 	    }
 	    faces->mNumIndices = idx;
         faces->mIndices = new unsigned int[faces->mNumIndices];
-        for (unsigned int m = 0; m < faces->mNumIndices;++m) {
-            SkipSpaces(&sz);
-            idx = strtoul10(sz,&sz);
-            if (idx >= vertexCount) {
-                ASSIMP_LOG_ERROR("OFF: Vertex index is out of range");
-                idx = vertexCount - 1;
-            }
-            faces->mIndices[m] = idx;
-        }
-        ++i;
-        ++faces;

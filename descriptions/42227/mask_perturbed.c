@@ -743,17 +743,17 @@ cmsFloat64Number ParseFloatNumber(const char *Buffer)
 
 // Reads a string, special case to avoid infinite resursion on .include
 static
-void InStringSymbol(cmsIT8* it8)
+void InStringSymbol(cmsIT8* it8_parser)
 {
-    while (isseparator(it8->ch))
-        NextCh(it8);
+    while (isseparator(it8_parser->ch))
+        NextCh(it8_parser);
 
-    if (it8->ch == '\'' || it8->ch == '\"')
+    if (it8_parser->ch == '\'' || it8_parser->ch == '\"')
     {
         // <MASK>        
     }
     else
-        SynError(it8, "String expected");
+        SynError(it8_parser, "String expected");
 
 }
 

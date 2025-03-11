@@ -88,7 +88,9 @@ _Static_assert(sizeof(struct ndpi_str_hash) == sizeof(struct ndpi_str_hash_priva
 /* ****************************************** */
 
 /* implementation of the punycode check function */
-int ndpi_check_punycode_string(char * buffer , int len) // <MASK>
+int ndpi_check_punycode_string(char * buffer , int len) {
+    // <MASK>
+  }
 
 /* ****************************************** */
 

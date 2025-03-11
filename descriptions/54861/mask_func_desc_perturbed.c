@@ -182,9 +182,13 @@ void avcodec_align_dimensions2(AVCodecContext *codeccontext, int *width, int *he
 
     *width  = FFALIGN(*width, w_align);
     *height = FFALIGN(*height, h_align);
-    // This code block is responsible for aligning the line sizes for video frames. 
-    // It iterates over each of the data pointers (up to 4) and sets their alignment 
-    // using the `STRIDE_ALIGN` constant.
+    // Align the width and height to the specified w_align and h_align values. 
+    // If the codec is H.264, a specific VP series codec, 
+    // other relevant codec, or if low 
+    // resolution is used, adjust the height by 2 to accommodate certain motion 
+    // compensation edge cases. Additionally, ensure that the width is at least 
+    // 32, to provide enough temporary space for edge emulation during 
+    // out-of-frame motion vector processing.
     // <MASK>
 
     for (i = 0; i < 4; i++)

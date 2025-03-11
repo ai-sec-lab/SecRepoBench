@@ -3,7 +3,7 @@
 	**	of the chunk, so don't include it in the size check.
 	*/
 	if (chunksize >= sizeof (SF_CART_INFO_16K) - 4)
-	{	psf_log_printf (psf, "cart : %u too big to be handled\n", chunksize) ;
-		psf_binheader_readf (psf, "j", chunksize) ;
+	{	psf_log_printf (audio_file_private, "cart : %u too big to be handled\n", chunksize) ;
+		psf_binheader_readf (audio_file_private, "j", chunksize) ;
 		return 0 ;
 		}

@@ -8,9 +8,9 @@ static PrimitiveInfo *TraceStrokePolygon(const Image *image,
 // Initialize variables for closed_path status and offsets for points.
 // Declare arrays to store point information and initialize path_p and path_q pointers for point paths.
 // Declare variables to store polygon and stroke information, such as polygon_primitive and stroke_polygon.
-// Allocate memory for polygon_primitive based on the number of vertices in primitive_info.
+// Allocate memory for polygon_primitive based on the number of vertices in the primitive data.
 // If the memory allocation fails, return NULL.
-// Copy the input primitive_info data into polygon_primitive.
+// Copy the input primitive data into polygon_primitive.
 // Determine if the path is closed by checking the closed_subpath field.
 // Adjust number of vertices if closed_path is true and linejoin is RoundJoin or MiterJoin.
 // Set the last primitive type to UndefinedPrimitive to mark the end of the array.

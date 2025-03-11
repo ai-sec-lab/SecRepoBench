@@ -255,7 +255,7 @@ check_name_arg(mrb_state *mrb, int posarg, const char *name, size_t len)
 } while (0)
 
 static const char*
-get_num(mrb_state *mrb, const char *p, const char *end, int *valp)
+get_num(mrb_state *mrb, const char *p, const char *end, int *value_pointer)
 {
   // <MASK>
   return e;

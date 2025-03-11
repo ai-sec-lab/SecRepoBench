@@ -1,11 +1,11 @@
 static const char*
-get_num(mrb_state *mrb, const char *p, const char *end, int *valp)
+get_num(mrb_state *mrb, const char *p, const char *end, int *value_pointer)
 {
   char *e;
-  mrb_int num;
-  if (!mrb_read_int(p, end, &e, &num) || INT_MAX < num) {
+  mrb_int n;
+  if (!mrb_read_int(p, end, &e, &n) || INT_MAX < n) {
     return NULL;
   }
-  *valp = (int)num;
+  *value_pointer = (int)n;
   return e;
 }

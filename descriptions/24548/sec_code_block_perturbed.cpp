@@ -1,0 +1,17 @@
+if (c->length () - initial_table_position == CmapSubtableFormat14::min_size)
+    {
+      c->revert (snap);
+      return;
+    }
+
+    if (unlikely (!c->check_success (!obj_indices.in_error ())))
+      return;
+
+    int tail_len = init_tail - c->tail;
+    c->check_assign (this->length, c->length () - initial_table_position + tail_len);
+    c->check_assign (this->record.len,
+		     (c->length () - initial_table_position - CmapSubtableFormat14::min_size) /
+		     VariationSelectorRecord::static_size);
+
+    /* Correct the incorrect write order by reversing the order of the variation
+       records array. */

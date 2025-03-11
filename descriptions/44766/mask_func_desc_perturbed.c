@@ -1,18 +1,18 @@
 GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 {
-	GF_MPEGAudioSampleEntryBox *audioentrybox;
+	GF_MPEGAudioSampleEntryBox *ptr;
 	char *data;
 	u8 a, b, c, d;
-	u32 i, size, v, nb_alnum;
+	u32 index, size, v, nb_alnum;
 	GF_Err e;
 	u64 pos, start;
 
-	audioentrybox = (GF_MPEGAudioSampleEntryBox *)s;
+	ptr = (GF_MPEGAudioSampleEntryBox *)s;
 
 	start = gf_bs_get_position(bs);
 	v = gf_bs_peek_bits(bs, 16, 8);
 	if (v)
-		audioentrybox->qtff_mode = GF_ISOM_AUDIO_QTFF_ON_NOEXT;
+		ptr->qtff_mode = GF_ISOM_AUDIO_QTFF_ON_NOEXT;
 
 	//try to disambiguate QTFF v1 and MP4 v1 audio sample entries ...
 	if (v==1) {
@@ -27,7 +27,7 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 		if (isalnum(b)) nb_alnum++;
 		if (isalnum(c)) nb_alnum++;
 		if (isalnum(d)) nb_alnum++;
-		if (nb_alnum>2) audioentrybox->qtff_mode = GF_ISOM_AUDIO_QTFF_NONE;
+		if (nb_alnum>2) ptr->qtff_mode = GF_ISOM_AUDIO_QTFF_NONE;
 		gf_bs_seek(bs, start);
 	}
 
@@ -39,7 +39,7 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 	//when cookie is set on bs, always convert qtff-style mp4a to isobmff-style
 	//since the conversion is done in addBox and we don't have the bitstream there (arg...), flag the box
  	if (gf_bs_get_cookie(bs) & GF_ISOM_BS_COOKIE_QT_CONV) {
- 		audioentrybox->qtff_mode |= GF_ISOM_AUDIO_QTFF_CONVERT_FLAG;
+ 		ptr->qtff_mode |= GF_ISOM_AUDIO_QTFF_CONVERT_FLAG;
  	}
 
 	e = gf_isom_box_array_read(s, bs);
@@ -55,7 +55,7 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 				case GF_ISOM_SUBTYPE_3GP_EVRC:
 				case GF_ISOM_SUBTYPE_3GP_QCELP:
 				case GF_ISOM_SUBTYPE_3GP_SMV:
-					if (audioentrybox->cfg_3gpp) audioentrybox->cfg_3gpp->cfg.type = type;
+					if (ptr->cfg_3gpp) ptr->cfg_3gpp->cfg.type = type;
 					break;
 				}
 			}
@@ -71,26 +71,15 @@ GF_Err audio_sample_entry_box_read(GF_Box *s, GF_BitStream *bs)
 	if (!data) return GF_OUT_OF_MEM;
 
 	gf_bs_read_data(bs, data, size);
-	for (i=0; i<size-8; i++) {
-		if (GF_4CC((u32)data[i+4], (u8)data[i+5], (u8)data[i+6], (u8)data[i+7]) == GF_ISOM_BOX_TYPE_ESDS) {
-			GF_BitStream *mybs = gf_bs_new(data + i, size - i, GF_BITSTREAM_READ);
-			gf_bs_set_cookie(mybs, GF_ISOM_BS_COOKIE_NO_LOGS);
-			// Remove the ESD (Elementary Stream Descriptor) box from the parent box's list of children, if it exists.
-			// <MASK>
-			audioentrybox->esd = NULL;
-			e = gf_isom_box_parse((GF_Box **)&audioentrybox->esd, mybs);
-			gf_bs_del(mybs);
-
-			if ((e==GF_OK) && audioentrybox->esd && (audioentrybox->esd->type == GF_ISOM_BOX_TYPE_ESDS)) {
-				if (!audioentrybox->child_boxes) audioentrybox->child_boxes = gf_list_new();
-				gf_list_add(audioentrybox->child_boxes, audioentrybox->esd);
-			} else if (audioentrybox->esd) {
-				gf_isom_box_del((GF_Box *)audioentrybox->esd);
-				audioentrybox->esd = NULL;
-			}
-			e = GF_OK;
-			break;
-		}
+	for (index=0; index<size-8; index++) {
+		// Search the data buffer for a specific four-character code indicating an ESDS box type.
+		// If found, create a new bitstream starting at the identified location in the data buffer.
+		// Set a cookie on the new bitstream to suppress logging for the operations that follow.
+		// If an ESDS box already exists in the current box structure, remove its reference from the parent-child hierarchy and delete it.
+		// Parse a new ESDS box from the bitstream and update the ESDS box reference in the current box structure.
+		// If the parsing is successful and the box type matches ESDS, ensure the box is added to the list of child boxes.
+		// Clean up by deleting the created bitstream and handle any memory management necessary for ESDS box references.
+		// <MASK>
 	}
 	gf_free(data);
 	return e;

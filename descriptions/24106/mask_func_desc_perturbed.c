@@ -272,7 +272,7 @@ static MagickBooleanType RenderMVGContent(Image *image,
             // Check if the current token matches the graphic context ID, break if true.
             // Retrieve the MVG class definition from the macros using the token.
             // If the class definition is found,
-            // inject the class elements into the stream at the current offset.
+            // inject the class elements into the stream.
             // Concatenate the MVG class to the elements string, followed by the remaining content.
             // Free the previous primitive string and update it with the new elements.
             // Adjust the stream pointer to the new position in the modified primitive.

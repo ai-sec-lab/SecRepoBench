@@ -1,1 +1,3 @@
-int ndpi_check_punycode_string(char * buffer , int len) // <MASK>
+int ndpi_check_punycode_string(char * buffer , int len) {
+    // <MASK>
+  }

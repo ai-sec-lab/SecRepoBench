@@ -1,14 +1,14 @@
-static int speedhq_decode_frame(AVCodecContext *ccodeccontext, AVFrame *frame,
+static int speedhq_decode_frame(AVCodecContext *codec_context, AVFrame *frame,
                                 int *got_frame, AVPacket *avpkt)
 {
-    SHQContext * const s = ccodeccontext->priv_data;
+    SHQContext * const s = codec_context->priv_data;
     const uint8_t *buf   = avpkt->data;
     int buf_size         = avpkt->size;
     uint8_t quality;
     uint32_t second_field_offset;
     int ret;
 
-    if (buf_size < 4 || ccodeccontext->width < 8 || ccodeccontext->width % 8 != 0)
+    if (buf_size < 4 || codec_context->width < 8 || codec_context->width % 8 != 0)
         return AVERROR_INVALIDDATA;
 
     quality = buf[0];
@@ -23,10 +23,10 @@ static int speedhq_decode_frame(AVCodecContext *ccodeccontext, AVFrame *frame,
         return AVERROR_INVALIDDATA;
     }
 
-    ccodeccontext->coded_width = FFALIGN(ccodeccontext->width, 16);
-    ccodeccontext->coded_height = FFALIGN(ccodeccontext->height, 16);
+    codec_context->coded_width = FFALIGN(codec_context->width, 16);
+    codec_context->coded_height = FFALIGN(codec_context->height, 16);
 
-    if ((ret = ff_get_buffer(ccodeccontext, frame, 0)) < 0) {
+    if ((ret = ff_get_buffer(codec_context, frame, 0)) < 0) {
         return ret;
     }
     frame->key_frame = 1;

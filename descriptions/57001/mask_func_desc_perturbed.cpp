@@ -60,14 +60,14 @@ void OFFImporter::InternReadFile( const std::string& pFile, aiScene* pScene, IOS
     }
 
     NextToken(&car, end);
-    const unsigned int vertexCount = strtoul10(car, &car);
+    const unsigned int numVertices = strtoul10(car, &car);
     NextToken(&car, end);
     const unsigned int numFaces = strtoul10(car, &car);
     NextToken(&car, end);
     strtoul10(car, &car);  // skip edge count
     NextToken(&car, end);
 
-    if (!vertexCount) {
+    if (!numVertices) {
         throw DeadlyImportError("OFF: There are no valid vertices");
     }
     if (!numFaces) {
@@ -84,42 +84,42 @@ void OFFImporter::InternReadFile( const std::string& pFile, aiScene* pScene, IOS
     aiFace* faces = new aiFace[mesh->mNumFaces];
     mesh->mFaces = faces;
 
-    mesh->mNumVertices = vertexCount;
-    mesh->mVertices = new aiVector3D[vertexCount];
-    mesh->mNormals = hasNormals ? new aiVector3D[vertexCount] : nullptr;
-    mesh->mColors[0] = hasColors ? new aiColor4D[vertexCount] : nullptr;
+    mesh->mNumVertices = numVertices;
+    mesh->mVertices = new aiVector3D[numVertices];
+    mesh->mNormals = hasNormals ? new aiVector3D[numVertices] : nullptr;
+    mesh->mColors[0] = hasColors ? new aiColor4D[numVertices] : nullptr;
 
     if (hasTexCoord) {
         mesh->mNumUVComponents[0] = 2;
-        mesh->mTextureCoords[0] = new aiVector3D[vertexCount];
+        mesh->mTextureCoords[0] = new aiVector3D[numVertices];
     }
     char line[4096];
     buffer = car;
-    const char *sz = car;
+    const char *vertex_data_ptr = car;
 
     // now read all vertex lines
-    for (unsigned int i = 0; i < vertexCount; ++i) {
+    for (unsigned int i = 0; i < numVertices; ++i) {
         if(!GetNextLine(buffer, line)) {
             ASSIMP_LOG_ERROR("OFF: The number of verts in the header is incorrect");
             break;
         }
         aiVector3D& v = mesh->mVertices[i];
-        sz = line;
+        vertex_data_ptr = line;
 
 	// helper array to write a for loop over possible dimension values
 	ai_real* vec[3] = {&v.x, &v.y, &v.z};
 
 	// stop at dimensions: this allows loading 1D or 2D coordinate vertices
         for (unsigned int dim = 0; dim < dimensions; ++dim ) {
-	    SkipSpaces(&sz);
-	    sz = fast_atoreal_move<ai_real>(sz, *vec[dim]);
+	    SkipSpaces(&vertex_data_ptr);
+	    vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr, *vec[dim]);
 	}
 
 	// if has homogeneous coordinate, divide others by this one
 	if (hasHomogenous) {
-	    SkipSpaces(&sz);
+	    SkipSpaces(&vertex_data_ptr);
 	    ai_real w = 1.;
-	    sz = fast_atoreal_move<ai_real>(sz, w);
+	    vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr, w);
             for (unsigned int dim = 0; dim < dimensions; ++dim ) {
 	        *(vec[dim]) /= w;
 	    }
@@ -128,12 +128,12 @@ void OFFImporter::InternReadFile( const std::string& pFile, aiScene* pScene, IOS
 	// read optional normals
 	if (hasNormals) {
 	    aiVector3D& n = mesh->mNormals[i];
-	    SkipSpaces(&sz);
-	    sz = fast_atoreal_move<ai_real>(sz,(ai_real&)n.x);
-	    SkipSpaces(&sz);
-	    sz = fast_atoreal_move<ai_real>(sz,(ai_real&)n.y);
-	    SkipSpaces(&sz);
-	    fast_atoreal_move<ai_real>(sz,(ai_real&)n.z);
+	    SkipSpaces(&vertex_data_ptr);
+	    vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)n.x);
+	    SkipSpaces(&vertex_data_ptr);
+	    vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)n.y);
+	    SkipSpaces(&vertex_data_ptr);
+	    fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)n.z);
 	}
 
 	// reading colors is a pain because the specification says it can be
@@ -142,45 +142,55 @@ void OFFImporter::InternReadFile( const std::string& pFile, aiScene* pScene, IOS
 	// in theory should be testing type !
 	if (hasColors) {
 	    aiColor4D& c = mesh->mColors[0][i];
-	    SkipSpaces(&sz);
-	    sz = fast_atoreal_move<ai_real>(sz,(ai_real&)c.r);
-            if (*sz != '#' && *sz != '\n' && *sz != '\r') {
-	        SkipSpaces(&sz);
-	        sz = fast_atoreal_move<ai_real>(sz,(ai_real&)c.g);
+	    SkipSpaces(&vertex_data_ptr);
+	    vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)c.r);
+            if (*vertex_data_ptr != '#' && *vertex_data_ptr != '\n' && *vertex_data_ptr != '\r') {
+	        SkipSpaces(&vertex_data_ptr);
+	        vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)c.g);
             } else {
 	        c.g = 0.;
 	    }
-            if (*sz != '#' && *sz != '\n' && *sz != '\r') {
-	        SkipSpaces(&sz);
-	        sz = fast_atoreal_move<ai_real>(sz,(ai_real&)c.b);
+            if (*vertex_data_ptr != '#' && *vertex_data_ptr != '\n' && *vertex_data_ptr != '\r') {
+	        SkipSpaces(&vertex_data_ptr);
+	        vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)c.b);
             } else {
 	        c.b = 0.;
 	    }
-            if (*sz != '#' && *sz != '\n' && *sz != '\r') {
-	        SkipSpaces(&sz);
-	        sz = fast_atoreal_move<ai_real>(sz,(ai_real&)c.a);
+            if (*vertex_data_ptr != '#' && *vertex_data_ptr != '\n' && *vertex_data_ptr != '\r') {
+	        SkipSpaces(&vertex_data_ptr);
+	        vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)c.a);
             } else {
 	        c.a = 1.;
 	    }
 	}
         if (hasTexCoord) {
 	    aiVector3D& t = mesh->mTextureCoords[0][i];
-	    SkipSpaces(&sz);
-	    sz = fast_atoreal_move<ai_real>(sz,(ai_real&)t.x);
-	    SkipSpaces(&sz);
-	    fast_atoreal_move<ai_real>(sz,(ai_real&)t.y);
+	    SkipSpaces(&vertex_data_ptr);
+	    vertex_data_ptr = fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)t.x);
+	    SkipSpaces(&vertex_data_ptr);
+	    fast_atoreal_move<ai_real>(vertex_data_ptr,(ai_real&)t.y);
 	}
     }
 
     // load faces with their indices
     faces = mesh->mFaces;
     for (unsigned int i = 0; i < numFaces; ) {
-        // Parse face data from the input buffer for the OFF format. For each face, read
-        // the number of vertex indices, followed by the indices themselves. Ensure that
-        // the number of indices does not exceed a specified maximum, and that all indices
-        // are within the valid range of existing vertices. Log an error if indices are out
-        // of range or if faces with zero indices are encountered.
+        // Read face data from the buffer and parse the number of indices per face.
+        // Ensure that the number of indices is valid, logging an error if not.
+        // Allocate memory for the indices of each face based on the parsed index count.
+        // Adjust the total face count if an invalid face is encountered.
         // <MASK>
+        for (unsigned int m = 0; m < faces->mNumIndices;++m) {
+            SkipSpaces(&vertex_data_ptr);
+            idx = strtoul10(vertex_data_ptr,&vertex_data_ptr);
+            if (idx >= numVertices) {
+                ASSIMP_LOG_ERROR("OFF: Vertex index is out of range");
+                idx = numVertices - 1;
+            }
+            faces->mIndices[m] = idx;
+        }
+        ++i;
+        ++faces;
     }
 
     // generate the output node graph

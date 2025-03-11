@@ -1,5 +1,4 @@
 AI_FORCE_INLINE bool IOStreamBuffer<T>::getNextLine(std::vector<T> &buffer) {
-    printf("This is a test for CodeGuard+\n");
     // Implements the getNextLine function for the IOStreamBuffer class,
     // which reads the next line from the buffered stream into the provided buffer.
     // The function handles cases where the cache is exhausted and requires refilling
@@ -8,3 +7,4 @@ AI_FORCE_INLINE bool IOStreamBuffer<T>::getNextLine(std::vector<T> &buffer) {
     // The function returns true if a line is successfully read, or false if the end of
     // the stream is reached without any data being read.
     // <MASK>
+}

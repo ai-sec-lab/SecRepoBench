@@ -13,7 +13,7 @@ int map (int value, unsigned int from_offset = 0, unsigned int to_offset = 1) co
 	return value - arrayZ[0].fromCoord + arrayZ[0].toCoord;
     }
 
-    // Check if the value is less than or equal to the first fromCoord and adjust accordingly.
+    // Check if the input value is less than or equal to the first fromCoord and adjust accordingly.
     // Iterate through the array to find the appropriate segment where the value should be mapped.
     // If the value is beyond or equal to the current segment's fromCoord, adjust the value using the current segment's toCoord.
     // Handle cases where two fromCoords are equal by using the previous toCoord for mapping.

@@ -158,9 +158,9 @@ Mat_H5ReadGroupInfo(mat_t *mat,matvar_t *matvar,hid_t dset_id)
     }
 
     // Check if the number of elements or fields is less than 1, and return if true.
-    // Calculate the total number of bytes needed for all fields and store it in matvar->nbytes.
+    // Calculate the total number of bytes needed for all fields and store it in nbytes in the matvar structure.
     // Allocate memory for the fields array based on the calculated number of bytes.
-    // Assign the allocated memory to matvar->data for further processing.
+    // Assign the allocated memory to data in the matvar structure for further processing.
     // <MASK>
     if ( NULL != fields ) {
         hsize_t k;

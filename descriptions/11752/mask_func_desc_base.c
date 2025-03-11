@@ -27,7 +27,7 @@ int yr_re_ast_split_at_chaining_point(
     // range that exceeds a specified threshold. If so, split the AST at this
     // point. Create a new AST for the remainder and update the current AST
     // to separate the nodes before and after the point of splitting.
-    // Update the min_gap and max_gap with the range values of the current node.
+    // Update the min and max gap with the range values of the current node.
     // Ensure the child node is properly removed, and return success after
     // successfully splitting the AST.
     // <MASK>

@@ -1,31 +1,31 @@
 static
-void InStringSymbol(cmsIT8* it8)
+void InStringSymbol(cmsIT8* it8_parser)
 {
-    while (isseparator(it8->ch))
-        NextCh(it8);
+    while (isseparator(it8_parser->ch))
+        NextCh(it8_parser);
 
-    if (it8->ch == '\'' || it8->ch == '\"')
+    if (it8_parser->ch == '\'' || it8_parser->ch == '\"')
     {
-        int quotechar;
+        int sng;
 
-        quotechar = it8->ch;
-        StringClear(it8->str);
+        sng = it8_parser->ch;
+        StringClear(it8_parser->str);
 
-        NextCh(it8);
+        NextCh(it8_parser);
 
-        while (it8->ch != quotechar) {
+        while (it8_parser->ch != sng) {
 
-            if (it8->ch == '\n' || it8->ch == '\r' || it8->ch == 0) break;
+            if (it8_parser->ch == '\n' || it8_parser->ch == '\r' || it8_parser->ch == 0) break;
             else {
-                StringAppend(it8->str, (char)it8->ch);
-                NextCh(it8);
+                StringAppend(it8_parser->str, (char)it8_parser->ch);
+                NextCh(it8_parser);
             }
         }
 
-        it8->sy = SSTRING;
-        NextCh(it8);        
+        it8_parser->sy = SSTRING;
+        NextCh(it8_parser);        
     }
     else
-        SynError(it8, "String expected");
+        SynError(it8_parser, "String expected");
 
 }

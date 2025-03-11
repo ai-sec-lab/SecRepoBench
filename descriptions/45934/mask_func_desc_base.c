@@ -424,7 +424,7 @@ static Image *ReadMIFFImage(const ImageInfo *image_info,
               case 'i':
               case 'I':
               {
-                // Handle specific keywords related to image properties.
+                // Handle specific keywords related to output image properties.
                 // If the keyword is "id", copy the value from options to the id variable.
                 // If the keyword is "iterations", convert the value from options to an unsigned long and assign it to the image's iterations property.
                 // For all other keywords, set the image property using the keyword and options values.

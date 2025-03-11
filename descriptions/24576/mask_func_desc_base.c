@@ -89,9 +89,9 @@ struct ndpi_proto ndpi_workflow_process_packet(struct ndpi_workflow * workflow,
 
     /* Cisco PPP in HDLC-like framing - 50 */
   // Handle packet processing for different Cisco PPP encapsulations
-  // Determine the type of datalink layer for the packet and set the IP header offset and type.
+  // Determine the type of datalink layer for the packet and set the IP header offset and ether type.
   // Specifically, process serial and HDLC encapsulations by extracting protocol information.
-  // Update the type and ip_offset variables based on the encapsulation method.
+  // Update the ether type and ip_offset variables based on the encapsulation method.
   // <MASK>
   case DLT_EN10MB:
     ethernet = (struct ndpi_ethhdr *) &packet[eth_offset];

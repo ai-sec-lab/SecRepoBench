@@ -1,11 +1,11 @@
-cp += safe_itf8_get((char *)cp,  (char *)cplimit, &hdr->ref_seq_id);
+cp += safe_itf8_get((char *)cp,  (char *)cp_end, &slice_header->ref_seq_id);
 #ifdef LARGE_POS
-        cp += safe_ltf8_get((char *)cp,  (char *)cplimit, &hdr->ref_seq_start);
-        cp += safe_ltf8_get((char *)cp,  (char *)cplimit, &hdr->ref_seq_span);
+        cp += safe_ltf8_get((char *)cp,  (char *)cp_end, &slice_header->ref_seq_start);
+        cp += safe_ltf8_get((char *)cp,  (char *)cp_end, &slice_header->ref_seq_span);
 #else
         int32_t i32;
-        cp += safe_itf8_get((char *)cp,  (char *)cplimit, &i32);
-        hdr->ref_seq_start = i32;
-        cp += safe_itf8_get((char *)cp,  (char *)cplimit, &i32);
-        hdr->ref_seq_span = i32;
+        cp += safe_itf8_get((char *)cp,  (char *)cp_end, &i32);
+        slice_header->ref_seq_start = i32;
+        cp += safe_itf8_get((char *)cp,  (char *)cp_end, &i32);
+        slice_header->ref_seq_span = i32;
 #endif

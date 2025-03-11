@@ -1,0 +1,25 @@
+static void
+_normalize_axes_location (hb_face_t *fontface, hb_subset_plan_t *plan)
+{
+  if (plan->user_axes_location.is_empty ())
+    return;
+
+  hb_array_t<const OT::AxisRecord> axes = fontface->table.fvar->get_axes ();
+  plan->normalized_coords.resize (axes.length);
+
+  bool has_avar = fontface->table.avar->has_data ();
+  const OT::SegmentMaps *seg_maps = nullptr;
+  // If 'avar' data is present, obtain the segment maps for axis value remapping.
+  // Initialize variables to track axis indices and whether any axis is not pinned.
+  // Iterate over each axis in the 'axes' array.
+  // For each axis, get its tag and update the map from old index to tag.
+  // Check if the axis is present in the user's axis location settings.
+  // If the axis is not set by the user, mark it as not pinned and update the index map.
+  // If the axis is set by the user, normalize its value using user settings.
+  // If 'avar' data is available, remap the normalized value using the segment maps.
+  // Set the normalized value in the plan's axes location and coordinates.
+  // If the normalized value is not zero, mark the plan as not pinned at default.
+  // Update segment maps for 'avar' for the next axis, if applicable.
+  // <MASK>
+  plan->all_axes_pinned = !axis_not_pinned;
+}

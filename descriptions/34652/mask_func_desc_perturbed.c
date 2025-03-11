@@ -102,12 +102,9 @@ mrb_format_float(mrb_float f, char *buf, size_t buf_size, char fmt, int prec, ch
       dec = -1;
       *s++ = first_dig;
 
-      // Adjusts the precision to prevent buffer overflow while formatting a float.
+      // Adjust the precision to prevent buffer overflow while formatting a float.
       // Depending on the original format ('g'), it modifies precision based on the
       // exponent value 'e'. If the format is 'g', increases precision by (e - 1).
-      // It also checks if the total precision along with exponent fits in the buffer.
-      // The calculation adjusts the precision to ensure it does not exceed the
-      // buffer limits.
       // <MASK>
       num_digits = prec;
       if (num_digits || alt_form) {

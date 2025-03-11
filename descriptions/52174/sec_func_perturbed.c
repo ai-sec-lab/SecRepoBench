@@ -1,0 +1,276 @@
+void ndpi_search_irc_tcp(struct ndpi_detection_module_struct *detection_module, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &detection_module->packet;
+	
+  u_int16_t c = 0;
+  u_int16_t i = 0;
+  u_int16_t j = 0;
+  u_int16_t h;
+  u_int16_t http_content_ptr_len = 0;
+  u_int8_t space = 0;
+
+  NDPI_LOG_DBG(detection_module, "search irc\n");
+  if (flow->detected_protocol_stack[0] != NDPI_PROTOCOL_IRC && (flow->packet_counter > 10)) {
+    NDPI_LOG_DBG(detection_module, "exclude irc, packet_counter > 70\n");
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_IRC);
+    return;
+  }
+
+  if (flow->detected_protocol_stack[0] != NDPI_PROTOCOL_IRC &&
+      ndpi_search_irc_ssl_detect_ninety_percent_but_very_fast(detection_module, flow) != 0) {
+    return;
+  }
+
+  if (flow->detected_protocol_stack[0] != NDPI_PROTOCOL_IRC && flow->packet_counter < 20
+      && packet->payload_packet_len >= 8) {
+    if (get_u_int8_t(packet->payload, packet->payload_packet_len - 1) == 0x0a
+	|| (ntohs(get_u_int16_t(packet->payload, packet->payload_packet_len - 2)) == 0x0a00)) {
+      if (memcmp(packet->payload, ":", 1) == 0) {
+	if (packet->payload[packet->payload_packet_len - 2] != 0x0d
+	    && packet->payload[packet->payload_packet_len - 1] == 0x0a) {
+	  ndpi_parse_packet_line_info_any(detection_module, flow);
+	} else if (packet->payload[packet->payload_packet_len - 2] == 0x0d) {
+	  ndpi_parse_packet_line_info(detection_module, flow);
+	} else {
+	  flow->l4.tcp.irc_3a_counter++;
+	  packet->parsed_lines = 0;
+	}
+	for (i = 0; i < packet->parsed_lines; i++) {
+	  if ((packet->line[i].len > 0) && packet->line[i].ptr[0] == ':') {
+	    flow->l4.tcp.irc_3a_counter++;
+	    if (flow->l4.tcp.irc_3a_counter == 7) {	/* ':' == 0x3a */
+	      NDPI_LOG_INFO(detection_module, "found irc. 0x3a. seven times.");
+	      ndpi_int_irc_add_connection(detection_module, flow, NDPI_CONFIDENCE_DPI);
+	      goto detected_irc;
+	    }
+	  }
+	}
+	if (flow->l4.tcp.irc_3a_counter == 7) {	/* ':' == 0x3a */
+	  NDPI_LOG_INFO(detection_module, "found irc. 0x3a. seven times.");
+	  ndpi_int_irc_add_connection(detection_module, flow, NDPI_CONFIDENCE_DPI);
+	  goto detected_irc;
+	}
+      }
+
+      if ((memcmp(packet->payload, "USER ", 5) == 0)
+	  || (memcmp(packet->payload, "NICK ", 5) == 0)
+	  || (memcmp(packet->payload, "PASS ", 5) == 0)
+	  || (memcmp(packet->payload, ":", 1) == 0 && ndpi_check_for_NOTICE_or_PRIVMSG(detection_module, flow) != 0)
+	  || (memcmp(packet->payload, "PONG ", 5) == 0)
+	  || (memcmp(packet->payload, "PING ", 5) == 0)
+	  || (memcmp(packet->payload, "JOIN ", 5) == 0)
+	  || (memcmp(packet->payload, "MODE ", 5) == 0)
+	  || (memcmp(packet->payload, "NOTICE ", 7) == 0)
+	  || (memcmp(packet->payload, "PRIVMSG ", 8) == 0)
+	  || (memcmp(packet->payload, "VERSION ", 8) == 0)) {
+	char *user = ndpi_strnstr((char*)packet->payload, "USER ", packet->payload_packet_len);
+
+	if(user) {
+	  char buf[32], msg[64], *sp;
+
+	  snprintf(buf, sizeof(buf), "%.*s", packet->payload_packet_len - 5, &user[5]);
+	  if((sp = strchr(buf, ' ')) != NULL)
+	    sp[0] = '\0';
+	  
+	  snprintf(msg, sizeof(msg), "Found IRC username (%s)", buf);
+	  ndpi_set_risk(detection_module, flow, NDPI_CLEAR_TEXT_CREDENTIALS, msg);
+	}
+	
+	NDPI_LOG_DBG2(detection_module,
+		      "USER, NICK, PASS, NOTICE, PRIVMSG one time");
+	if (flow->l4.tcp.irc_stage == 2) {
+	  NDPI_LOG_INFO(detection_module, "found irc");
+	  ndpi_int_irc_add_connection(detection_module, flow, NDPI_CONFIDENCE_DPI);
+	  flow->l4.tcp.irc_stage = 3;
+	}
+	if (flow->l4.tcp.irc_stage == 1) {
+	  NDPI_LOG_DBG2(detection_module, "second time, stage=2");
+	  flow->l4.tcp.irc_stage = 2;
+	}
+	if (flow->l4.tcp.irc_stage == 0) {
+	  NDPI_LOG_DBG2(detection_module, "first time, stage=1");
+	  flow->l4.tcp.irc_stage = 1;
+	}
+	/* irc packets can have either windows line breaks (0d0a) or unix line breaks (0a) */
+	if (packet->payload[packet->payload_packet_len - 2] == 0x0d
+	    && packet->payload[packet->payload_packet_len - 1] == 0x0a) {
+	  ndpi_parse_packet_line_info(detection_module, flow);
+	  if (packet->parsed_lines > 1) {
+	    NDPI_LOG_DBG2(detection_module, "packet contains more than one line");
+	    for (c = 1; c < packet->parsed_lines; c++) {
+	      if (packet->line[c].len > 4 && (memcmp(packet->line[c].ptr, "NICK ", 5) == 0
+					      || memcmp(packet->line[c].ptr, "USER ", 5) == 0)) {
+		NDPI_LOG_INFO(detection_module, "found IRC: two icq signal words in the same packet");
+		ndpi_int_irc_add_connection(detection_module, flow, NDPI_CONFIDENCE_DPI);
+		flow->l4.tcp.irc_stage = 3;
+		return;
+	      }
+	    }
+	  }
+
+	} else if (packet->payload[packet->payload_packet_len - 1] == 0x0a) {
+	  ndpi_parse_packet_line_info_any(detection_module, flow);
+	  if (packet->parsed_lines > 1) {
+	    NDPI_LOG_DBG2(detection_module, "packet contains more than one line");
+	    for (c = 1; c < packet->parsed_lines; c++) {
+	      if (packet->line[c].len > 4 && (memcmp(packet->line[c].ptr, "NICK ", 5) == 0
+					      || memcmp(packet->line[c].ptr, "USER ",
+							5) == 0)) {
+		NDPI_LOG_INFO(detection_module, "found IRC: two icq signal words in the same packet");
+		ndpi_int_irc_add_connection(detection_module, flow, NDPI_CONFIDENCE_DPI);
+		flow->l4.tcp.irc_stage = 3;
+		return;
+	      }
+	    }
+	  }
+	}
+      }
+    }
+  }
+
+  /**
+   * Trying to primarily detect the HTTP Web based IRC chat patterns based on the HTTP headers
+   * during the User login time.When the HTTP data gets posted using the POST method ,patterns
+   * will be searched in the HTTP content.
+   */
+  if ((flow->detected_protocol_stack[0] != NDPI_PROTOCOL_IRC) && (flow->l4.tcp.irc_stage == 0)
+      && (packet->payload_packet_len > 5)) {
+    //HTTP POST Method being employed
+    if (memcmp(packet->payload, "POST ", 5) == 0) {
+      ndpi_parse_packet_line_info(detection_module, flow);
+      if (packet->parsed_lines) {
+	u_int16_t http_header_len = (u_int16_t)((packet->line[packet->parsed_lines - 1].ptr - packet->payload) + 2);
+	if (packet->payload_packet_len > http_header_len) {
+	  http_content_ptr_len = packet->payload_packet_len - http_header_len;
+	}
+	if ((ndpi_check_for_IRC_traces(packet->line[0].ptr, packet->line[0].len))
+	    || ((packet->http_url_name.ptr)
+		&& (ndpi_check_for_IRC_traces(packet->http_url_name.ptr, packet->http_url_name.len)))
+	    || ((packet->referer_line.ptr)
+		&& (ndpi_check_for_IRC_traces(packet->referer_line.ptr, packet->referer_line.len)))) {
+	  NDPI_LOG_DBG2(detection_module,
+			"IRC detected from the Http URL/ Referer header ");
+	  flow->l4.tcp.irc_stage = 1;
+	  // HTTP POST Request body is not in the same packet.
+	  if (!http_content_ptr_len) {
+	    return;
+	  }
+	}
+      }
+    }
+  }
+
+  if ((flow->detected_protocol_stack[0] != NDPI_PROTOCOL_IRC) && (flow->l4.tcp.irc_stage == 1)) {
+    if ((((packet->payload_packet_len - http_content_ptr_len) > 10)
+	 && (memcmp(packet->payload + http_content_ptr_len, "interface=", 10) == 0)
+	 && (ndpi_check_for_Nickname(detection_module, flow) != 0))
+	|| (((packet->payload_packet_len - http_content_ptr_len) > 5)
+	    && (memcmp(packet->payload + http_content_ptr_len, "item=", 5) == 0)
+	    && (ndpi_check_for_cmd(detection_module, flow) != 0))) {
+      NDPI_LOG_INFO(detection_module, "found IRC: Nickname, cmd,  one time");
+      ndpi_int_irc_add_connection(detection_module, flow, NDPI_CONFIDENCE_DPI);
+      return;
+    }
+  }
+
+ detected_irc:
+  NDPI_LOG_DBG2(detection_module, "detected_irc:");
+
+  if (flow->detected_protocol_stack[0] == NDPI_PROTOCOL_IRC) {
+    /* maybe this can be deleted at the end */
+
+    if (packet->payload[packet->payload_packet_len - 2] != 0x0d
+	&& packet->payload[packet->payload_packet_len - 1] == 0x0a) {
+      NDPI_LOG_DBG2(detection_module, "ndpi_parse_packet_line_info_any(ndpi_struct, flow);");
+      ndpi_parse_packet_line_info_any(detection_module, flow);
+    } else if (packet->payload[packet->payload_packet_len - 2] == 0x0d) {
+      ndpi_parse_packet_line_info(detection_module, flow);
+    } else {
+      return;
+    }
+    for (i = 0; i < packet->parsed_lines; i++) {
+      if (packet->line[i].len > 6 && memcmp(packet->line[i].ptr, "NOTICE ", 7) == 0) {
+	NDPI_LOG_DBG2(detection_module, "NOTICE");
+	for (j = 7; j < packet->line[i].len - 9; j++) {
+	  if (packet->line[i].ptr[j] == ':') {
+	    if (memcmp(&packet->line[i].ptr[j + 1], "DCC SEND ", 9) == 0
+		|| memcmp(&packet->line[i].ptr[j + 1], "DCC CHAT ", 9) == 0) {
+	      NDPI_LOG_INFO(detection_module,
+			    "found NOTICE and DCC CHAT or DCC SEND.");
+	    }
+	  }
+	}
+      }
+      if (packet->payload_packet_len > 0 && packet->payload[0] == 0x3a /* 0x3a = ':' */ ) {
+	NDPI_LOG_DBG2(detection_module, "3a");
+	for (j = 1; j < packet->line[i].len - 9; j++) {
+	  if (packet->line[i].ptr[j] == ' ') {
+	    j++;
+	    if (packet->line[i].ptr[j] == 'P') {
+	      NDPI_LOG_DBG2(detection_module, "P");
+	      j++;
+	      if (memcmp(&packet->line[i].ptr[j], "RIVMSG ", 7) == 0)
+		NDPI_LOG_DBG2(detection_module, "RIVMSG");
+	      h = j + 7;
+	      goto read_privmsg;
+	    }
+	  }
+	}
+      }
+      if (packet->line[i].len > 7 && (memcmp(packet->line[i].ptr, "PRIVMSG ", 8) == 0)) {
+	NDPI_LOG_DBG2(detection_module, "PRIVMSG	");
+	h = 7;
+      read_privmsg:
+	for (j = h; j < packet->line[i].len - 9; j++) {
+	  if (packet->line[i].ptr[j] == ':') {
+	    if (memcmp(&packet->line[i].ptr[j + 1], "xdcc ", 5) == 0) {
+	      NDPI_LOG_DBG2(detection_module, "xdcc should match.");
+	    }
+	    j += 2;
+	    if (j + 4 < packet->line[i].len &&
+            memcmp(&packet->line[i].ptr[j], "DCC ", 4) == 0) {
+	      j += 4;
+	      NDPI_LOG_DBG2(detection_module, "found DCC.");
+		  if ((j + 5 < packet->line[i].len &&
+		       memcmp(&packet->line[i].ptr[j], "SEND ", 5) == 0) ||
+		      (j + 4 < packet->line[i].len &&
+		       memcmp(&packet->line[i].ptr[j], "CHAT", 4) == 0) ||
+		      (j + 4 < packet->line[i].len &&
+		       memcmp(&packet->line[i].ptr[j], "chat", 4) == 0) ||
+		      (j + 7 < packet->line[i].len &&
+		       memcmp(&packet->line[i].ptr[j], "sslchat", 7) == 0) ||
+		      (j + 5 < packet->line[i].len &&
+		       memcmp(&packet->line[i].ptr[j], "TSEND", 5) == 0)) {
+		NDPI_LOG_DBG2(detection_module, "found CHAT,chat,sslchat,TSEND.");
+		j += 4;
+
+		while (packet->line[i].len > j &&
+		       ((packet->line[i].ptr[j] >= 'a' && packet->line[i].ptr[j] <= 'z')
+			|| (packet->line[i].ptr[j] >= 'A' && packet->line[i].ptr[j] <= 'Z')
+			|| (packet->line[i].ptr[j] >= '0' && packet->line[i].ptr[j] <= '9')
+			|| (packet->line[i].ptr[j] >= ' ')
+			|| (packet->line[i].ptr[j] >= '.')
+			|| (packet->line[i].ptr[j] >= '-'))) {
+
+		  if (packet->line[i].ptr[j] == ' ') {
+		    space++;
+		    NDPI_LOG_DBG2(detection_module, "space %u.", space);
+		  }
+		  if (space == 3) {
+		    j++;
+		    NDPI_LOG_DBG2(detection_module, "read port.");
+		  }
+
+
+		  j++;
+		}
+
+	      }
+	    }
+	  }
+	}
+
+      }
+    }
+  }
+}

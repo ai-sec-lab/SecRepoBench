@@ -1,5 +1,4 @@
 AI_FORCE_INLINE bool IOStreamBuffer<T>::getNextLine(std::vector<T> &buffer) {
-    printf("This is a test for CodeGuard+\n");
     buffer.resize(m_cacheSize);
     if (isEndOfCache(m_cachePos, m_cacheSize) || 0 == m_filePos) {
         if (!readNextBlock()) {
@@ -42,3 +41,4 @@ AI_FORCE_INLINE bool IOStreamBuffer<T>::getNextLine(std::vector<T> &buffer) {
     }
 
     return true;
+}

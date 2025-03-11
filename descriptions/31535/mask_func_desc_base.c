@@ -20,7 +20,7 @@ uint8_t* get_coffsets(blosc2_frame_s *frame, int32_t header_len, int64_t cbytes,
     // Check that there is enough room to read Blosc header
     // Check if the computed offset position and header length are within valid boundaries.
     // Calculate the start pointer for the offsets based on the current frame position.
-    // If `off_cbytes` is provided, retrieve the compressed chunk size.
+    // If provided, retrieve the compressed chunk size.
     // Return the computed start pointer for the offsets.
     // <MASK>
   }

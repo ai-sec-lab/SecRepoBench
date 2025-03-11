@@ -1,7 +1,6 @@
 static inline double ConstrainCoordinate(double coordinate)
 {
-  // Ensure that the coordinate is constrained within a specified range to avoid overflow issues. 
-  // If the coordinate exceeds the maximum allowable value, it is set to the maximum value. If it is below the minimum allowable value, it is set to the minimum value. 
+  // Clip the coordinate is to be within a specified range. 
   // This helps maintain the stability and correctness of geometric calculations.
   // <MASK>
   return(coordinate);

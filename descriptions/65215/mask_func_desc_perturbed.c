@@ -1,20 +1,9 @@
 GF_EXPORT
 void gf_url_to_fs_path(char *urlString)
 {
-	if (!strnicmp(urlString, "file://", 7)) {
-		/*file:///C:\ scheme*/
-		// If the URL starts with "file://", adjust the path to remove the scheme prefix.
-		// For Windows-style paths, remove "file:///" by shifting the string position
-		// based on the presence of a drive letter (e.g., "C:") after the third slash.
-		// The code checks if the 8th character is a slash and the 10th is a colon to 
-		// identify a Windows drive letter, and adjusts accordingly.
-		// <MASK>
-	}
-
-	while (1) {
-		char *sep = strstr(urlString, "%20");
-		if (!sep) break;
-		sep[0] = ' ';
-		memmove(sep+1, sep+3, strlen(sep)-2);
-	}
+	// Convert a URL to a filesystem path by removing the "file://" prefix if present.
+	// Specifically, handle the case where the URL uses a "file:///" prefix with a drive letter,
+	// and adjust the string to remove the correct number of characters.
+	// Replace occurrences of "%20" in the URL with spaces to complete the conversion to a filesystem path format.
+	// <MASK>
 }

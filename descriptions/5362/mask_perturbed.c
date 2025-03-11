@@ -2145,28 +2145,7 @@ static void ImportGrayQuantum(const Image *img,QuantumInfo *quantum_info,
                 }
               break;
             }
-          for (x=0; x < (ssize_t) (number_pixels-2); x+=3)
-          {
-            p=PushLongPixel(quantum_info->endian,p,&pixel);
-            SetPixelGray(img,ScaleAnyToQuantum((pixel >> 2) & 0x3ff,range),
-              q);
-            q+=GetPixelChannels(img);
-            SetPixelGray(img,ScaleAnyToQuantum((pixel >> 12) & 0x3ff,range),
-              q);
-            q+=GetPixelChannels(img);
-            SetPixelGray(img,ScaleAnyToQuantum((pixel >> 22) & 0x3ff,range),
-              q);
-            p+=quantum_info->pad;
-            q+=GetPixelChannels(img);
-          }
           // <MASK>
-          if (x++ < (ssize_t) number_pixels)
-            {
-              SetPixelGray(img,ScaleAnyToQuantum((pixel >> 12) & 0x3ff,
-                range),q);
-              q+=GetPixelChannels(img);
-            }
-          break;
         }
       for (x=0; x < (ssize_t) number_pixels; x++)
       {

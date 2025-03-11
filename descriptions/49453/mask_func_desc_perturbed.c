@@ -2,12 +2,8 @@ static int
 ucmp(mpz_t *y, mpz_t *operand)
 {
   // Compare the absolute values of two multi-precision integers.
-  // - If the first integer has fewer digits than the second integer, return -1 (indicating the first integer is smaller).
-  // - If the first integer has more digits than the second integer, return 1 (indicating the first integer is larger).
-  // - If they have the same number of digits, iterate from the most significant
-  //   digit to the least significant digit:
-  //   - If a digit of the first integer is greater than the corresponding digit of the second integer, return 1.
-  //   - If a digit of the first integer is less than the corresponding digit of the second integer, return -1.
+  // Return -1 if the first integer is smaller.
+  // Return 1 if the first integer is larger.
   // <MASK>
   return 0;
 }

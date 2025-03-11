@@ -1350,8 +1350,8 @@ MagickExport MagickBooleanType DrawImage(Image *image,const DrawInfo *draw_info,
         break;
       }
       // Estimate the number of points required for circular or elliptical primitives.
-      // Calculate the width (alpha) and height (beta) of the bounding box for the shape.
-      // Compute the radius using the Pythagorean theorem on alpha and beta.
+      // Calculate the width and height of the bounding box for the shape.
+      // Compute the radius.
       // Use the calculated radius to estimate the points_extent for rendering the shape.
       // <MASK>
       default:

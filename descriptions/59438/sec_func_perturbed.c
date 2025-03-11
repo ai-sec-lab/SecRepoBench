@@ -1,18 +1,18 @@
 static int
-simh_parse(const unsigned char *uc, const unsigned char *ue)
+simh_parse(const unsigned char *uc, const unsigned char *end_pointer)
 {
-	uint32_t bytecount, cbytes;
+	uint32_t nbytes, cbytes;
 	const unsigned char *orig_uc = uc;
 	size_t nt = 0, nr = 0;
 
 	(void)memcpy(simh_bo.s, "\01\02\03\04", 4);
 
-	while (ue - uc >= CAST(ptrdiff_t, sizeof(bytecount))) {
-		bytecount = getlen(&uc);
-		if ((nt > 0 || nr > 0) && bytecount == 0xFFFFFFFF)
+	while (end_pointer - uc >= CAST(ptrdiff_t, sizeof(nbytes))) {
+		nbytes = getlen(&uc);
+		if ((nt > 0 || nr > 0) && nbytes == 0xFFFFFFFF)
 			/* EOM after at least one record or tapemark */
 			break;
-		if (bytecount == 0) {
+		if (nbytes == 0) {
 			nt++;	/* count tapemarks */
 #if SIMH_TAPEMARKS
 			if (nt == SIMH_TAPEMARKS)
@@ -21,11 +21,11 @@ simh_parse(const unsigned char *uc, const unsigned char *ue)
 			continue;
 		}
 		/* handle a data record */
-		uc += bytecount;
-		if (ue - uc < CAST(ptrdiff_t, sizeof(bytecount)))
+		uc += nbytes;
+		if (end_pointer - uc < CAST(ptrdiff_t, sizeof(nbytes)))
 			break;
 		cbytes = getlen(&uc);
-		if (bytecount != cbytes)
+		if (nbytes != cbytes)
 			return 0;
 		nr++;
 	}

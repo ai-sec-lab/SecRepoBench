@@ -1,26 +1,26 @@
-        if(in.empty()) {
+        if(input_string.empty()) {
             return;
         }
 
         // Remove a very common issue when we're parsing file names: spaces at the
         // beginning of the path.
         char last = 0;
-        std::string::iterator it = in.begin();
+        std::string::iterator it = input_string.begin();
         while (IsSpaceOrNewLine( *it ))++it;
-        if (it != in.begin()) {
-            in.erase(in.begin(),it+1);
+        if (it != input_string.begin()) {
+            input_string.erase(input_string.begin(),it+1);
         }
 
         const char separator = getOsSeparator();
-        for (it = in.begin(); it != in.end(); ++it) {
-            int remaining = std::distance(in.end(), it);
+        for (it = input_string.begin(); it != input_string.end(); ++it) {
+            int remaining = std::distance(input_string.end(), it);
             // Exclude :// and \\, which remain untouched.
             // https://sourceforge.net/tracker/?func=detail&aid=3031725&group_id=226462&atid=1067632
             if (remaining >= 3 && !strncmp(&*it, "://", 3 )) {
                 it += 3;
                 continue;
             }
-            if (it == in.begin() && remaining >= 2 && !strncmp(&*it, "\\\\", 2)) {
+            if (it == input_string.begin() && remaining >= 2 && !strncmp(&*it, "\\\\", 2)) {
                 it += 2;
                 continue;
             }
@@ -32,14 +32,14 @@
                 // And we're removing double delimiters, frequent issue with
                 // incorrectly composited paths ...
                 if (last == *it) {
-                    it = in.erase(it);
+                    it = input_string.erase(it);
                     --it;
                 }
-            } else if (*it == '%' && in.end() - it > 2) {
+            } else if (*it == '%' && input_string.end() - it > 2) {
                 // Hex sequence in URIs
                 if( IsHex((&*it)[0]) && IsHex((&*it)[1]) ) {
                     *it = HexOctetToDecimal(&*it);
-                    it = in.erase(it+1,it+2);
+                    it = input_string.erase(it+1,it+2);
                     --it;
                 }
             }

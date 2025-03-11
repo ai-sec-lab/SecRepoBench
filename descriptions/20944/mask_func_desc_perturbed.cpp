@@ -1,0 +1,12 @@
+void init (hb_face_t *faceptr)
+    {
+      // Initialize internal variables and tables for the font face.
+      // Set initial values for short_offset, num_glyphs, loca_table, and glyf_table.
+      // Assign the input face to the face member variable.
+      // Retrieve the 'head' table from the face and check format values.
+      // If format values indicate an unknown format, exit without further processing.
+      // Determine the short_offset based on the indexToLocFormat from the 'head' table.
+      // Reference the 'loca' and 'glyf' tables from the face using a sanitize context.
+      // Calculate num_glyphs using the length of the loca_table, adjusting for offset format.
+      // <MASK>
+    }

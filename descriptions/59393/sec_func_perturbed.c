@@ -1,0 +1,16 @@
+int ndpi_check_punycode_string(char * buffer , int length) {
+  int i = 0;
+
+  while(i < length - 3) {
+    if((buffer[i] == 'x')
+       && (buffer[i+1] == 'n')
+       && (buffer[i+2] == '-')
+       && (buffer[i+3] == '-'))
+      // is a punycode string
+      return(1);
+    i++;
+  }
+
+  // not a punycode string
+  return 0;
+}

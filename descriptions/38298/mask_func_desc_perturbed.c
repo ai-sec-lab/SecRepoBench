@@ -13,16 +13,11 @@ mrb_ary_splice(mrb_state *mrb, mrb_value ary, mrb_int head, mrb_int len, mrb_val
   if (len < 0) mrb_raisef(mrb, E_INDEX_ERROR, "negative length (%i)", len);
 
   /* range check */
-  if (head < 0) {
-    head += arraylength;
-    if (head < 0) goto out_of_range;
-  }
-  if (head > ARY_MAX_SIZE - len) {
-  out_of_range:
-    mrb_raisef(mrb, E_INDEX_ERROR, "index %i is out of array", head);
-  }
-  // Calculate the tail index by adding head and len.
-  // If the array length is less than len or tail, adjust len to fit within the array bounds.
+  // Adjust the `head` index for negative values by adding the array length.
+  // If the adjusted `head` is still negative, raise an index error as it's out of bounds.
+  // Calculate the `tail` index.
+  // If the `head` index or calculated `tail` would result in exceeding the maximum array size, raise an index error.
+  // If the current array length is less than `len` or `tail`, adjust `len` to fit within the array bounds.
   // <MASK>
   if (mrb_array_p(rpl)) {
     argc = RARRAY_LEN(rpl);

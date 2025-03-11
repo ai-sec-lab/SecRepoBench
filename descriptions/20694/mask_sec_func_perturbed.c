@@ -1,7 +1,7 @@
 cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
-    cram_block_slice_hdr *hdr;
+    cram_block_slice_hdr *slice_header;
     unsigned char *cp;
-    unsigned char *cplimit;
+    unsigned char *cp_end;
     int i;
 
     if (b->method != RAW) {
@@ -11,71 +11,71 @@ cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
             return NULL;
     }
     cp =  (unsigned char *)BLOCK_DATA(b);
-    cplimit = cp + b->uncomp_size;
+    cp_end = cp + b->uncomp_size;
 
     if (b->content_type != MAPPED_SLICE &&
         b->content_type != UNMAPPED_SLICE)
         return NULL;
 
-    if (!(hdr  = calloc(1, sizeof(*hdr))))
+    if (!(slice_header  = calloc(1, sizeof(*slice_header))))
         return NULL;
 
-    hdr->content_type = b->content_type;
+    slice_header->content_type = b->content_type;
 
     if (b->content_type == MAPPED_SLICE) {
         // <MASK>
     }
-    cp += safe_itf8_get((char *)cp,  (char *)cplimit, &hdr->num_records);
-    hdr->record_counter = 0;
+    cp += safe_itf8_get((char *)cp,  (char *)cp_end, &slice_header->num_records);
+    slice_header->record_counter = 0;
     if (CRAM_MAJOR_VERS(fd->version) == 2) {
         int32_t i32 = 0;
-        cp += safe_itf8_get((char *)cp, (char *)cplimit, &i32);
-        hdr->record_counter = i32;
+        cp += safe_itf8_get((char *)cp, (char *)cp_end, &i32);
+        slice_header->record_counter = i32;
     } else if (CRAM_MAJOR_VERS(fd->version) >= 3) {
-        cp += safe_ltf8_get((char *)cp, (char *)cplimit, &hdr->record_counter);
+        cp += safe_ltf8_get((char *)cp, (char *)cp_end, &slice_header->record_counter);
     }
 
-    cp += safe_itf8_get((char *)cp, (char *)cplimit, &hdr->num_blocks);
+    cp += safe_itf8_get((char *)cp, (char *)cp_end, &slice_header->num_blocks);
 
-    cp += safe_itf8_get((char *)cp, (char *)cplimit, &hdr->num_content_ids);
-    if (hdr->num_content_ids < 1 ||
-        hdr->num_content_ids >= SIZE_MAX / sizeof(int32_t)) {
+    cp += safe_itf8_get((char *)cp, (char *)cp_end, &slice_header->num_content_ids);
+    if (slice_header->num_content_ids < 1 ||
+        slice_header->num_content_ids >= SIZE_MAX / sizeof(int32_t)) {
         /* Slice must have at least one data block,
            and malloc'd size shouldn't wrap. */
-        free(hdr);
+        free(slice_header);
         return NULL;
     }
-    hdr->block_content_ids = malloc(hdr->num_content_ids * sizeof(int32_t));
-    if (!hdr->block_content_ids) {
-        free(hdr);
+    slice_header->block_content_ids = malloc(slice_header->num_content_ids * sizeof(int32_t));
+    if (!slice_header->block_content_ids) {
+        free(slice_header);
         return NULL;
     }
 
-    for (i = 0; i < hdr->num_content_ids; i++) {
-        int l = safe_itf8_get((char *)cp, (char *)cplimit,
-                              &hdr->block_content_ids[i]);
+    for (i = 0; i < slice_header->num_content_ids; i++) {
+        int l = safe_itf8_get((char *)cp, (char *)cp_end,
+                              &slice_header->block_content_ids[i]);
         if (l <= 0) {
-            free(hdr->block_content_ids);
-            free(hdr);
+            free(slice_header->block_content_ids);
+            free(slice_header);
             return NULL;
         }
         cp += l;
     }
 
     if (b->content_type == MAPPED_SLICE) {
-        cp += safe_itf8_get((char *)cp, (char *) cplimit, &hdr->ref_base_id);
+        cp += safe_itf8_get((char *)cp, (char *) cp_end, &slice_header->ref_base_id);
     }
 
     if (CRAM_MAJOR_VERS(fd->version) != 1) {
-        if (cplimit - cp < 16) {
-            free(hdr->block_content_ids);
-            free(hdr);
+        if (cp_end - cp < 16) {
+            free(slice_header->block_content_ids);
+            free(slice_header);
             return NULL;
         }
-        memcpy(hdr->md5, cp, 16);
+        memcpy(slice_header->md5, cp, 16);
     } else {
-        memset(hdr->md5, 0, 16);
+        memset(slice_header->md5, 0, 16);
     }
 
-    return hdr;
+    return slice_header;
 }

@@ -26,8 +26,6 @@ memsearch_swar(const char *needle, long m, const char *ys, long n)
   // a method inspired by "SIMD within a register" (SWAR) technique.
   // The function takes a pattern and a text, represented as byte arrays, 
   // and tries to find the first occurrence of the pattern in the text.
-  // This involves using bitwise operations and memory copying to compare 
-  // sections of the text against the pattern efficiently.
   // It accounts for both big-endian and little-endian architectures 
   // when processing the bitwise logic to ensure compatibility.
   // The function will return the index of the start of the match if found,

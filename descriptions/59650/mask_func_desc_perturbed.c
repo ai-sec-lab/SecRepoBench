@@ -1,0 +1,10 @@
+TLVRecordType getNextTLVRecord(TLVRecordType& record, const uint8_t* tlvBufferPtr, size_t tlvDataLen) const
+		{
+			TLVRecordType resRec(NULL); // for NRVO optimization
+
+			// Check if the input record is null; if so, return an uninitialized result record.
+			// Calculate the next TLV record by advancing the current record's base pointer by its total size.
+			// If the calculated record is invalid or out-of-bounds of the TLV memory range, reset it to null.
+			// Return the next TLV record or null if any invalid conditions are detected.
+			// <MASK>
+		}

@@ -24,7 +24,7 @@ const StringInfo
 
         name=cmsTakeProductName(icc_profile);
         if (name != (const char *) NULL)
-          (void) SetImageProperty((Image *) image,"icc:name",name,exception);
+          (void) SetImageProperty((Image *) image,"icc:name",name,exception_info);
 #else
         StringInfo
           *info;
@@ -42,7 +42,7 @@ const StringInfo
               "US",(char *) GetStringInfoDatum(info),extent);
             if (extent != 0)
               (void) SetImageProperty((Image *) image,"icc:description",
-                (char *) GetStringInfoDatum(info),exception);
+                (char *) GetStringInfoDatum(info),exception_info);
          }
         extent=cmsGetProfileInfoASCII(icc_profile,cmsInfoManufacturer,"en","US",
           NULL,0);
@@ -53,7 +53,7 @@ const StringInfo
               "US",(char *) GetStringInfoDatum(info),extent);
             if (extent != 0)
               (void) SetImageProperty((Image *) image,"icc:manufacturer",
-                (char *) GetStringInfoDatum(info),exception);
+                (char *) GetStringInfoDatum(info),exception_info);
           }
         extent=cmsGetProfileInfoASCII(icc_profile,cmsInfoModel,"en","US",
           NULL,0);
@@ -64,7 +64,7 @@ const StringInfo
               (char *) GetStringInfoDatum(info),extent);
             if (extent != 0)
               (void) SetImageProperty((Image *) image,"icc:model",
-                (char *) GetStringInfoDatum(info),exception);
+                (char *) GetStringInfoDatum(info),exception_info);
           }
         extent=cmsGetProfileInfoASCII(icc_profile,cmsInfoCopyright,"en","US",
           NULL,0);
@@ -75,7 +75,7 @@ const StringInfo
               "US",(char *) GetStringInfoDatum(info),extent);
             if (extent != 0)
               (void) SetImageProperty((Image *) image,"icc:copyright",
-                (char *) GetStringInfoDatum(info),exception);
+                (char *) GetStringInfoDatum(info),exception_info);
           }
         info=DestroyStringInfo(info);
 #endif

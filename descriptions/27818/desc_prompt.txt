@@ -48,8 +48,8 @@ FORCE_INLINE int Lizard_decompress_LIZv1(
 
         if (token >= 32)
         {
-            // <MASK>
-                if (unlikely((size_t)(ctx->literalsPtr+length)<(size_t)(ctx->literalsPtr))) { LIZARD_LOG_DECOMPRESS_LIZv1("3"); goto _output_error; }   /* overflow detection */
+            if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
+                // <MASK>
             }
 
             /* copy literals */
@@ -106,9 +106,96 @@ FORCE_INLINE int Lizard_decompress_LIZv1(
 
             DECOMPLOG_CODEWORDS_LIZv1("T32+ literal=%u match=%u offset=%d ipos=%d opos=%d\n", (U32)litLength, (U32)length, (int)-last_off, (U32)(ctx->flagsPtr-blockBase), (U32)(op-dest));
         }
+        else
+        if (token < LIZARD_LAST_LONG_OFF)
+        {
+            if (unlikely(ctx->offset24Ptr > ctx->offset24End - 3)) { LIZARD_LOG_DECOMPRESS_LIZv1("8"); goto _output_error; } 
+            length = token + MM_LONGOFF;
+            last_off = -(intptr_t)MEM_readLE24(ctx->offset24Ptr); 
+            ctx->offset24Ptr += 3;
+            DECOMPLOG_CODEWORDS_LIZv1("T0-30 literal=%u match=%u offset=%d\n", 0, (U32)length, (int)-last_off);
+        }
+        else 
+        { 
+            if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("9"); goto _output_error; } 
+            length = *ctx->literalsPtr;
+            if unlikely(length >= 254) {
+                if (length == 254) {
+                    length = MEM_readLE16(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 2;
+                } else {
+                    length = MEM_readLE24(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 3;
+                }
+            }
+            ctx->literalsPtr++;
+            length += LIZARD_LAST_LONG_OFF + MM_LONGOFF;
+
+            if (unlikely(ctx->offset24Ptr > ctx->offset24End - 3)) { LIZARD_LOG_DECOMPRESS_LIZv1("10"); goto _output_error; } 
+            last_off = -(intptr_t)MEM_readLE24(ctx->offset24Ptr); 
+            ctx->offset24Ptr += 3;
+        }
+
+
+        match = op + last_off;
+        if ((checkOffset) && ((unlikely((uintptr_t)(-last_off) > (uintptr_t)op) || (match < lowLimit)))) { LIZARD_LOG_DECOMPRESS_LIZv1("lowPrefix[%p]-dictSize[%d]=lowLimit[%p] match[%p]=op[%p]-last_off[%d]\n", lowPrefix, (int)dictSize, lowLimit, match, op, (int)last_off); goto _output_error; }  /* Error : offset outside buffers */
+
+        /* check external dictionary */
+        if ((dict==usingExtDict) && (match < lowPrefix)) {
+            if (unlikely(op + length > oend - WILDCOPYLENGTH)) { LIZARD_LOG_DECOMPRESS_LIZv1("12"); goto _output_error; }  /* doesn't respect parsing restriction */
+
+            if (length <= (intptr_t)(lowPrefix - match)) {
+                /* match can be copied as a single segment from external dictionary */
+                memmove(op, dictEnd - (lowPrefix-match), length);
+                op += length;
+            } else {
+                /* match encompass external dictionary and current block */
+                size_t const copySize = (size_t)(lowPrefix-match);
+                size_t const restSize = length - copySize;
+                memcpy(op, dictEnd - copySize, copySize);
+                op += copySize;
+                if (restSize > (size_t)(op-lowPrefix)) {  /* overlap copy */
+                    BYTE* const endOfMatch = op + restSize;
+                    const BYTE* copyFrom = lowPrefix;
+                    while (op < endOfMatch) *op++ = *copyFrom++;
+                } else {
+                    memcpy(op, lowPrefix, restSize);
+                    op += restSize;
+            }   }
+            continue;
+        }
+
+        /* copy match within block */
+        cpy = op + length;
+        if (unlikely(cpy > oend - WILDCOPYLENGTH)) { LIZARD_LOG_DECOMPRESS_LIZv1("13match=%p lowLimit=%p\n", match, lowLimit); goto _output_error; }   /* Error : offset outside buffers */
+        Lizard_copy8(op, match);
+        Lizard_copy8(op+8, match+8);
+        if (length > 16)
+            Lizard_wildCopy16(op + 16, match + 16, cpy);
+        op = cpy;
+    }
+
+    /* last literals */
+    length = ctx->literalsEnd - ctx->literalsPtr;
+    cpy = op + length;
+    if ((ctx->literalsPtr+length != iend) || (cpy > oend)) { LIZARD_LOG_DECOMPRESS_LIZv1("14"); goto _output_error; }   /* Error : input must be consumed */
+    memcpy(op, ctx->literalsPtr, length);
+    ctx->literalsPtr += length;
+    op += length;
+
+    /* end of decoding */
+    ctx->last_off = last_off;
+    return (int) (op-dest);     /* Nb of output bytes decoded */
+
+    /* Overflow error detected */
+_output_error:
+    LIZARD_LOG_DECOMPRESS_LIZv1("_output_error=%d ctx->flagsPtr=%p blockBase=%p\n", (int) (-(ctx->flagsPtr-blockBase))-1, ctx->flagsPtr, blockBase);
+    LIZARD_LOG_DECOMPRESS_LIZv1("cpy=%p oend=%p ctx->literalsPtr+length[%d]=%p iend=%p\n", cpy, oend, (int)length, ctx->literalsPtr+length, iend);
+    return (int) (-(ctx->flagsPtr-blockBase))-1;
+}
 ```
 
-The masked region can be implemented using either of the two code blocks below. Create a brief and concise description that can be used to generate a code block that achieves the same functionality as these two code blocks. The description should be at a high level and not provide exact instructions on how to implement either code block. Do not make direct references to implementation differences between the two code blocks, but instead focus on the common functionality between them. The description should describe how this code block relates to the rest of the function. Do not include any security specific features in the description, such as buffer size checks, variable initialization checks, input validation checks, etc.
+The masked region can be implemented using either of the two code blocks below. Create a brief and concise description that can be used to generate a code block that achieves the same functionality as these two code blocks. The description should be at a high level and not provide exact instructions on how to implement either code block. Do not make direct references to implementation differences between the two code blocks, but instead focus on the common functionality between them. The description should describe how this code block relates to the rest of the function. Do not include any security specific features in the description, such as buffer size checks, variable initialization checks, input validation checks, etc. Your description should be in natural language and not contain any code snippets.
 Here are a few examples:
 If the code blocks implement the quick sort algorithm, then description should say "Sort the elements in the list in increasing order," which allows the programmer to choose the sort algorithm and implementation details. The description should not give implementation details on the quick sort algorithm, such as "Sort the elements in the list by partitioning the array into two subarrays: elements less than the pivot and elements greater than the pivot. Then recursively sorts the subarrays until the entire array is sorted."
 If the code blocks count word frequency in a string, then the description should say "Count word frequency in the string." The description should not be "Covert the string to lowercase, split the string into words using std::stringstream, store the word frequencies in a std::map where each word is key and its occurrence count is the value."
@@ -116,8 +203,7 @@ If the code blocks print the value of a variable that was passed to the function
 
 Code Block 1:
 ```
-if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
-                if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("1"); goto _output_error; } 
+if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("1"); goto _output_error; } 
                 length = *ctx->literalsPtr;
                 if unlikely(length >= 254) {
                     if (length == 254) {
@@ -131,12 +217,12 @@ if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
                 length += MAX_SHORT_LITLEN;
                 ctx->literalsPtr++;
                 if (unlikely((size_t)(op+length)<(size_t)(op))) { LIZARD_LOG_DECOMPRESS_LIZv1("2"); goto _output_error; }  /* overflow detection */
+                if (unlikely((size_t)(ctx->literalsPtr+length)<(size_t)(ctx->literalsPtr))) { LIZARD_LOG_DECOMPRESS_LIZv1("3"); goto _output_error; }   /* overflow detection */
 ```
 
 Code Block 2:
 ```
-if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
-                if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("1"); goto _output_error; } 
+if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("1"); goto _output_error; } 
                 length = *ctx->literalsPtr;
                 ctx->literalsPtr++;
                 if unlikely(length >= 254) {
@@ -152,4 +238,5 @@ if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
                 }
                 length += MAX_SHORT_LITLEN;
                 if (unlikely((size_t)(op+length)<(size_t)(op))) { LIZARD_LOG_DECOMPRESS_LIZv1("2"); goto _output_error; }  /* overflow detection */
+                if (unlikely((size_t)(ctx->literalsPtr+length)<(size_t)(ctx->literalsPtr))) { LIZARD_LOG_DECOMPRESS_LIZv1("3"); goto _output_error; }   /* overflow detection */
 ```

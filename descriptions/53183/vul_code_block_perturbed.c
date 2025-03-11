@@ -1,6 +1,6 @@
 char *e;
-  mrb_int num;
-  if (!mrb_read_int(p, end, &e, &num)) {
+  mrb_int n;
+  if (!mrb_read_int(p, end, &e, &n)) {
     return NULL;
   }
-  *valp = (int)num;
+  *value_pointer = (int)n;
