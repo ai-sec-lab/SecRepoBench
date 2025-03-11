@@ -1,36 +1,21 @@
 static int
-json_parse_array(const unsigned char **ucp, const unsigned char *ue,
+json_parse_array(const unsigned char **ucp, const unsigned char *ueend,
 	size_t *st, size_t lvl)
 {
-	const unsigned char *currentposition = *ucp;
+	const unsigned char *uc = *ucp;
 
-	DPRINTF("Parse array: ", currentposition, *ucp);
-	while (currentposition < ue) {
-		currentposition = json_skip_space(currentposition, ue);
-		// Check for the end of a JSON array during parsing. The code verifies
-		// if the current character being parsed is the closing bracket ']' 
-		// indicating the end of the array.
+	DPRINTF("Parse array: ", uc, *ucp);
+	while (uc < ueend) {
+		// Parse elements within a JSON array by iterating over each element until the end of the array is reached.
+		// Skip any whitespace.
+		// Attempt to parse the next JSON element; if parsing fails, exit the loop.
+		// After successfully parsing an element, check the next character to determine if it is a comma, indicating more elements, or a closing bracket, indicating the end of the array.
+		// If the end of the array is reached successfully, update the array count, print a success message, and update the position pointer.
+		// If an unexpected character is encountered or parsing fails at any point, exit the loop and handle the error.
 		// <MASK>
-		if (!json_parse(&currentposition, ue, st, lvl + 1))
-			goto out;
-		if (currentposition == ue)
-			goto out;
-		switch (*currentposition) {
-		case ',':
-			currentposition++;
-			continue;
-		case ']':
-		done:
-			st[JSON_ARRAYN]++;
-			DPRINTF("Good array: ", currentposition, *ucp);
-			*ucp = currentposition + 1;
-			return 1;
-		default:
-			goto out;
-		}
 	}
 out:
-	DPRINTF("Bad array: ", currentposition,  *ucp);
-	*ucp = currentposition;
+	DPRINTF("Bad array: ", uc,  *ucp);
+	*ucp = uc;
 	return 0;
 }

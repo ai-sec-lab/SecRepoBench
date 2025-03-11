@@ -2,7 +2,7 @@
     stack_copy(p, e->stack, len);
     e->stack = p;
     MRB_ENV_CLOSE(e);
-    mrb_write_barrier(mrb, (struct RBasic*)e);
+    mrb_write_barrier(mrb_state, (struct RBasic*)e);
     return TRUE;
   }
   else {
@@ -11,7 +11,7 @@
     MRB_ENV_SET_LEN(e, 0);
     MRB_ENV_SET_BIDX(e, 0);
     if (!noraise) {
-      mrb_exc_raise(mrb, mrb_obj_value(mrb->nomem_err));
+      mrb_exc_raise(mrb_state, mrb_obj_value(mrb_state->nomem_err));
     }
     return FALSE;
   }

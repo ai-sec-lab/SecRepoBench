@@ -20,10 +20,10 @@ static size_t dissect_softether_type(enum softether_value_type t,
     case VALUE_DATA:
     case VALUE_STR:
     case 
-    // Handle the VALUE_UNISTR case for extracting and setting the value from payload.
+    // Handle the VALUE_UNISTR case for extracting and setting the value from the buffer.
     // Check if the payload length is sufficient for the expected data size.
     // Set the pointer to the raw data starting after the size indicator.
-    // Verify that the payload value size is non-zero and does not exceed the payload length.
+    // Verify that the buffer value size is non-zero and does not exceed the payload length.
     // Adjust the size if handling VALUE_DATA type.
     // Update the value size and return the total size processed, including size indicator.
     // <MASK>

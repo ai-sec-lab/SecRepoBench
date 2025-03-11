@@ -4,12 +4,7 @@ cmsBool Write16bitTables(cmsContext ContextID, cmsIOHANDLER* io, _cmsStageToneCu
     cmsUInt32Number j;
     cmsUInt32Number index;
     cmsUInt16Number val;
-    cmsUInt32Number nEntries;
-
-    _cmsAssert(Tables != NULL);
-   
     // <MASK>
-    return TRUE;
 
     cmsUNUSED_PARAMETER(ContextID);
 }

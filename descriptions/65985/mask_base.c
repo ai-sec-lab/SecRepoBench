@@ -735,6 +735,7 @@ GF_Err mpgviddmx_process(GF_Filter *filter)
 		current = -1;
 
 		//we have some potential bytes of a start code in the store, copy some more bytes and check if valid start code.
+		//if not, dispatch these bytes as continuation of the data
 		// <MASK>
 		//no startcode in store, look for startcode in packet
 		if (current == -1) {

@@ -30,10 +30,10 @@ class BaseEvaler(ABC):
     def postprocess(response: str) -> str:
         clean_response = ''
         for char in response:
-            if char.isalpha():
+            if char.isalpha() or char.isnumeric() or char == '_':
                 clean_response += char
         if clean_response[0].isnumeric():
-            clean_response[0] = '_'
+            clean_response = '_' + clean_response
         return clean_response
 
     def _get_prompt(self, id: str) -> str:
@@ -116,18 +116,41 @@ class APIEvaler(BaseEvaler):
         return self.postprocess(response)
 
 
-def main():
-    evaler = APIEvaler()
-    with open('ids/final_ids.txt', 'r') as f:
-        ids = f.readlines()
+def get_new_var(old_var, mask_sec_func_base, evaler, vars_all):
+    prompt = f"Given the following C/CPP function, create a new variable name for the variable `{old_var}`. \n"
+    prompt += "The new variable name should be different from the current variable name. \n"
+    prompt += "The new variable should be something a human would name it, which means you should consider how the variable is used in the function. \n"
+    prompt += "For example, if the variable `x` tracks the x coordinate location, you could rename it `x_coord`. \n"
+    prompt += "If the variable `sum` tracks the cumulative amount owed, you could rename it `cum_amount_owed`. \n"
+    prompt += "If the variable `arr` has a customer's address, you could rename it `cust_addr`. \n"
+    prompt += "Only return the variable name. \n"
+    prompt += "Do not return anything else, such as 'A new variable name could be: ...' or 'The new name is: ...'. \n"
+    prompt += f"Here is the C/CPP function: \n"
+    prompt += "```\n"
+    prompt += mask_sec_func_base
+    prompt += "\n```"
 
-    for id in tqdm(ids):
-        print(id)
-        response = evaler.get_response(id)
-        evaler.save_cache()
-        with open(f'descriptions/{id}/desc.txt', 'w') as f:
-            f.write(response)
-    evaler.save_cache()
+    new_var = evaler.get_response(prompt)
+    
+    while new_var in vars_all:
+        prompt += f"\nDo not rename it to {new_var}"
+        new_var = evaler.get_response(prompt)
+    
+    return new_var
 
-if __name__ == '__main__':
-    main()
+
+# def main():
+#     evaler = APIEvaler()
+#     with open('ids/final_ids.txt', 'r') as f:
+#         ids = f.readlines()
+
+#     for id in tqdm(ids):
+#         print(id)
+#         response = evaler.get_response(id)
+#         evaler.save_cache()
+#         with open(f'descriptions/{id}/desc.txt', 'w') as f:
+#             f.write(response)
+#     evaler.save_cache()
+
+# if __name__ == '__main__':
+#     main()

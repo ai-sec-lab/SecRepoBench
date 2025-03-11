@@ -284,8 +284,8 @@ private:
     // -------------------------------------------------------------------
     /** Cleanup the given path
      */
-    void Cleanup (std::string& in) const {
-// <MASK>
+    void Cleanup (std::string& input_string) const {
+        // <MASK>
     }
 
 private:

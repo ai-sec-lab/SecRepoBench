@@ -1,0 +1,93 @@
+#if LUCA
+    if (header->caplen < ip_offset + ip_len + sizeof(struct ndpi_udphdr))
+      return(ndpiprotocol); /* Too short for UDP header*/
+#endif
+    struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset+ip_len];
+    u_int16_t sport = ntohs(udp->source), dport = ntohs(udp->dest);
+
+    if((sport == GTP_U_V1_PORT) || (dport == GTP_U_V1_PORT)) {
+      /* Check if it's GTPv1 */
+      u_int offset = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+      u_int8_t flags = packet[offset];
+      u_int8_t message_type = packet[offset+1];
+
+      tunnel_type = ndpi_gtp_tunnel;
+
+      if((((flags & 0xE0) >> 5) == 1 /* GTPv1 */) &&
+	 (message_type == 0xFF /* T-PDU */)) {
+
+	ip_offset = ip_offset+ip_len+sizeof(struct ndpi_udphdr)+8; /* GTPv1 header len */
+	if(flags & 0x04) ip_offset += 1; /* next_ext_header is present */
+	if(flags & 0x02) ip_offset += 4; /* sequence_number is present (it also includes next_ext_header and pdu_number) */
+	if(flags & 0x01) ip_offset += 1; /* pdu_number is present */
+
+	iph = (struct ndpi_iphdr *) &packet[ip_offset];
+
+	if(iph->version != IPVERSION) {
+	  // printf("WARNING: not good (packet_id=%u)!\n", (unsigned int)workflow->stats.raw_packet_count);
+	  goto v4_warning;
+	}
+      }
+    } else if((sport == TZSP_PORT) || (dport == TZSP_PORT)) {
+      /* https://en.wikipedia.org/wiki/TZSP */
+      u_int offset           = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+      u_int8_t version       = packet[offset];
+      u_int8_t ts_type       = packet[offset+1];
+      u_int16_t encapsulates = ntohs(*((u_int16_t*)&packet[offset+2]));
+
+      tunnel_type = ndpi_tzsp_tunnel;
+
+      if((version == 1) && (ts_type == 0) && (encapsulates == 1)) {
+	u_int8_t stop = 0;
+
+	offset += 4;
+
+	while((!stop) && (offset < header->caplen)) {
+	  u_int8_t tag_type = packet[offset];
+	  u_int8_t tag_len;
+
+	  switch(tag_type) {
+	  case 0: /* PADDING Tag */
+	    tag_len = 1;
+	    break;
+	  case 1: /* END Tag */
+	    tag_len = 1, stop = 1;
+	    break;
+	  default:
+	    tag_len = packet[offset+1];
+	    break;
+	  }
+
+	  offset += tag_len;
+
+	  if(offset >= header->caplen)
+	    return(ndpiprotocol); /* Invalid packet */
+	  else {
+	    eth_offset = offset;
+	    goto datalink_check;
+	  }
+	}
+      }
+    } else if(sport == NDPI_CAPWAP_DATA_PORT) {
+      /* We dissect ONLY CAPWAP traffic */
+      u_int offset           = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+
+      if((offset+40) < header->caplen) {
+	u_int16_t msg_len = packet[offset+1] >> 1;
+
+	offset += msg_len;
+
+	if(packet[offset] == 0x02) {
+	  /* IEEE 802.11 Data */
+
+	  offset += 24;
+	  /* LLC header is 8 bytes */
+	  type = ntohs((u_int16_t)*((u_int16_t*)&packet[offset+6]));
+
+	  ip_offset = offset + 8;
+
+	  tunnel_type = ndpi_capwap_tunnel;
+	  goto iph_check;
+	}
+      }
+    }

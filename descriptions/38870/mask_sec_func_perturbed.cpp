@@ -11,7 +11,7 @@ void ZipArchiveIOSystem::Implement::MapArchive() {
 
     // Loop over all files
     do {
-        char filename[FileNameSize];
+        char filename[max_filename_length];
         // <MASK>
     } while (unzGoToNextFile(m_ZipFileHandle) != UNZ_END_OF_LIST_OF_FILE);
 }

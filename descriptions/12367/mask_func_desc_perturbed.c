@@ -38,20 +38,12 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
     s->last_slice_end = 0;
 
-    if (avctx->codec_id == AV_CODEC_ID_HYMT &&
-        (buf_size > 32 && AV_RL32(packet->data + buf_size - 16) == 0)) {
-        // Check if the codec ID is AV_CODEC_ID_HYMT and validate the buffer size
-        // and specific conditions at the end of the packet data. This helps determine
-        // the number of slices, slice height, and offset for slice information.
-        // The conditions ensure that the calculated offsets and sizes do not exceed
-        // the available buffer, and that the slice height is positive. If the conditions
-        // are not met, an error is returned. If the codec ID does not match, default to
-        // a single slice covering the full height.
-        // <MASK>
-    } else {
-        slice_height = height;
-        nb_slices = 1;
-    }
+    // Check if the codec ID is AV_CODEC_ID_HYMT and validate the buffer size
+    // and specific conditions at the end of the packet data. Determine
+    // the number of slices, slice height, and offset for slice information.
+    // If any of these are invalid, return an error. 
+    // If the codec ID does not match, default to a single slice covering the full height.
+    // <MASK>
 
     for (slice = 0; slice < nb_slices; slice++) {
         int y_offset, slice_offset, slice_size;

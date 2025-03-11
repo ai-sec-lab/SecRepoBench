@@ -1547,7 +1547,9 @@ short AffixMgr::get_syllable(const std::string& word) {
   return num;
 }
 
-void AffixMgr::setcminmax(size_t* cmin, size_t* cmax, const char* word, size_t len) // <MASK>
+void AffixMgr::setcminmax(size_t* cmin, size_t* cmax, const char* word, size_t len) {
+    // <MASK>
+  }
 
 // check if compound word is correctly spelled
 // hu_mov_rule = spec. Hungarian rule (XXX)

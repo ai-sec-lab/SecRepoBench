@@ -1,0 +1,40 @@
+MagickExport MagickBooleanType DrawImage(Image *image,const DrawInfo *draw_info,
+  ExceptionInfo *exception)
+{
+#define RenderImageTag  "Render/Image"
+
+  AffineMatrix
+    affine,
+    current;
+
+  char
+    primitive_name[MagickPathExtent],
+    geometry[MagickPathExtent],
+    *next_token,
+    pattern[MagickPathExtent],
+    *primitive,
+    *token;
+
+  const char
+    *q;
+
+  // <MASK>
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"end draw-image");
+  /*
+    Relinquish resources.
+  */
+  token=DestroyString(token);
+  if (primitive_info != (PrimitiveInfo *) NULL)
+    primitive_info=(PrimitiveInfo *) RelinquishMagickMemory(primitive_info);
+  primitive=DestroyString(primitive);
+  if (stops != (StopInfo *) NULL)
+    stops=(StopInfo *) RelinquishMagickMemory(stops);
+  for ( ; n >= 0; n--)
+    graphic_context[n]=DestroyDrawInfo(graphic_context[n]);
+  graphic_context=(DrawInfo **) RelinquishMagickMemory(graphic_context);
+  if (status == MagickFalse)
+    ThrowBinaryException(DrawError,"NonconformingDrawingPrimitiveDefinition",
+      primitive_name);
+  return(status != 0 ? MagickTrue : MagickFalse);
+}

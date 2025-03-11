@@ -16,7 +16,7 @@ void ndpi_parse_packet_line_info(struct ndpi_detection_module_struct *ndpi_str, 
 
   // Parse the payload of the packet to identify and extract lines separated by "\r\n" sequences.
   // For each line, calculate its length and store it in the packet structure.
-  // If a sequence "\r\n\r\n" is encountered, extract subsequent bytes and store them in the flow's initial binary bytes.
+  // If a sequence "\r\n\r\n" is encountered, extract subsequent bytes and store them in the data flow's initial binary bytes.
   // Analyze the first line to detect and process HTTP response status codes.
   // Identify and extract specific HTTP headers such as "Server:", "Host:", "Content-Type:", etc., storing their positions and lengths.
   // Count the number of headers found in the packet.

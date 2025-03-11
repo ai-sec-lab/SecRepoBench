@@ -488,29 +488,20 @@ static void compute_quant_matrix(int *output, int qscale)
     for (i = 0; i < 64; i++) output[i] = unscaled_quant_matrix[ff_zigzag_direct[i]] * qscale;
 }
 
-static int speedhq_decode_frame(AVCodecContext *ccodeccontext, AVFrame *frame,
+static int speedhq_decode_frame(AVCodecContext *codec_context, AVFrame *frame,
                                 int *got_frame, AVPacket *avpkt)
 {
-    SHQContext * const s = ccodeccontext->priv_data;
-    const uint8_t *buf   = avpkt->data;
-    int buf_size         = avpkt->size;
-    uint8_t quality;
     // <MASK>
-    if (quality >= 100) {
-        return AVERROR_INVALIDDATA;
-    }
-
-    compute_quant_matrix(s->quant_matrix, 100 - quality);
 
     second_field_offset = AV_RL24(buf + 1);
     if (second_field_offset >= buf_size - 3) {
         return AVERROR_INVALIDDATA;
     }
 
-    ccodeccontext->coded_width = FFALIGN(ccodeccontext->width, 16);
-    ccodeccontext->coded_height = FFALIGN(ccodeccontext->height, 16);
+    codec_context->coded_width = FFALIGN(codec_context->width, 16);
+    codec_context->coded_height = FFALIGN(codec_context->height, 16);
 
-    if ((ret = ff_get_buffer(ccodeccontext, frame, 0)) < 0) {
+    if ((ret = ff_get_buffer(codec_context, frame, 0)) < 0) {
         return ret;
     }
     frame->key_frame = 1;

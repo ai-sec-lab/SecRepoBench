@@ -1518,28 +1518,7 @@ void* CMSEXPORT cmsReadTag(cmsHPROFILE hProfile, cmsTagSignature sig)
 
     if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return NULL;
 
-    n = _cmsSearchTag(Icc, sig, TRUE);
     // <MASK>
-
-    // If the element is already in memory, return the pointer
-    if (Icc -> TagPtrs[n]) {
-
-        if (Icc->TagTypeHandlers[n] == NULL) goto Error;
-
-        // Sanity check
-        BaseType = Icc->TagTypeHandlers[n]->Signature;
-        if (BaseType == 0) goto Error;
-
-        TagDescriptor = _cmsGetTagDescriptor(Icc->ContextID, sig);
-        if (TagDescriptor == NULL) goto Error;
-
-        if (!IsTypeSupported(TagDescriptor, BaseType)) goto Error;
-
-        if (Icc ->TagSaveAsRaw[n]) goto Error;  // We don't support read raw tags as cooked
-
-        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
-        return Icc -> TagPtrs[n];
-    }
 
     // We need to read it. Get the offset and size to the file
     Offset    = Icc -> TagOffsets[n];

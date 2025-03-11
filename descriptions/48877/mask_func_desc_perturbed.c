@@ -1,23 +1,12 @@
 static mrb_int
 cmpnum(mrb_state *mrb, mrb_value v1, mrb_value value)
 {
-#ifdef 
-// This section handles comparison for big integer types if MRB_USE_BIGINT is enabled.
-// It checks if one of the values being compared is a big integer and uses
-// the appropriate function `mrb_bint_cmp` for comparison.
+// Compare two numerical values in the context of a Ruby-like environment.
+// Check if either value is a big integer and handle this case separately using a specific comparison function for big integers.
+// Determine the type of the first value and convert it into a numerical form suitable for comparison.
+// Decide the type of variables x and y based on whether floating-point support is enabled, using integers if floating-point is disabled.
+// Store the converted numerical value of the first value into the variable x for further comparison with the second value.
 // <MASK>
-
-#ifdef MRB_NO_FLOAT
-  mrb_int x, y;
-#else
-  mrb_float x, y;
-#endif
-
-#ifdef MRB_NO_FLOAT
-  x = mrb_integer(v1);
-#else
-  x = mrb_as_float(mrb, v1);
-#endif
   switch (mrb_type(value)) {
   case MRB_TT_INTEGER:
 #ifdef MRB_NO_FLOAT

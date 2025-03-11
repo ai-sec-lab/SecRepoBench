@@ -137,34 +137,11 @@ static void ImportGrayQuantum(const Image *img,QuantumInfo *quantum_info,
                 }
               break;
             }
-          for (x=0; x < (ssize_t) (number_pixels-2); x+=3)
-          {
-            p=PushLongPixel(quantum_info->endian,p,&pixel);
-            SetPixelGray(img,ScaleAnyToQuantum((pixel >> 2) & 0x3ff,range),
-              q);
-            q+=GetPixelChannels(img);
-            SetPixelGray(img,ScaleAnyToQuantum((pixel >> 12) & 0x3ff,range),
-              q);
-            q+=GetPixelChannels(img);
-            SetPixelGray(img,ScaleAnyToQuantum((pixel >> 22) & 0x3ff,range),
-              q);
-            p+=quantum_info->pad;
-            q+=GetPixelChannels(img);
-          }
-          // The masked region handles the remaining pixels when the total number 
-          // of pixels is not a multiple of three. It reads a long pixel from the 
-          // source, applies a bitwise shift to extract a 10-bit gray value, scales 
-          // it according to the quantum range, and then sets this gray value for 
-          // the pixel. The operation is conditioned to ensure it does not exceed 
-          // the number of pixels being processed.
+          // Process groups of three pixels from the input data, converting each to a grayscale value.
+          // For each group, extract three 10-bit values from a 32-bit pixel.
+          // Convert each extracted value to a quantum gray value and assign it to the output pixel array.
+          // Handle the remaining pixels if the total number of pixels is not a multiple of three.
           // <MASK>
-          if (x++ < (ssize_t) number_pixels)
-            {
-              SetPixelGray(img,ScaleAnyToQuantum((pixel >> 12) & 0x3ff,
-                range),q);
-              q+=GetPixelChannels(img);
-            }
-          break;
         }
       for (x=0; x < (ssize_t) number_pixels; x++)
       {

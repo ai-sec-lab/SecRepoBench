@@ -1,3 +1,15 @@
-if (codeccontext->codec_id == AV_CODEC_ID_BINKVIDEO)
+case AV_PIX_FMT_GBRP12LE:
+    case AV_PIX_FMT_GBRP12BE:
+    case AV_PIX_FMT_GBRP14LE:
+    case AV_PIX_FMT_GBRP14BE:
+    case AV_PIX_FMT_GBRP16LE:
+    case AV_PIX_FMT_GBRP16BE:
+    case AV_PIX_FMT_GBRAP12LE:
+    case AV_PIX_FMT_GBRAP12BE:
+    case AV_PIX_FMT_GBRAP16LE:
+    case AV_PIX_FMT_GBRAP16BE:
+        w_align = 16; //FIXME assume 16 pixel per macroblock
+        height_align = 16 * 2; // interlaced needs 2 macroblocks height
+        if (s->codec_id == AV_CODEC_ID_BINKVIDEO)
             w_align = 16*2;
         break;

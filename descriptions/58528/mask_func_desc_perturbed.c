@@ -30,8 +30,7 @@ int ff_hevc_slice_rpl(HEVCContext *s)
         /* concatenate the candidate lists for the current frame */
         while (rpl_tmp.nb_refs < sh->nb_refs[list_idx]) {
             // Iterate over the candidate reference picture lists (ST_CURR_BEF, ST_CURR_AFT, LT_CURR).
-            // For each candidate list, append its references to a temporary reference picture list (rpl_tmp).
-            // Ensure the list does not exceed the maximum number of references allowed (HEVC_MAX_REFS).
+            // For each candidate list, append its references to a temporary reference picture list.
             // If the current picture reference is enabled by the PPS, add the current picture as a reference.
             // <MASK>
         }

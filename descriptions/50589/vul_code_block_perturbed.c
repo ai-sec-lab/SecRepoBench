@@ -1,4 +1,4 @@
-    buffer.resize(m_cacheSize);
+    line.resize(m_cacheSize);
     if (isEndOfCache(m_cachePos, m_cacheSize) || 0 == m_filePos) {
         if (!readNextBlock()) {
             return false;
@@ -20,12 +20,12 @@
 
     size_t i(0);
     while (!IsLineEnd(m_cache[m_cachePos])) {
-        buffer[i] = m_cache[m_cachePos];
+        line[i] = m_cache[m_cachePos];
         ++m_cachePos;
         ++i;
 
-        if(i == buffer.size()) {
-            buffer.resize(buffer.size() * 2);
+        if(i == line.size()) {
+            line.resize(line.size() * 2);
         }
 
         if (m_cachePos >= m_cacheSize) {
@@ -34,7 +34,7 @@
             }
         }
     }
-    buffer[i] = '\n';
+    line[i] = '\n';
     ++m_cachePos;
 
     return true;

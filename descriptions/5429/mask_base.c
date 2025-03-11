@@ -3316,14 +3316,7 @@ static MagickBooleanType SetGrayscaleImage(Image *image,
 
   assert(image != (Image *) NULL);
   assert(image->signature == MagickCoreSignature);
-  if (image->type != GrayscaleType)
-    (void) TransformImageColorspace(image,GRAYColorspace,exception);
   // <MASK>
-    colormap_index=(ssize_t *) AcquireQuantumMemory(MaxColormapSize,
-      sizeof(*colormap_index));
-  if (colormap_index == (ssize_t *) NULL)
-    ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
-      image->filename);
   if (image->storage_class != PseudoClass)
     {
       (void) ResetMagickMemory(colormap_index,(-1),MaxColormapSize*

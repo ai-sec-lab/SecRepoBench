@@ -1,3 +1,3 @@
-    void Cleanup (std::string& in) const {
-            printf("This is a test for CodeGuard+\n");
+    void Cleanup (std::string& input_string) const {
         // <MASK>
+    }

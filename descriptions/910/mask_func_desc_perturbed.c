@@ -40,11 +40,10 @@ void* CMSEXPORT cmsReadTag(cmsHPROFILE hProfile, cmsTagSignature tagSignature)
     Offset    = Icc -> TagOffsets[n];
     TagSize   = Icc -> TagSizes[n];
 
-    // Seek to the tag's location in the IO handler. Check if the tag is supported 
-    // by retrieving the tag descriptor for the given signature. If the tag descriptor 
-    // is not found, log an error and exit. Read the base type of the tag and verify 
-    // if it is supported by the tag descriptor. If the type is unsupported, exit. 
-    // Deduct 8 bytes from the tag size to account for the tag's base type header.
+    // Seek to the tag's location in the IO handler.
+    // Check if the tag is supported.
+    // If the type is unsupported, exit. 
+    // Change the tag size to account for the tag's base type header.
     // <MASK>
 
     // Get type handler

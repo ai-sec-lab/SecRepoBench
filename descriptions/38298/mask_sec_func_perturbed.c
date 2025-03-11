@@ -13,14 +13,6 @@ mrb_ary_splice(mrb_state *mrb, mrb_value ary, mrb_int head, mrb_int len, mrb_val
   if (len < 0) mrb_raisef(mrb, E_INDEX_ERROR, "negative length (%i)", len);
 
   /* range check */
-  if (head < 0) {
-    head += arraylength;
-    if (head < 0) goto out_of_range;
-  }
-  if (head > ARY_MAX_SIZE - len) {
-  out_of_range:
-    mrb_raisef(mrb, E_INDEX_ERROR, "index %i is out of array", head);
-  }
   // <MASK>
   if (mrb_array_p(rpl)) {
     argc = RARRAY_LEN(rpl);

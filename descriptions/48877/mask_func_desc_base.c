@@ -1,11 +1,11 @@
 static mrb_int
 cmpnum(mrb_state *mrb, mrb_value v1, mrb_value v2)
 {
-// Compare two numerical values, v1 and v2, in the context of a Ruby-like environment.
+// Compare two numerical values in the context of a Ruby-like environment.
 // Check if either value is a big integer and handle this case separately using a specific comparison function for big integers.
-// Determine the type of v1 and convert it into a numerical form suitable for comparison.
+// Determine the type of the first value and convert it into a numerical form suitable for comparison.
 // Decide the type of variables x and y based on whether floating-point support is enabled, using integers if floating-point is disabled.
-// Store the converted numerical value of v1 into the variable x for further comparison with v2.
+// Store the converted numerical value of the first value into the variable x for further comparison with the second value.
 // <MASK>
   switch (mrb_type(v2)) {
   case MRB_TT_INTEGER:

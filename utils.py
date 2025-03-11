@@ -393,7 +393,7 @@ def find_variables(node):
             recursive_find(child)
 
     recursive_find(node)
-    return variables
+    return [var.text.decode('utf-8') for var in variables]
 
 def find_variables_before_code_block(node, mask_line):
     variables = []
@@ -464,6 +464,21 @@ def find_variables_in_code_block(code_block_node, variables_text):
             variable_name = current_node.text.decode('utf-8')
             if variable_name in variables_text:
                 variables.add(variable_name)
+
+        for child in current_node.children:
+            recursive_find(child)
+
+    recursive_find(code_block_node)
+    return list(variables)
+
+
+def find_all_variables(code_block_node):
+    variables = set()
+
+    def recursive_find(current_node):
+        if current_node.type == 'identifier':
+            variable_name = current_node.text.decode('utf-8')
+            variables.add(variable_name)
 
         for child in current_node.children:
             recursive_find(child)

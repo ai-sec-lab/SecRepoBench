@@ -33,8 +33,8 @@ SuggestMgr::SuggestMgr(const std::string& tryme, unsigned int maxn, AffixMgr* ap
     complexprefixes = pAMgr->get_complexprefixes();
   }
 
-  // Convert the `ckey` and `tryme` strings to their UTF-16 representations if UTF-8 mode is enabled.
-  // Assign their lengths to `ckeyl` and `ctryl`. Assign `tryme` to `ctry`.
+  // Convert the `ckey` and given string to their UTF-16 representations if UTF-8 mode is enabled.
+  // Assign their lengths to `ckeyl` and `ctryl`. Assign the given string to `ctry`.
   // <MASK>
 
   // language with possible dash usage

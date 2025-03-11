@@ -1,0 +1,14 @@
+bool serialize (hb_serialize_context_t *c,
+                  Iterator iterator)
+  {
+    TRACE_SERIALIZE (this);
+    if (unlikely (!c->extend_min (*this))) return_trace (false);
+
+    // If the iterator is null, set the starting glyph index and class value length to zero, and return true.
+    // Determine the minimum and maximum glyph indices from the iterator to calculate the glyph count.
+    // Set the starting glyph index to the minimum glyph index.
+    // Serialize the class value using the serialization context and the calculated glyph count.
+    // Iterate over the glyph-class pairs in the iterator, and assign the class value to each glyph index relative to the starting glyph index.
+    // Return true to indicate successful serialization.
+    // <MASK>
+  }

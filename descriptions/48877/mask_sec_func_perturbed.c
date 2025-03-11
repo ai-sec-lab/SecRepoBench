@@ -1,19 +1,7 @@
 static mrb_int
 cmpnum(mrb_state *mrb, mrb_value v1, mrb_value value)
 {
-#ifdef // <MASK>
-
-#ifdef MRB_NO_FLOAT
-  mrb_int x, y;
-#else
-  mrb_float x, y;
-#endif
-
-#ifdef MRB_NO_FLOAT
-  x = mrb_integer(v1);
-#else
-  x = mrb_as_float(mrb, v1);
-#endif
+// <MASK>
   switch (mrb_type(value)) {
   case MRB_TT_INTEGER:
 #ifdef MRB_NO_FLOAT

@@ -1,0 +1,65 @@
+bool subset (hb_subset_context_t *context) const
+  {
+    TRACE_SUBSET (this);
+
+    if (!has_valid_glyf_format (context->plan->source)) {
+      // glyf format is unknown don't attempt to subset it.
+      DEBUG_MSG (SUBSET, nullptr,
+                 "unkown glyf format, dropping from subset.");
+      return_trace (false);
+    }
+
+    hb_font_t *font = nullptr;
+    if (context->plan->normalized_coords)
+    {
+      font = _create_font_for_instancing (context->plan);
+      if (unlikely (!font))
+	return_trace (false);
+    }
+
+    hb_vector_t<unsigned> padded_offsets;
+    if (unlikely (!padded_offsets.alloc (context->plan->new_to_old_gid_list.length, true)))
+      return_trace (false);
+
+    hb_vector_t<glyf_impl::SubsetGlyph> glyphs;
+    if (!_populate_subset_glyphs (context->plan, font, glyphs))
+    {
+      hb_font_destroy (font);
+      return_trace (false);
+    }
+
+    if (font)
+      hb_font_destroy (font);
+
+    unsigned max_offset = 0;
+    for (auto &g : glyphs)
+    {
+      unsigned size = g.padded_size ();
+      padded_offsets.push (size);
+      max_offset += size;
+    }
+
+    bool use_short_loca = false;
+    if (likely (!context->plan->force_long_loca))
+      use_short_loca = max_offset < 0x1FFFF;
+
+    if (!use_short_loca)
+    {
+      padded_offsets.resize (0);
+      for (auto &g : glyphs)
+	padded_offsets.push (g.length ());
+    }
+
+    glyf *glyf_prime = context->serializer->start_embed <glyf> ();
+    bool result = glyf_prime &&
+		  glyf_prime->serialize (context->serializer, hb_iter (glyphs), use_short_loca, context->plan);
+    if (context->plan->normalized_coords && !context->plan->pinned_at_default)
+      _free_compiled_subset_glyphs (glyphs);
+
+    if (unlikely (!context->serializer->check_success (glyf_impl::_add_loca_and_head (context,
+						 padded_offsets.iter (),
+						 use_short_loca))))
+      return_trace (false);
+
+    return result;
+  }

@@ -49,15 +49,13 @@ alac_decode (ALAC_DECODER *p, struct BitBuffer * bits, int32_t * sampleBuffer, u
 
 		// read element tag
 		tag = BitBufferReadSmall (bits, 3) ;
-		// This section of code serves as a safeguard to break out of the decoding loop
-		// once all channels have been processed, preventing further processing of
-		// any remaining data bits that do not correspond to audio data. The condition
-		// is wrapped in a preprocessor directive that allows enabling or disabling
-		// this check in non-debug or debug builds respectively. This ensures that
-		// in a production build, the code will stop decoding once the specified
-		// number of channels has been reached, thereby avoiding potential errors
-		// from unexpected data. In debug builds, the check can be disabled to allow
-		// for more rigorous testing and detection of issues with the bitstream.
+		// Decode audio data from the bitstream based on the element type specified by the tag.
+		// For mono or low-frequency elements, read and process header parameters, handling both compressed and uncompressed frames.
+		// For compressed frames, decompress data and apply prediction to reconstruct the audio samples.
+		// For stereo channel pairs, ensure channel limit is not exceeded and process each channel separately, similar to mono elements.
+		// Handle special cases such as partial frames and shifted values, reading them into appropriate buffers.
+		// For unsupported elements, set the status to indicate unsupported operations and ignore any fill elements.
+		// Finally, align the bitstream to byte boundaries and exit once all channels are processed or the frame end is reached.
 		// <MASK>
 	}
 

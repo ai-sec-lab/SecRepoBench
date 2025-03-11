@@ -1,0 +1,36 @@
+bool serialize (hb_serialize_context_t *c,
+		  Iterator iterator)
+  {
+    TRACE_SERIALIZE (this);
+    if (unlikely (!c->extend_min (this))) return_trace (false);
+
+    if (unlikely (!iterator))
+    {
+      classFormat = 2;
+      rangeRecord.len = 0;
+      return_trace (true);
+    }
+
+    unsigned num_ranges = 1;
+    hb_codepoint_t prev_gid = (*iterator).first;
+    unsigned prev_klass = (*iterator).second;
+
+    RangeRecord<Types> range_rec;
+    range_rec.first = prev_gid;
+    range_rec.last = prev_gid;
+    range_rec.value = prev_klass;
+
+    auto *record = c->copy (range_rec);
+    if (unlikely (!record)) return_trace (false);
+
+    // Iterate over the remaining elements in the iterator, processing each glyph ID and class pair.
+    // For each pair, check if it is a continuation of the current range.
+    // If it is not a continuation, finalize the current range, and create a new range record for the new pair.
+    // Copy the new range record into the serialization context.
+    // Update previous glyph ID and class values for the next iteration.
+    // After the loop, finalize the last range record by setting its last glyph ID.
+    // Update the range record length to reflect the number of ranges processed.
+    // Sort the range records to handle any unsorted glyph order.
+    // Return true to indicate successful serialization.
+    // <MASK>
+  }

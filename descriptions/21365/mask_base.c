@@ -74,7 +74,11 @@ int ndpi_netbios_name_interpret(char *in, size_t inlen, char *out, u_int out_len
 
 /* ****************************************************************** */
 
-static void // <MASK>
+static void ndpi_int_netbios_add_connection(struct ndpi_detection_module_struct *ndpi_struct,
+					    struct ndpi_flow_struct *flow,
+					    u_int16_t sub_protocol) { 
+  // <MASK>
+}
 
 /* ****************************************************************** */
 

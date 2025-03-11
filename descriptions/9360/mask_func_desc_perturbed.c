@@ -60,9 +60,8 @@ static SplayTreeInfo *GetMVGMacros(const char *primitive)
             start=q;
             // Extract macros from the MVG string. The code iterates through the string 
             // to find 'push' and 'pop' commands, handling nested structures accordingly.
-            // It skips comments starting with '#'. When a complete macro is identified 
-            // (when the nesting level `n` drops below zero), it extracts the macro 
-            // definition between `start` and `end` pointers, and adds it to a splay tree 
+            // It skips comments starting with '#'. When a complete macro is identified, 
+            // it extracts the macro definition and adds it to a splay tree 
             // for later retrieval using the macro name as the key.
             // <MASK>
           }

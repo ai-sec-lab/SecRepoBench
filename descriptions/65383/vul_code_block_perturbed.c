@@ -1,5 +1,5 @@
 case 'H': {
-            if (aux_end - aux < 3)
+            if (aux_limit - aux < 3)
                 goto err;
 
             if (!tm->blk) {
@@ -11,14 +11,14 @@ case 'H': {
             char *aux_s;
             aux += 3;
             aux_s = aux;
-            while (aux < aux_end && *aux++);
-            if (codec->encode(slice, codec, aux_s, aux - aux_s) < 0)
+            while (aux < aux_limit && *aux++);
+            if (codec->encode(s, codec, aux_s, aux - aux_s) < 0)
                 goto err;
             break;
         }
 
         case 'B': {
-            if (aux_end - aux < 3+4)
+            if (aux_limit - aux < 3+4)
                 goto err;
 
             int type = aux[3], blen;
@@ -60,10 +60,10 @@ case 'H': {
             }
 
             blen += 5; // sub-type & length
-            if (aux_end - aux < blen)
+            if (aux_limit - aux < blen)
                 goto err;
 
-            if (codec->encode(slice, codec, aux, blen) < 0)
+            if (codec->encode(s, codec, aux, blen) < 0)
                 goto err;
             aux += blen;
             break;

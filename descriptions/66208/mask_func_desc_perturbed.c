@@ -23,11 +23,6 @@ mrb_memsearch_ss(const unsigned char *xs, long m, const unsigned char *ys, long 
 #endif
 
 // This function performs a substring search using a bit manipulation technique.
-// It compares the first and last characters of the target substring (`xs`) with
-// possible positions in the search string (`ys`) using bitwise operations for efficiency.
-// The function iterates through `ys` in chunks of machine word size (`bitint`).
-// It calculates a mask for matching positions and checks equality for the first and last
-// characters of the substring to quickly skip non-matching positions.
 // It returns the byte index of the first occurrence of `xs` in `ys`.
 // <MASK>
 

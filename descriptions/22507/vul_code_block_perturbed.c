@@ -7,7 +7,7 @@ mrb_value val = GETARG();
         if (!isfinite(fval)) {
           const char *expr;
           const mrb_int elen = 3;
-          char sign = '\0';
+          char number_sign = '\0';
 
           if (isnan(fval)) {
             expr = "NaN";
@@ -17,10 +17,10 @@ mrb_value val = GETARG();
           }
           need = elen;
           if (!isnan(fval) && fval < 0.0)
-            sign = '-';
+            number_sign = '-';
           else if (flags & (FPLUS|FSPACE))
-            sign = (flags & FPLUS) ? '+' : ' ';
-          if (sign)
+            number_sign = (flags & FPLUS) ? '+' : ' ';
+          if (number_sign)
             ++need;
           if ((flags & FWIDTH) && need < width)
             need = width;
@@ -30,14 +30,14 @@ mrb_value val = GETARG();
           }
           FILL(' ', need);
           if (flags & FMINUS) {
-            if (sign)
-              buf[bufferlength - need--] = sign;
-            memcpy(&buf[bufferlength - need], expr, elen);
+            if (number_sign)
+              buf[blen - need--] = number_sign;
+            memcpy(&buf[blen - need], expr, elen);
           }
           else {
-            if (sign)
-              buf[bufferlength - elen - 1] = sign;
-            memcpy(&buf[bufferlength - elen], expr, elen);
+            if (number_sign)
+              buf[blen - elen - 1] = number_sign;
+            memcpy(&buf[blen - elen], expr, elen);
           }
           break;
         }

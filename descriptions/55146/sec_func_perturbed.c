@@ -1,0 +1,284 @@
+static int node_from_openstep(parse_ctx parse_context, plist_t *plist)
+{
+    plist_t subnode = NULL;
+    const char *p = NULL;
+    while (parse_context->pos < parse_context->end && !parse_context->err) {
+        parse_skip_ws(parse_context);
+        if (parse_context->pos >= parse_context->end) {
+            break;
+        }
+        plist_data_t data = plist_new_plist_data();
+        if (*parse_context->pos == '{') {
+            data->type = PLIST_DICT;
+            subnode = plist_new_node(data);
+            parse_context->pos++;
+            parse_dict_data(parse_context, subnode);
+            if (parse_context->err) {
+                goto err_out;
+            }
+            if (parse_context->pos >= parse_context->end) {
+                PLIST_OSTEP_ERR("EOF while parsing dictionary terminator '}' at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                break;
+            }
+            if (*parse_context->pos != '}') {
+                PLIST_OSTEP_ERR("Missing terminating '}' at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                goto err_out;
+            }
+            parse_context->pos++;
+            *plist = subnode;
+            parse_skip_ws(parse_context);
+            break;
+        } else if (*parse_context->pos == '(') {
+            data->type = PLIST_ARRAY;
+            subnode = plist_new_node(data);
+            parse_context->pos++;
+            plist_t tmp = NULL;
+            while (parse_context->pos < parse_context->end && !parse_context->err) {
+                parse_skip_ws(parse_context);
+                if (parse_context->pos >= parse_context->end || *parse_context->pos == ')') {
+                    break;
+                }
+                parse_context->err = node_from_openstep(parse_context, &tmp);
+                if (parse_context->err != 0) {
+                    break;
+                }
+                if (!tmp) {
+                    parse_context->err++;
+                    break;
+                }
+                plist_array_append_item(subnode, tmp);
+                tmp = NULL;
+                parse_skip_ws(parse_context);
+                if (parse_context->pos >= parse_context->end) {
+                    PLIST_OSTEP_ERR("EOF while parsing array item delimiter ',' at offset %ld\n", parse_context->pos - parse_context->start);
+                    parse_context->err++;
+                    break;
+                }
+                if (*parse_context->pos != ',') {
+                    break;
+                }
+                parse_context->pos++;
+            }
+	    plist_free(tmp);
+	    tmp = NULL;
+            if (parse_context->err) {
+                goto err_out;
+            }
+            if (parse_context->pos >= parse_context->end) {
+                PLIST_OSTEP_ERR("EOF while parsing array terminator ')' at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                break;
+            }
+            if (*parse_context->pos != ')') {
+                PLIST_OSTEP_ERR("Missing terminating ')' at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                goto err_out;
+            }
+            parse_context->pos++;
+            *plist = subnode;
+            parse_skip_ws(parse_context);
+            break;
+        } else if (*parse_context->pos == '<') {
+            data->type = PLIST_DATA;
+            parse_context->pos++;
+            bytearray_t *bytes = byte_array_new(256);
+            while (parse_context->pos < parse_context->end && !parse_context->err) {
+                parse_skip_ws(parse_context);
+                if (parse_context->pos >= parse_context->end) {
+                    PLIST_OSTEP_ERR("EOF while parsing data terminator '>' at offset %ld\n", parse_context->pos - parse_context->start);
+                    parse_context->err++;
+                    break;
+                }
+                if (*parse_context->pos == '>') {
+                    break;
+                }
+                if (!isxdigit(*parse_context->pos)) {
+                    PLIST_OSTEP_ERR("Invalid byte group in data at offset %ld\n", parse_context->pos - parse_context->start);
+                    parse_context->err++;
+                    break;
+                }
+                uint8_t b = HEX_DIGIT(*parse_context->pos);
+                parse_context->pos++;
+                if (parse_context->pos >= parse_context->end) {
+                    PLIST_OSTEP_ERR("Unexpected end of data at offset %ld\n", parse_context->pos - parse_context->start);
+                    parse_context->err++;
+                    break;
+                }
+                if (!isxdigit(*parse_context->pos)) {
+                    PLIST_OSTEP_ERR("Invalid byte group in data at offset %ld\n", parse_context->pos - parse_context->start);
+                    parse_context->err++;
+                    break;
+                }
+                b = (b << 4) + HEX_DIGIT(*parse_context->pos);
+                byte_array_append(bytes, &b, 1);
+                parse_context->pos++;
+            }
+            if (parse_context->err) {
+                byte_array_free(bytes);
+                plist_free_data(data);
+                goto err_out;
+            }
+            if (parse_context->pos >= parse_context->end) {
+                byte_array_free(bytes);
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("EOF while parsing data terminator '>' at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                goto err_out;
+            }
+            if (*parse_context->pos != '>') {
+                byte_array_free(bytes);
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("Missing terminating '>' at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                goto err_out;
+            }
+            parse_context->pos++;
+            data->buff = bytes->data;
+            data->length = bytes->len;
+            bytes->data = NULL;
+            byte_array_free(bytes);
+            *plist = plist_new_node(data);
+            parse_skip_ws(parse_context);
+            break;
+        } else if (*parse_context->pos == '"' || *parse_context->pos == '\'') {
+            char c = *parse_context->pos;
+            parse_context->pos++;
+            p = parse_context->pos;
+            int num_escapes = 0;
+            while (parse_context->pos < parse_context->end) {
+                if (*parse_context->pos == '\\') {
+                    num_escapes++;
+                }
+                if ((*parse_context->pos == c) && (*(parse_context->pos-1) != '\\')) {
+                    break;
+                }
+                parse_context->pos++;
+            }
+            if (parse_context->pos >= parse_context->end) {
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("EOF while parsing quoted string at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                goto err_out;
+            }
+            if (*parse_context->pos != c) {
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("Missing closing quote (%c) at offset %ld\n", c, parse_context->pos - parse_context->start);
+                parse_context->err++;
+                goto err_out;
+            }
+            size_t slen = parse_context->pos - p;
+            parse_context->pos++; // skip the closing quote
+            char* strbuf = malloc(slen+1);
+            if (num_escapes > 0) {
+                size_t i = 0;
+                size_t o = 0;
+                while (i < slen) {
+                    if (p[i] == '\\') {
+                        /* handle escape sequence */
+                        i++;
+                        switch (p[i]) {
+                            case '0':
+                            case '1':
+                            case '2':
+                            case '3':
+                            case '4':
+                            case '5':
+                            case '6':
+                            case '7': {
+                                // max 3 digits octal
+                                unsigned char chr = 0;
+                                int maxd = 3;
+                                while ((i < slen) && (p[i] >= '0' && p[i] <= '7') && --maxd) {
+                                    chr = (chr << 3) + p[i] - '0';
+                                    i++;
+                                }
+                                strbuf[o++] = (char)chr;
+                            }   break;
+                            case 'U': {
+                                i++;
+                                // max 4 digits hex
+                                uint16_t wchr = 0;
+                                int maxd = 4;
+                                while ((i < slen) && isxdigit(p[i]) && maxd--) {
+                                    wchr = (wchr << 4) + ((p[i] <= '9') ? (p[i] - '0') : ((p[i] <= 'F') ? (p[i] - 'A' + 10) : (p[i] - 'a' + 10)));
+                                    i++;
+                                }
+                                if (wchr >= 0x800) {
+                                    strbuf[o++] = (char)(0xE0 + ((wchr >> 12) & 0xF));
+                                    strbuf[o++] = (char)(0x80 + ((wchr >> 6) & 0x3F));
+                                    strbuf[o++] = (char)(0x80 + (wchr & 0x3F));
+                                } else if (wchr >= 0x80) {
+                                    strbuf[o++] = (char)(0xC0 + ((wchr >> 6) & 0x1F));
+                                    strbuf[o++] = (char)(0x80 + (wchr & 0x3F));
+                                } else {
+                                    strbuf[o++] = (char)(wchr & 0x7F);
+                                }
+                            }   break;
+                            case 'a': strbuf[o++] = '\a'; i++; break;
+                            case 'b': strbuf[o++] = '\b'; i++; break;
+                            case 'f': strbuf[o++] = '\f'; i++; break;
+                            case 'n': strbuf[o++] = '\n'; i++; break;
+                            case 'r': strbuf[o++] = '\r'; i++; break;
+                            case 't': strbuf[o++] = '\t'; i++; break;
+                            case 'v': strbuf[o++] = '\v'; i++; break;
+                            case '"': strbuf[o++] = '"';  i++; break;
+                            case '\'': strbuf[o++] = '\''; i++; break;
+                            default:
+                                break;
+                        }
+                    } else {
+                        strbuf[o++] = p[i++];
+                    }
+                }
+                strbuf[o] = '\0';
+                slen = o;
+            } else {
+                strncpy(strbuf, p, slen);
+                strbuf[slen] = '\0';
+            }
+            data->type = PLIST_STRING;
+            data->strval = strbuf;
+            data->length = slen;
+            *plist = plist_new_node(data);
+            parse_skip_ws(parse_context);
+            break;
+        } else {
+            // unquoted string
+            size_t slen = 0;
+            parse_skip_ws(parse_context);
+            p = parse_context->pos;
+            while (parse_context->pos < parse_context->end) {
+                if (!allowed_unquoted_chars[(uint8_t)*parse_context->pos]) {
+                    break;
+                }
+                parse_context->pos++;
+            }
+            slen = parse_context->pos-p;
+            if (slen > 0) {
+                data->type = PLIST_STRING;
+                data->strval = strndup(p, slen);
+                data->length = slen;
+                *plist = plist_new_node(data);
+                parse_skip_ws(parse_context);
+                break;
+            } else {
+                plist_free_data(data);
+                PLIST_OSTEP_ERR("Unexpected character when parsing unquoted string at offset %ld\n", parse_context->pos - parse_context->start);
+                parse_context->err++;
+                break;
+            }
+        }
+        parse_context->pos++;
+    }
+
+err_out:
+    if (parse_context->err) {
+        plist_free(subnode);
+        plist_free(*plist);
+        *plist = NULL;
+        return PLIST_ERR_PARSE;
+    }
+    return PLIST_ERR_SUCCESS;
+}

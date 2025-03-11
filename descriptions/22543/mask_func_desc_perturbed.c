@@ -220,9 +220,6 @@ static Image *ReadJP2Image(const ImageInfo *image_info,ExceptionInfo *exception)
           scale;
 
         // Calculate the scale factor and pixel value for the JP2 image component.
-        // The scale is determined by the quantum range divided by the maximum pixel
-        // value determined by the precision of the component. The pixel value is
-        // adjusted for signedness by adding an offset when the component is signed. 
         // <MASK>
         switch (i)
         {

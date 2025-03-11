@@ -34,8 +34,6 @@ char *gf_text_get_utf8_line(char *linebuffer, u32 lineSize, FILE *txt_in, s32 un
 				// This code block handles the conversion of multi-byte UTF-8 characters to a custom internal format.
 				// It processes characters from the input string and writes them into `szLineConv` while
 				// ensuring the proper handling of 2-byte, 3-byte, and 4-byte UTF-8 characters.
-				// For each UTF-8 character, it checks the first byte to determine the number of bytes in the character,
-				// then copies the appropriate number of bytes to `szLineConv`.
 				// <MASK>
 			}
 

@@ -1,0 +1,49 @@
+MagickExport MagickBooleanType DrawImage(Image *image,const DrawInfo *draw_info,
+  ExceptionInfo *exception)
+{
+#define RenderImageTag  "Render/Image"
+
+  AffineMatrix
+    affine,
+    current;
+
+  char
+    primitive_name[MagickPathExtent],
+    geometry[MagickPathExtent],
+    *next_token,
+    pattern[MagickPathExtent],
+    *primitive,
+    *token;
+
+  const char
+    *q;
+
+  // This code block interprets and executes a series of drawing commands to render 
+  // graphics on an image. It parses the commands from a string, which may include 
+  // transformations, styles, and primitive shapes such as lines, rectangles, and paths.
+  // A stack of graphic contexts is maintained to handle nested transformations and styles.
+  // The drawing commands may be specified directly in the input string or may reference 
+  // external resources, such as files or previously defined patterns or gradients.
+  // The code handles affine transformations, color, and opacity settings, text annotations,
+  // and other graphical operations. It updates the image's graphics state as specified 
+  // by the commands, applying changes in a manner compliant with SVG standards.
+  // <MASK>
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"end draw-image");
+  /*
+    Relinquish resources.
+  */
+  token=DestroyString(token);
+  if (primitive_info != (PrimitiveInfo *) NULL)
+    primitive_info=(PrimitiveInfo *) RelinquishMagickMemory(primitive_info);
+  primitive=DestroyString(primitive);
+  if (stops != (StopInfo *) NULL)
+    stops=(StopInfo *) RelinquishMagickMemory(stops);
+  for ( ; n >= 0; n--)
+    graphic_context[n]=DestroyDrawInfo(graphic_context[n]);
+  graphic_context=(DrawInfo **) RelinquishMagickMemory(graphic_context);
+  if (status == MagickFalse)
+    ThrowBinaryException(DrawError,"NonconformingDrawingPrimitiveDefinition",
+      primitive_name);
+  return(status != 0 ? MagickTrue : MagickFalse);
+}

@@ -4,7 +4,7 @@ static int threedostr_probe(const AVProbeData *p)
         unsigned chunk = AV_RL32(p->buf + i);
         unsigned size  = AV_RB32(p->buf + i + 4);
 
-        // Check the validity of the buffer size.
+        // Check the validity of the buffer.
         // If invalid, return 0 to indicate failure. 
         // Move the index past the header.
         // <MASK>

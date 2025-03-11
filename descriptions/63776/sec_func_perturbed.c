@@ -1,7 +1,7 @@
 int
 decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
                         unsigned num_entities, BITCODE_RL size,
-                        Bit_Chain *restrict bitchain, Dwg_Data *restrict dwg,
+                        Bit_Chain *restrict bit_chain, Dwg_Data *restrict dwg,
                         const EntitySectionIndexR11 entity_section)
 {
   int error = 0;
@@ -43,14 +43,14 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
   }
 
   // report unknown data before entites block
-  if (start != end && real_start > 0 && (BITCODE_RL)bitchain->byte != real_start)
+  if (start != end && real_start > 0 && (BITCODE_RL)bit_chain->byte != real_start)
     {
-      LOG_WARN ("\n@0x%zx => start 0x%x", bitchain->byte, real_start);
-      if ((BITCODE_RL)bitchain->byte < real_start)
+      LOG_WARN ("\n@0x%zx => start 0x%x", bit_chain->byte, real_start);
+      if ((BITCODE_RL)bit_chain->byte < real_start)
         {
-          if (real_start > bitchain->size)
+          if (real_start > bit_chain->size)
             {
-              UNKNOWN_UNTIL (bitchain->size);
+              UNKNOWN_UNTIL (bit_chain->size);
             }
           else
             {
@@ -79,11 +79,11 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
       }
   }
 
-  if (end > start && start == bitchain->byte)
+  if (end > start && start == bit_chain->byte)
     {
-      oldpos = bitchain->byte;
-      bitchain->bit = 0;
-      while (bitchain->byte < oldpos + size)
+      oldpos = bit_chain->byte;
+      bit_chain->bit = 0;
+      while (bit_chain->byte < oldpos + size)
         {
           Dwg_Object *obj;
           Dwg_Object_Type_r11 abstype;
@@ -112,13 +112,13 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
           dwg->num_objects++;
           obj->index = num;
           obj->parent = dwg;
-          obj->address = bitchain->byte;
+          obj->address = bit_chain->byte;
           obj->supertype = DWG_SUPERTYPE_ENTITY;
 
-          LOG_HANDLE ("@offset 0x%zx\n", bitchain->byte - start);
+          LOG_HANDLE ("@offset 0x%zx\n", bit_chain->byte - start);
           PRE (R_2_0b)
           {
-            obj->type = bit_read_RS (bitchain);
+            obj->type = bit_read_RS (bit_chain);
             LOG_TRACE ("type: " FORMAT_RS " [RS]\n", obj->type);
             if (obj->type > 127)
               { // deleted. moved into BLOCK
@@ -132,7 +132,7 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
           }
           else
           {
-            obj->type = bit_read_RC (bitchain);
+            obj->type = bit_read_RC (bit_chain);
             LOG_TRACE ("type: " FORMAT_RCd " [RCd]\n", obj->type);
             if (obj->type > 127)
               { // deleted. moved into BLOCK
@@ -148,49 +148,49 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
           switch (abstype)
             {
             case DWG_TYPE_LINE_r11:
-              error |= dwg_decode_LINE (bitchain, obj);
+              error |= dwg_decode_LINE (bit_chain, obj);
               break;
             case DWG_TYPE_POINT_r11:
-              error |= dwg_decode_POINT (bitchain, obj);
+              error |= dwg_decode_POINT (bit_chain, obj);
               break;
             case DWG_TYPE_CIRCLE_r11:
-              error |= dwg_decode_CIRCLE (bitchain, obj);
+              error |= dwg_decode_CIRCLE (bit_chain, obj);
               break;
             case DWG_TYPE_SHAPE_r11:
-              error |= dwg_decode_SHAPE (bitchain, obj);
+              error |= dwg_decode_SHAPE (bit_chain, obj);
               break;
             case DWG_TYPE_REPEAT_r11:
-              error |= dwg_decode_REPEAT (bitchain, obj);
+              error |= dwg_decode_REPEAT (bit_chain, obj);
               break;
             case DWG_TYPE_ENDREP_r11:
-              error |= dwg_decode_ENDREP (bitchain, obj);
+              error |= dwg_decode_ENDREP (bit_chain, obj);
               break;
             case DWG_TYPE_TEXT_r11:
-              error |= dwg_decode_TEXT (bitchain, obj);
+              error |= dwg_decode_TEXT (bit_chain, obj);
               break;
             case DWG_TYPE_ARC_r11:
-              error |= dwg_decode_ARC (bitchain, obj);
+              error |= dwg_decode_ARC (bit_chain, obj);
               break;
             case DWG_TYPE_TRACE_r11:
-              error |= dwg_decode_TRACE (bitchain, obj);
+              error |= dwg_decode_TRACE (bit_chain, obj);
               break;
             case DWG_TYPE_LOAD_r11:
-              error |= dwg_decode_LOAD (bitchain, obj);
+              error |= dwg_decode_LOAD (bit_chain, obj);
               break;
             case DWG_TYPE_SOLID_r11:
-              error |= dwg_decode_SOLID (bitchain, obj);
+              error |= dwg_decode_SOLID (bit_chain, obj);
               break;
             case DWG_TYPE_BLOCK_r11:
               {
                 BITCODE_RL cur_offset;
                 BITCODE_RL cur_offset_prefix = 0;
-                if (bitchain->version > R_2_22)
+                if (bit_chain->version > R_2_22)
                   cur_offset_prefix += 0x40000000;
                 // search current offset in block_offset_r11 in BLOCK_HEADER's
                 // and set new _hdr
-                cur_offset = (((bitchain->byte - 1) - start) | cur_offset_prefix)
+                cur_offset = (((bit_chain->byte - 1) - start) | cur_offset_prefix)
                              & 0xFFFFFFFF;
-                error |= dwg_decode_BLOCK (bitchain, obj);
+                error |= dwg_decode_BLOCK (bit_chain, obj);
                 if (!_hdr && entity_section == BLOCKS_SECTION_INDEX)
                   {
                     for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
@@ -253,7 +253,7 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
               }
               break;
             case DWG_TYPE_ENDBLK_r11:
-              error |= dwg_decode_ENDBLK (bitchain, obj);
+              error |= dwg_decode_ENDBLK (bit_chain, obj);
               if (_hdr)
                 {
                   hdr = &dwg->object[hdr_index];
@@ -266,19 +266,19 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
               _hdr = NULL;
               break;
             case DWG_TYPE_INSERT_r11:
-              error |= dwg_decode_INSERT (bitchain, obj);
+              error |= dwg_decode_INSERT (bit_chain, obj);
               break;
             case DWG_TYPE_ATTDEF_r11:
-              error |= dwg_decode_ATTDEF (bitchain, obj);
+              error |= dwg_decode_ATTDEF (bit_chain, obj);
               break;
             case DWG_TYPE_ATTRIB_r11:
-              error |= dwg_decode_ATTRIB (bitchain, obj);
+              error |= dwg_decode_ATTRIB (bit_chain, obj);
               break;
             case DWG_TYPE_SEQEND_r11:
-              error |= dwg_decode_SEQEND (bitchain, obj);
+              error |= dwg_decode_SEQEND (bit_chain, obj);
               break;
             case DWG_TYPE_JUMP_r11:
-              error |= dwg_decode_JUMP (bitchain, obj);
+              error |= dwg_decode_JUMP (bit_chain, obj);
               break;
             case DWG_TYPE_POLYLINE_r11:
               { // which polyline
@@ -289,66 +289,66 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
                 BITCODE_RC handling_len;
                 size_t start_byte;
                 LOG_TRACE ("Detect polyline:");
-                start_byte = bitchain->byte;
+                start_byte = bit_chain->byte;
                 LOG_TRACE (" start_byte: %" PRIuSIZE ",", start_byte);
-                flag_r11 = bit_read_RC (bitchain);
+                flag_r11 = bit_read_RC (bit_chain);
                 LOG_TRACE (" flag_r11: 0x%x,", flag_r11);
-                bitchain->byte += 4;
-                opts_r11 = bit_read_RS (bitchain);
+                bit_chain->byte += 4;
+                opts_r11 = bit_read_RS (bit_chain);
                 LOG_TRACE (" opts_r11: 0x%x", opts_r11);
                 if (opts_r11 & OPTS_R11_POLYLINE_HAS_FLAG)
                   {
                     if (flag_r11 & FLAG_R11_HAS_PSPACE)
                       {
-                        extra_r11 = bit_read_RC (bitchain);
+                        extra_r11 = bit_read_RC (bit_chain);
                         LOG_TRACE (", extra_r11: 0x%x", extra_r11);
                       }
                     if (flag_r11 & FLAG_R11_HAS_COLOR)
-                      bitchain->byte += 1;
+                      bit_chain->byte += 1;
                     if (flag_r11 & FLAG_R11_HAS_LTYPE)
                       {
                         PRE (R_11)
                         {
-                          bitchain->byte += 1;
+                          bit_chain->byte += 1;
                         }
-                        else bitchain->byte += 2;
+                        else bit_chain->byte += 2;
                       }
                     if (flag_r11 & FLAG_R11_HAS_THICKNESS)
-                      bitchain->byte += 8;
+                      bit_chain->byte += 8;
                     if (flag_r11 & FLAG_R11_HAS_ELEVATION)
-                      bitchain->byte += 8;
+                      bit_chain->byte += 8;
                     if (extra_r11 & EXTRA_R11_HAS_EED)
                       {
-                        eed_size = bit_read_RS (bitchain);
+                        eed_size = bit_read_RS (bit_chain);
                         LOG_TRACE (", eed_size: %d", eed_size);
-                        bitchain->byte += eed_size;
+                        bit_chain->byte += eed_size;
                       }
                     if (flag_r11 & FLAG_R11_HAS_HANDLING)
                       {
-                        handling_len = bit_read_RC (bitchain);
+                        handling_len = bit_read_RC (bit_chain);
                         LOG_TRACE (", handling_len: %d", handling_len);
-                        bitchain->byte += handling_len;
+                        bit_chain->byte += handling_len;
                       }
                     if (extra_r11 & EXTRA_R11_HAS_VIEWPORT)
-                      bitchain->byte += 2;
-                    pline_flag = bit_read_RC (bitchain);
+                      bit_chain->byte += 2;
+                    pline_flag = bit_read_RC (bit_chain);
                     LOG_TRACE (", pline_flag: 0x%x", pline_flag);
                     LOG_POS;
-                    bitchain->byte = start_byte;
+                    bit_chain->byte = start_byte;
                     if (pline_flag & FLAG_POLYLINE_3D)
-                      error |= dwg_decode_POLYLINE_3D (bitchain, obj);
+                      error |= dwg_decode_POLYLINE_3D (bit_chain, obj);
                     else if (pline_flag & FLAG_POLYLINE_MESH)
-                      error |= dwg_decode_POLYLINE_MESH (bitchain, obj);
+                      error |= dwg_decode_POLYLINE_MESH (bit_chain, obj);
                     else if (pline_flag & FLAG_POLYLINE_PFACE_MESH)
-                      error |= dwg_decode_POLYLINE_PFACE (bitchain, obj);
+                      error |= dwg_decode_POLYLINE_PFACE (bit_chain, obj);
                     else
-                      error |= dwg_decode_POLYLINE_2D (bitchain, obj);
+                      error |= dwg_decode_POLYLINE_2D (bit_chain, obj);
                   }
                 else
                   {
-                    bitchain->byte = start_byte;
+                    bit_chain->byte = start_byte;
                     LOG_TRACE ("\n");
-                    error |= dwg_decode_POLYLINE_2D (bitchain, obj);
+                    error |= dwg_decode_POLYLINE_2D (bit_chain, obj);
                   }
               }
               break;
@@ -362,105 +362,105 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
                 BITCODE_RC vertex_flag;
                 size_t start_byte;
                 LOG_TRACE ("Detect vertex:");
-                start_byte = bitchain->byte;
+                start_byte = bit_chain->byte;
                 LOG_TRACE (" start_byte: %" PRIuSIZE ",", start_byte);
-                flag_r11 = bit_read_RC (bitchain);
+                flag_r11 = bit_read_RC (bit_chain);
                 LOG_TRACE (" flag_r11: 0x%x,", flag_r11);
-                bitchain->byte += 4;
-                opts_r11 = bit_read_RS (bitchain);
+                bit_chain->byte += 4;
+                opts_r11 = bit_read_RS (bit_chain);
                 LOG_TRACE (" opts_r11: 0x%x", opts_r11);
                 if (flag_r11 & FLAG_R11_HAS_COLOR)
-                  bitchain->byte += 1;
+                  bit_chain->byte += 1;
                 if (flag_r11 & FLAG_R11_HAS_LTYPE)
                   {
                     PRE (R_11)
                     {
-                      bitchain->byte += 1;
+                      bit_chain->byte += 1;
                     }
-                    else bitchain->byte += 2;
+                    else bit_chain->byte += 2;
                   }
                 if (flag_r11 & FLAG_R11_HAS_THICKNESS)
-                  bitchain->byte += 8;
+                  bit_chain->byte += 8;
                 if (flag_r11 & FLAG_R11_HAS_ELEVATION)
-                  bitchain->byte += 8;
+                  bit_chain->byte += 8;
                 if (flag_r11 & FLAG_R11_HAS_PSPACE)
                   {
-                    extra_r11 = bit_read_RC (bitchain);
+                    extra_r11 = bit_read_RC (bit_chain);
                     LOG_TRACE (", extra_r11: 0x%x", extra_r11);
                   }
                 if (extra_r11 && extra_r11 & EXTRA_R11_HAS_EED)
                   {
-                    eed_size = bit_read_RS (bitchain);
+                    eed_size = bit_read_RS (bit_chain);
                     LOG_TRACE (", eed_size: %d", eed_size);
-                    bitchain->byte += eed_size;
+                    bit_chain->byte += eed_size;
                   }
                 if (flag_r11 & FLAG_R11_HAS_HANDLING)
                   {
-                    handling_len = bit_read_RC (bitchain);
+                    handling_len = bit_read_RC (bit_chain);
                     LOG_TRACE (", handling_len: %d", handling_len);
-                    bitchain->byte += handling_len;
+                    bit_chain->byte += handling_len;
                   }
                 if (extra_r11 && extra_r11 & EXTRA_R11_HAS_VIEWPORT)
-                  bitchain->byte += 2;
+                  bit_chain->byte += 2;
                 if (!(opts_r11 & OPTS_R11_VERTEX_HAS_NOT_X_Y))
-                  bitchain->byte += 16;
+                  bit_chain->byte += 16;
                 if (opts_r11 & OPTS_R11_VERTEX_HAS_START_WIDTH)
-                  bitchain->byte += 8;
+                  bit_chain->byte += 8;
                 if (opts_r11 & OPTS_R11_VERTEX_HAS_END_WIDTH)
-                  bitchain->byte += 8;
+                  bit_chain->byte += 8;
                 if (opts_r11 & OPTS_R11_VERTEX_HAS_BULGE)
-                  bitchain->byte += 8;
+                  bit_chain->byte += 8;
                 if (opts_r11 & OPTS_R11_VERTEX_HAS_FLAG)
                   {
-                    vertex_flag = bit_read_RC (bitchain);
+                    vertex_flag = bit_read_RC (bit_chain);
                     LOG_TRACE (", vertex_flag: 0x%x", vertex_flag);
                     LOG_POS;
-                    bitchain->byte = start_byte;
+                    bit_chain->byte = start_byte;
                     if (vertex_flag & FLAG_VERTEX_MESH
                         && vertex_flag & FLAG_VERTEX_PFACE_MESH)
-                      error |= dwg_decode_VERTEX_PFACE (bitchain, obj);
+                      error |= dwg_decode_VERTEX_PFACE (bit_chain, obj);
                     else if (vertex_flag & FLAG_VERTEX_MESH)
-                      error |= dwg_decode_VERTEX_MESH (bitchain, obj);
+                      error |= dwg_decode_VERTEX_MESH (bit_chain, obj);
                     else if (vertex_flag & FLAG_VERTEX_PFACE_MESH)
-                      error |= dwg_decode_VERTEX_PFACE_FACE (bitchain, obj);
+                      error |= dwg_decode_VERTEX_PFACE_FACE (bit_chain, obj);
                     else if (vertex_flag & FLAG_VERTEX_3D)
-                      error |= dwg_decode_VERTEX_3D (bitchain, obj);
+                      error |= dwg_decode_VERTEX_3D (bit_chain, obj);
                     else
-                      error |= dwg_decode_VERTEX_2D (bitchain, obj);
+                      error |= dwg_decode_VERTEX_2D (bit_chain, obj);
                   }
                 else
                   {
-                    bitchain->byte = start_byte;
+                    bit_chain->byte = start_byte;
                     LOG_TRACE ("\n");
-                    error |= dwg_decode_VERTEX_2D (bitchain, obj);
+                    error |= dwg_decode_VERTEX_2D (bit_chain, obj);
                   }
               }
               break;
             case DWG_TYPE_3DLINE_r11:
-              error |= dwg_decode__3DLINE (bitchain, obj);
+              error |= dwg_decode__3DLINE (bit_chain, obj);
               break;
             case DWG_TYPE_3DFACE_r11:
-              error |= dwg_decode__3DFACE (bitchain, obj);
+              error |= dwg_decode__3DFACE (bit_chain, obj);
               break;
             case DWG_TYPE_DIMENSION_r11:
-              error |= decode_preR13_DIMENSION (bitchain, obj);
+              error |= decode_preR13_DIMENSION (bit_chain, obj);
               break;
             case DWG_TYPE_VIEWPORT_r11:
-              error |= dwg_decode_VIEWPORT (bitchain, obj);
+              error |= dwg_decode_VIEWPORT (bit_chain, obj);
               break;
             default:
-              bitchain->byte--;
+              bit_chain->byte--;
               DEBUG_HERE;
               LOG_ERROR ("Unknown object type %d", obj->type);
               error |= DWG_ERR_SECTIONNOTFOUND;
-              bitchain->byte++;
+              bit_chain->byte++;
               break;
             }
 
-          assert (!bitchain->bit);
+          assert (!bit_chain->bit);
           PRE (R_2_0b)
           {
-            obj->size = (bitchain->byte - oldpos) & 0xFFFFFFFF;
+            obj->size = (bit_chain->byte - oldpos) & 0xFFFFFFFF;
             if (num + 1 > dwg->num_objects)
               break;
           }
@@ -470,29 +470,29 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
               {
                 PRE (R_11) // no crc16
                 {
-                  if (obj->size > bitchain->size - oldpos ||
-                      obj->size + obj->address > bitchain->byte)
+                  if (obj->size > bit_chain->size - oldpos ||
+                      obj->size + obj->address > bit_chain->byte)
                     {
                       LOG_ERROR ("Invalid obj->size " FORMAT_RL " changed to %" PRIuSIZE,
-                                 obj->size, bitchain->byte - oldpos);
+                                 obj->size, bit_chain->byte - oldpos);
                       error |= DWG_ERR_VALUEOUTOFBOUNDS;
-                      obj->size = (bitchain->byte - oldpos) & 0xFFFFFFFF;
+                      obj->size = (bit_chain->byte - oldpos) & 0xFFFFFFFF;
                     }
-                  else if (obj->address + obj->size != bitchain->byte)
+                  else if (obj->address + obj->size != bit_chain->byte)
                     {
                       LOG_ERROR ("offset %ld",
-                                 (long)(obj->address + obj->size - bitchain->byte));
-                      if (obj->address + obj->size > bitchain->byte)
+                                 (long)(obj->address + obj->size - bit_chain->byte));
+                      if (obj->address + obj->size > bit_chain->byte)
                         {
                           BITCODE_RL offset
                               = (BITCODE_RL)(obj->address + obj->size
-                                             - bitchain->byte);
+                                             - bit_chain->byte);
                           obj->num_unknown_rest = 8 * offset;
                           obj->unknown_rest = (BITCODE_TF)calloc (offset, 1);
                           if (obj->unknown_rest)
                             {
                               memcpy (obj->unknown_rest,
-                                      &bitchain->chain[bitchain->byte], offset);
+                                      &bit_chain->chain[bit_chain->byte], offset);
                               LOG_TRACE_TF (obj->unknown_rest, offset);
                             }
                           else
@@ -502,30 +502,30 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
                             }
                         }
                       if (obj->size > 2)
-                        bitchain->byte = obj->address + obj->size;
+                        bit_chain->byte = obj->address + obj->size;
                     }
                 }
                 LATER_VERSIONS
                 {
-                  if (obj->size > bitchain->size - oldpos ||
-                      obj->size + obj->address > bitchain->byte)
+                  if (obj->size > bit_chain->size - oldpos ||
+                      obj->size + obj->address > bit_chain->byte)
                     {
                       LOG_ERROR ("Invalid obj->size " FORMAT_RL " changed to %" PRIuSIZE,
-                                 obj->size, bitchain->byte + 2 - oldpos);
+                                 obj->size, bit_chain->byte + 2 - oldpos);
                       error |= DWG_ERR_VALUEOUTOFBOUNDS;
-                      obj->size = ((bitchain->byte + 2) - oldpos) & 0xFFFFFFFF;
+                      obj->size = ((bit_chain->byte + 2) - oldpos) & 0xFFFFFFFF;
                     }
-                  else if (obj->address + obj->size != bitchain->byte + 2)
+                  else if (obj->address + obj->size != bit_chain->byte + 2)
                     {
                       LOG_ERROR ("offset %ld", (long)(obj->address + obj->size
-                                                      - (bitchain->byte + 2)));
-                      if (obj->address + obj->size > bitchain->byte + 2)
+                                                      - (bit_chain->byte + 2)));
+                      if (obj->address + obj->size > bit_chain->byte + 2)
                         {
                           BITCODE_RL offset
                               = (BITCODE_RL)(obj->address + obj->size
-                                             - (bitchain->byte + 2));
+                                             - (bit_chain->byte + 2));
                           obj->num_unknown_rest = 8 * offset;
-                          obj->unknown_rest = bit_read_TF (bitchain, offset);
+                          obj->unknown_rest = bit_read_TF (bit_chain, offset);
                           if (obj->unknown_rest)
                             {
                               LOG_TRACE_TF (obj->unknown_rest, offset);
@@ -537,9 +537,9 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
                             }
                         }
                       if (obj->address + obj->size >= start && start > 60)
-                        bitchain->byte = obj->address + obj->size - 2;
+                        bit_chain->byte = obj->address + obj->size - 2;
                     }
-                  if (!bit_check_CRC (bitchain, obj->address, 0xC0C1))
+                  if (!bit_check_CRC (bit_chain, obj->address, 0xC0C1))
                     error |= DWG_ERR_WRONGCRC;
                 }
               }
@@ -568,19 +568,19 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
                          ARGS_HREF11 (obj->tio.entity->ownerhandle));
             }
           num++;
-          if (bitchain->byte < oldpos + size)
+          if (bit_chain->byte < oldpos + size)
             LOG_TRACE ("\n");
-          if (bitchain->byte >= bitchain->size && (BITCODE_RL)bitchain->byte != end)
+          if (bit_chain->byte >= bit_chain->size && (BITCODE_RL)bit_chain->byte != end)
             {
               LOG_ERROR ("Too many entities, buffer overflow %" PRIuSIZE
                          " >= %" PRIuSIZE,
-                         bitchain->byte, bitchain->size);
+                         bit_chain->byte, bit_chain->size);
               return DWG_ERR_INVALIDDWG;
             }
         }
-      if ((BITCODE_RL)bitchain->byte != end)
+      if ((BITCODE_RL)bit_chain->byte != end)
         {
-          LOG_ERROR ("@0x%zx => end 0x%x", bitchain->byte, end);
+          LOG_ERROR ("@0x%zx => end 0x%x", bit_chain->byte, end);
           return DWG_ERR_INVALIDDWG;
         }
     }

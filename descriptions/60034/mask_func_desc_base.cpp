@@ -103,7 +103,7 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
         affixed = 1;
         rv = lookup(st.c_str(), i);  // perhaps without prefix
 
-        // Check if the current dictionary entry `rv` is forbidden in compound words
+        // Check if the current dictionary entry is forbidden in compound words
         // by checking for `COMPOUNDFORBIDFLAG`. If it is forbidden and not allowed
         // by the Hungarian movement rule (`hu_mov_rule`), handle the case by either
         // breaking out of a potential infinite loop or continuing the search for
@@ -111,7 +111,7 @@ struct hentry* AffixMgr::compound_check(const std::string& word,
         // compound processing (`simplifiedcpd`).
         // Adjust compound word boundaries if necessary.
         //
-        // Iterate through homonyms of the current entry `rv` to find one with the
+        // Iterate through homonyms of the current entry to find one with the
         // required compound conditions. This includes conditions based on compound
         // flags such as `compoundflag`, `compoundbegin`, `compoundmiddle`, and
         // checks against specific compound pattern conditions (`checkcpdtable`).

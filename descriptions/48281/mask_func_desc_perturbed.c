@@ -1,30 +1,21 @@
-static int speedhq_decode_frame(AVCodecContext *ccodeccontext, AVFrame *frame,
+static int speedhq_decode_frame(AVCodecContext *codec_context, AVFrame *frame,
                                 int *got_frame, AVPacket *avpkt)
 {
-    SHQContext * const s = ccodeccontext->priv_data;
-    const uint8_t *buf   = avpkt->data;
-    int buf_size         = avpkt->size;
-    uint8_t quality;
-    // Initialize variables for processing the second field offset and return value.
-    // Check the buffer size and the width of the video context to ensure they meet requirements.
-    // If the requirements are not met, return an error indicating invalid data.
-    // Extract the quality value from the first byte of the buffer for further processing.
+    // Initialize context and packet data variables for processing the frame.
+    // Validate basic constraints on packet size and codec context width to ensure data integrity.
+    // Extract a quality parameter from the packet data to adjust processing parameters.
+    // Calculate a quantization matrix based on the quality parameter to prepare for further decoding.
     // <MASK>
-    if (quality >= 100) {
-        return AVERROR_INVALIDDATA;
-    }
-
-    compute_quant_matrix(s->quant_matrix, 100 - quality);
 
     second_field_offset = AV_RL24(buf + 1);
     if (second_field_offset >= buf_size - 3) {
         return AVERROR_INVALIDDATA;
     }
 
-    ccodeccontext->coded_width = FFALIGN(ccodeccontext->width, 16);
-    ccodeccontext->coded_height = FFALIGN(ccodeccontext->height, 16);
+    codec_context->coded_width = FFALIGN(codec_context->width, 16);
+    codec_context->coded_height = FFALIGN(codec_context->height, 16);
 
-    if ((ret = ff_get_buffer(ccodeccontext, frame, 0)) < 0) {
+    if ((ret = ff_get_buffer(codec_context, frame, 0)) < 0) {
         return ret;
     }
     frame->key_frame = 1;

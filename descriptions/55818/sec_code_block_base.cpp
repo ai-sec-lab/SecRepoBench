@@ -1,5 +1,4 @@
-{
-  if (utf8) {
+if (utf8) {
     int i;
     for (*cmin = 0, i = 0; (i < cpdmin) && *cmin < len; i++) {
       for ((*cmin)++; *cmin < len && (word[*cmin] & 0xc0) == 0x80; (*cmin)++)
@@ -13,4 +12,3 @@
     *cmin = cpdmin;
     *cmax = len - cpdmin + 1;
   }
-}

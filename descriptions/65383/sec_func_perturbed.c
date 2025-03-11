@@ -1,13 +1,13 @@
 static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
                                       cram_container *c,
-                                      cram_slice *slice, cram_record *cr,
+                                      cram_slice *s, cram_record *cr,
                                       int verbatim_NM, int verbatim_MD,
                                       int NM, kstring_t *MD, int cf_tag,
                                       int no_ref, int *err) {
     char *aux, *orig;
     sam_hrec_rg_t *brg = NULL;
     int aux_size = bam_get_l_aux(b);
-    const char *aux_end = bam_data_end(b);
+    const char *aux_limit = bam_data_end(b);
     cram_block *td_b = c->comp_hdr->TD_blk;
     int TD_blk_size = BLOCK_SIZE(td_b), new;
     char *key;
@@ -33,11 +33,11 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
         aux[aux_size++] = 'C';
         aux[aux_size++] = cf_tag;
         orig = aux;
-        aux_end = aux + aux_size;
+        aux_limit = aux + aux_size;
     }
 
     // Copy aux keys to td_b and aux values to slice aux blocks
-    while (aux_end - aux >= 1 && aux[0] != 0) {
+    while (aux_limit - aux >= 1 && aux[0] != 0) {
         int r;
 
         // Room for code + type + at least 1 byte of data
@@ -49,7 +49,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
             char *rg = &aux[3];
             brg = sam_hrecs_find_rg(fd->header->hrecs, rg);
             if (brg) {
-                while (aux < aux_end && *aux++);
+                while (aux < aux_limit && *aux++);
                 if (CRAM_MAJOR_VERS(fd->version) >= 4)
                     BLOCK_APPEND(td_b, "RG*", 3);
                 continue;
@@ -63,7 +63,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
         if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
             if (cr->len && !no_ref && !(cr->flags & BAM_FUNMAP) && !verbatim_MD) {
                 if (MD && MD->s && strncasecmp(MD->s, aux+3, orig + aux_size - (aux+3)) == 0) {
-                    while (aux < aux_end && *aux++);
+                    while (aux < aux_limit && *aux++);
                     if (CRAM_MAJOR_VERS(fd->version) >= 4)
                         BLOCK_APPEND(td_b, "MD*", 3);
                     continue;
@@ -74,7 +74,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
         // NM:i
         if (aux[0] == 'N' && aux[1] == 'M') {
             if (cr->len && !no_ref && !(cr->flags & BAM_FUNMAP) && !verbatim_NM) {
-                int NM_ = bam_aux2i_end((uint8_t *)aux+2, (uint8_t *)aux_end);
+                int NM_ = bam_aux2i_end((uint8_t *)aux+2, (uint8_t *)aux_limit);
                 if (NM_ == NM) {
                     switch(aux[2]) {
                     case 'A': case 'C': case 'c': aux+=4; break;
@@ -263,7 +263,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
 
         switch(aux[2]) {
         case 'A': case 'C': case 'c':
-            if (aux_end - aux < 3+1)
+            if (aux_limit - aux < 3+1)
                 goto err;
 
             if (!tm->blk) {
@@ -280,7 +280,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
             break;
 
         case 'S': case 's':
-            if (aux_end - aux < 3+2)
+            if (aux_limit - aux < 3+2)
                 goto err;
 
             if (!tm->blk) {
@@ -296,7 +296,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
             break;
 
         case 'I': case 'i': case 'f':
-            if (aux_end - aux < 3+4)
+            if (aux_limit - aux < 3+4)
                 goto err;
 
             if (!tm->blk) {
@@ -312,7 +312,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
             break;
 
         case 'd':
-            if (aux_end - aux < 3+8)
+            if (aux_limit - aux < 3+8)
                 goto err;
 
             if (!tm->blk) {
@@ -328,7 +328,7 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
             break;
 
         case 'Z': case 'H': {
-            if (aux_end - aux < 3)
+            if (aux_limit - aux < 3)
                 goto err;
 
             if (!tm->blk) {
@@ -340,14 +340,14 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
             char *aux_s;
             aux += 3;
             aux_s = aux;
-            while (aux < aux_end && *aux++);
-            if (codec->encode(slice, codec, aux_s, aux - aux_s) < 0)
+            while (aux < aux_limit && *aux++);
+            if (codec->encode(s, codec, aux_s, aux - aux_s) < 0)
                 goto err;
             break;
         }
 
         case 'B': {
-            if (aux_end - aux < 4+4)
+            if (aux_limit - aux < 4+4)
                 goto err;
 
             int type = aux[3], blen;
@@ -389,16 +389,16 @@ static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
             }
 
             blen += 5; // sub-type & length
-            if (aux_end - aux < blen)
+            if (aux_limit - aux < blen)
                 goto err;
 
-            if (codec->encode(slice, codec, aux, blen) < 0)
+            if (codec->encode(s, codec, aux, blen) < 0)
                 goto err;
             aux += blen;
             break;
         }
         default:
-            hts_log_error("Unknown aux type '%c'", aux_end - aux < 2 ? '?' : aux[2]);
+            hts_log_error("Unknown aux type '%c'", aux_limit - aux < 2 ? '?' : aux[2]);
             goto err;
         }
         tm->blk->m = tm->m;

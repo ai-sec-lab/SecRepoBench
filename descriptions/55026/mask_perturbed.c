@@ -138,20 +138,20 @@ int ff_side_data_update_matrix_encoding(AVFrame *frame,
     return 0;
 }
 
-void avcodec_align_dimensions2(AVCodecContext *codeccontext, int *width, int *height,
+void avcodec_align_dimensions2(AVCodecContext *s, int *width, int *height,
                                int linesize_align[AV_NUM_DATA_POINTERS])
 {
     int i;
     int w_align = 1;
-    int h_align = 1;
-    AVPixFmtDescriptor const *desc = av_pix_fmt_desc_get(codeccontext->pix_fmt);
+    int height_align = 1;
+    AVPixFmtDescriptor const *desc = av_pix_fmt_desc_get(s->pix_fmt);
 
     if (desc) {
         w_align = 1 << desc->log2_chroma_w;
-        h_align = 1 << desc->log2_chroma_h;
+        height_align = 1 << desc->log2_chroma_h;
     }
 
-    switch (codeccontext->pix_fmt) {
+    switch (s->pix_fmt) {
     case AV_PIX_FMT_YUV420P:
     case AV_PIX_FMT_YUYV422:
     case AV_PIX_FMT_YVYU422:
@@ -231,98 +231,86 @@ void avcodec_align_dimensions2(AVCodecContext *codeccontext, int *width, int *he
     case AV_PIX_FMT_GBRP9BE:
     case AV_PIX_FMT_GBRP10LE:
     case AV_PIX_FMT_GBRP10BE:
-    case AV_PIX_FMT_GBRP12LE:
-    case AV_PIX_FMT_GBRP12BE:
-    case AV_PIX_FMT_GBRP14LE:
-    case AV_PIX_FMT_GBRP14BE:
-    case AV_PIX_FMT_GBRP16LE:
-    case AV_PIX_FMT_GBRP16BE:
-    case AV_PIX_FMT_GBRAP12LE:
-    case AV_PIX_FMT_GBRAP12BE:
-    case AV_PIX_FMT_GBRAP16LE:
-    case AV_PIX_FMT_GBRAP16BE:
-        w_align = 16; //FIXME assume 16 pixel per macroblock
-        h_align = 16 * 2; // interlaced needs 2 macroblocks height
-        // <MASK>
+    // <MASK>
     case AV_PIX_FMT_YUV411P:
     case AV_PIX_FMT_YUVJ411P:
     case AV_PIX_FMT_UYYVYY411:
         w_align = 32;
-        h_align = 16 * 2;
+        height_align = 16 * 2;
         break;
     case AV_PIX_FMT_YUV410P:
-        if (codeccontext->codec_id == AV_CODEC_ID_SVQ1) {
+        if (s->codec_id == AV_CODEC_ID_SVQ1) {
             w_align = 64;
-            h_align = 64;
+            height_align = 64;
         }
         break;
     case AV_PIX_FMT_RGB555:
-        if (codeccontext->codec_id == AV_CODEC_ID_RPZA) {
+        if (s->codec_id == AV_CODEC_ID_RPZA) {
             w_align = 4;
-            h_align = 4;
+            height_align = 4;
         }
-        if (codeccontext->codec_id == AV_CODEC_ID_INTERPLAY_VIDEO) {
+        if (s->codec_id == AV_CODEC_ID_INTERPLAY_VIDEO) {
             w_align = 8;
-            h_align = 8;
+            height_align = 8;
         }
         break;
     case AV_PIX_FMT_PAL8:
     case AV_PIX_FMT_BGR8:
     case AV_PIX_FMT_RGB8:
-        if (codeccontext->codec_id == AV_CODEC_ID_SMC ||
-            codeccontext->codec_id == AV_CODEC_ID_CINEPAK) {
+        if (s->codec_id == AV_CODEC_ID_SMC ||
+            s->codec_id == AV_CODEC_ID_CINEPAK) {
             w_align = 4;
-            h_align = 4;
+            height_align = 4;
         }
-        if (codeccontext->codec_id == AV_CODEC_ID_JV ||
-            codeccontext->codec_id == AV_CODEC_ID_ARGO ||
-            codeccontext->codec_id == AV_CODEC_ID_INTERPLAY_VIDEO) {
+        if (s->codec_id == AV_CODEC_ID_JV ||
+            s->codec_id == AV_CODEC_ID_ARGO ||
+            s->codec_id == AV_CODEC_ID_INTERPLAY_VIDEO) {
             w_align = 8;
-            h_align = 8;
+            height_align = 8;
         }
-        if (codeccontext->codec_id == AV_CODEC_ID_MJPEG   ||
-            codeccontext->codec_id == AV_CODEC_ID_MJPEGB  ||
-            codeccontext->codec_id == AV_CODEC_ID_LJPEG   ||
-            codeccontext->codec_id == AV_CODEC_ID_SMVJPEG ||
-            codeccontext->codec_id == AV_CODEC_ID_AMV     ||
-            codeccontext->codec_id == AV_CODEC_ID_SP5X    ||
-            codeccontext->codec_id == AV_CODEC_ID_JPEGLS) {
+        if (s->codec_id == AV_CODEC_ID_MJPEG   ||
+            s->codec_id == AV_CODEC_ID_MJPEGB  ||
+            s->codec_id == AV_CODEC_ID_LJPEG   ||
+            s->codec_id == AV_CODEC_ID_SMVJPEG ||
+            s->codec_id == AV_CODEC_ID_AMV     ||
+            s->codec_id == AV_CODEC_ID_SP5X    ||
+            s->codec_id == AV_CODEC_ID_JPEGLS) {
             w_align =   8;
-            h_align = 2*8;
+            height_align = 2*8;
         }
         break;
     case AV_PIX_FMT_BGR24:
-        if ((codeccontext->codec_id == AV_CODEC_ID_MSZH) ||
-            (codeccontext->codec_id == AV_CODEC_ID_ZLIB)) {
+        if ((s->codec_id == AV_CODEC_ID_MSZH) ||
+            (s->codec_id == AV_CODEC_ID_ZLIB)) {
             w_align = 4;
-            h_align = 4;
+            height_align = 4;
         }
         break;
     case AV_PIX_FMT_RGB24:
-        if (codeccontext->codec_id == AV_CODEC_ID_CINEPAK) {
+        if (s->codec_id == AV_CODEC_ID_CINEPAK) {
             w_align = 4;
-            h_align = 4;
+            height_align = 4;
         }
         break;
     case AV_PIX_FMT_BGR0:
-        if (codeccontext->codec_id == AV_CODEC_ID_ARGO) {
+        if (s->codec_id == AV_CODEC_ID_ARGO) {
             w_align = 8;
-            h_align = 8;
+            height_align = 8;
         }
         break;
     default:
         break;
     }
 
-    if (codeccontext->codec_id == AV_CODEC_ID_IFF_ILBM) {
+    if (s->codec_id == AV_CODEC_ID_IFF_ILBM) {
         w_align = FFMAX(w_align, 8);
     }
 
     *width  = FFALIGN(*width, w_align);
-    *height = FFALIGN(*height, h_align);
-    if (codeccontext->codec_id == AV_CODEC_ID_H264 || codeccontext->lowres ||
-        codeccontext->codec_id == AV_CODEC_ID_VP5  || codeccontext->codec_id == AV_CODEC_ID_VP6 ||
-        codeccontext->codec_id == AV_CODEC_ID_VP6F || codeccontext->codec_id == AV_CODEC_ID_VP6A
+    *height = FFALIGN(*height, height_align);
+    if (s->codec_id == AV_CODEC_ID_H264 || s->lowres ||
+        s->codec_id == AV_CODEC_ID_VP5  || s->codec_id == AV_CODEC_ID_VP6 ||
+        s->codec_id == AV_CODEC_ID_VP6F || s->codec_id == AV_CODEC_ID_VP6A
     ) {
         // some of the optimized chroma MC reads one line too much
         // which is also done in mpeg decoders with lowres > 0

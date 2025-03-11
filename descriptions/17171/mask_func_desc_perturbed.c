@@ -64,22 +64,13 @@ exsltCryptoRc4DecryptFunction (xmlXPathParserContextPtr parsercontext, int nargs
 
 /* decrypt the binary blob */
     ret = xmlMallocAtomic (ret_len + 1);
-    if (ret == NULL) {
-	xsltTransformError(tctxt, NULL, tctxt->inst,
-	    "exsltCryptoRc4EncryptFunction: Failed to allocate result\n");
-	tctxt->state = XSLT_STATE_STOPPED;
-	xmlXPathReturnEmptyString (parsercontext);
-	goto done;
-    }
-    PLATFORM_RC4_DECRYPT (parsercontext, padkey, bin, ret_len, ret, ret_len);
-    ret[ret_len] = 0;
-
-    // return the decrypted string
+    // Decrypt the binary data using the RC4 algorithm with the provided padded key.
+    // Allocate memory for the decrypted result and handle errors if allocation fails.
+    // Perform the decryption and null-terminate the resulting string.
+    // Validate the decrypted result if necessary, handling any errors appropriately.
+    // Return the decrypted string to the caller.
+    // Ensure all allocated resources are freed before exiting the function.
     // <MASK>
-
-done:
-    if (key != NULL)
-	xmlFree (key);
     if (str != NULL)
 	xmlFree (str);
     if (padkey != NULL)

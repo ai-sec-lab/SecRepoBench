@@ -1,3 +1,7 @@
+cmsUInt32Number nEntries;
+
+    _cmsAssert(Tables != NULL);
+
     nEntries = Tables->TheCurves[0]->nEntries;
 
     for (index=0; index < Tables ->nCurves; index++) {
@@ -8,3 +12,4 @@
             if (!_cmsWriteUInt16Number(io, val)) return FALSE;
         }
     }
+    return TRUE;

@@ -1,14 +1,14 @@
-if (currentpos == ue)
+if (json_cursor == ue)
 			goto out;
-		switch (*currentpos++) {
+		switch (*json_cursor++) {
 		case ',':
 			continue;
 		case '}': /* { */
-			*ucp = currentpos;
-			DPRINTF("Good object: ", currentpos, *ucp);
+			*ucp = json_cursor;
+			DPRINTF("Good object: ", json_cursor, *ucp);
 			return 1;
 		default:
-			*ucp = currentpos - 1;
-			DPRINTF("not more", currentpos, *ucp);
+			*ucp = json_cursor - 1;
+			DPRINTF("not more", json_cursor, *ucp);
 			goto out;
 		}

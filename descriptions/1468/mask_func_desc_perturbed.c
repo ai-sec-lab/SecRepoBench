@@ -28,12 +28,7 @@ static int vlc_decode_block(MimicContext *ctx, int num_coeffs, int qscale)
         magnitude = get_bits(&ctx->gb, num_bits);
 
         // Calculate the coefficient using a lookup table and adjust it based on
-        // the position within the block and a quality scale. The lookup table 
-        // `vlcdec_lookup` provides values for different bit lengths and decoded 
-        // values. For the first three positions, the coefficient is multiplied by 16.
-        // For other positions, the coefficient is scaled by `qscale` and divided by 
-        // 1001 to account for differences in FFmpeg's inverse discrete cosine 
-        // transform (IDCT) behavior compared to the original implementation.
+        // the position within the block and a quality scale.
         // <MASK>
 
         block[ctx->scantable.permutated[pos]] = coeff;

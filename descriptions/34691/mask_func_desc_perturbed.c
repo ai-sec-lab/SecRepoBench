@@ -11,10 +11,7 @@ mrb_ary_shift_m(mrb_state *mrbstateptr, mrb_value self)
   }
   // This section implements the functionality for shifting elements from an array,
   // either by removing a single element (default behavior) or a specified number
-  // of elements when provided with an integer argument. It checks the number of
-  // arguments passed and determines if the operation is a single element shift or
-  // a multiple shift. The method ensures that shared arrays are handled
-  // correctly by adjusting the pointer and length of the underlying storage.
+  // of elements when provided with an integer argument.
   // <MASK>
   if (len > ARY_SHIFT_SHARED_MIN) {
     ary_make_shared(mrbstateptr, a);

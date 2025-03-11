@@ -1,5 +1,4 @@
-{
-  int i = 0;
+int i = 0;
 
   while(i < len - 3) {
     if((buffer[i] == 'x')
@@ -13,4 +12,3 @@
 
   // not a punycode string
   return 0;
-}
