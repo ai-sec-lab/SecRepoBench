@@ -85,44 +85,10 @@ static double FxGetSymbol(FxInfo *fx_info,const PixelChannel pixchannel,
         }
       if ((*p == 'p') && (isalpha((int) ((unsigned char) *(p+1))) == 0))
         {
-          p++;
-          if (*p == '{')
-            {
-              // Extract a subexpression enclosed in curly braces '{}' from the input expression.
-              // Increment the level counter when encountering an opening brace '{' and decrement it for a closing brace '}'.
-              // Continue until the matching closing brace for the starting opening brace is found.
-              // Evaluate the subexpression using FxEvaluateSubexpression and assign its result to point.x and point.y.
-              // Update the expression pointer 'p' to continue processing the rest of the expression.
-              // <MASK>
-            }
-          else
-            if (*p == '[')
-              {
-                level++;
-                q=subexpression;
-                for (p++; *p != '\0'; )
-                {
-                  if (*p == '[')
-                    level++;
-                  else
-                    if (*p == ']')
-                      {
-                        level--;
-                        if (level == 0)
-                          break;
-                      }
-                  *q++=(*p++);
-                }
-                *q='\0';
-                alpha=FxEvaluateSubexpression(fx_info,pixchannel,x,y,subexpression,
-                  &depth,&beta,exception);
-                point.x+=alpha;
-                point.y+=beta;
-                if (*p != '\0')
-                  p++;
-              }
-          if (*p == '.')
-            p++;
+          // Extract a subexpression enclosed in curly braces '{}' or square brackets '[]' from the input expression.
+          // Evaluate the subexpression using FxEvaluateSubexpression and assign its result to point.x and point.y.
+          // Update the expression pointer 'p' to continue processing the rest of the expression.
+          // <MASK>
         }
     }
   length=GetImageListLength(fx_info->images);

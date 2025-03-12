@@ -1,4 +1,19 @@
-if (image == (Image *) NULL)
+double
+            value;
+
+          FxInfo
+            *fx_info;
+
+          MagickStatusType
+            status;
+
+          PixelInfo
+            pixel;
+
+          /*
+            Pixel - color value calculator.
+          */
+          if (image == (Image *) NULL)
             {
               (void) ThrowMagickException(exception,GetMagickModule(),
                 OptionWarning,"NoImageForProperty","\"%%[%s]\"",pattern);
@@ -17,3 +32,24 @@ if (image == (Image *) NULL)
           status&=FxEvaluateChannelExpression(fx_info,BluePixelChannel,0,0,
             &value,exception);
           pixel.blue=(double) QuantumRange*value;
+          if (image->colorspace == CMYKColorspace)
+            {
+              status&=FxEvaluateChannelExpression(fx_info,BlackPixelChannel,0,0,
+                &value,exception);
+              pixel.black=(double) QuantumRange*value;
+            }
+          status&=FxEvaluateChannelExpression(fx_info,AlphaPixelChannel,0,0,
+            &value,exception);
+          pixel.alpha=(double) QuantumRange*value;
+          fx_info=DestroyFxInfo(fx_info);
+          if (status != MagickFalse)
+            {
+              char
+                hex[MagickPathExtent],
+                name[MagickPathExtent];
+
+              (void) QueryColorname(image,&pixel,SVGCompliance,name,exception);
+              GetColorTuple(&pixel,MagickTrue,hex);
+              AppendString2Text(hex+1);
+            }
+          continue;
