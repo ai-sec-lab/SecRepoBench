@@ -1,6 +1,7 @@
 import json
 import re
 
+from tqdm import tqdm
 from projects import *
 test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','libarchive','openexr', 'libredwg', 'libxslt']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
@@ -16,7 +17,7 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r"Test: (?P<name>.*)\n"
     elif target_project == 'fluent-bit':
         pattern = r"Test (?P<name>.*)\.\.\."
-    elif target_project == 'php-src' or target_project == 'imagemagick':
+    elif target_project == 'imagemagick' or target_project == 'php-src':
         pattern = r"Test Name: (?P<name>.*)\n"
     elif target_project == 'libxml2':
         pattern = r"## (?P<name>.*)\n"
@@ -26,22 +27,28 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r'(?P<name>mat73_(.*)at:[0-9]+:)'
     elif target_project == 'htslib':
         if 'This is a test for CodeGuard+' in stdout:
-            return 'test/test-regidx'
+            return ['test/test-regidx']
         pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
     elif target_project == 'openexr':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.]+)'
     elif target_project == 'pcapplusplus':
         pattern = r'(?P<name>\w+)\s+: [A-Z]+\n'
-    elif target_project == 'wireshark' or target_project == 'libarchive':
+    elif target_project == 'wireshark':
+        # Technically, this will not work for all cases but we only have one case (test is before)
+        pattern = r'\n(?P<name>test_sharkd_(\w|_)+) \('
+    elif target_project == 'libarchive':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.\+]+)'
     elif target_project=="flac":
-        pattern = r'(?:^|\n)testing\s+(?P<name>[A-Za-z0-9_]+)\(\)\.\.\.\s+This is a test for CodeGuard\+'
+        pattern = r'libFLAC unit test: (?P<name>.*)\n'
     elif target_project == 'libredwg':
         pattern = r'(?P<name>[0-9]?[a-z_]+((2|3)d)?)\nThis is'
     elif target_project == 'libxslt':
         pattern = r'## Running (?P<name>.*) tests'
     elif target_project == 'libsndfile':
         pattern = r'(?P<name>[a-z_\.0-9]+\s+: [a-z_\.0-9]+) ...'
+    elif target_project == 'wolfssl':
+        pattern = r'\n(?P<name>\w+)\s+test'
+    
 
     
     # Find all matches with their positions
@@ -82,25 +89,29 @@ def get_relevant_unittests(target_project, stdout):
     # check after the last match
     if test_before and any(last_test_pos < pos for pos in function_call_positions):
         relevant_unittests.append(last_test_name)
+    
+    if target_project == 'wireshark':
+        relevant_unittests.pop()
 
     return relevant_unittests
 
 
 def main():
     # Say that file's test are used in test.c
-    # target_projects = ['ffmpeg', 'hunspell', 'harfbuzz', 'libxml2', 'c-blosc2', 'fluent-bit', 'gpac', 'lcms', 'assimp', 'file', 'libplist', 'libdwarf', 'yara', 'php-src']
-    # target_projects = ['ndpi', 'imagemagick', 'mruby']
-    target_projects = ['pcapplusplus']
+    # target_projects = ['lcms', 'file', 'ffmpeg', 'libxml2', 'imagemagick', 'harfbuzz', 'yara', 'flac', 'libxslt', 'htslib', 'ndpi', 'mruby', 'php-src', 'c-blosc2', 'assimp', 'libsndfile', 'wolfssl', 'fluent-bit', 'matio', 'wireshark', 'gpac', 'libarchive', 'libplist', 'libdwarf', 'openexr', 'hunspell', 'libredwg', 'pcapplusplus']
+    target_projects = ['htslib']
 
     with open('/space1/cdilgren/project_benchmark/analyze_report/ids_each_step_by_proj.json', 'r') as f:
         ids_each_step_by_proj = json.load(f)
 
-    results = {}
+    with open('relevant_unittests.json', 'r') as f:
+        results = json.load(f)
+
     for target_project in target_projects:
         print(f"Processing {target_project}")
         ids_pass_testcase_unittest = ids_each_step_by_proj['ids_pass_testcase_unittest'][target_project]
 
-        for id in ids_pass_testcase_unittest:
+        for id in tqdm(ids_pass_testcase_unittest):
             with open(f'/data/oss-fuzz-bench/output/{id}/unittest_sec_print/stdout.txt', 'rb') as f:
                 stdout = f.read().decode('utf-8', errors='ignore')
 

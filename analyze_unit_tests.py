@@ -1,36 +1,72 @@
+from collections import defaultdict
 import json
 import subprocess
 import re
+import csv
+import random
+from tqdm import tqdm
 
-
-with open('relevant_unittests.json', 'r') as f:
-    relevant_unittests = json.load(f)
+random.seed(57)
 
 with open('filter_logs/cases.json', 'r') as f:
     cases = json.load(f)
 
+with open('relevant_unittests.json', 'r') as f:
+    relevant_unittests = json.load(f)
+    one_test_samples = [sample_id for sample_id in relevant_unittests if len(relevant_unittests[sample_id]['relevant_unittests']) == 1]
+    # choose 2 random samples for each project
+    seen_set = defaultdict(int)
+    random_sample = []
+    all_samples = [sample_id for sample_id in relevant_unittests]
+    random.shuffle(all_samples)
+    for sample_id in all_samples:
+        project_name = cases[sample_id]['project_name']
+        if seen_set[project_name] < 2:
+            random_sample.append(sample_id)
+            seen_set[project_name] += 1
+    # merge one_test_samples and random_sample
+    relevant_unittests = {sample_id: relevant_unittests[sample_id] for sample_id in one_test_samples + random_sample}
+
+
 def execute_command(command, sample_id):
-    return subprocess.run(['docker', 'run', '--rm', '-it', f'n132/arvo:{sample_id}-fix', 'sh', '-c', command], stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
+    return subprocess.run(['docker', 'run', '--rm', f'n132/arvo:{sample_id}-fix', 'sh', '-c', command], stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
 
 def get_github_base(sample_id):
     with open(f'ARVO-Meta/meta/{sample_id}.json', 'r') as f:
         meta = json.load(f)
     return meta['repo_addr']
 
+def get_comment(sample_id):
+    project_name = cases[sample_id]['project_name']
+    if project_name == 'ffmpeg':
+        return f'Actual testing code located in unknown file'
+    elif project_name == 'hunspell':
+        return f'Actual testing code located in tests/test.sh'
+    elif project_name == 'file':
+        return f'Actual testing code located in test.c'
+    elif project_name == 'libdwarf':
+        return f'Arguments to the test file are located in test/CMakeLists.txt'
+    elif project_name == 'ndpi':
+        return f'Actual testing code located in tests/do.sh'
+    elif project_name == 'libxslt':
+        return f'Links to a directory of relevant tests'
+    else:
+        return ""
+
 def find_github_url(test_name, sample_id):
     project_name = cases[sample_id]['project_name']
     commit_hash = cases[sample_id]['fixing_commit']
     github_base = get_github_base(sample_id)
     line_number = 0
-    FIND_COMMAND = 'find . -wholename "*{test_name}*"'
-
+    FIND_COMMAND = f'find . -wholename "*{test_name}*"'
 
     if project_name == 'ffmpeg':
         # Actual testing code located in unknown file
         command = FIND_COMMAND
-        file_name = execute_command(command, sample_id).split('\n')[0]    
+        output = execute_command(command, sample_id) 
+        file_name = output.split('\n')[0]
     elif project_name == 'hunspell':
-        # Tests based on dictionary files if words are spelled correctly
+        # Actual testing code located in test.sh
         file_name = f'tests/{test_name}.dic'
     elif project_name == 'c-blosc2':
         if test_name.endswith('0_1') or test_name.endswith('1_1') or test_name.endswith('2_1'):
@@ -41,6 +77,9 @@ def find_github_url(test_name, sample_id):
         elif test_name.startswith('test_compat'):
             test_name = test_name[11:]
             file_name = f'compat/{test_name}'
+        elif 'lizard' in test_name:
+            # can't get line number
+            file_name = 'bench/CMakelists.txt'
         else:
             file_name = f"tests/{test_name}.c"
     elif project_name == 'gpac':
@@ -78,12 +117,12 @@ def find_github_url(test_name, sample_id):
         command = f'grep -n "{new_test_name}" {file_name}'
         output = execute_command(command, sample_id)
         line_number = output.split(':')[0]
-    elif project_name == 'harfbuzz':
+    elif project_name == 'harfbuzz' or project_name == 'imagemagick':
         command = f'find . -wholename "*{test_name}.*"'
-        file_name = execute_command(command, sample_id)
+        file_name = execute_command(command, sample_id).split('\n')[0]
         if file_name == '':
             command = FIND_COMMAND
-            file_name = execute_command(command, sample_id)
+            file_name = execute_command(command, sample_id).split('\n')[0]
     elif project_name == 'fluent-bit':
         command = f'grep -r "\\"{test_name}\\"" .'
         output = execute_command(command, sample_id)
@@ -104,16 +143,113 @@ def find_github_url(test_name, sample_id):
     elif project_name == 'yara':
         file_name = f'tests/{test_name}.c'
     elif project_name == 'libxml2':
-        command = f'grep -r "{test_name}" . -A 1 --include=*.c' 
-        output = execute_command(command, sample_id).split('\n')[1]
-        file_name = output.split('-')[0]
-        function_name = output.split('-')[1].split(',')[0].strip()
-        command = f'grep -n "{function_name}(" {file_name}'
-        output = execute_command(command, sample_id)
-        line_number = output.split(':')[0]
+        # need more reliable method
+        if 'fuzzer' in test_name:
+            file_name = 'fuzz/testFuzzer.c'
+        elif 'examples regression' in test_name:
+            file_name = 'doc/examples/Makefile.am'
+            line_number = 96
+        else:
+            command = f'grep -r "{test_name}" . -A 1 --include=*.c ' 
+            output = execute_command(command, sample_id).split('\n')[1]
+            file_name = output.split('-')[0]
+            function_name = output.split('-')[1].split(',')[0].strip()
+            command = f'grep -n "{function_name}(" {file_name}'
+            output = execute_command(command, sample_id)
+            line_number = output.split(':')[0]
     elif project_name == 'php-src':
         command = f"find . -wholename '*/{test_name}.phpt'"
-        file_name = execute_command(command, sample_id)
+        possible_names = execute_command(command, sample_id)
+        if type(possible_names) == str:
+            file_name = possible_names
+        else:
+            with open(f'/data/oss-fuzz-bench/output/{sample_id}/unittest_sec_print/stdout.txt', 'rb') as f:
+                stdout = f.read().decode('utf-8', errors='ignore')
+            pattern = f"Test Name: {test_name}\n"
+            # get the line number of the test
+            line = stdout.split(pattern)[1].split('\n')[4]
+            print(line)
+            exit()
+    elif project_name == 'ndpi':
+        file_name = f'tests/pcap/{test_name}'
+    elif project_name == 'mruby':
+        if test_name.startswith('Direct superclass of'):
+            command = f'grep --include=*.rb -r "Direct superclass of" .'
+        else:
+            test_name = re.escape(test_name.split(" [1")[0]).replace('`', '\\`').replace('"', '\\"')
+            command = f'grep --include=*.rb -r -E "[\\\'\\\"]{test_name}[\\\'\\\"]" .'
+        output = execute_command(command, sample_id)
+        if output == '':
+            command = f'grep -r -E "[\\\'\\\"]{test_name}[\\\'\\\"]" .'
+            output = execute_command(command, sample_id)
+        file_name = output.split(':')[0]
+        command = f'grep -n -E "[\\\'\\\"]{test_name}[\\\'\\\"]" {file_name}'
+        output = execute_command(command, sample_id)
+        line_number = output.split(':')[0]
+    elif project_name == 'htslib':
+        file_name = 'test/test-regidx.c'
+    elif project_name == 'matio':
+        split_name = test_name.split(':')
+        file_name = f'test/tests/{split_name[0]}'
+        line_number = split_name[1]
+    elif project_name == 'openexr':
+        test_name = test_name.split('.')[1]
+        command = f'grep --include=*.cpp -r "{test_name} (" .'
+        output = execute_command(command, sample_id)
+        file_name = output.split(':')[0]
+        command = f'grep -n "{test_name} (" {file_name}'
+        output = execute_command(command, sample_id)
+        line_number = output.split(':')[0]
+    elif project_name == 'libarchive':
+        test_name = test_name[11:]
+        command = f'grep --include=*.c -r "{test_name}" .'
+        output = execute_command(command, sample_id)
+        file_name = output.split(':')[0]
+        command = f'grep -n "{test_name}" {file_name}'
+        output = execute_command(command, sample_id)
+        line_number = output.split(':')[0]
+    elif project_name == 'libredwg':
+        file_name = f'test/unit-testing/{test_name}.c'
+    elif project_name == 'pcapplusplus':
+        command = f'grep -r "{test_name}" Tests/Packet++Test/Tests/'
+        output = execute_command(command, sample_id)
+        file_name = output.split(':')[0]
+        command = f'grep -n "{test_name}" {file_name}'
+        output = execute_command(command, sample_id)
+        line_number = output.split(':')[0]
+    elif project_name == 'libxslt':
+        test_name = '/'.join(test_name.split(' '))
+        file_name = f'tests/{test_name}'
+    elif project_name == 'libsndfile':
+        overall_test, sub_test = test_name.split(':')
+        overall_test = overall_test.strip()
+        sub_test = sub_test.strip().replace('.', '\\.')
+        if '_' in sub_test:
+            sub_test = '_'.join(sub_test.split('_')[1:])
+        command = f'grep -r -E \'{overall_test}\\s+\\("{sub_test}\' .'
+        output = execute_command(command, sample_id)
+        file_name = output.split(':')[0]
+        command = f'grep -n -E \'{overall_test}\\s+\\("{sub_test}\' {file_name}'
+        output = execute_command(command, sample_id)
+        line_number = output.split(':')[0]
+    elif project_name == 'wireshark':
+        # temporary fix, only one sample
+        file_name = "test/suite_sharkd.py"
+        line_number = 453
+    elif project_name == 'wolfssl':
+        # temporary fix, only one sample
+        file_name = "wolfcrypt/test/test.c"
+        line_number = 20684
+    elif project_name == 'flac':
+        if 'StreamEncoder' in test_name:
+            file_name = 'src/test_libFLAC++/encoders.cpp'
+            line_number = 196
+        elif 'StreamDecoder' in test_name:
+            file_name = 'src/test_libFLAC++/decoders.cpp'
+            line_number = 440
+        else:
+            file_name = 'src/test_libFLAC++/metadata_object.cpp'
+            line_number = 2069
         
     # if file_name starts with project_name, remove it
     if file_name.startswith('./'):
@@ -132,11 +268,21 @@ def find_github_url(test_name, sample_id):
         return f'{github_base}/blob/{commit_hash}/{file_name}#L{line_number}'
 
 for sample_id in relevant_unittests:
+    print(f'Processing {sample_id}')
     tests = relevant_unittests[sample_id]['relevant_unittests']
+    random.shuffle(tests)
+    if len(tests) > 5:
+        tests = tests[:5]
     
-    print("Sample ID:", sample_id)
+    with open('filter_logs/unit_tests.log', 'a') as f:
+        f.write(f'{sample_id}\n')
     #  docker run --rm -it n132/arvo:13736-vul
-    for test_name in tests:
-        # output = subprocess.run(['docker', 'run', '--rm', '-it', f'n132/arvo:{sample_id}-fix', 'sh', '-c', commands[]], stdout=subprocess.PIPE).stdout.decode('utf-8')
-        print(find_github_url(test_name, sample_id))
-    exit
+    test_urls = []
+    for test_name in tqdm(tests):
+        url = find_github_url(test_name, sample_id)
+        test_urls.append(url)
+    
+    with open('unit_test_urls.csv', 'a') as f:
+        writer = csv.writer(f)
+        project_name = cases[sample_id]['project_name']
+        writer.writerow([sample_id, project_name, get_comment(sample_id), *test_urls])
