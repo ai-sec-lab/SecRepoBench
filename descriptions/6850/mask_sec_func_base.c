@@ -325,43 +325,7 @@ RestoreMSCWarning
         }
       if (LocaleNCompare("hex:",pattern,4) == 0)
         {
-          double
-            value;
-
-          FxInfo
-            *fx_info;
-
-          MagickStatusType
-            status;
-
-          PixelInfo
-            pixel;
-
-          /*
-            Pixel - color value calculator.
-          */
           // <MASK>
-          if (image->colorspace == CMYKColorspace)
-            {
-              status&=FxEvaluateChannelExpression(fx_info,BlackPixelChannel,0,0,
-                &value,exception);
-              pixel.black=(double) QuantumRange*value;
-            }
-          status&=FxEvaluateChannelExpression(fx_info,AlphaPixelChannel,0,0,
-            &value,exception);
-          pixel.alpha=(double) QuantumRange*value;
-          fx_info=DestroyFxInfo(fx_info);
-          if (status != MagickFalse)
-            {
-              char
-                hex[MagickPathExtent],
-                name[MagickPathExtent];
-
-              (void) QueryColorname(image,&pixel,SVGCompliance,name,exception);
-              GetColorTuple(&pixel,MagickTrue,hex);
-              AppendString2Text(hex+1);
-            }
-          continue;
         }
       if (LocaleNCompare("pixel:",pattern,6) == 0)
         {

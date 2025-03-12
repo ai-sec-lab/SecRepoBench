@@ -24,11 +24,7 @@ _dwarf_internal_global_formref_b(Dwarf_Attribute attr,
 
     // Handle DWARF attribute forms that indicate offsets to other entries within
     // the same compilation unit. Specifically, handle DW_FORM_ref1, DW_FORM_ref2,
-    // and DW_FORM_ref4. Extract the offset value from the attribute pointer for
-    // these forms. For DW_FORM_ref1, directly assign the byte value as the offset.
-    // For DW_FORM_ref2 and DW_FORM_ref4, read the unaligned data using their
-    // respective sizes. Use a `goto` statement to jump to the `fixoffset` label
-    // to further process the offset into a global offset.
+    // and DW_FORM_ref4.
     // <MASK>
     case DW_FORM_ref8:
         READ_UNALIGNED_CK(dbg, offset, Dwarf_Unsigned,
