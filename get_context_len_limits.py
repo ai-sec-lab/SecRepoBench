@@ -7,8 +7,38 @@ from constants import *
 from cwe_map import *
 
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from transformers import AutoTokenizer
+
+
+def mistral_tokenize(text):
+    tokenizer = MistralTokenizer.from_file("tekken.json")
+    tokens = tokenizer.instruct_tokenizer.tokenizer.encode(text, bos=True, eos=True)
+    return tokens
+
+
+def gpt_4o_tokenize(text):
+    # Tokenize the content
+    tokenizer = tiktoken.encoding_for_model("gpt-4o")
+    tokens = tokenizer.encode(text)
+    return tokens
+
+
+def deepseek_tokenize(text):
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", trust_remote_code=True)
+    tokens = tokenizer.encode(text)
+    return tokens
+
+
+def llama_tokenize(text):
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", trust_remote_code=True)
+    tokens = tokenizer.encode(text)
+    return tokens
+
+
+def general_tokenizer(tokenizer, text):
+    # tokens = tokenizer.encode(text)
+    tokens = tokenizer.instruct_tokenizer.tokenizer.encode(text, bos=True, eos=True)
+    return tokens
 
 
 def get_c_cpp_file(base_path: str):
@@ -26,9 +56,7 @@ def get_c_cpp_file(base_path: str):
     return content
 
 
-def get_constant_prompt_token_len():
-
-    tokenizer = MistralTokenizer.v3()
+def get_constant_prompt_token_len(tokenizer):
 
     system_prompts = [SYSTEM_PROMPT, SEC_GENERIC_PROMPT]
     prompts = [INFILE_PROMPT.format(context=""),
@@ -43,14 +71,12 @@ def get_constant_prompt_token_len():
 
     system_prompt_token_lens = []
     for system_prompt in system_prompts:
-        completion_request = ChatCompletionRequest(messages=[UserMessage(content=system_prompt)])    
-        tokens = tokenizer.encode_chat_completion(completion_request).tokens
+        tokens = general_tokenizer(tokenizer, system_prompt)
         system_prompt_token_lens.append(len(tokens))
 
     prompts_token_lens = []
     for prompt in prompts:
-        completion_request = ChatCompletionRequest(messages=[UserMessage(content=prompt)])    
-        tokens = tokenizer.encode_chat_completion(completion_request).tokens
+        tokens = general_tokenizer(tokenizer, prompt)
         prompts_token_lens.append(len(tokens))
     
     max_system_prompt_token_lens = max(system_prompt_token_lens)
@@ -61,47 +87,61 @@ def get_constant_prompt_token_len():
     return max_system_prompt_token_lens + max_prompts_token_lens
 
 
-def get_context_len_limit(id, max_prompt_len):
-    tokenizer = MistralTokenizer.v3()
-
+def get_context_len_limit(id, max_prompt_len, context_len_limits, tokenizer, name):
     # get max token len of sec, vul code blocks
     sec_block = get_c_cpp_file(f"descriptions/{id}/sec_code_block_perturbed")
+    sec_tokens = general_tokenizer(tokenizer, sec_block)
+
     vul_block = get_c_cpp_file(f"descriptions/{id}/vul_code_block_perturbed")
-
-    sec_completion_request = ChatCompletionRequest(messages=[UserMessage(content=sec_block)])    
-    sec_tokens = tokenizer.encode_chat_completion(sec_completion_request).tokens
-
-    vul_completion_request = ChatCompletionRequest(messages=[UserMessage(content=vul_block)])    
-    vul_tokens = tokenizer.encode_chat_completion(vul_completion_request).tokens
+    vul_tokens = general_tokenizer(tokenizer, vul_block)
 
     max_block_token_len = max(len(sec_tokens), len(vul_tokens))
 
     # get token len of masked_func + desc
     mask_func_desc_perturbed = get_c_cpp_file(f"descriptions/{id}/mask_func_desc_perturbed")
+    mask_func_desc_perturbed_token_len = len(general_tokenizer(tokenizer, mask_func_desc_perturbed))
 
-    completion_request = ChatCompletionRequest(messages=[UserMessage(content=mask_func_desc_perturbed)])    
-    mask_func_desc_perturbed_token_len = len(tokenizer.encode_chat_completion(completion_request).tokens)
+    # get context len limit, smallest context window of 128k
+    context_len_limit = 128_000 - max_prompt_len - 2 * max_block_token_len - mask_func_desc_perturbed_token_len
 
-    # get context len limit, codestral has smallest context window of 32k
-    context_len_limit = 32000 - max_prompt_len - 2 * max_block_token_len - mask_func_desc_perturbed_token_len
+    # get in file context, which is in file tokens minus target func + desc tokens
+    mask_desc_perturbed = get_c_cpp_file(f"descriptions/{id}/mask_desc_perturbed")
+    mask_desc_perturbed_tokens = general_tokenizer(tokenizer, mask_desc_perturbed)
+    mask_desc_perturbed_token_len = len(mask_desc_perturbed_tokens) - mask_func_desc_perturbed_token_len
 
-    return context_len_limit
+    if mask_desc_perturbed_token_len > context_len_limit:
+        print(f"ID {id} tokenizer {name}: context len {mask_desc_perturbed_token_len}, limit {context_len_limit}")
+
+    context_len_limits[id] = {
+        "max_prompt_len": max_prompt_len,
+        "max_block_token_len": max_block_token_len,
+        "max_block_token_with_SF_len": 2 * max_block_token_len,
+        "mask_func_desc_perturbed_token_len": mask_func_desc_perturbed_token_len,
+        "context_len_limit": context_len_limit
+    }
 
 
 def main():
-    input_dir = 'descriptions'
-
-    max_prompt_len = get_constant_prompt_token_len()
+    # tokenize_func = mistral_tokenize
+    tokenize_funcs_names = [
+        (MistralTokenizer.from_file("tekken.json"), 'mistral'),
+        # (tiktoken.encoding_for_model("gpt-4o"), 'gpt4o'),
+        # (AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", trust_remote_code=True), 'deepseek'),
+        # (AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", trust_remote_code=True), 'llama')
+    ]
 
     with open('ids.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
 
     context_len_limits = {}
-    for id in tqdm(ids):
-        len_limit = get_context_len_limit(id, max_prompt_len)
-        context_len_limits[id] = len_limit
+    for id in ids:
+        # print(id)
+        for tokenizer, name in tokenize_funcs_names:
+            # print(name)
+            max_prompt_len = get_constant_prompt_token_len(tokenizer)
+            get_context_len_limit(id, max_prompt_len, context_len_limits, tokenizer, name)
     
-    context_len_limits = dict(sorted(context_len_limits.items(), key=lambda item: item[1]))
+    context_len_limits = dict(sorted(context_len_limits.items(), key=lambda item: item[1]["context_len_limit"]))
     with open("context_len_limits.json", 'w') as f:
         json.dump(context_len_limits, f, indent=4)
 

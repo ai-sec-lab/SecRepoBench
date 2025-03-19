@@ -395,7 +395,7 @@ unittest_patterns = {
     "lcms":r"Checking (?P<name>.*) \.+(?P<status>[A-z]+)", 
     #"leptonica":"", 
     "openvswitch":_matio_ovs_pattern, 
-    "php-src":r"(?P<status>[A-Z]+) (?P<name>.*)",
+    "php-src":r"^(?P<status>PASS|SKIP|FAIL).*?\/(?P<name>[^\/]+)\.phpt",
     "flac":r"\n(?P<name>(testing |(\S+ )+test ?|case|Testing |Test )(.*\.\.\. (\+\n|\n|))+)(?P<status>[A-Z]*)(?=\n)", # this pattern needs to be extensively tested
     "harfbuzz":_default_pattern,
     "aom":_google_test_pattern,
