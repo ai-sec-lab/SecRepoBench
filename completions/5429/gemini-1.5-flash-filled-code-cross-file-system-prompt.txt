@@ -1,2 +1,0 @@
-colormap_index=(ssize_t *) AcquireQuantumMemory(MaxColormapSize,
-    sizeof(*colormap_index));

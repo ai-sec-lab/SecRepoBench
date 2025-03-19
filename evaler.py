@@ -14,6 +14,21 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
 
+def get_c_cpp_file(base_path: str):
+    c_path = base_path + '.c'
+    cpp_path = base_path + '.cpp'
+    if os.path.exists(c_path):
+        path = c_path
+    elif os.path.exists(cpp_path):
+        path = cpp_path
+    else:
+        print(f'This file does not exist with a c or cpp extension: {base_path}')
+        return
+    with open(path, 'r') as f:
+        content = f.read()
+    return content
+
+
 safety_settings = [
     {
         "category": "HARM_CATEGORY_DANGEROUS",
@@ -38,7 +53,7 @@ safety_settings = [
 ]
 
 def get_cwe_info(id):
-    with open(f'/home/cdilgren/project_benchmark/ARVO-Meta/meta/{id}.json', 'r') as f:
+    with open(f'ARVO-Meta/meta/{id}.json', 'r') as f:
         meta = json.load(f)
     
     crash_type = meta['crash_type']
@@ -84,22 +99,27 @@ class BaseEvaler(ABC):
 
     def _get_prompt(self, id: str, mode) -> str:
         if self.context_type == 'in-file':
-            with open(f'descriptions/{id}/new-in-file.txt', 'r') as file:
+            with open(f'descriptions/{id}/in-file.txt', 'r') as file:
                 context = file.read()
             return INFILE_PROMPT.format(context=context.strip())
         elif self.context_type == 'cross-file':
-
             # get func_mask_desc
-            mask_desc_sec_func_file = f'/home/cdilgren/project_benchmark/descriptions/{id}/mask_desc_sec_func_{mode}.txt'
-            if not os.path.exists(mask_desc_sec_func_file):
-                print(f'ID {id}: mask_desc_sec_func_{mode} file not present')
-                return
-            with open(mask_desc_sec_func_file, "r") as file:
-                context1 = file.read()
-                
+            context1 = get_c_cpp_file(f'descriptions/{id}/mask_func_desc_{mode}')
             with open(f'descriptions/{id}/cross-file.txt', 'r') as file:
                 context2 = file.read()
             return CROSS_FILE_PROMPT.format(context1=context1.strip(), context2=context2.strip())
+        elif self.context_type == 'func':
+            mask_func_desc = f"descriptions/{id}/mask_func_desc_{mode}"
+            if os.path.exists(mask_func_desc + '.c'):
+                path = mask_func_desc + '.c'
+            elif os.path.exists(mask_func_desc + '.cpp'):
+                path = mask_func_desc + '.cpp'
+            else:
+                print(f'ID {id}: mask_func_desc_{mode} file not present')
+                return
+            with open(path, 'r') as f:
+                context = f.read()
+            return FUNC_PROMPT.format(context=context.strip())
         else:
             raise ValueError(f"Invalid context type: {self.context_type}")
     
@@ -253,9 +273,9 @@ class APIEvaler(BaseEvaler):
         if 'gemini-' in self.model_name:
             self.client = self._initialize_client(system_prompt)
             self.create = self._get_create_function()
-        if id in self.responses_cache:
-            print('Using cache')
-            return self.postprocess(self.responses_cache[id]), prompt, system_prompt
+        # if id in self.responses_cache:
+        #     print('Using cache')
+        #     return self.postprocess(self.responses_cache[id]), prompt, system_prompt
 
         if self.prompt_type != 'refine':
             messages = self._create_messages(prompt, system_prompt)
