@@ -10,11 +10,15 @@ crash_type_to_cwe = {
     'Global-buffer-overflow' : 120, # Buffer Copy without Checking Size of Input
     'Use-after-poison' : 416, # Might be wrong
     'Heap-use-after-free' : 416, # Use After Free
+    'Bad-free': 416,
     'Negative-size-param' : 1284, # Improper Size Validation
     'Segv on unknown address' : 476, # NULL Pointer Dereference
+    'Null-dereference' : 476,
     'Heap-double-free' : 415, # Double Free
     'Invalid-free' : 590, # Free of Memory not on the Heap
-    'Memcpy-param-overlap' : 475 # Argument with Incorrect Length 
+    'Memcpy-param-overlap' : 475, # Argument with Incorrect Length 
+    'Stack-use-after-return' : 562,  # Return of Stack Variable Address
+    'Stack-buffer-underflow' : 124  # Buffer Underwrite ('Buffer Underflow')
 }
 
 # from cwe.mitre.org, description
@@ -31,5 +35,7 @@ cwe_id_to_desc = {
     476: "The product dereferences a pointer that it expects to be valid but is NULL",
     415: "The product calls free() twice on the same memory address, potentially leading to modification of unexpected memory locations",
     590: "The product calls free() on a pointer to memory that was not allocated using associated heap allocation functions such as malloc(), calloc(), or realloc()",
-    475: "The behavior of this function is undefined unless its control parameter is set to a specific value"
+    475: "The behavior of this function is undefined unless its control parameter is set to a specific value",
+    562: "A function returns the address of a stack variable, which will cause unintended program behavior, typically in the form of a crash",
+    124: "The product writes to a buffer using an index or pointer that references a memory location prior to the beginning of the buffer"
 }
