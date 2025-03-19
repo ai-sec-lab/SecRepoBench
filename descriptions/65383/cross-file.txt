@@ -187,28 +187,6 @@ static int cram_add_feature(cram_container *c, cram_slice *s,
 }
 
 // the below code fragment can be found in:
-// cram/cram_encode.c
-static int expected_template_count(bam_seq_t *b) {
-    int expected = bam_flag(b) & BAM_FPAIRED ? 2 : 1;
-
-    uint8_t *TC = (uint8_t *)bam_aux_get(b, "TC");
-    if (TC) {
-        int n = bam_aux2i_end(TC, (uint8_t *)bam_data_end(b));
-        if (expected < n)
-            expected = n;
-    }
-
-    if (!TC && bam_aux_get(b, "SA")) {
-        // We could count the semicolons, but we'd have to do this for
-        // read1, read2 and read(not-1-or-2) combining the results
-        // together.  This is a cheap and safe alternative for now.
-        expected = INT_MAX;
-    }
-
-    return expected;
-}
-
-// the below code fragment can be found in:
 // cram/cram_decode.c
 static int cram_decode_aux(cram_fd *fd,
                            cram_container *c, cram_slice *s,
@@ -390,5 +368,196 @@ static cram_container *cram_first_slice(cram_fd *fd) {
     }
 
     return c;
+}
+
+// the below code fragment can be found in:
+// cram/cram_encode.c
+int cram_put_bam_seq(cram_fd *fd, bam_seq_t *b) {
+    cram_container *c;
+
+    if (!fd->ctr) {
+        fd->ctr = cram_new_container(fd->seqs_per_slice,
+                                     fd->slices_per_container);
+        if (!fd->ctr)
+            return -1;
+        fd->ctr->record_counter = fd->record_counter;
+
+        pthread_mutex_lock(&fd->ref_lock);
+        fd->ctr->no_ref = fd->no_ref;
+        fd->ctr->embed_ref = fd->embed_ref;
+        pthread_mutex_unlock(&fd->ref_lock);
+    }
+    c = fd->ctr;
+
+    int embed_ref = c->embed_ref;
+
+    if (!c->slice || c->curr_rec == c->max_rec ||
+        (bam_ref(b) != c->curr_ref && c->curr_ref >= -1) ||
+        (c->s_num_bases + c->s_aux_bytes >= fd->bases_per_slice)) {
+        int slice_rec, curr_rec, multi_seq = fd->multi_seq == 1;
+        int curr_ref = c->slice ? c->curr_ref : bam_ref(b);
+
+        /*
+         * Start packing slices when we routinely have under 1/4tr full.
+         *
+         * This option isn't available if we choose to embed references
+         * since we can only have one per slice.
+         *
+         * The multi_seq var here refers to our intention for the next slice.
+         * This slice has already been encoded so we output as-is.
+         */
+        if (fd->multi_seq == -1 && c->curr_rec < c->max_rec/4+10 &&
+            fd->last_slice && fd->last_slice < c->max_rec/4+10 &&
+            embed_ref<=0) {
+            if (!c->multi_seq)
+                hts_log_info("Multi-ref enabled for next container");
+            multi_seq = 1;
+        } else if (fd->multi_seq == 1) {
+            pthread_mutex_lock(&fd->metrics_lock);
+            if (fd->last_RI_count <= c->max_slice && fd->multi_seq_user != 1) {
+                multi_seq = 0;
+                hts_log_info("Multi-ref disabled for next container");
+            }
+            pthread_mutex_unlock(&fd->metrics_lock);
+        }
+
+        slice_rec = c->slice_rec;
+        curr_rec  = c->curr_rec;
+
+        if (CRAM_MAJOR_VERS(fd->version) == 1 ||
+            c->curr_rec == c->max_rec || fd->multi_seq != 1 || !c->slice ||
+            c->s_num_bases + c->s_aux_bytes >= fd->bases_per_slice) {
+            if (NULL == (c = cram_next_container(fd, b))) {
+                if (fd->ctr) {
+                    // prevent cram_close attempting to flush
+                    fd->ctr_mt = fd->ctr; // delay free when threading
+                    fd->ctr = NULL;
+                }
+                return -1;
+            }
+        }
+
+        /*
+         * Due to our processing order, some things we've already done we
+         * cannot easily undo. So when we first notice we should be packing
+         * multiple sequences per container we emit the small partial
+         * container as-is and then start a fresh one in a different mode.
+         */
+        if (multi_seq == 0 && fd->multi_seq == 1 && fd->multi_seq_user == -1) {
+            // User selected auto-mode, we're currently using multi-seq, but
+            // have detected we don't need to.  Switch back to auto.
+            fd->multi_seq = -1;
+        } else if (multi_seq) {
+            // We detected we need multi-seq
+            fd->multi_seq = 1;
+            c->multi_seq = 1;
+            c->pos_sorted = 0;
+
+            // Cram_next_container may end up flushing an existing one and
+            // triggering fd->embed_ref=2 if no reference is found.
+            // Embedded refs are incompatible with multi-seq, so we bail
+            // out and switch to no_ref in this scenario.  We do this
+            // within the container only, as multi_seq may be temporary
+            // and we switch back away from it again.
+            pthread_mutex_lock(&fd->ref_lock);
+            if (fd->embed_ref > 0 && c->curr_rec == 0 && c->curr_slice == 0) {
+                hts_log_warning("Changing from embed_ref to no_ref mode");
+                // Should we update fd->embed_ref and no_ref here too?
+                // Doing so means if we go into multi-seq and back out
+                // again, eg due a cluster of tiny refs in the middle of
+                // much larger ones, then we bake in no-ref mode.
+                //
+                // However for unsorted data we're realistically not
+                // going to switch back.
+                c->embed_ref = fd->embed_ref = 0; // or -1 for auto?
+                c->no_ref = fd->no_ref = 1;
+            }
+            pthread_mutex_unlock(&fd->ref_lock);
+
+            if (!c->refs_used) {
+                pthread_mutex_lock(&fd->ref_lock);
+                c->refs_used = calloc(fd->refs->nref, sizeof(int));
+                pthread_mutex_unlock(&fd->ref_lock);
+                if (!c->refs_used)
+                    return -1;
+            }
+        }
+
+        fd->last_slice = curr_rec - slice_rec;
+        c->slice_rec = c->curr_rec;
+
+        // Have we seen this reference before?
+        if (bam_ref(b) >= 0 && curr_ref >= 0 && bam_ref(b) != curr_ref &&
+            embed_ref<=0 && !fd->unsorted && multi_seq) {
+
+            if (!c->refs_used) {
+                pthread_mutex_lock(&fd->ref_lock);
+                c->refs_used = calloc(fd->refs->nref, sizeof(int));
+                pthread_mutex_unlock(&fd->ref_lock);
+                if (!c->refs_used)
+                    return -1;
+            } else if (c->refs_used && c->refs_used[bam_ref(b)]) {
+                pthread_mutex_lock(&fd->ref_lock);
+                fd->unsorted = 1;
+                fd->multi_seq = 1;
+                pthread_mutex_unlock(&fd->ref_lock);
+            }
+        }
+
+        c->curr_ref = bam_ref(b);
+        if (c->refs_used && c->curr_ref >= 0) c->refs_used[c->curr_ref]++;
+    }
+
+    if (!c->bams) {
+        /* First time through, allocate a set of bam pointers */
+        pthread_mutex_lock(&fd->bam_list_lock);
+        if (fd->bl) {
+            spare_bams *spare = fd->bl;
+            c->bams = spare->bams;
+            fd->bl = spare->next;
+            free(spare);
+        } else {
+            c->bams = calloc(c->max_c_rec, sizeof(bam_seq_t *));
+            if (!c->bams) {
+                pthread_mutex_unlock(&fd->bam_list_lock);
+                return -1;
+            }
+        }
+        pthread_mutex_unlock(&fd->bam_list_lock);
+    }
+
+    /* Copy or alloc+copy the bam record, for later encoding */
+    if (c->bams[c->curr_c_rec]) {
+        if (bam_copy1(c->bams[c->curr_c_rec], b) == NULL)
+            return -1;
+    } else {
+        c->bams[c->curr_c_rec] = bam_dup1(b);
+        if (c->bams[c->curr_c_rec] == NULL)
+            return -1;
+    }
+    if (bam_seq_len(b)) {
+        c->s_num_bases += bam_seq_len(b);
+    } else {
+        // No sequence in BAM record.  CRAM doesn't directly support this
+        // case, it ends up being stored as a string of N's for each query
+        // consuming CIGAR operation.  As this can become very inefficient
+        // in time and memory, data where the query length is excessively
+        // long are rejected.
+        hts_pos_t qlen = bam_cigar2qlen(b->core.n_cigar, bam_get_cigar(b));
+        if (qlen > 100000000) {
+            hts_log_error("CIGAR query length %"PRIhts_pos
+                          " for read \"%s\" is too long",
+                          qlen, bam_get_qname(b));
+            return -1;
+        }
+        c->s_num_bases += qlen;
+    }
+    c->curr_rec++;
+    c->curr_c_rec++;
+    c->s_aux_bytes += bam_get_l_aux(b);
+    c->n_mapped += (bam_flag(b) & BAM_FUNMAP) ? 0 : 1;
+    fd->record_counter++;
+
+    return 0;
 }
 

@@ -1,0 +1,212 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/hunspell/affixmgr.cxx
+inline int AffixMgr::isRevSubset(const char* s1,
+                                 const char* end_of_s2,
+                                 int len) {
+  while ((len > 0) && (*s1 != '\0') && ((*s1 == *end_of_s2) || (*s1 == '.'))) {
+    s1++;
+    end_of_s2--;
+    len--;
+  }
+  return (*s1 == '\0');
+}
+
+// the below code fragment can be found in:
+// src/hunspell/suggestmgr.cxx
+int SuggestMgr::check_forbidden(const std::string& word) {
+  if (pAMgr) {
+    struct hentry* rv = pAMgr->lookup(word.c_str(), word.size());
+    if (rv && rv->astr &&
+        (TESTAFF(rv->astr, pAMgr->get_needaffix(), rv->alen) ||
+         TESTAFF(rv->astr, pAMgr->get_onlyincompound(), rv->alen)))
+      rv = NULL;
+    size_t len = word.size();
+    if (!(pAMgr->prefix_check(word, 0, len, 1)))
+      rv = pAMgr->suffix_check(word, 0, len, 0, NULL,
+                               FLAG_NULL, FLAG_NULL, IN_CPD_NOT);  // prefix+suffix, suffix
+    // check forbidden words
+    if ((rv) && (rv->astr) &&
+        TESTAFF(rv->astr, pAMgr->get_forbiddenword(), rv->alen))
+      return 1;
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/hunspell.cxx
+std::vector<std::string> HunspellImpl::suggest(const std::string& word, std::vector<std::string>& suggest_candidate_stack) {
+
+  if (suggest_candidate_stack.size() > MAX_CANDIDATE_STACK_DEPTH || // apply a fairly arbitrary depth limit
+      // something very broken if suggest ends up calling itself with the same word
+      std::find(suggest_candidate_stack.begin(), suggest_candidate_stack.end(), word) != suggest_candidate_stack.end()) {
+    return { };
+  }
+
+  bool capwords;
+  size_t abbv;
+  int captype;
+  std::vector<std::string> spell_candidate_stack;
+  suggest_candidate_stack.push_back(word);
+  std::vector<std::string> slst = suggest_internal(word, spell_candidate_stack, suggest_candidate_stack,
+		                                   capwords, abbv, captype);
+  suggest_candidate_stack.pop_back();
+  // word reversing wrapper for complex prefixes
+  if (complexprefixes) {
+    for (auto& j : slst) {
+      if (utf8)
+        reverseword_utf(j);
+      else
+        reverseword(j);
+    }
+  }
+
+  // capitalize
+  if (capwords)
+    for (auto& j : slst) {
+      mkinitcap(j);
+    }
+
+  // expand suggestions with dot(s)
+  if (abbv && pAMgr && pAMgr->get_sugswithdots() && word.size() >= abbv) {
+    for (auto& j : slst) {
+	    j.append(word.substr(word.size() - abbv));
+    }
+  }
+
+  // remove bad capitalized and forbidden forms
+  if (pAMgr && (pAMgr->get_keepcase() || pAMgr->get_forbiddenword())) {
+    switch (captype) {
+      case INITCAP:
+      case ALLCAP: {
+        size_t l = 0;
+        for (size_t j = 0; j < slst.size(); ++j) {
+          if (slst[j].find(' ') == std::string::npos && !spell(slst[j], spell_candidate_stack)) {
+            std::string s;
+            std::vector<w_char> w;
+            if (utf8) {
+              u8_u16(w, slst[j]);
+            } else {
+              s = slst[j];
+            }
+            mkallsmall2(s, w);
+            if (spell(s, spell_candidate_stack)) {
+              slst[l] = s;
+              ++l;
+            } else {
+              mkinitcap2(s, w);
+              if (spell(s, spell_candidate_stack)) {
+                slst[l] = s;
+                ++l;
+              }
+            }
+          } else {
+            slst[l] = slst[j];
+            ++l;
+          }
+        }
+        slst.resize(l);
+      }
+    }
+  }
+
+  // remove duplications
+  size_t l = 0;
+  for (size_t j = 0; j < slst.size(); ++j) {
+    slst[l] = slst[j];
+    for (size_t k = 0; k < l; ++k) {
+      if (slst[k] == slst[j]) {
+        --l;
+        break;
+      }
+    }
+    ++l;
+  }
+  slst.resize(l);
+
+  // output conversion
+  RepList* rl = (pAMgr) ? pAMgr->get_oconvtable() : NULL;
+  if (rl) {
+    for (size_t i = 0; rl && i < slst.size(); ++i) {
+      std::string wspace;
+      if (rl->conv(slst[i], wspace)) {
+        slst[i] = wspace;
+      }
+    }
+  }
+  return slst;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/affixmgr.cxx
+int AffixMgr::cpdcase_check(const std::string& word, int pos) {
+  if (utf8) {
+    const char* p;
+    const char* wordp = word.c_str();
+    for (p = wordp + pos - 1; p > wordp && (*p & 0xc0) == 0x80; p--)
+      ;
+    std::string pair(p);
+    std::vector<w_char> pair_u;
+    u8_u16(pair_u, pair);
+    unsigned short a = pair_u.size() > 1 ? (unsigned short)pair_u[1] : 0,
+                   b = !pair_u.empty() ? (unsigned short)pair_u[0] : 0;
+    if (((unicodetoupper(a, langnum) == a) ||
+         (unicodetoupper(b, langnum) == b)) &&
+        (a != '-') && (b != '-'))
+      return 1;
+  } else {
+    const unsigned char a = word[pos - 1], b = word[pos];
+    if ((csconv[a].ccase || csconv[b].ccase) && (a != '-') && (b != '-'))
+      return 1;
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/affixmgr.cxx
+struct hentry* AffixMgr::suffix_check_twosfx(const std::string& word,
+                                             int start,
+                                             int len,
+                                             int sfxopts,
+                                             PfxEntry* ppfx,
+                                             const FLAG needflag) {
+  struct hentry* rv = NULL;
+
+  // first handle the special case of 0 length suffixes
+  SfxEntry* se = sStart[0];
+  while (se) {
+    if (contclasses[se->getFlag()]) {
+      rv = se->check_twosfx(word, start, len, sfxopts, ppfx, needflag);
+      if (rv)
+        return rv;
+    }
+    se = se->getNext();
+  }
+
+  // now handle the general case
+  if (len == 0)
+    return NULL;  // FULLSTRIP
+  unsigned char sp = word[start + len - 1];
+  SfxEntry* sptr = sStart[sp];
+
+  while (sptr) {
+    if (isRevSubset(sptr->getKey(), word.c_str() + start + len - 1, len)) {
+      if (contclasses[sptr->getFlag()]) {
+        rv = sptr->check_twosfx(word, start, len, sfxopts, ppfx, needflag);
+        if (rv) {
+          sfxflag = sptr->getFlag();  // BUG: sfxflag not stateless
+          if (!sptr->getCont())
+            sfxappnd = sptr->getKey();  // BUG: sfxappnd not stateless
+          return rv;
+        }
+      }
+      sptr = sptr->getNextEQ();
+    } else {
+      sptr = sptr->getNextNE();
+    }
+  }
+
+  return NULL;
+}
+

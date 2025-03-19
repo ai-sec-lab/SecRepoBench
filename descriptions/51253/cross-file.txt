@@ -28,135 +28,161 @@ static void init_multbl2(uint32_t tbl[][256], const int c[4],
 }
 
 // the below code fragment can be found in:
-// libavutil/rc4.c
-void av_rc4_crypt(AVRC4 *r, uint8_t *dst, const uint8_t *src, int count, uint8_t *iv, int decrypt) {
-    uint8_t x = r->x, y = r->y;
-    uint8_t *state = r->state;
-    while (count-- > 0) {
-        uint8_t sum = state[x] + state[y];
-        FFSWAP(uint8_t, state[x], state[y]);
-        *dst++ = src ? *src++ ^ state[sum] : state[sum];
-        x++;
-        y += state[x];
-    }
-    r->x = x; r->y = y;
-}
-
-// the below code fragment can be found in:
-// libavcodec/cbs_jpeg_syntax_template.c
-static int FUNC(dht)(CodedBitstreamContext *ctx, RWContext *rw,
-                     JPEGRawHuffmanTableSpecification *current)
+// libavcodec/atrac9dec.c
+static av_cold int atrac9_decode_init(AVCodecContext *avctx)
 {
-    int err, i, j, n;
+    static AVOnce static_table_init = AV_ONCE_INIT;
+    GetBitContext gb;
+    ATRAC9Context *s = avctx->priv_data;
+    int version, block_config_idx, superframe_idx, alloc_c_len;
 
-    HEADER("Huffman Tables");
+    s->avctx = avctx;
 
-    u(16, Lh, 2, 2 + 8 * (1 + 16 + 256));
+    av_lfg_init(&s->lfg, 0xFBADF00D);
 
-    n = 2;
-    for (i = 0; n < current->Lh; i++) {
-        if (i >= 8)
-            return AVERROR_INVALIDDATA;
-
-        CHECK(FUNC(huffman_table)(ctx, rw, &current->table[i]));
-
-        ++n;
-        for (j = 0; j < 16; j++)
-            n += 1 + current->table[i].L[j];
+    if (avctx->block_align <= 0) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid block align\n");
+        return AVERROR_INVALIDDATA;
     }
+
+    if (avctx->extradata_size != 12) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid extradata length!\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    version = AV_RL32(avctx->extradata);
+    if (version > 2) {
+        av_log(avctx, AV_LOG_ERROR, "Unsupported version (%i)!\n", version);
+        return AVERROR_INVALIDDATA;
+    }
+
+    init_get_bits8(&gb, avctx->extradata + 4, avctx->extradata_size);
+
+    if (get_bits(&gb, 8) != 0xFE) {
+        av_log(avctx, AV_LOG_ERROR, "Incorrect magic byte!\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->samplerate_idx = get_bits(&gb, 4);
+    avctx->sample_rate = at9_tab_samplerates[s->samplerate_idx];
+
+    block_config_idx = get_bits(&gb, 3);
+    if (block_config_idx > 5) {
+        av_log(avctx, AV_LOG_ERROR, "Incorrect block config!\n");
+        return AVERROR_INVALIDDATA;
+    }
+    s->block_config = &at9_block_layout[block_config_idx];
+
+    av_channel_layout_uninit(&avctx->ch_layout);
+    avctx->ch_layout      = s->block_config->channel_layout;
+    avctx->sample_fmt     = AV_SAMPLE_FMT_FLTP;
+
+    if (get_bits1(&gb)) {
+        av_log(avctx, AV_LOG_ERROR, "Incorrect verification bit!\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    /* Average frame size in bytes */
+    s->avg_frame_size = get_bits(&gb, 11) + 1;
+
+    superframe_idx = get_bits(&gb, 2);
+    if (superframe_idx & 1) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid superframe index!\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->frame_count = 1 << superframe_idx;
+    s->frame_log2  = at9_tab_sri_frame_log2[s->samplerate_idx];
+
+    if (ff_mdct_init(&s->imdct, s->frame_log2 + 1, 1, 1.0f / 32768.0f))
+        return AVERROR(ENOMEM);
+
+    s->fdsp = avpriv_float_dsp_alloc(avctx->flags & AV_CODEC_FLAG_BITEXACT);
+    if (!s->fdsp)
+        return AVERROR(ENOMEM);
+
+    /* iMDCT window */
+    for (int i = 0; i < (1 << s->frame_log2); i++) {
+        const int   len  = 1 << s->frame_log2;
+        const float sidx = (      i + 0.5f) / len;
+        const float eidx = (len - i - 0.5f) / len;
+        const float s_c  = sinf(sidx*M_PI - M_PI_2)*0.5f + 0.5f;
+        const float e_c  = sinf(eidx*M_PI - M_PI_2)*0.5f + 0.5f;
+        s->imdct_win[i]  = s_c / ((s_c * s_c) + (e_c * e_c));
+    }
+
+    /* Allocation curve */
+    alloc_c_len = FF_ARRAY_ELEMS(at9_tab_b_dist);
+    for (int i = 1; i <= alloc_c_len; i++)
+        for (int j = 0; j < i; j++)
+            s->alloc_curve[i - 1][j] = at9_tab_b_dist[(j * alloc_c_len) / i];
+
+    ff_thread_once(&static_table_init, atrac9_init_static);
 
     return 0;
 }
 
 // the below code fragment can be found in:
-// libavutil/tests/cast5.c
-int main(int argc, char** argv)
+// libavutil/cast5.c
+void av_cast5_crypt2(AVCAST5* cs, uint8_t* dst, const uint8_t* src, int count, uint8_t *iv, int decrypt)
 {
-
-    static const uint8_t Key[3][16] = {
-        {0x01, 0x23, 0x45, 0x67, 0x12, 0x34, 0x56, 0x78, 0x23, 0x45, 0x67, 0x89, 0x34, 0x56, 0x78, 0x9a},
-        {0x01, 0x23, 0x45, 0x67, 0x12, 0x34, 0x56, 0x78, 0x23, 0x45},
-        {0x01, 0x23, 0x45, 0x67, 0x12}
-    };
-    static const uint8_t rpt[8] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
-    static const uint8_t rct[3][8] = {
-        {0x23, 0x8b, 0x4f, 0xe5, 0x84, 0x7e, 0x44, 0xb2},
-        {0xeb, 0x6a, 0x71, 0x1a, 0x2c, 0x02, 0x27, 0x1b},
-        {0x7a, 0xc8, 0x16, 0xd1, 0x6e, 0x9b, 0x30, 0x2e}
-    };
-    static const uint8_t rct2[2][16] = {
-        {0xee, 0xa9, 0xd0, 0xa2, 0x49, 0xfd, 0x3b, 0xa6, 0xb3, 0x43, 0x6f, 0xb8, 0x9d, 0x6d, 0xca, 0x92},
-        {0xb2, 0xc9, 0x5e, 0xb0, 0x0c, 0x31, 0xad, 0x71, 0x80, 0xac, 0x05, 0xb8, 0xe8, 0x3d, 0x69, 0x6e}
-    };
-    static const uint8_t iv[8] = {0xee, 0xa9, 0xd0, 0xa2, 0x49, 0xfd, 0x3b, 0xa6};
-    static uint8_t rpt2[2][16];
-    int i, j, err = 0;
-    static const int key_bits[3] = {128, 80, 40};
-    uint8_t temp[8];
-    struct AVCAST5 *cs;
-    cs = av_cast5_alloc();
-    if (!cs)
-        return 1;
-    for (j = 0; j < 3; j++){
-
-        av_cast5_init(cs, Key[j], key_bits[j]);
-        av_cast5_crypt(cs, temp, rpt, 1, 0);
-        for (i = 0;i < 8; i++){
-            if (rct[j][i] != temp[i]){
-                av_log(NULL, AV_LOG_ERROR, "%d %02x %02x\n", i, rct[j][i], temp[i]);
-                err = 1;
+    int i;
+    while (count--) {
+        if (decrypt) {
+            decipher(cs, dst, src, iv);
+        } else {
+            if (iv) {
+                for (i = 0; i < 8; i++)
+                    dst[i] = src[i] ^ iv[i];
+                encipher(cs, dst, dst);
+                memcpy(iv, dst, 8);
+            } else {
+                encipher(cs, dst, src);
             }
         }
-
-        av_cast5_crypt(cs, temp, rct[j], 1, 1);
-        for (i =0; i < 8; i++) {
-            if (rpt[i] != temp[i]) {
-                av_log(NULL, AV_LOG_ERROR, "%d %02x %02x\n", i, rpt[i], temp[i]);
-                err = 1;
-            }
-        }
+        src = src + 8;
+        dst = dst + 8;
     }
-    memcpy(rpt2[0], Key[0], 16);
-    memcpy(rpt2[1], Key[0], 16);
-    for (i = 0; i < 1000000; i++){
-        av_cast5_init(cs, rpt2[1], 128);
-        av_cast5_crypt(cs, rpt2[0], rpt2[0], 2, 0);
-        av_cast5_init(cs, rpt2[0], 128);
-        av_cast5_crypt(cs, rpt2[1], rpt2[1], 2, 0);
-    }
-    for (j = 0; j < 2; j++) {
-        for (i = 0; i < 16; i++) {
-            if (rct2[j][i] != rpt2[j][i]) {
-                av_log(NULL, AV_LOG_ERROR, "%d %02x %02x\n", i, rct2[j][i], rpt2[j][i]);
-                err = 1;
-            }
-        }
-    }
-    for (j = 0; j < 3; j++) {
-
-        av_cast5_init(cs, Key[j], key_bits[j]);
-        memcpy(temp, iv, 8);
-        av_cast5_crypt2(cs, rpt2[0], rct2[0], 2, temp, 0);
-        memcpy(temp, iv, 8);
-        av_cast5_crypt2(cs, rpt2[0], rpt2[0], 2, temp, 1);
-        for (i = 0; i < 16; i++) {
-            if (rct2[0][i] != rpt2[0][i]) {
-                av_log(NULL, AV_LOG_ERROR, "%d %02x %02x\n", i, rct2[0][i], rpt2[0][i]);
-                err = 1;
-            }
-        }
-    }
-    av_free(cs);
-    return err;
 }
 
 // the below code fragment can be found in:
-// libavcodec/4xm.c
-static int mix(int c0, int c1)
+// libavutil/twofish.c
+void av_twofish_crypt(AVTWOFISH *cs, uint8_t *dst, const uint8_t *src, int count, uint8_t *iv, int decrypt)
 {
-    int blue  =  2 * (c0 & 0x001F) + (c1 & 0x001F);
-    int green = (2 * (c0 & 0x03E0) + (c1 & 0x03E0)) >> 5;
-    int red   =  2 * (c0 >> 10)    + (c1 >> 10);
-    return red / 3 * 1024 + green / 3 * 32 + blue / 3;
+    int i;
+    while (count--) {
+        if (decrypt) {
+            twofish_decrypt(cs, dst, src, iv);
+        } else {
+            if (iv) {
+                for (i = 0; i < 16; i++)
+                    dst[i] = src[i] ^ iv[i];
+                twofish_encrypt(cs, dst, dst);
+                memcpy(iv, dst, 16);
+            } else {
+                twofish_encrypt(cs, dst, src);
+            }
+        }
+        src = src + 16;
+        dst = dst + 16;
+    }
+}
+
+// the below code fragment can be found in:
+// libavutil/aes.c
+static void aes_decrypt(AVAES *a, uint8_t *dst, const uint8_t *src,
+                        int count, uint8_t *iv, int rounds)
+{
+    while (count--) {
+        addkey_s(&a->state[1], src, &a->round_key[rounds]);
+        aes_crypt(a, 0, inv_sbox, dec_multbl);
+        if (iv) {
+            addkey_s(&a->state[0], iv, &a->state[0]);
+            memcpy(iv, src, 16);
+        }
+        addkey_d(dst, &a->state[0], &a->round_key[0]);
+        src += 16;
+        dst += 16;
+    }
 }
 

@@ -36,8 +36,8 @@ def llama_tokenize(text):
 
 
 def general_tokenizer(tokenizer, text):
-    # tokens = tokenizer.encode(text)
-    tokens = tokenizer.instruct_tokenizer.tokenizer.encode(text, bos=True, eos=True)
+    tokens = tokenizer.encode(text)
+    # tokens = tokenizer.instruct_tokenizer.tokenizer.encode(text, bos=True, eos=True)
     return tokens
 
 
@@ -104,13 +104,22 @@ def get_context_len_limit(id, max_prompt_len, context_len_limits, tokenizer, nam
     # get context len limit, smallest context window of 128k
     context_len_limit = 128_000 - max_prompt_len - 2 * max_block_token_len - mask_func_desc_perturbed_token_len
 
-    # get in file context, which is in file tokens minus target func + desc tokens
-    mask_desc_perturbed = get_c_cpp_file(f"descriptions/{id}/mask_desc_perturbed")
-    mask_desc_perturbed_tokens = general_tokenizer(tokenizer, mask_desc_perturbed)
-    mask_desc_perturbed_token_len = len(mask_desc_perturbed_tokens) - mask_func_desc_perturbed_token_len
+    # # get in file context, which is in file tokens minus target func + desc tokens
+    # mask_desc_perturbed = get_c_cpp_file(f"descriptions/{id}/mask_desc_perturbed")
+    # mask_desc_perturbed_tokens = general_tokenizer(tokenizer, mask_desc_perturbed)
+    # mask_desc_perturbed_token_len = len(mask_desc_perturbed_tokens) - mask_func_desc_perturbed_token_len
 
-    if mask_desc_perturbed_token_len > context_len_limit:
-        print(f"ID {id} tokenizer {name}: context len {mask_desc_perturbed_token_len}, limit {context_len_limit}")
+    # if mask_desc_perturbed_token_len > context_len_limit:
+    #     print(f"ID {id} tokenizer {name}: context len {mask_desc_perturbed_token_len}, limit {context_len_limit}")
+
+    # get cross file context
+    with open(f'descriptions/{id}/cross-file.txt', 'r') as f:
+        cross_file = f.read()
+    cross_file_tokens = general_tokenizer(tokenizer, cross_file)
+    cross_file_token_len = len(cross_file_tokens)
+
+    if cross_file_token_len > context_len_limit:
+        print(f"ID {id} tokenizer {name}: context len {cross_file_token_len}, limit {context_len_limit}")
 
     context_len_limits[id] = {
         "max_prompt_len": max_prompt_len,
@@ -124,10 +133,10 @@ def get_context_len_limit(id, max_prompt_len, context_len_limits, tokenizer, nam
 def main():
     # tokenize_func = mistral_tokenize
     tokenize_funcs_names = [
-        (MistralTokenizer.from_file("tekken.json"), 'mistral'),
+        # (MistralTokenizer.from_file("tekken.json"), 'mistral'),
         # (tiktoken.encoding_for_model("gpt-4o"), 'gpt4o'),
         # (AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", trust_remote_code=True), 'deepseek'),
-        # (AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", trust_remote_code=True), 'llama')
+        (AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", trust_remote_code=True), 'llama')
     ]
 
     with open('ids.txt', 'r') as f:

@@ -1,0 +1,611 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// xinclude.c
+static xmlNodePtr
+xmlXIncludeCopyRange(xmlXIncludeCtxtPtr ctxt, xmlXPathObjectPtr range) {
+    /* pointers to generated nodes */
+    xmlNodePtr list = NULL, last = NULL, listParent = NULL;
+    xmlNodePtr tmp, tmp2;
+    /* pointers to traversal nodes */
+    xmlNodePtr start, cur, end;
+    int index1, index2;
+    int level = 0, lastLevel = 0, endLevel = 0, endFlag = 0;
+
+    if ((ctxt == NULL) || (range == NULL))
+	return(NULL);
+    if (range->type != XPATH_RANGE)
+	return(NULL);
+    start = (xmlNodePtr) range->user;
+
+    if ((start == NULL) || (start->type == XML_NAMESPACE_DECL))
+	return(NULL);
+    end = range->user2;
+    if (end == NULL)
+	return(xmlDocCopyNode(start, ctxt->doc, 1));
+    if (end->type == XML_NAMESPACE_DECL)
+        return(NULL);
+
+    cur = start;
+    index1 = range->index;
+    index2 = range->index2;
+    /*
+     * level is depth of the current node under consideration
+     * list is the pointer to the root of the output tree
+     * listParent is a pointer to the parent of output tree (within
+       the included file) in case we need to add another level
+     * last is a pointer to the last node added to the output tree
+     * lastLevel is the depth of last (relative to the root)
+     */
+    while (cur != NULL) {
+	/*
+	 * Check if our output tree needs a parent
+	 */
+	if (level < 0) {
+	    while (level < 0) {
+	        /* copy must include namespaces and properties */
+	        tmp2 = xmlDocCopyNode(listParent, ctxt->doc, 2);
+	        xmlAddChild(tmp2, list);
+	        list = tmp2;
+	        listParent = listParent->parent;
+	        level++;
+	    }
+	    last = list;
+	    lastLevel = 0;
+	}
+	/*
+	 * Check whether we need to change our insertion point
+	 */
+	while (level < lastLevel) {
+	    last = last->parent;
+	    lastLevel --;
+	}
+	if (cur == end) {	/* Are we at the end of the range? */
+	    if (cur->type == XML_TEXT_NODE) {
+		const xmlChar *content = cur->content;
+		int len;
+
+		if (content == NULL) {
+		    tmp = xmlNewDocTextLen(ctxt->doc, NULL, 0);
+		} else {
+		    len = index2;
+		    if ((cur == start) && (index1 > 1)) {
+			content += (index1 - 1);
+			len -= (index1 - 1);
+		    } else {
+			len = index2;
+		    }
+		    tmp = xmlNewDocTextLen(ctxt->doc, content, len);
+		}
+		/* single sub text node selection */
+		if (list == NULL)
+		    return(tmp);
+		/* prune and return full set */
+		if (level == lastLevel)
+		    xmlAddNextSibling(last, tmp);
+		else
+		    xmlAddChild(last, tmp);
+		return(list);
+	    } else {	/* ending node not a text node */
+	        endLevel = level;	/* remember the level of the end node */
+		endFlag = 1;
+		/* last node - need to take care of properties + namespaces */
+		tmp = xmlDocCopyNode(cur, ctxt->doc, 2);
+		if (list == NULL) {
+		    list = tmp;
+		    listParent = cur->parent;
+		    last = tmp;
+		} else {
+		    if (level == lastLevel)
+			last = xmlAddNextSibling(last, tmp);
+		    else {
+			last = xmlAddChild(last, tmp);
+			lastLevel = level;
+		    }
+		}
+
+		if (index2 > 1) {
+		    end = xmlXIncludeGetNthChild(cur, index2 - 1);
+		    index2 = 0;
+		}
+		if ((cur == start) && (index1 > 1)) {
+		    cur = xmlXIncludeGetNthChild(cur, index1 - 1);
+		    index1 = 0;
+		}  else {
+		    cur = cur->children;
+		}
+		level++;	/* increment level to show change */
+		/*
+		 * Now gather the remaining nodes from cur to end
+		 */
+		continue;	/* while */
+	    }
+	} else if (cur == start) {	/* Not at the end, are we at start? */
+	    if ((cur->type == XML_TEXT_NODE) ||
+		(cur->type == XML_CDATA_SECTION_NODE)) {
+		const xmlChar *content = cur->content;
+
+		if (content == NULL) {
+		    tmp = xmlNewDocTextLen(ctxt->doc, NULL, 0);
+		} else {
+		    if (index1 > 1) {
+			content += (index1 - 1);
+			index1 = 0;
+		    }
+		    tmp = xmlNewDocText(ctxt->doc, content);
+		}
+		last = list = tmp;
+		listParent = cur->parent;
+	    } else {		/* Not text node */
+	        /*
+		 * start of the range - need to take care of
+		 * properties and namespaces
+		 */
+		tmp = xmlDocCopyNode(cur, ctxt->doc, 2);
+		list = last = tmp;
+		listParent = cur->parent;
+		if (index1 > 1) {	/* Do we need to position? */
+		    cur = xmlXIncludeGetNthChild(cur, index1 - 1);
+		    level = lastLevel = 1;
+		    index1 = 0;
+		    /*
+		     * Now gather the remaining nodes from cur to end
+		     */
+		    continue; /* while */
+		}
+	    }
+	} else {
+	    tmp = NULL;
+	    switch (cur->type) {
+		case XML_DTD_NODE:
+		case XML_ELEMENT_DECL:
+		case XML_ATTRIBUTE_DECL:
+		case XML_ENTITY_NODE:
+		    /* Do not copy DTD information */
+		    break;
+		case XML_ENTITY_DECL:
+		    /* handle crossing entities -> stack needed */
+		    break;
+		case XML_XINCLUDE_START:
+		case XML_XINCLUDE_END:
+		    /* don't consider it part of the tree content */
+		    break;
+		case XML_ATTRIBUTE_NODE:
+		    /* Humm, should not happen ! */
+		    break;
+		default:
+		    /*
+		     * Middle of the range - need to take care of
+		     * properties and namespaces
+		     */
+		    tmp = xmlDocCopyNode(cur, ctxt->doc, 2);
+		    break;
+	    }
+	    if (tmp != NULL) {
+		if (level == lastLevel)
+		    last = xmlAddNextSibling(last, tmp);
+		else {
+		    last = xmlAddChild(last, tmp);
+		    lastLevel = level;
+		}
+	    }
+	}
+	/*
+	 * Skip to next node in document order
+	 */
+	cur = xmlXPtrAdvanceNode(cur, &level);
+	if (endFlag && (level >= endLevel))
+	    break;
+    }
+    return(list);
+}
+
+// the below code fragment can be found in:
+// xinclude.c
+static int
+xmlXIncludeLoadNode(xmlXIncludeCtxtPtr ctxt, xmlXIncludeRefPtr ref) {
+    xmlNodePtr cur;
+    xmlChar *href;
+    xmlChar *parse;
+    xmlChar *base;
+    xmlChar *oldBase;
+    xmlChar *URI;
+    int xml = 1; /* default Issue 64 */
+    int ret;
+
+    if ((ctxt == NULL) || (ref == NULL))
+	return(-1);
+    cur = ref->elem;
+    if (cur == NULL)
+	return(-1);
+
+    /*
+     * read the attributes
+     */
+    href = xmlXIncludeGetProp(ctxt, cur, XINCLUDE_HREF);
+    if (href == NULL) {
+	href = xmlStrdup(BAD_CAST ""); /* @@@@ href is now optional */
+	if (href == NULL)
+	    return(-1);
+    }
+    parse = xmlXIncludeGetProp(ctxt, cur, XINCLUDE_PARSE);
+    if (parse != NULL) {
+	if (xmlStrEqual(parse, XINCLUDE_PARSE_XML))
+	    xml = 1;
+	else if (xmlStrEqual(parse, XINCLUDE_PARSE_TEXT))
+	    xml = 0;
+	else {
+	    xmlXIncludeErr(ctxt, cur, XML_XINCLUDE_PARSE_VALUE,
+			   "invalid value %s for 'parse'\n", parse);
+	    if (href != NULL)
+		xmlFree(href);
+	    if (parse != NULL)
+		xmlFree(parse);
+	    return(-1);
+	}
+    }
+
+    /*
+     * compute the URI
+     */
+    base = xmlNodeGetBase(ctxt->doc, cur);
+    if (base == NULL) {
+	URI = xmlBuildURI(href, ctxt->doc->URL);
+    } else {
+	URI = xmlBuildURI(href, base);
+    }
+    if (URI == NULL) {
+	xmlChar *escbase;
+	xmlChar *eschref;
+	/*
+	 * Some escaping may be needed
+	 */
+	escbase = xmlURIEscape(base);
+	eschref = xmlURIEscape(href);
+	URI = xmlBuildURI(eschref, escbase);
+	if (escbase != NULL)
+	    xmlFree(escbase);
+	if (eschref != NULL)
+	    xmlFree(eschref);
+    }
+    if (URI == NULL) {
+	xmlXIncludeErr(ctxt, cur, XML_XINCLUDE_HREF_URI,
+                       "failed build URL\n", NULL);
+	if (parse != NULL)
+	    xmlFree(parse);
+	if (href != NULL)
+	    xmlFree(href);
+	if (base != NULL)
+	    xmlFree(base);
+	return(-1);
+    }
+#ifdef DEBUG_XINCLUDE
+    xmlGenericError(xmlGenericErrorContext, "parse: %s\n",
+	    xml ? "xml": "text");
+    xmlGenericError(xmlGenericErrorContext, "URI: %s\n", URI);
+#endif
+
+    /*
+     * Save the base for this include (saving the current one)
+     */
+    oldBase = ctxt->base;
+    ctxt->base = base;
+
+    if (xml) {
+	ret = xmlXIncludeLoadDoc(ctxt, URI, ref);
+	/* xmlXIncludeGetFragment(ctxt, cur, URI); */
+    } else {
+	ret = xmlXIncludeLoadTxt(ctxt, URI, ref);
+    }
+
+    /*
+     * Restore the original base before checking for fallback
+     */
+    ctxt->base = oldBase;
+
+    if (ret < 0) {
+	xmlNodePtr children;
+
+	/*
+	 * Time to try a fallback if available
+	 */
+#ifdef DEBUG_XINCLUDE
+	xmlGenericError(xmlGenericErrorContext, "error looking for fallback\n");
+#endif
+	children = cur->children;
+	while (children != NULL) {
+	    if ((children->type == XML_ELEMENT_NODE) &&
+		(children->ns != NULL) &&
+		(xmlStrEqual(children->name, XINCLUDE_FALLBACK)) &&
+		((xmlStrEqual(children->ns->href, XINCLUDE_NS)) ||
+		 (xmlStrEqual(children->ns->href, XINCLUDE_OLD_NS)))) {
+		ret = xmlXIncludeLoadFallback(ctxt, children, ref);
+		break;
+	    }
+	    children = children->next;
+	}
+    }
+    if (ret < 0) {
+	xmlXIncludeErr(ctxt, cur, XML_XINCLUDE_NO_FALLBACK,
+		       "could not load %s, and no fallback was found\n",
+		       URI);
+    }
+
+    /*
+     * Cleanup
+     */
+    if (URI != NULL)
+	xmlFree(URI);
+    if (parse != NULL)
+	xmlFree(parse);
+    if (href != NULL)
+	xmlFree(href);
+    if (base != NULL)
+	xmlFree(base);
+    return(0);
+}
+
+// the below code fragment can be found in:
+// relaxng.c
+static int
+xmlRelaxNGValidErrorPush(xmlRelaxNGValidCtxtPtr ctxt,
+                         xmlRelaxNGValidErr err, const xmlChar * arg1,
+                         const xmlChar * arg2, int dup)
+{
+    xmlRelaxNGValidErrorPtr cur;
+
+#ifdef DEBUG_ERROR
+    xmlGenericError(xmlGenericErrorContext,
+                    "Pushing error %d at %d on stack\n", err, ctxt->errNr);
+#endif
+    if (ctxt->errTab == NULL) {
+        ctxt->errMax = 8;
+        ctxt->errNr = 0;
+        ctxt->errTab =
+            (xmlRelaxNGValidErrorPtr) xmlMalloc(ctxt->errMax *
+                                                sizeof
+                                                (xmlRelaxNGValidError));
+        if (ctxt->errTab == NULL) {
+            xmlRngVErrMemory(ctxt, "pushing error\n");
+            return (0);
+        }
+        ctxt->err = NULL;
+    }
+    if (ctxt->errNr >= ctxt->errMax) {
+        ctxt->errMax *= 2;
+        ctxt->errTab =
+            (xmlRelaxNGValidErrorPtr) xmlRealloc(ctxt->errTab,
+                                                 ctxt->errMax *
+                                                 sizeof
+                                                 (xmlRelaxNGValidError));
+        if (ctxt->errTab == NULL) {
+            xmlRngVErrMemory(ctxt, "pushing error\n");
+            return (0);
+        }
+        ctxt->err = &ctxt->errTab[ctxt->errNr - 1];
+    }
+    if ((ctxt->err != NULL) && (ctxt->state != NULL) &&
+        (ctxt->err->node == ctxt->state->node) && (ctxt->err->err == err))
+        return (ctxt->errNr);
+    cur = &ctxt->errTab[ctxt->errNr];
+    cur->err = err;
+    if (dup) {
+        cur->arg1 = xmlStrdup(arg1);
+        cur->arg2 = xmlStrdup(arg2);
+        cur->flags = ERROR_IS_DUP;
+    } else {
+        cur->arg1 = arg1;
+        cur->arg2 = arg2;
+        cur->flags = 0;
+    }
+    if (ctxt->state != NULL) {
+        cur->node = ctxt->state->node;
+        cur->seq = ctxt->state->seq;
+    } else {
+        cur->node = NULL;
+        cur->seq = NULL;
+    }
+    ctxt->err = cur;
+    return (ctxt->errNr++);
+}
+
+// the below code fragment can be found in:
+// xinclude.c
+static int
+xmlXIncludeTestNode(xmlXIncludeCtxtPtr ctxt, xmlNodePtr node) {
+    if (node == NULL)
+	return(0);
+    if (node->type != XML_ELEMENT_NODE)
+	return(0);
+    if (node->ns == NULL)
+	return(0);
+    if ((xmlStrEqual(node->ns->href, XINCLUDE_NS)) ||
+        (xmlStrEqual(node->ns->href, XINCLUDE_OLD_NS))) {
+	if (xmlStrEqual(node->ns->href, XINCLUDE_OLD_NS)) {
+	    if (ctxt->legacy == 0) {
+#if 0 /* wait for the XML Core Working Group to get something stable ! */
+		xmlXIncludeWarn(ctxt, node, XML_XINCLUDE_DEPRECATED_NS,
+	               "Deprecated XInclude namespace found, use %s",
+		                XINCLUDE_NS);
+#endif
+	        ctxt->legacy = 1;
+	    }
+	}
+	if (xmlStrEqual(node->name, XINCLUDE_NODE)) {
+	    xmlNodePtr child = node->children;
+	    int nb_fallback = 0;
+
+	    while (child != NULL) {
+		if ((child->type == XML_ELEMENT_NODE) &&
+		    (child->ns != NULL) &&
+		    ((xmlStrEqual(child->ns->href, XINCLUDE_NS)) ||
+		     (xmlStrEqual(child->ns->href, XINCLUDE_OLD_NS)))) {
+		    if (xmlStrEqual(child->name, XINCLUDE_NODE)) {
+			xmlXIncludeErr(ctxt, node,
+			               XML_XINCLUDE_INCLUDE_IN_INCLUDE,
+				       "%s has an 'include' child\n",
+				       XINCLUDE_NODE);
+			return(0);
+		    }
+		    if (xmlStrEqual(child->name, XINCLUDE_FALLBACK)) {
+			nb_fallback++;
+		    }
+		}
+		child = child->next;
+	    }
+	    if (nb_fallback > 1) {
+		xmlXIncludeErr(ctxt, node, XML_XINCLUDE_FALLBACKS_IN_INCLUDE,
+			       "%s has multiple fallback children\n",
+		               XINCLUDE_NODE);
+		return(0);
+	    }
+	    return(1);
+	}
+	if (xmlStrEqual(node->name, XINCLUDE_FALLBACK)) {
+	    if ((node->parent == NULL) ||
+		(node->parent->type != XML_ELEMENT_NODE) ||
+		(node->parent->ns == NULL) ||
+		((!xmlStrEqual(node->parent->ns->href, XINCLUDE_NS)) &&
+		 (!xmlStrEqual(node->parent->ns->href, XINCLUDE_OLD_NS))) ||
+		(!xmlStrEqual(node->parent->name, XINCLUDE_NODE))) {
+		xmlXIncludeErr(ctxt, node,
+		               XML_XINCLUDE_FALLBACK_NOT_IN_INCLUDE,
+			       "%s is not the child of an 'include'\n",
+			       XINCLUDE_FALLBACK);
+	    }
+	}
+    }
+    return(0);
+}
+
+// the below code fragment can be found in:
+// catalog.c
+static xmlChar *
+xmlCatalogXMLResolveURI(xmlCatalogEntryPtr catal, const xmlChar *URI) {
+    xmlChar *ret = NULL;
+    xmlCatalogEntryPtr cur;
+    int haveDelegate = 0;
+    int haveNext = 0;
+    xmlCatalogEntryPtr rewrite = NULL;
+    int lenrewrite = 0, len;
+
+    if (catal == NULL)
+	return(NULL);
+
+    if (URI == NULL)
+	return(NULL);
+
+    if (catal->depth > MAX_CATAL_DEPTH) {
+	xmlCatalogErr(catal, NULL, XML_CATALOG_RECURSION,
+		      "Detected recursion in catalog %s\n",
+		      catal->name, NULL, NULL);
+	return(NULL);
+    }
+
+    /*
+     * First tries steps 2/ 3/ 4/ if a system ID is provided.
+     */
+    cur = catal;
+    haveDelegate = 0;
+    while (cur != NULL) {
+	switch (cur->type) {
+	    case XML_CATA_URI:
+		if (xmlStrEqual(URI, cur->name)) {
+		    if (xmlDebugCatalogs)
+			xmlGenericError(xmlGenericErrorContext,
+				"Found URI match %s\n", cur->name);
+		    return(xmlStrdup(cur->URL));
+		}
+		break;
+	    case XML_CATA_REWRITE_URI:
+		len = xmlStrlen(cur->name);
+		if ((len > lenrewrite) &&
+		    (!xmlStrncmp(URI, cur->name, len))) {
+		    lenrewrite = len;
+		    rewrite = cur;
+		}
+		break;
+	    case XML_CATA_DELEGATE_URI:
+		if (!xmlStrncmp(URI, cur->name, xmlStrlen(cur->name)))
+		    haveDelegate++;
+		break;
+	    case XML_CATA_NEXT_CATALOG:
+		haveNext++;
+		break;
+	    default:
+		break;
+	}
+	cur = cur->next;
+    }
+    if (rewrite != NULL) {
+	if (xmlDebugCatalogs)
+	    xmlGenericError(xmlGenericErrorContext,
+		    "Using rewriting rule %s\n", rewrite->name);
+	ret = xmlStrdup(rewrite->URL);
+	if (ret != NULL)
+	    ret = xmlStrcat(ret, &URI[lenrewrite]);
+	return(ret);
+    }
+    if (haveDelegate) {
+	const xmlChar *delegates[MAX_DELEGATE];
+	int nbList = 0, i;
+
+	/*
+	 * Assume the entries have been sorted by decreasing substring
+	 * matches when the list was produced.
+	 */
+	cur = catal;
+	while (cur != NULL) {
+	    if (((cur->type == XML_CATA_DELEGATE_SYSTEM) ||
+	         (cur->type == XML_CATA_DELEGATE_URI)) &&
+		(!xmlStrncmp(URI, cur->name, xmlStrlen(cur->name)))) {
+		for (i = 0;i < nbList;i++)
+		    if (xmlStrEqual(cur->URL, delegates[i]))
+			break;
+		if (i < nbList) {
+		    cur = cur->next;
+		    continue;
+		}
+		if (nbList < MAX_DELEGATE)
+		    delegates[nbList++] = cur->URL;
+
+		if (cur->children == NULL) {
+		    xmlFetchXMLCatalogFile(cur);
+		}
+		if (cur->children != NULL) {
+		    if (xmlDebugCatalogs)
+			xmlGenericError(xmlGenericErrorContext,
+				"Trying URI delegate %s\n", cur->URL);
+		    ret = xmlCatalogListXMLResolveURI(
+			    cur->children, URI);
+		    if (ret != NULL)
+			return(ret);
+		}
+	    }
+	    cur = cur->next;
+	}
+	/*
+	 * Apply the cut algorithm explained in 4/
+	 */
+	return(XML_CATAL_BREAK);
+    }
+    if (haveNext) {
+	cur = catal;
+	while (cur != NULL) {
+	    if (cur->type == XML_CATA_NEXT_CATALOG) {
+		if (cur->children == NULL) {
+		    xmlFetchXMLCatalogFile(cur);
+		}
+		if (cur->children != NULL) {
+		    ret = xmlCatalogListXMLResolveURI(cur->children, URI);
+		    if (ret != NULL)
+			return(ret);
+		}
+	    }
+	    cur = cur->next;
+	}
+    }
+
+    return(NULL);
+}
+

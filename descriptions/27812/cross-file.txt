@@ -1,0 +1,339 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int frame_get_lazychunk(blosc2_frame *frame, int nchunk, uint8_t **chunk, bool *needs_free) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  *chunk = NULL;
+  *needs_free = false;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  if (nchunk >= nchunks) {
+    BLOSC_TRACE_ERROR("nchunk ('%d') exceeds the number of chunks "
+                      "('%d') in frame.", nchunk, nchunks);
+    return -2;
+  }
+
+  // Get the offset to nchunk
+  int64_t offset = get_coffset(frame, header_len, cbytes, nchunk);
+
+  size_t lazychunk_cbytes = 0;
+  if (frame->sdata == NULL) {
+    // TODO: make this portable across different endianness
+    // Get info for building a lazy chunk
+    size_t chunk_nbytes;
+    size_t chunk_cbytes;
+    size_t chunk_blocksize;
+    uint8_t header[BLOSC_MIN_HEADER_LENGTH];
+    FILE* fp = fopen(frame->fname, "rb");
+    fseek(fp, header_len + offset, SEEK_SET);
+    size_t rbytes = fread(header, 1, BLOSC_MIN_HEADER_LENGTH, fp);
+    if (rbytes != BLOSC_MIN_HEADER_LENGTH) {
+      BLOSC_TRACE_ERROR("Cannot read the header for chunk in the fileframe.");
+      return -5;
+    }
+    blosc_cbuffer_sizes(header, &chunk_nbytes, &chunk_cbytes, &chunk_blocksize);
+    size_t nblocks = chunk_nbytes / chunk_blocksize;
+    size_t leftover_block = chunk_nbytes % chunk_blocksize;
+    nblocks = leftover_block ? nblocks + 1 : nblocks;
+    // Allocate space for lazy chunk (cbytes + trailer)
+    size_t trailer_len = sizeof(int32_t) + sizeof(int64_t) + nblocks * sizeof(int32_t);
+    lazychunk_cbytes = chunk_cbytes + trailer_len;
+    *chunk = malloc(lazychunk_cbytes);
+    *needs_free = true;
+    // Read just the full header and bstarts section too (lazy partial length)
+    fseek(fp, header_len + offset, SEEK_SET);
+    size_t lazy_partial_len = BLOSC_EXTENDED_HEADER_LENGTH + nblocks * sizeof(int32_t);
+    rbytes = fread(*chunk, 1, lazy_partial_len, fp);
+    fclose(fp);
+    if (rbytes != lazy_partial_len) {
+      BLOSC_TRACE_ERROR("Cannot read the (lazy) chunk out of the fileframe.");
+      return -6;
+    }
+
+    // Mark chunk as lazy
+    uint8_t* blosc2_flags = *chunk + BLOSC2_CHUNK_BLOSC2_FLAGS;
+    *blosc2_flags |= 0x08U;
+
+    // Add the trailer (currently, nchunk + offset + block_csizes)
+    *(int32_t*)(*chunk + chunk_cbytes) = nchunk;
+    *(int64_t*)(*chunk + chunk_cbytes + sizeof(int32_t)) = header_len + offset;
+
+    int32_t* block_csizes = malloc(nblocks * sizeof(int32_t));
+
+    int memcpyed = *(*chunk + BLOSC2_CHUNK_FLAGS) & (uint8_t)BLOSC_MEMCPYED;
+    if (memcpyed) {
+      // When memcpyed the blocksizes are trivial to compute
+      for (int i = 0; i < (int)nblocks; i++) {
+        block_csizes[i] = (int)chunk_blocksize;
+      }
+    }
+    else {
+      // In regular, compressed chunks, we need to sort the bstarts (they can be out
+      // of order because of multi-threading), and get a reverse index too.
+      memcpy(block_csizes, *chunk + BLOSC_EXTENDED_HEADER_LENGTH, nblocks * sizeof(int32_t));
+      // Helper structure to keep track of original indexes
+      struct csize_idx *csize_idx = malloc(nblocks * sizeof(struct csize_idx));
+      for (int n = 0; n < (int)nblocks; n++) {
+        csize_idx[n].val = block_csizes[n];
+        csize_idx[n].idx = n;
+      }
+      qsort(csize_idx, nblocks, sizeof(struct csize_idx), &sort_offset);
+      // Compute the actual csizes
+      int idx;
+      for (int n = 0; n < (int)nblocks - 1; n++) {
+        idx = csize_idx[n].idx;
+        block_csizes[idx] = csize_idx[n + 1].val - csize_idx[n].val;
+      }
+      idx = csize_idx[nblocks - 1].idx;
+      block_csizes[idx] = (int)chunk_cbytes - csize_idx[nblocks - 1].val;
+      free(csize_idx);
+    }
+    // Copy the csizes at the end of the trailer
+    void *trailer_csizes = *chunk + lazychunk_cbytes - nblocks * sizeof(int32_t);
+    memcpy(trailer_csizes, block_csizes, nblocks * sizeof(int32_t));
+    free(block_csizes);
+  } else {
+    // The chunk is in memory and just one pointer away
+    *chunk = frame->sdata + header_len + offset;
+    lazychunk_cbytes = sw32_(*chunk + BLOSC2_CHUNK_CBYTES);
+  }
+
+  return (int)lazychunk_cbytes;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int sort_offset(const void* a, const void* b) {
+  int32_t a_ = ((struct csize_idx*)a)->val;
+  int32_t b_ = ((struct csize_idx*)b)->val;
+  return a_ - b_;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int frame_update_header(blosc2_frame* frame, blosc2_schunk* schunk, bool new) {
+  uint8_t* framep = frame->sdata;
+  uint8_t header[FRAME_HEADER_MINLEN];
+
+  if (frame->len <= 0) {
+    return -1;
+  }
+
+  if (new && schunk->cbytes > 0) {
+    BLOSC_TRACE_ERROR("New metalayers cannot be added after actual data "
+                      "has been appended.");
+    return -1;
+  }
+
+  if (frame->sdata == NULL) {
+    size_t rbytes = 0;
+    FILE* fp = fopen(frame->fname, "rb");
+    if (fp != NULL) {
+      rbytes = fread(header, 1, FRAME_HEADER_MINLEN, fp);
+      fclose(fp);
+    }
+    (void) rbytes;
+    if (rbytes != FRAME_HEADER_MINLEN) {
+      return -1;
+    }
+    framep = header;
+  }
+  uint32_t prev_h2len;
+  swap_store(&prev_h2len, framep + FRAME_HEADER_LEN, sizeof(prev_h2len));
+
+  // Build a new header
+  uint8_t* h2 = new_header_frame(schunk, frame);
+  uint32_t h2len;
+  swap_store(&h2len, h2 + FRAME_HEADER_LEN, sizeof(h2len));
+
+  // The frame length is outdated when adding a new metalayer, so update it
+  if (new) {
+    int64_t frame_len = h2len;  // at adding time, we only have to worry of the header for now
+    swap_store(h2 + FRAME_LEN, &frame_len, sizeof(frame_len));
+    frame->len = frame_len;
+  }
+
+  if (!new && prev_h2len != h2len) {
+    BLOSC_TRACE_ERROR("The new metalayer sizes should be equal the existing ones.");
+    return -2;
+  }
+
+  if (frame->sdata == NULL) {
+    // Write updated header down to file
+    FILE* fp = fopen(frame->fname, "rb+");
+    if (fp != NULL) {
+      fwrite(h2, h2len, 1, fp);
+      fclose(fp);
+    }
+  }
+  else {
+    if (new) {
+      frame->sdata = realloc(frame->sdata, h2len);
+    }
+    memcpy(frame->sdata, h2, h2len);
+  }
+  free(h2);
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int64_t blosc2_frame_from_schunk(blosc2_schunk *schunk, blosc2_frame *frame) {
+  int32_t nchunks = schunk->nchunks;
+  int64_t cbytes = schunk->cbytes;
+  FILE* fp = NULL;
+
+  uint8_t* h2 = new_header_frame(schunk, frame);
+  if (h2 == NULL) {
+    return -1;
+  }
+  uint32_t h2len;
+  swap_store(&h2len, h2 + FRAME_HEADER_LEN, sizeof(h2len));
+
+  // Build the offsets chunk
+  int32_t chunksize = -1;
+  int32_t off_cbytes = 0;
+  uint64_t coffset = 0;
+  int32_t off_nbytes = nchunks * 8;
+  uint64_t* data_tmp = malloc(off_nbytes);
+  for (int i = 0; i < nchunks; i++) {
+    uint8_t* data_chunk = schunk->data[i];
+    int32_t chunk_cbytes = sw32_(data_chunk + BLOSC2_CHUNK_CBYTES);
+    data_tmp[i] = coffset;
+    coffset += chunk_cbytes;
+    int32_t chunksize_ = sw32_(data_chunk + BLOSC2_CHUNK_NBYTES);
+    if (i == 0) {
+      chunksize = chunksize_;
+    }
+    else if (chunksize != chunksize_) {
+      // Variable size  // TODO: update flags for this (or do not use them at all)
+      chunksize = 0;
+    }
+  }
+  if ((int64_t)coffset != cbytes) {
+    return -1;
+  }
+
+  uint8_t *off_chunk = NULL;
+  if (nchunks > 0) {
+    // Compress the chunk of offsets
+    off_chunk = malloc(off_nbytes + BLOSC_MAX_OVERHEAD);
+    blosc2_context *cctx = blosc2_create_cctx(BLOSC2_CPARAMS_DEFAULTS);
+    cctx->typesize = 8;
+    off_cbytes = blosc2_compress_ctx(cctx, data_tmp, off_nbytes, off_chunk,
+                                     off_nbytes + BLOSC_MAX_OVERHEAD);
+    blosc2_free_ctx(cctx);
+    if (off_cbytes < 0) {
+      free(off_chunk);
+      free(h2);
+      return -1;
+    }
+  }
+  else {
+    off_cbytes = 0;
+  }
+  free(data_tmp);
+
+  // Now that we know them, fill the chunksize and frame length in header
+  swap_store(h2 + FRAME_CHUNKSIZE, &chunksize, sizeof(chunksize));
+  frame->len = h2len + cbytes + off_cbytes + FRAME_TRAILER_MINLEN + schunk->usermeta_len;
+  int64_t tbytes = frame->len;
+  swap_store(h2 + FRAME_LEN, &tbytes, sizeof(tbytes));
+
+  // Create the frame and put the header at the beginning
+  if (frame->fname == NULL) {
+    frame->sdata = malloc((size_t)frame->len);
+    memcpy(frame->sdata, h2, h2len);
+  }
+  else {
+    fp = fopen(frame->fname, "wb");
+    fwrite(h2, h2len, 1, fp);
+  }
+  free(h2);
+
+  // Fill the frame with the actual data chunks
+  coffset = 0;
+  for (int i = 0; i < nchunks; i++) {
+    uint8_t* data_chunk = schunk->data[i];
+    int32_t chunk_cbytes = sw32_(data_chunk + BLOSC2_CHUNK_CBYTES);
+    if (frame->fname == NULL) {
+      memcpy(frame->sdata + h2len + coffset, data_chunk, (size_t)chunk_cbytes);
+    } else {
+      fwrite(data_chunk, (size_t)chunk_cbytes, 1, fp);
+    }
+    coffset += chunk_cbytes;
+  }
+  if ((int64_t)coffset != cbytes) {
+    return -1;
+  }
+
+  // Copy the offsets chunk at the end of the frame
+  if (frame->fname == NULL) {
+    memcpy(frame->sdata + h2len + cbytes, off_chunk, off_cbytes);
+  }
+  else {
+    fwrite(off_chunk, (size_t)off_cbytes, 1, fp);
+    fclose(fp);
+  }
+  free(off_chunk);
+
+  int rc = frame_update_trailer(frame, schunk);
+  if (rc < 0) {
+    return rc;
+  }
+
+  return frame->len;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+blosc2_frame* blosc2_frame_from_sframe(uint8_t *sframe, int64_t len, bool copy) {
+  // Get the length of the frame
+  const uint8_t* header = sframe;
+  int64_t frame_len;
+  if (len < FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+  swap_store(&frame_len, header + FRAME_LEN, sizeof(frame_len));
+  if (frame_len != len) {   // sanity check
+    return NULL;
+  }
+
+  blosc2_frame* frame = calloc(1, sizeof(blosc2_frame));
+  frame->len = frame_len;
+
+  // Now, the trailer length
+  const uint8_t* trailer = sframe + frame_len - FRAME_TRAILER_MINLEN;
+  int trailer_offset = FRAME_TRAILER_MINLEN - FRAME_TRAILER_LEN_OFFSET;
+  if (trailer[trailer_offset - 1] != 0xce) {
+    free(frame);
+    return NULL;
+  }
+  uint32_t trailer_len;
+  swap_store(&trailer_len, trailer + trailer_offset, sizeof(trailer_len));
+  frame->trailer_len = trailer_len;
+
+  if (copy) {
+    frame->sdata = malloc((size_t)len);
+    memcpy(frame->sdata, sframe, (size_t)len);
+  }
+  else {
+    frame->sdata = sframe;
+  }
+
+  return frame;
+}
+

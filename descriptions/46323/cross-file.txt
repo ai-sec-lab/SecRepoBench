@@ -1,0 +1,251 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// tree.c
+static int
+xmlDOMWrapAdoptAttr(xmlDOMWrapCtxtPtr ctxt,
+		    xmlDocPtr sourceDoc,
+		    xmlAttrPtr attr,
+		    xmlDocPtr destDoc,
+		    xmlNodePtr destParent,
+		    int options ATTRIBUTE_UNUSED)
+{
+    xmlNodePtr cur;
+    int adoptStr = 1;
+
+    if ((attr == NULL) || (destDoc == NULL))
+	return (-1);
+
+    attr->doc = destDoc;
+    if (attr->ns != NULL) {
+	xmlNsPtr ns = NULL;
+
+	if (ctxt != NULL) {
+	    /* TODO: User defined. */
+	}
+	/* XML Namespace. */
+	if (IS_STR_XML(attr->ns->prefix)) {
+	    ns = xmlTreeEnsureXMLDecl(destDoc);
+	} else if (destParent == NULL) {
+	    /*
+	    * Store in @destDoc->oldNs.
+	    */
+	    ns = xmlDOMWrapStoreNs(destDoc, attr->ns->href, attr->ns->prefix);
+	} else {
+	    /*
+	    * Declare on @destParent.
+	    */
+	    if (xmlSearchNsByNamespaceStrict(destDoc, destParent, attr->ns->href,
+		&ns, 1) == -1)
+		goto internal_error;
+	    if (ns == NULL) {
+		ns = xmlDOMWrapNSNormDeclareNsForced(destDoc, destParent,
+		    attr->ns->href, attr->ns->prefix, 1);
+	    }
+	}
+	if (ns == NULL)
+	    goto internal_error;
+	attr->ns = ns;
+    }
+
+    XML_TREE_ADOPT_STR(attr->name);
+    attr->atype = 0;
+    attr->psvi = NULL;
+    /*
+    * Walk content.
+    */
+    if (attr->children == NULL)
+	return (0);
+    cur = attr->children;
+    if ((cur != NULL) && (cur->type == XML_NAMESPACE_DECL))
+        goto internal_error;
+    while (cur != NULL) {
+	cur->doc = destDoc;
+	switch (cur->type) {
+	    case XML_TEXT_NODE:
+	    case XML_CDATA_SECTION_NODE:
+		XML_TREE_ADOPT_STR_2(cur->content)
+		break;
+	    case XML_ENTITY_REF_NODE:
+		/*
+		* Remove reference to the entity-node.
+		*/
+		cur->content = NULL;
+		cur->children = NULL;
+		cur->last = NULL;
+		if ((destDoc->intSubset) || (destDoc->extSubset)) {
+		    xmlEntityPtr ent;
+		    /*
+		    * Assign new entity-node if available.
+		    */
+		    ent = xmlGetDocEntity(destDoc, cur->name);
+		    if (ent != NULL) {
+			cur->content = ent->content;
+			cur->children = (xmlNodePtr) ent;
+			cur->last = (xmlNodePtr) ent;
+		    }
+		}
+		break;
+	    default:
+		break;
+	}
+	if (cur->children != NULL) {
+	    cur = cur->children;
+	    continue;
+	}
+next_sibling:
+	if (cur == (xmlNodePtr) attr)
+	    break;
+	if (cur->next != NULL)
+	    cur = cur->next;
+	else {
+	    cur = cur->parent;
+	    goto next_sibling;
+	}
+    }
+    return (0);
+internal_error:
+    return (-1);
+}
+
+// the below code fragment can be found in:
+// debugXML.c
+static void
+xmlCtxtDumpString(xmlDebugCtxtPtr ctxt, const xmlChar * str)
+{
+    int i;
+
+    if (ctxt->check) {
+        return;
+    }
+    /* TODO: check UTF8 content of the string */
+    if (str == NULL) {
+        fprintf(ctxt->output, "(NULL)");
+        return;
+    }
+    for (i = 0; i < 40; i++)
+        if (str[i] == 0)
+            return;
+        else if (IS_BLANK_CH(str[i]))
+            fputc(' ', ctxt->output);
+        else if (str[i] >= 0x80)
+            fprintf(ctxt->output, "#%X", str[i]);
+        else
+            fputc(str[i], ctxt->output);
+    fprintf(ctxt->output, "...");
+}
+
+// the below code fragment can be found in:
+// tree.c
+xmlAttrPtr
+xmlNewProp(xmlNodePtr node, const xmlChar *name, const xmlChar *value) {
+
+    if (name == NULL) {
+#ifdef DEBUG_TREE
+        xmlGenericError(xmlGenericErrorContext,
+		"xmlNewProp : name == NULL\n");
+#endif
+	return(NULL);
+    }
+
+	return xmlNewPropInternal(node, NULL, name, value, 0);
+}
+
+// the below code fragment can be found in:
+// tree.c
+static int
+xmlSearchNsByNamespaceStrict(xmlDocPtr doc, xmlNodePtr node,
+			     const xmlChar* nsName,
+			     xmlNsPtr *retNs, int prefixed)
+{
+    xmlNodePtr cur, prev = NULL, out = NULL;
+    xmlNsPtr ns, prevns;
+
+    if ((doc == NULL) || (nsName == NULL) || (retNs == NULL))
+	return (-1);
+    if ((node == NULL) || (node->type == XML_NAMESPACE_DECL))
+        return(-1);
+
+    *retNs = NULL;
+    if (xmlStrEqual(nsName, XML_XML_NAMESPACE)) {
+	*retNs = xmlTreeEnsureXMLDecl(doc);
+	if (*retNs == NULL)
+	    return (-1);
+	return (1);
+    }
+    cur = node;
+    do {
+	if (cur->type == XML_ELEMENT_NODE) {
+	    if (cur->nsDef != NULL) {
+		for (ns = cur->nsDef; ns != NULL; ns = ns->next) {
+		    if (prefixed && (ns->prefix == NULL))
+			continue;
+		    if (prev != NULL) {
+			/*
+			* Check the last level of ns-decls for a
+			* shadowing prefix.
+			*/
+			prevns = prev->nsDef;
+			do {
+			    if ((prevns->prefix == ns->prefix) ||
+				((prevns->prefix != NULL) &&
+				(ns->prefix != NULL) &&
+				xmlStrEqual(prevns->prefix, ns->prefix))) {
+				/*
+				* Shadowed.
+				*/
+				break;
+			    }
+			    prevns = prevns->next;
+			} while (prevns != NULL);
+			if (prevns != NULL)
+			    continue;
+		    }
+		    /*
+		    * Ns-name comparison.
+		    */
+		    if ((nsName == ns->href) ||
+			xmlStrEqual(nsName, ns->href)) {
+			/*
+			* At this point the prefix can only be shadowed,
+			* if we are the the (at least) 3rd level of
+			* ns-decls.
+			*/
+			if (out) {
+			    int ret;
+
+			    ret = xmlNsInScope(doc, node, prev, ns->prefix);
+			    if (ret < 0)
+				return (-1);
+			    /*
+			    * TODO: Should we try to find a matching ns-name
+			    * only once? This here keeps on searching.
+			    * I think we should try further since, there might
+			    * be an other matching ns-decl with an unshadowed
+			    * prefix.
+			    */
+			    if (! ret)
+				continue;
+			}
+			*retNs = ns;
+			return (1);
+		    }
+		}
+		out = prev;
+		prev = cur;
+	    }
+	} else if ((cur->type == XML_ENTITY_NODE) ||
+            (cur->type == XML_ENTITY_DECL))
+	    return (0);
+	cur = cur->parent;
+    } while ((cur != NULL) && (cur->doc != (xmlDocPtr) cur));
+    return (0);
+}
+
+// the below code fragment can be found in:
+// tree.c
+xmlAttrPtr
+xmlCopyProp(xmlNodePtr target, xmlAttrPtr cur) {
+	return xmlCopyPropInternal(NULL, target, cur);
+}
+

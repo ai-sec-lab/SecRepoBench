@@ -1,0 +1,368 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static void cleanupServerName(char *buffer, int buffer_len) {
+  u_int i;
+
+  /* Now all lowecase */
+  for(i=0; i<buffer_len; i++)
+    buffer[i] = tolower(buffer[i]);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static int ndpi_search_tls_udp(struct ndpi_detection_module_struct *ndpi_struct,
+			       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  // u_int8_t handshake_type;
+  u_int32_t handshake_len;
+  u_int16_t p_len;
+  const u_int8_t *p;
+
+#ifdef DEBUG_TLS
+  printf("[TLS] %s()\n", __FUNCTION__);
+#endif
+
+  /* Consider only specific SSL packets (handshake) */
+  if((packet->payload_packet_len < 17)
+     || (packet->payload[0]  != 0x16)
+     || (packet->payload[1]  != 0xfe) /* We ignore old DTLS versions */
+     || ((packet->payload[2] != 0xff) && (packet->payload[2] != 0xfd))
+     || ((ntohs(*((u_int16_t*)&packet->payload[11]))+13) != packet->payload_packet_len)
+    ) {
+  no_dtls:
+
+#ifdef DEBUG_TLS
+    printf("[TLS] No DTLS found\n");
+#endif
+
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return(0); /* Giveup */
+  }
+
+  // handshake_type = packet->payload[13];
+  handshake_len  = (packet->payload[14] << 16) + (packet->payload[15] << 8) + packet->payload[16];
+
+  if((handshake_len+25) != packet->payload_packet_len)
+    goto no_dtls;
+
+  /* Overwriting packet payload */
+  p = packet->payload, p_len = packet->payload_packet_len; /* Backup */
+  packet->payload = &packet->payload[13], packet->payload_packet_len -= 13;
+
+  processTLSBlock(ndpi_struct, flow);
+
+  packet->payload = p;
+  packet->payload_packet_len = p_len; /* Restore */
+
+  ndpi_int_tls_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_TLS);
+
+  return(1); /* Keep working */
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+void ndpi_connection_tracking(struct ndpi_detection_module_struct *ndpi_str,
+			      struct ndpi_flow_struct *flow) {
+  if(!flow) {
+    return;
+  } else {
+    /* const for gcc code optimization and cleaner code */
+    struct ndpi_packet_struct *packet = &flow->packet;
+    const struct ndpi_iphdr *iph = packet->iph;
+#ifdef NDPI_DETECTION_SUPPORT_IPV6
+    const struct ndpi_ipv6hdr *iphv6 = packet->iphv6;
+#endif
+    const struct ndpi_tcphdr *tcph = packet->tcp;
+    const struct ndpi_udphdr *udph = flow->packet.udp;
+
+    packet->tcp_retransmission = 0, packet->packet_direction = 0;
+
+    if(ndpi_str->direction_detect_disable) {
+      packet->packet_direction = flow->packet_direction;
+    } else {
+      if(iph != NULL && ntohl(iph->saddr) < ntohl(iph->daddr))
+	packet->packet_direction = 1;
+
+#ifdef NDPI_DETECTION_SUPPORT_IPV6
+      if(iphv6 != NULL && NDPI_COMPARE_IPV6_ADDRESS_STRUCTS(&iphv6->ip6_src, &iphv6->ip6_dst) != 0)
+	packet->packet_direction = 1;
+#endif
+    }
+
+    packet->packet_lines_parsed_complete = 0;
+
+    if(flow->init_finished == 0) {
+      flow->init_finished = 1;
+      flow->setup_packet_direction = packet->packet_direction;
+    }
+
+    if(tcph != NULL) {
+      /* reset retried bytes here before setting it */
+      packet->num_retried_bytes = 0;
+
+      if(!ndpi_str->direction_detect_disable)
+	packet->packet_direction = (ntohs(tcph->source) < ntohs(tcph->dest)) ? 1 : 0;
+
+      if(tcph->syn != 0 && tcph->ack == 0 && flow->l4.tcp.seen_syn == 0 && flow->l4.tcp.seen_syn_ack == 0 &&
+	 flow->l4.tcp.seen_ack == 0) {
+	flow->l4.tcp.seen_syn = 1;
+      }
+      if(tcph->syn != 0 && tcph->ack != 0 && flow->l4.tcp.seen_syn == 1 && flow->l4.tcp.seen_syn_ack == 0 &&
+	 flow->l4.tcp.seen_ack == 0) {
+	flow->l4.tcp.seen_syn_ack = 1;
+      }
+      if(tcph->syn == 0 && tcph->ack == 1 && flow->l4.tcp.seen_syn == 1 && flow->l4.tcp.seen_syn_ack == 1 &&
+	 flow->l4.tcp.seen_ack == 0) {
+	flow->l4.tcp.seen_ack = 1;
+      }
+      if((flow->next_tcp_seq_nr[0] == 0 && flow->next_tcp_seq_nr[1] == 0) ||
+	 (flow->next_tcp_seq_nr[0] == 0 || flow->next_tcp_seq_nr[1] == 0)) {
+	/* initialize tcp sequence counters */
+	/* the ack flag needs to be set to get valid sequence numbers from the other
+	 * direction. Usually it will catch the second packet syn+ack but it works
+	 * also for asymmetric traffic where it will use the first data packet
+	 *
+	 * if the syn flag is set add one to the sequence number,
+	 * otherwise use the payload length.
+	 */
+	if(tcph->ack != 0) {
+	  flow->next_tcp_seq_nr[flow->packet.packet_direction] =
+	    ntohl(tcph->seq) + (tcph->syn ? 1 : packet->payload_packet_len);
+
+	  flow->next_tcp_seq_nr[1 - flow->packet.packet_direction] = ntohl(tcph->ack_seq);
+	}
+      } else if(packet->payload_packet_len > 0) {
+	/* check tcp sequence counters */
+	if(((u_int32_t)(ntohl(tcph->seq) - flow->next_tcp_seq_nr[packet->packet_direction])) >
+	   ndpi_str->tcp_max_retransmission_window_size) {
+	  packet->tcp_retransmission = 1;
+
+	  /* CHECK IF PARTIAL RETRY IS HAPPENING */
+	  if((flow->next_tcp_seq_nr[packet->packet_direction] - ntohl(tcph->seq) <
+	      packet->payload_packet_len)) {
+	    /* num_retried_bytes actual_payload_len hold info about the partial retry
+	       analyzer which require this info can make use of this info
+	       Other analyzer can use packet->payload_packet_len */
+	    packet->num_retried_bytes =
+	      (u_int16_t)(flow->next_tcp_seq_nr[packet->packet_direction] - ntohl(tcph->seq));
+	    packet->actual_payload_len = packet->payload_packet_len - packet->num_retried_bytes;
+	    flow->next_tcp_seq_nr[packet->packet_direction] = ntohl(tcph->seq) + packet->payload_packet_len;
+	  }
+	}
+
+	/* normal path
+	   actual_payload_len is initialized to payload_packet_len during tcp header parsing itself.
+	   It will be changed only in case of retransmission */
+	else {
+	  packet->num_retried_bytes = 0;
+	  flow->next_tcp_seq_nr[packet->packet_direction] = ntohl(tcph->seq) + packet->payload_packet_len;
+	}
+      }
+
+      if(tcph->rst) {
+	flow->next_tcp_seq_nr[0] = 0;
+	flow->next_tcp_seq_nr[1] = 0;
+      }
+    } else if(udph != NULL) {
+      if(!ndpi_str->direction_detect_disable)
+	packet->packet_direction = (htons(udph->source) < htons(udph->dest)) ? 1 : 0;
+    }
+
+    if(flow->packet_counter < MAX_PACKET_COUNTER && packet->payload_packet_len) {
+      flow->packet_counter++;
+    }
+
+    if(flow->packet_direction_counter[packet->packet_direction] < MAX_PACKET_COUNTER &&
+       packet->payload_packet_len) {
+      flow->packet_direction_counter[packet->packet_direction]++;
+    }
+
+    if(flow->byte_counter[packet->packet_direction] + packet->payload_packet_len >
+       flow->byte_counter[packet->packet_direction]) {
+      flow->byte_counter[packet->packet_direction] += packet->payload_packet_len;
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
+			       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  u_int8_t something_went_wrong = 0;
+
+#ifdef DEBUG_TLS_MEMORY
+  printf("[TLS Mem] ndpi_search_tls_tcp() Processing new packet [payload_packet_len: %u]\n",
+	 packet->payload_packet_len);
+#endif
+
+  if(packet->payload_packet_len == 0)
+    return(1); /* Keep working */
+
+  ndpi_search_tls_tcp_memory(ndpi_struct, flow);
+
+  while(!something_went_wrong) {
+    u_int16_t len, p_len;
+    const u_int8_t *p;
+    u_int8_t content_type;
+
+    if(flow->l4.tcp.tls.message.buffer_used < 5)
+      return(1); /* Keep working */
+
+    len = (flow->l4.tcp.tls.message.buffer[3] << 8) + flow->l4.tcp.tls.message.buffer[4] + 5;
+
+    if(len > flow->l4.tcp.tls.message.buffer_used) {
+#ifdef DEBUG_TLS_MEMORY
+      printf("[TLS Mem] Not enough TLS data [%u < %u][%02X %02X %02X %02X %02X]\n",
+	     len, flow->l4.tcp.tls.message.buffer_used,
+	     flow->l4.tcp.tls.message.buffer[0],
+	     flow->l4.tcp.tls.message.buffer[1],
+	     flow->l4.tcp.tls.message.buffer[2],
+	     flow->l4.tcp.tls.message.buffer[3],
+	     flow->l4.tcp.tls.message.buffer[4]);
+#endif
+      break;
+    }
+
+    if(len == 0) {
+      something_went_wrong = 1;
+      break;
+    }
+
+#ifdef DEBUG_TLS_MEMORY
+    printf("[TLS Mem] Processing %u bytes message\n", len);
+#endif
+
+    content_type = flow->l4.tcp.tls.message.buffer[0];
+
+    /* Overwriting packet payload */
+    p = packet->payload;
+    p_len = packet->payload_packet_len; /* Backup */
+
+    if(content_type == 0x14 /* Change Cipher Spec */) {
+      if(ndpi_struct->skip_tls_blocks_until_change_cipher) {
+	/*
+	  Ignore Application Data up until change cipher
+	  so in this case we reset the number of observed
+	  TLS blocks
+	*/
+	flow->l4.tcp.tls.num_tls_blocks = 0;
+      }
+    }
+
+    if((len > 9)
+       && (content_type != 0x17 /* Application Data */)
+       && (!flow->l4.tcp.tls.certificate_processed)) {
+      /* Split the element in blocks */
+      u_int16_t processed = 5;
+
+      while((processed+4) <= len) {
+	const u_int8_t *block = (const u_int8_t *)&flow->l4.tcp.tls.message.buffer[processed];
+	u_int32_t block_len   = (block[1] << 16) + (block[2] << 8) + block[3];
+
+	if(/* (block_len == 0) || */ /* Note blocks can have zero lenght */
+	   (block_len > len) || ((block[1] != 0x0))) {
+	  something_went_wrong = 1;
+	  break;
+	}
+
+	packet->payload = block;
+	packet->payload_packet_len = ndpi_min(block_len+4, flow->l4.tcp.tls.message.buffer_used);
+
+	if((processed+packet->payload_packet_len) > len) {
+	  something_went_wrong = 1;
+	  break;
+	}
+
+	processTLSBlock(ndpi_struct, flow);
+
+	processed += packet->payload_packet_len;
+      }
+    } else {
+      /* Process element as a whole */
+      if((content_type == 0x17 /* Application Data */)
+	 && (flow->l4.tcp.tls.certificate_processed)) {
+	if(flow->l4.tcp.tls.num_tls_blocks < ndpi_struct->num_tls_blocks_to_follow)
+	  flow->l4.tcp.tls.tls_application_blocks_len[flow->l4.tcp.tls.num_tls_blocks++] =
+	    (packet->packet_direction == 0) ? (len-5) : -(len-5);
+
+#ifdef DEBUG_TLS_BLOCKS
+	printf("*** [TLS Block] [len: %u][num_tls_blocks: %u/%u]\n",
+	       len-5, flow->l4.tcp.tls.num_tls_blocks, ndpi_struct->num_tls_blocks_to_follow);
+#endif
+      }
+    }
+
+    packet->payload = p;
+    packet->payload_packet_len = p_len; /* Restore */
+    flow->l4.tcp.tls.message.buffer_used -= len;
+
+    if(flow->l4.tcp.tls.message.buffer_used > 0)
+      memmove(flow->l4.tcp.tls.message.buffer,
+	      &flow->l4.tcp.tls.message.buffer[len],
+	      flow->l4.tcp.tls.message.buffer_used);
+    else
+      break;
+
+#ifdef DEBUG_TLS_MEMORY
+    printf("[TLS Mem] Left memory buffer %u bytes\n", flow->l4.tcp.tls.message.buffer_used);
+#endif
+  }
+
+  if(something_went_wrong
+     || ((ndpi_struct->num_tls_blocks_to_follow > 0)
+	 && (flow->l4.tcp.tls.num_tls_blocks == ndpi_struct->num_tls_blocks_to_follow))
+     ) {
+#ifdef DEBUG_TLS_BLOCKS
+    printf("*** [TLS Block] No more blocks\n");
+#endif
+    flow->check_extra_packets = 0;
+    flow->extra_packets_func = NULL;
+    return(0); /* That's all */
+  } else
+    return(1);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static int processTLSBlock(struct ndpi_detection_module_struct *ndpi_struct,
+			   struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+
+  switch(packet->payload[0] /* block type */) {
+  case 0x01: /* Client Hello */
+  case 0x02: /* Server Hello */
+    processClientServerHello(ndpi_struct, flow, 0);
+    flow->l4.tcp.tls.hello_processed = 1;
+    ndpi_int_tls_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_TLS);
+
+#ifdef DEBUG_TLS
+    printf("*** TLS [version: %02X][%s Hello]\n",
+	   flow->protos.stun_ssl.ssl.ssl_version,
+	   (packet->payload[0] == 0x01) ? "Client" : "Server");
+#endif
+
+    if((flow->protos.stun_ssl.ssl.ssl_version >= 0x0304 /* TLS 1.3 */)
+       && (packet->payload[0] == 0x02 /* Server Hello */)) {
+      flow->l4.tcp.tls.certificate_processed = 1; /* No Certificate with TLS 1.3+ */
+    }
+    break;
+
+  case 0x0b: /* Certificate */
+    /* Important: populate the tls union fields only after
+     * ndpi_int_tls_add_connection has been called */
+    if(flow->l4.tcp.tls.hello_processed) {
+      processCertificate(ndpi_struct, flow);
+      flow->l4.tcp.tls.certificate_processed = 1;
+    }
+    break;
+
+  default:
+    return(-1);
+  }
+
+  return(0);
+}
+

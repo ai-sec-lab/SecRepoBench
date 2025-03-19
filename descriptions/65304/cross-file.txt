@@ -1,0 +1,230 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static void ndpi_search_tls_wrapper(struct ndpi_detection_module_struct *ndpi_struct,
+				    struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+#ifdef DEBUG_TLS
+  printf("==>> %s() %u [len: %u][version: %u]\n",
+	 __FUNCTION__,
+	 flow->guessed_protocol_id_by_ip,
+	 packet->payload_packet_len,
+	 flow->protos.tls_quic.ssl_version);
+#endif
+
+  if(packet->udp != NULL)
+    ndpi_search_tls_udp(ndpi_struct, flow);
+  else
+    ndpi_search_tls_tcp(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+int processCertificate(struct ndpi_detection_module_struct *ndpi_struct,
+		       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  int is_dtls = packet->udp ? 1 : 0;
+  u_int32_t certificates_length, length = (packet->payload[1] << 16) + (packet->payload[2] << 8) + packet->payload[3];
+  u_int32_t certificates_offset = 7 + (is_dtls ? 8 : 0);
+  u_int8_t num_certificates_found = 0;
+  SHA1_CTX srv_cert_fingerprint_ctx ;
+
+#ifdef DEBUG_TLS
+  printf("[TLS] %s() [payload_packet_len=%u][direction: %u][%02X %02X %02X %02X %02X %02X...]\n",
+	 __FUNCTION__, packet->payload_packet_len,
+	 packet->packet_direction,
+	 packet->payload[0], packet->payload[1], packet->payload[2],
+	 packet->payload[3], packet->payload[4], packet->payload[5]);
+#endif
+
+  if((packet->payload_packet_len != (length + 4 + (is_dtls ? 8 : 0))) || (packet->payload[1] != 0x0) ||
+     certificates_offset >= packet->payload_packet_len) {
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET, NULL);
+    return(-1); /* Invalid length */
+  }
+
+  certificates_length = (packet->payload[certificates_offset - 3] << 16) +
+    (packet->payload[certificates_offset - 2] << 8) +
+    packet->payload[certificates_offset - 1];
+
+  if((packet->payload[certificates_offset - 3] != 0x0) || ((certificates_length+3) != length)) {
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET, NULL);
+    return(-2); /* Invalid length */
+  }
+
+  /* Now let's process each individual certificates */
+  while(certificates_offset < certificates_length) {
+    u_int32_t certificate_len = (packet->payload[certificates_offset] << 16) + (packet->payload[certificates_offset+1] << 8) + packet->payload[certificates_offset+2];
+
+    /* Invalid lenght */
+    if((certificate_len == 0)
+       || (packet->payload[certificates_offset] != 0x0)
+       || ((certificates_offset+certificate_len) > (4+certificates_length+(is_dtls ? 8 : 0)))) {
+#ifdef DEBUG_TLS
+      printf("[TLS] Invalid length [certificate_len: %u][certificates_offset: %u][%u vs %u]\n",
+	     certificate_len, certificates_offset,
+	     (certificates_offset+certificate_len),
+	     certificates_length);
+#endif
+      break;
+    }
+
+    certificates_offset += 3;
+#ifdef DEBUG_TLS
+    printf("[TLS] Processing %u bytes certificate [%02X %02X %02X]\n",
+	   certificate_len,
+	   packet->payload[certificates_offset],
+	   packet->payload[certificates_offset+1],
+	   packet->payload[certificates_offset+2]);
+#endif
+
+    if(num_certificates_found++ == 0) /* Dissect only the first certificate that is the one we care */ {
+      /* For SHA-1 we take into account only the first certificate and not all of them */
+
+      SHA1Init(&srv_cert_fingerprint_ctx);
+
+#ifdef DEBUG_CERTIFICATE_HASH
+      {
+	u_int32_t i;
+
+	for(i=0;i<certificate_len;i++)
+	  printf("%02X ", packet->payload[certificates_offset+i]);
+
+	printf("\n");
+      }
+#endif
+
+      SHA1Update(&srv_cert_fingerprint_ctx,
+		 &packet->payload[certificates_offset],
+		 certificate_len);
+
+      SHA1Final(flow->protos.tls_quic.sha1_certificate_fingerprint, &srv_cert_fingerprint_ctx);
+
+      flow->protos.tls_quic.fingerprint_set = 1;
+
+      uint8_t * sha1 = flow->protos.tls_quic.sha1_certificate_fingerprint;
+      const size_t sha1_siz = sizeof(flow->protos.tls_quic.sha1_certificate_fingerprint);
+      char sha1_str[20 /* sha1_siz */ * 2 + 1];
+      static const char hexalnum[] = "0123456789ABCDEF";
+      size_t i;
+      for (i = 0; i < sha1_siz; ++i) {
+        u_int8_t lower = (sha1[i] & 0x0F);
+        u_int8_t upper = (sha1[i] & 0xF0) >> 4;
+        sha1_str[i*2] = hexalnum[upper];
+        sha1_str[i*2 + 1] = hexalnum[lower];
+      }
+      sha1_str[sha1_siz * 2] = '\0';
+
+#ifdef DEBUG_TLS
+      printf("[TLS] SHA-1: %s\n", sha1_str);
+#endif
+
+      if(ndpi_struct->malicious_sha1_hashmap != NULL) {
+        u_int16_t rc1 = ndpi_hash_find_entry(ndpi_struct->malicious_sha1_hashmap, sha1_str, sha1_siz * 2, NULL);
+
+        if(rc1 == 0)
+          ndpi_set_risk(ndpi_struct, flow, NDPI_MALICIOUS_SHA1_CERTIFICATE, sha1_str);
+      }
+
+      processCertificateElements(ndpi_struct, flow, certificates_offset, certificate_len);
+    }
+
+    certificates_offset += certificate_len;
+  }
+
+  if((ndpi_struct->num_tls_blocks_to_follow != 0)
+     && (flow->l4.tcp.tls.num_tls_blocks >= ndpi_struct->num_tls_blocks_to_follow)) {
+#ifdef DEBUG_TLS_BLOCKS
+    printf("*** [TLS Block] Enough blocks dissected\n");
+#endif
+
+    flow->extra_packets_func = NULL; /* We're good now */
+  }
+
+  return(1);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static void ndpi_looks_like_tls(struct ndpi_detection_module_struct *ndpi_struct,
+				struct ndpi_flow_struct *flow) {
+  if(flow->guessed_protocol_id == NDPI_PROTOCOL_UNKNOWN)
+    flow->guessed_protocol_id = __get_master(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static int processTLSBlock(struct ndpi_detection_module_struct *ndpi_struct,
+                           struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  int ret;
+
+#ifdef DEBUG_TLS
+  printf("[TLS] Processing block %u\n", packet->payload[0]);
+#endif
+
+  switch(packet->payload[0] /* block type */) {
+  case 0x01: /* Client Hello */
+  case 0x02: /* Server Hello */
+    processClientServerHello(ndpi_struct, flow, 0);
+    flow->protos.tls_quic.hello_processed = 1;
+    flow->protos.tls_quic.ch_direction = (packet->payload[0] == 0x01 ? packet->packet_direction : !packet->packet_direction);
+    ndpi_int_tls_add_connection(ndpi_struct, flow);
+
+#ifdef DEBUG_TLS
+    printf("*** TLS [version: %02X][%s Hello]\n",
+	   flow->protos.tls_quic.ssl_version,
+	   (packet->payload[0] == 0x01) ? "Client" : "Server");
+#endif
+
+    /* Not support for DTLS 1.3 yet, then certificates are always visible in DTLS */
+    if((packet->tcp && flow->protos.tls_quic.ssl_version >= 0x0304 /* TLS 1.3 */)
+       && (packet->payload[0] == 0x02 /* Server Hello */)) {
+      flow->tls_quic.certificate_processed = 1; /* No Certificate with TLS 1.3+ */
+    }
+
+    checkTLSSubprotocol(ndpi_struct, flow, packet->payload[0] == 0x01);
+    break;
+
+  case 0x0b: /* Certificate */
+    /* Important: populate the tls union fields only after
+     * ndpi_int_tls_add_connection has been called */
+    if(flow->protos.tls_quic.hello_processed) {
+      /* Only certificates from the server */
+      if(flow->protos.tls_quic.ch_direction != packet->packet_direction) {
+        ret = processCertificate(ndpi_struct, flow);
+        if(ret != 1) {
+#ifdef DEBUG_TLS
+          printf("[TLS] Error processing certificate: %d\n", ret);
+#endif
+        }
+      } else {
+#ifdef DEBUG_TLS
+        printf("[TLS] Certificate from client. Ignoring it\n");
+#endif
+      }
+      flow->tls_quic.certificate_processed = 1;
+    }
+    break;
+
+  default:
+    return(-1);
+  }
+
+  return(0);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static int check_sni_is_numeric_ip(char *sni) {
+  unsigned char buf[sizeof(struct in6_addr)];
+
+  if(inet_pton(AF_INET, sni, buf) == 1)
+    return 1;
+  if(inet_pton(AF_INET6, sni, buf) == 1)
+    return 1;
+  return 0;
+}
+

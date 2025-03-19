@@ -1,0 +1,315 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// MagickCore/draw.c
+static MagickBooleanType TraceBezier(MVGInfo *mvg_info,
+  const size_t number_coordinates)
+{
+  double
+    alpha,
+    *coefficients,
+    weight;
+
+  PointInfo
+    end,
+    point,
+    *points;
+
+  PrimitiveInfo
+    *primitive_info;
+
+  register PrimitiveInfo
+    *p;
+
+  register ssize_t
+    i,
+    j;
+
+  size_t
+    control_points,
+    quantum;
+
+  /*
+    Allocate coefficients.
+  */
+  primitive_info=(*mvg_info->primitive_info)+mvg_info->offset;
+  quantum=number_coordinates;
+  for (i=0; i < (ssize_t) number_coordinates; i++)
+  {
+    for (j=i+1; j < (ssize_t) number_coordinates; j++)
+    {
+      alpha=fabs(primitive_info[j].point.x-primitive_info[i].point.x);
+      if (alpha > (double) SSIZE_MAX)
+        {
+          (void) ThrowMagickException(mvg_info->exception,GetMagickModule(),
+            ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+          return(MagickFalse);
+        }
+      if (alpha > (double) quantum)
+        quantum=(size_t) alpha;
+      alpha=fabs(primitive_info[j].point.y-primitive_info[i].point.y);
+      if (alpha > (double) SSIZE_MAX)
+        {
+          (void) ThrowMagickException(mvg_info->exception,GetMagickModule(),
+            ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+          return(MagickFalse);
+        }
+      if (alpha > (double) quantum)
+        quantum=(size_t) alpha;
+    }
+  }
+  primitive_info=(*mvg_info->primitive_info)+mvg_info->offset;
+  quantum=MagickMin(quantum/number_coordinates,BezierQuantum);
+  coefficients=(double *) AcquireQuantumMemory(number_coordinates,
+    sizeof(*coefficients));
+  points=(PointInfo *) AcquireQuantumMemory(quantum,number_coordinates*
+    sizeof(*points));
+  if ((coefficients == (double *) NULL) || (points == (PointInfo *) NULL))
+    {
+      if (points != (PointInfo *) NULL)
+        points=(PointInfo *) RelinquishMagickMemory(points);
+      if (coefficients != (double *) NULL)
+        coefficients=(double *) RelinquishMagickMemory(coefficients);
+      (void) ThrowMagickException(mvg_info->exception,GetMagickModule(),
+        ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+      return(MagickFalse);
+    }
+  control_points=quantum*number_coordinates;
+  if (CheckPrimitiveExtent(mvg_info,control_points+1) == MagickFalse)
+    {
+      points=(PointInfo *) RelinquishMagickMemory(points);
+      coefficients=(double *) RelinquishMagickMemory(coefficients);
+      return(MagickFalse);
+    }
+  primitive_info=(*mvg_info->primitive_info)+mvg_info->offset;
+  /*
+    Compute bezier points.
+  */
+  end=primitive_info[number_coordinates-1].point;
+  for (i=0; i < (ssize_t) number_coordinates; i++)
+    coefficients[i]=Permutate((ssize_t) number_coordinates-1,i);
+  weight=0.0;
+  for (i=0; i < (ssize_t) control_points; i++)
+  {
+    p=primitive_info;
+    point.x=0.0;
+    point.y=0.0;
+    alpha=pow((double) (1.0-weight),(double) number_coordinates-1.0);
+    for (j=0; j < (ssize_t) number_coordinates; j++)
+    {
+      point.x+=alpha*coefficients[j]*p->point.x;
+      point.y+=alpha*coefficients[j]*p->point.y;
+      alpha*=weight/(1.0-weight);
+      p++;
+    }
+    points[i]=point;
+    weight+=1.0/control_points;
+  }
+  /*
+    Bezier curves are just short segmented polys.
+  */
+  p=primitive_info;
+  for (i=0; i < (ssize_t) control_points; i++)
+  {
+    if (TracePoint(p,points[i]) == MagickFalse)
+      {
+        points=(PointInfo *) RelinquishMagickMemory(points);
+        coefficients=(double *) RelinquishMagickMemory(coefficients);
+        return(MagickFalse);
+      }
+    p+=p->coordinates;
+  }
+  if (TracePoint(p,end) == MagickFalse)
+    {
+      points=(PointInfo *) RelinquishMagickMemory(points);
+      coefficients=(double *) RelinquishMagickMemory(coefficients);
+      return(MagickFalse);
+    }
+  p+=p->coordinates;
+  primitive_info->coordinates=(size_t) (p-primitive_info);
+  primitive_info->closed_subpath=MagickFalse;
+  for (i=0; i < (ssize_t) primitive_info->coordinates; i++)
+  {
+    p->primitive=primitive_info->primitive;
+    p--;
+  }
+  points=(PointInfo *) RelinquishMagickMemory(points);
+  coefficients=(double *) RelinquishMagickMemory(coefficients);
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// MagickCore/draw.c
+static MagickBooleanType TraceRectangle(PrimitiveInfo *primitive_info,
+  const PointInfo start,const PointInfo end)
+{
+  PointInfo
+    point;
+
+  register PrimitiveInfo
+    *p;
+
+  register ssize_t
+    i;
+
+  p=primitive_info;
+  if (TracePoint(p,start) == MagickFalse)
+    return(MagickFalse);
+  p+=p->coordinates;
+  point.x=start.x;
+  point.y=end.y;
+  if (TracePoint(p,point) == MagickFalse)
+    return(MagickFalse);
+  p+=p->coordinates;
+  if (TracePoint(p,end) == MagickFalse)
+    return(MagickFalse);
+  p+=p->coordinates;
+  point.x=end.x;
+  point.y=start.y;
+  if (TracePoint(p,point) == MagickFalse)
+    return(MagickFalse);
+  p+=p->coordinates;
+  if (TracePoint(p,start) == MagickFalse)
+    return(MagickFalse);
+  p+=p->coordinates;
+  primitive_info->coordinates=(size_t) (p-primitive_info);
+  primitive_info->closed_subpath=MagickTrue;
+  for (i=0; i < (ssize_t) primitive_info->coordinates; i++)
+  {
+    p->primitive=primitive_info->primitive;
+    p--;
+  }
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// MagickCore/draw.c
+static MagickBooleanType TraceLine(PrimitiveInfo *primitive_info,
+  const PointInfo start,const PointInfo end)
+{
+  if (TracePoint(primitive_info,start) == MagickFalse)
+    return(MagickFalse);
+  if ((fabs(start.x-end.x) < MagickEpsilon) &&
+      (fabs(start.y-end.y) < MagickEpsilon))
+    {
+      primitive_info->primitive=PointPrimitive;
+      primitive_info->coordinates=1;
+      return(MagickTrue);
+    }
+  if (TracePoint(primitive_info+1,end) == MagickFalse)
+    return(MagickFalse);
+  (primitive_info+1)->primitive=primitive_info->primitive;
+  primitive_info->coordinates=2;
+  primitive_info->closed_subpath=MagickFalse;
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// MagickCore/draw.c
+static MagickBooleanType TraceSquareLinecap(PrimitiveInfo *primitive_info,
+  const size_t number_vertices,const double offset)
+{
+  double
+    distance;
+
+  register double
+    dx,
+    dy;
+
+  register ssize_t
+    i;
+
+  ssize_t
+    j;
+
+  dx=0.0;
+  dy=0.0;
+  for (i=1; i < (ssize_t) number_vertices; i++)
+  {
+    dx=primitive_info[0].point.x-primitive_info[i].point.x;
+    dy=primitive_info[0].point.y-primitive_info[i].point.y;
+    if ((fabs((double) dx) >= MagickEpsilon) ||
+        (fabs((double) dy) >= MagickEpsilon))
+      break;
+  }
+  if (i == (ssize_t) number_vertices)
+    i=(ssize_t) number_vertices-1L;
+  distance=hypot((double) dx,(double) dy);
+  primitive_info[0].point.x=(double) (primitive_info[i].point.x+
+    dx*(distance+offset)/distance);
+  primitive_info[0].point.y=(double) (primitive_info[i].point.y+
+    dy*(distance+offset)/distance);
+  for (j=(ssize_t) number_vertices-2; j >= 0;  j--)
+  {
+    dx=primitive_info[number_vertices-1].point.x-primitive_info[j].point.x;
+    dy=primitive_info[number_vertices-1].point.y-primitive_info[j].point.y;
+    if ((fabs((double) dx) >= MagickEpsilon) ||
+        (fabs((double) dy) >= MagickEpsilon))
+      break;
+  }
+  distance=hypot((double) dx,(double) dy);
+  primitive_info[number_vertices-1].point.x=(double) (primitive_info[j].point.x+
+    dx*(distance+offset)/distance);
+  primitive_info[number_vertices-1].point.y=(double) (primitive_info[j].point.y+
+    dy*(distance+offset)/distance);
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// MagickCore/draw.c
+static inline double GetStopColorOffset(const GradientInfo *gradient,
+  const ssize_t x,const ssize_t y)
+{
+  switch (gradient->type)
+  {
+    case UndefinedGradient:
+    case LinearGradient:
+    {
+      double
+        gamma,
+        length,
+        offset,
+        scale;
+
+      PointInfo
+        p,
+        q;
+
+      const SegmentInfo
+        *gradient_vector;
+
+      gradient_vector=(&gradient->gradient_vector);
+      p.x=gradient_vector->x2-gradient_vector->x1;
+      p.y=gradient_vector->y2-gradient_vector->y1;
+      q.x=(double) x-gradient_vector->x1;
+      q.y=(double) y-gradient_vector->y1;
+      length=sqrt(q.x*q.x+q.y*q.y);
+      gamma=sqrt(p.x*p.x+p.y*p.y)*length;
+      gamma=PerceptibleReciprocal(gamma);
+      scale=p.x*q.x+p.y*q.y;
+      offset=gamma*scale*length;
+      return(offset);
+    }
+    case RadialGradient:
+    {
+      PointInfo
+        v;
+
+      if (gradient->spread == RepeatSpread)
+        {
+          v.x=(double) x-gradient->center.x;
+          v.y=(double) y-gradient->center.y;
+          return(sqrt(v.x*v.x+v.y*v.y));
+        }
+      v.x=(double) (((x-gradient->center.x)*cos(DegreesToRadians(
+        gradient->angle)))+((y-gradient->center.y)*sin(DegreesToRadians(
+        gradient->angle))))*PerceptibleReciprocal(gradient->radii.x);
+      v.y=(double) (((x-gradient->center.x)*sin(DegreesToRadians(
+        gradient->angle)))-((y-gradient->center.y)*cos(DegreesToRadians(
+        gradient->angle))))*PerceptibleReciprocal(gradient->radii.y);
+      return(sqrt(v.x*v.x+v.y*v.y));
+    }
+  }
+  return(0.0);
+}
+

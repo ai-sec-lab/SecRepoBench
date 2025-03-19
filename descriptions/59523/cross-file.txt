@@ -1,0 +1,323 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/dynapi.c
+EXPORT bool
+dwg_dynapi_header_set_value (Dwg_Data *restrict dwg,
+                             const char *restrict fieldname,
+                             const void *restrict value, const bool is_utf8)
+{
+#ifndef HAVE_NONNULL
+  if (!dwg || !fieldname || !value) // cannot set NULL value
+    return false;
+#endif
+  {
+    Dwg_DYNAPI_field *f = (Dwg_DYNAPI_field *)bsearch (
+        fieldname, _dwg_header_variables_fields,
+        ARRAY_SIZE (_dwg_header_variables_fields) - 1, /* NULL terminated */
+        sizeof (_dwg_header_variables_fields[0]), _name_struct_cmp);
+    if (f)
+      {
+        void *old;
+        // there are no malloc'd fields in the HEADER, so no need to free().
+        const Dwg_Header_Variables *const _obj = &dwg->header_vars;
+        // but there are several fixed-length malloced strings preR13
+        static const Dwg_DYNAPI_field r11_fixed_strings[] = {
+          { "MENU", "TFv", 16, OFF (struct _dwg_header_variables, MENU), 1,1,1, 1 },
+          { "DIMBLK_T", "TFv", 33, OFF (struct _dwg_header_variables, DIMBLK_T), 1,1,1, 1 },
+          { "DIMBLK1_T", "TFv", 33, OFF (struct _dwg_header_variables, DIMBLK1_T), 1,1,1, 1 },
+          { "DIMBLK2_T", "TFv", 33, OFF (struct _dwg_header_variables, DIMBLK2_T), 1,1,1, 1 },
+          { "DIMPOST", "TFv", 16, OFF (struct _dwg_header_variables, DIMPOST), 1,1,1, 1 },
+          { "DIMAPOST", "TFv", 16, OFF (struct _dwg_header_variables, DIMAPOST), 1,1,1, 1 },
+          { "unknown_string", "TFv", 33, OFF (struct _dwg_header_variables, unknown_string), 1,1,1, 1 },
+          { "unit1_name", "TFv", 32, OFF (struct _dwg_header_variables, unit1_name), 1,1,1, 1 },
+          { "unit2_name", "TFv", 32, OFF (struct _dwg_header_variables, unit2_name), 1,1,1, 1 },
+          { "unit3_name", "TFv", 32, OFF (struct _dwg_header_variables, unit3_name), 1,1,1, 1 },
+          { "unit4_name", "TFv", 32, OFF (struct _dwg_header_variables, unit4_name), 1,1,1, 1 },
+          { 0 }
+        };
+        if (f->is_string && dwg->header.from_version < R_13b1)
+          {
+            //find_name (fieldname, r11_fixed_strings))
+            for (Dwg_DYNAPI_field* f11 = (Dwg_DYNAPI_field*)&r11_fixed_strings[0]; f11->name; f11++)
+              {
+                if (strEQ (fieldname, f11->name))
+                  {
+                    f = f11;
+                    break;
+                  }
+              }
+          }
+        old = &((char*)_obj)[f->offset];
+        dynapi_set_helper (old, f, dwg->header.version, value, is_utf8);
+
+        // Set also FLAGS
+        if (strEQc (fieldname, "CELWEIGHT"))
+          {
+            dwg->header_vars.FLAGS &= ~0x1f; // delete old, and set new
+            dwg->header_vars.FLAGS |= dxf_revcvt_lweight (dwg->header_vars.CELWEIGHT);
+          }
+        else if (strEQc (fieldname, "codepage"))
+          {
+            dwg->header.codepage = *(BITCODE_RS*)value;
+          }
+#define SET_HDR_FLAGS(name, bit, inverse)          \
+        else if (strEQc (fieldname, #name))        \
+          {                                        \
+            if (dwg->header_vars.name && !inverse) \
+              dwg->header_vars.FLAGS |= bit;       \
+            else                                   \
+              dwg->header_vars.FLAGS &= ~bit;      \
+          }
+        SET_HDR_FLAGS (ENDCAPS, 0x60, 0)
+        SET_HDR_FLAGS (JOINSTYLE, 0x180, 0)
+        SET_HDR_FLAGS (LWDISPLAY, 0x200, 1)
+        SET_HDR_FLAGS (XEDIT, 0x400, 1)
+        SET_HDR_FLAGS (EXTNAMES, 0x800, 0)
+        SET_HDR_FLAGS (PSTYLEMODE, 0x2000, 0)
+        SET_HDR_FLAGS (OLESTARTUP, 0x4000, 0)
+
+        return true;
+      }
+    else
+      {
+        const int loglevel = dwg->opts & DWG_OPTS_LOGLEVEL;
+        LOG_ERROR ("%s: Invalid header field %s", __FUNCTION__, fieldname);
+        return false;
+      }
+  }
+}
+
+// the below code fragment can be found in:
+// src/dynapi.c
+EXPORT bool
+dwg_dynapi_common_set_value (void *restrict _obj,
+                             const char *restrict fieldname,
+                             const void *restrict value, const bool is_utf8)
+{
+#ifndef HAVE_NONNULL
+  if (!_obj || !fieldname || !value)
+    return false;
+#endif
+  {
+    Dwg_DYNAPI_field *f;
+    int error;
+    void *old;
+    const Dwg_Object *obj = dwg_obj_generic_to_object (_obj, &error);
+    Dwg_Data *dwg;
+    if (!obj || error)
+      {
+        const int loglevel = DWG_LOGLEVEL_ERROR;
+        LOG_ERROR ("%s: dwg_obj_generic_to_object failed", __FUNCTION__);
+        return false;
+      }
+    dwg = obj->parent;
+    if (obj->supertype == DWG_SUPERTYPE_ENTITY)
+      {
+        _obj = obj->tio.entity;
+        f = (Dwg_DYNAPI_field *)bsearch (
+            fieldname, _dwg_object_entity_fields,
+            ARRAY_SIZE (_dwg_object_entity_fields) - 1, /* NULL terminated */
+            sizeof (_dwg_object_entity_fields[0]), _name_struct_cmp);
+      }
+    else if (obj->supertype == DWG_SUPERTYPE_OBJECT)
+      {
+        _obj = obj->tio.object;
+        f = (Dwg_DYNAPI_field *)bsearch (
+            fieldname, _dwg_object_object_fields,
+            ARRAY_SIZE (_dwg_object_object_fields) - 1, /* NULL terminated */
+            sizeof (_dwg_object_object_fields[0]), _name_struct_cmp);
+      }
+    else
+      {
+        const int loglevel = DWG_LOGLEVEL_ERROR;
+        LOG_ERROR ("%s: Unhandled %s.supertype ", __FUNCTION__, obj->name);
+        return false;
+      }
+
+    if (!f)
+      {
+        const int loglevel = obj->parent->opts & DWG_OPTS_LOGLEVEL;
+        LOG_ERROR ("%s: Invalid %s common field %s", __FUNCTION__, obj->name, fieldname);
+        return false;
+      }
+
+    old = &((char*)_obj)[f->offset];
+    if (f->dxf == 160 && strEQc (fieldname, "preview_size"))
+      {
+        int size = f->size;
+        if (dwg && dwg->header.version < R_2010)
+          size = 4;
+        memcpy (old, value, size);
+      }
+    else
+      dynapi_set_helper (old, f, dwg ? dwg->header.version : R_INVALID, value, is_utf8);
+
+    if (dwg && obj->supertype == DWG_SUPERTYPE_ENTITY && strEQc (fieldname, "ltype"))
+      { // set also isbylayerlt and ltype_flags
+        BITCODE_H ltype = *(BITCODE_H*)value;
+        Dwg_Object_Entity *ent = obj->tio.entity;
+        if (!dwg->header_vars.LTYPE_BYLAYER || !ent->ltype)
+          ;
+        else if (ent->ltype->absolute_ref == dwg->header_vars.LTYPE_BYLAYER->absolute_ref)
+          {
+            ent->isbylayerlt = 1; // r13-r14 only
+            ent->ltype_flags = 0;
+          }
+        else if (dwg->header_vars.LTYPE_BYBLOCK
+                 && ent->ltype->absolute_ref == dwg->header_vars.LTYPE_BYBLOCK->absolute_ref)
+          {
+            ent->isbylayerlt = 0;
+            ent->ltype_flags = 1;
+          }
+        else if (dwg->header_vars.LTYPE_CONTINUOUS
+                 && ent->ltype->absolute_ref == dwg->header_vars.LTYPE_CONTINUOUS->absolute_ref)
+          {
+            ent->isbylayerlt = 0;
+            ent->ltype_flags = 2;
+          }
+        else
+          {
+            ent->isbylayerlt = 0;
+            ent->ltype_flags = 3;
+          }
+      }
+    return true;
+  }
+}
+
+// the below code fragment can be found in:
+// src/dynapi.c
+EXPORT bool
+dwg_dynapi_subclass_value (const void *restrict ptr,
+                           const char *restrict subclass,
+                           const char *restrict fieldname,
+                           void *restrict out, Dwg_DYNAPI_field *restrict fp)
+{
+  const Dwg_DYNAPI_field *f;
+#ifndef HAVE_NONNULL
+  if (!ptr || !subclass || !fieldname || !out)
+    return false;
+#endif
+  f = dwg_dynapi_subclass_field (subclass, fieldname);
+  if (!f) // TODO maybe search via dwg_dynapi_subclass_name ()
+    return false;
+  memcpy (out, &((char*)ptr)[f->offset], f->size);
+  if (fp)
+    memcpy (fp, f, sizeof(Dwg_DYNAPI_field));
+  return true;
+}
+
+// the below code fragment can be found in:
+// test/unit-testing/dxf_test.c
+static int
+test_dxf (const struct _unknown_dxf *dxf, const char *restrict name,
+          const char *restrict dwgfile)
+{
+  int error = 0;
+  static char prev_dwgfile[128];
+  static Dwg_Data dwg;
+  BITCODE_BL i;
+  char *trace;
+  int tracelevel = 0;
+
+  trace = getenv ("LIBREDWG_TRACE");
+  if (trace)
+    tracelevel = atoi (trace);
+
+  loglevel = is_make_silent () ? 0 : MAX (tracelevel, 2);
+  LOG_TRACE ("%s %X %s\n", dxf->name, dxf->handle, dwgfile);
+  num = passed = failed = 0;
+
+  if (dwg.num_objects && strEQ (dwgfile, prev_dwgfile))
+    ;
+  else
+    {
+      if (dwg.num_objects && dwg.header.version > R_INVALID)
+        dwg_free (&dwg);
+      dwg.opts = tracelevel;
+      if (dwg_read_file (dwgfile, &dwg) >= DWG_ERR_CRITICAL)
+        {
+          dwg_free (&dwg);
+          return 1;
+        }
+    }
+  strcpy (prev_dwgfile, dwgfile);
+
+  // find the object
+  for (i = 0; i < dwg.num_objects; i++)
+    {
+      if (dwg.object[i].handle.value == dxf->handle)
+        {
+          if (dwg.object[i].fixedtype >= DWG_TYPE_UNKNOWN_ENT)
+            break;
+          if (strNE (dwg.object[i].dxfname, dxf->name))
+            LOG_WARN ("Invalid handle 0x%X for %s", dxf->handle, dxf->name)
+          else
+            error += test_object (&dwg, &dwg.object[i], dxf, name);
+          break;
+        }
+    }
+  /* This value is the return value for `main',
+     so clamp it to either 0 or 1.  */
+  return error ? 1 : 0;
+}
+
+// the below code fragment can be found in:
+// src/dynapi.c
+EXPORT bool
+dwg_dynapi_common_value(void *restrict _obj, const char *restrict fieldname,
+                        void *restrict out, Dwg_DYNAPI_field *restrict fp)
+{
+#ifndef HAVE_NONNULL
+  if (!_obj || !fieldname || !out)
+    return false;
+#endif
+  {
+    const Dwg_DYNAPI_field *f;
+    int error;
+    const Dwg_Object *obj = dwg_obj_generic_to_object (_obj, &error);
+    if (!obj || error)
+      {
+        const int loglevel = DWG_LOGLEVEL_ERROR;
+        LOG_ERROR ("%s: dwg_obj_generic_to_object failed", __FUNCTION__);
+        return false;
+      }
+
+    if (obj->supertype == DWG_SUPERTYPE_ENTITY)
+      {
+        f = dwg_dynapi_common_entity_field (fieldname);
+        _obj = obj->tio.entity;
+      }
+    else if (obj->supertype == DWG_SUPERTYPE_OBJECT)
+      {
+        f = dwg_dynapi_common_object_field (fieldname);
+        _obj = obj->tio.object;
+      }
+    else
+      {
+        const int loglevel = obj->parent->opts & DWG_OPTS_LOGLEVEL; // DWG_LOGLEVEL_ERROR;
+        LOG_ERROR ("%s: Unhandled %s.supertype ", __FUNCTION__, obj->name);
+        return false;
+      }
+
+    if (f)
+      {
+        int size = f->size;
+        if (fp)
+          memcpy (fp, f, sizeof(Dwg_DYNAPI_field));
+        if (f->dxf == 160 && strEQc (fieldname, "preview_size")
+            && obj->parent->header.version < R_2010)
+          size = 4;
+        memcpy (out, &((char *)_obj)[f->offset], size);
+        return true;
+      }
+    else
+      {
+        const int loglevel = obj->parent->opts & DWG_OPTS_LOGLEVEL;
+        LOG_ERROR ("%s: Invalid common field %s", __FUNCTION__, fieldname);
+        return false;
+      }
+  }
+}
+

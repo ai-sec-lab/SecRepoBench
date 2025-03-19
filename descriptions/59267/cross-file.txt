@@ -1,0 +1,407 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_compressor.h
+exr_result_t
+DwaCompressor_initializeBuffers (DwaCompressor* me, size_t* bufferSize)
+{
+    exr_result_t rv = EXR_ERR_SUCCESS;
+
+    //
+    // _outBuffer needs to be big enough to hold all our
+    // compressed data - which could vary depending on what sort
+    // of channels we have.
+    //
+
+    uint64_t maxOutBufferSize  = 0;
+    uint64_t numLossyDctChans  = 0;
+    uint64_t unknownBufferSize = 0;
+    uint64_t rleBufferSize     = 0;
+
+    uint64_t maxLossyDctAcSize =
+        (uint64_t) (ceilf ((float) me->_numScanLines / 8.0f)) *
+        (uint64_t) (ceilf ((float) (me->_max[0] - me->_min[0] + 1) / 8.0f)) *
+        63 * sizeof (uint16_t);
+
+    uint64_t maxLossyDctDcSize =
+        (uint64_t) (ceilf ((float) me->_numScanLines / 8.0f)) *
+        (uint64_t) (ceilf ((float) (me->_max[0] - me->_min[0] + 1) / 8.0f)) *
+        sizeof (uint16_t);
+
+    uint64_t pixelCount = (uint64_t) (me->_numScanLines) *
+                          (uint64_t) (me->_max[0] - me->_min[0] + 1);
+
+    uint64_t planarUncBufferSize[NUM_COMPRESSOR_SCHEMES];
+
+    for (int i = 0; i < NUM_COMPRESSOR_SCHEMES; ++i)
+        planarUncBufferSize[i] = 0;
+
+    for (size_t i = 0; i < me->_channelRuleCount; ++i)
+    {
+        maxOutBufferSize += Classifier_size (&(me->_channelRules[i]));
+    }
+
+    rv = DwaCompressor_classifyChannels (me);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+
+    for (int c = 0; c < me->_numChannels; ++c)
+    {
+        const exr_coding_channel_info_t* curc = me->_channelData[c].chan;
+        switch (me->_channelData[c].compression)
+        {
+            case LOSSY_DCT:
+
+                //
+                // This is the size of the number of packed
+                // components, plus the requirements for
+                // maximum Huffman encoding size (for STATIC_HUFFMAN)
+                // or for zlib compression (for DEFLATE)
+                //
+
+                maxOutBufferSize += std_max (
+                    2lu * maxLossyDctAcSize + 65536lu,
+                    exr_compress_max_buffer_size (maxLossyDctAcSize));
+                numLossyDctChans++;
+                break;
+
+            case RLE:
+                //
+                // RLE, if gone horribly wrong, could double the size
+                // of the source data.
+                //
+                rleBufferSize +=
+                    2 * pixelCount * (uint64_t) curc->bytes_per_element;
+
+                planarUncBufferSize[RLE] +=
+                    2 * pixelCount * (uint64_t) curc->bytes_per_element;
+                break;
+
+            case UNKNOWN:
+                unknownBufferSize +=
+                    pixelCount * (uint64_t) curc->bytes_per_element;
+                planarUncBufferSize[UNKNOWN] +=
+                    pixelCount * (uint64_t) curc->bytes_per_element;
+                break;
+
+            case NUM_COMPRESSOR_SCHEMES:
+            default: return EXR_ERR_INVALID_ARGUMENT;
+        }
+    }
+
+    //
+    // Also, since the results of the RLE are packed into
+    // the output buffer, we need the extra room there. But
+    // we're going to zlib compress() the data we pack,
+    // which could take slightly more space
+    //
+
+    maxOutBufferSize += exr_compress_max_buffer_size (rleBufferSize);
+
+    //
+    // And the same goes for the UNKNOWN data
+    //
+
+    maxOutBufferSize += exr_compress_max_buffer_size (unknownBufferSize);
+
+    //
+    // Reserve space big enough to hold the DC data
+    // and include its compressed results in the size requirements
+    // for our output buffer
+    //
+
+    maxOutBufferSize +=
+        exr_compress_max_buffer_size (maxLossyDctDcSize * numLossyDctChans);
+
+    //
+    // We also need to reserve space at the head of the buffer to
+    // write out the size of our various packed and compressed data.
+    //
+
+    maxOutBufferSize += NUM_SIZES_SINGLE * sizeof (uint64_t);
+
+    //
+    // Later, we're going to hijack outBuffer for the result of
+    // both encoding and decoding. So it needs to be big enough
+    // to hold either a buffers' worth of uncompressed or
+    // compressed data
+    //
+    // For encoding, we'll need _outBuffer to hold maxOutBufferSize bytes,
+    // but for decoding, we only need it to be maxScanLineSize*numScanLines.
+    // Cache the max size for now, and alloc the buffer when we either
+    // encode or decode.
+    //
+
+    *bufferSize = maxOutBufferSize;
+
+    //
+    // _packedAcBuffer holds the quantized DCT coefficients prior
+    // to Huffman encoding
+    //
+
+    if (maxLossyDctAcSize * numLossyDctChans > me->_packedAcBufferSize)
+    {
+        me->_packedAcBufferSize = maxLossyDctAcSize * numLossyDctChans;
+        if (me->_packedAcBuffer != NULL) me->free_fn (me->_packedAcBuffer);
+        me->_packedAcBuffer = me->alloc_fn (me->_packedAcBufferSize);
+        if (!me->_packedAcBuffer) return EXR_ERR_OUT_OF_MEMORY;
+        memset (me->_packedAcBuffer, 0, me->_packedAcBufferSize);
+    }
+
+    //
+    // _packedDcBuffer holds one quantized DCT coef per 8x8 block
+    //
+
+    if (maxLossyDctDcSize * numLossyDctChans > me->_packedDcBufferSize)
+    {
+        me->_packedDcBufferSize = maxLossyDctDcSize * numLossyDctChans;
+        if (me->_packedDcBuffer != NULL) me->free_fn (me->_packedDcBuffer);
+        me->_packedDcBuffer = me->alloc_fn (me->_packedDcBufferSize);
+        if (!me->_packedDcBuffer) return EXR_ERR_OUT_OF_MEMORY;
+        memset (me->_packedDcBuffer, 0, me->_packedDcBufferSize);
+    }
+
+    if (rleBufferSize > me->_rleBufferSize)
+    {
+        me->_rleBufferSize = rleBufferSize;
+        if (me->_rleBuffer != 0) me->free_fn (me->_rleBuffer);
+        me->_rleBuffer = me->alloc_fn (rleBufferSize);
+        if (!me->_rleBuffer) return EXR_ERR_OUT_OF_MEMORY;
+        memset (me->_rleBuffer, 0, rleBufferSize);
+    }
+
+    //
+    // The planar uncompressed buffer will hold float data for LOSSY_DCT
+    // compressed values, and whatever the native type is for other
+    // channels. We're going to use this to hold data in a planar
+    // format, as opposed to the native interleaved format we take
+    // into compress() and give back from uncompress().
+    //
+    // This also makes it easier to compress the UNKNOWN and RLE data
+    // all in one swoop (for each compression scheme).
+    //
+
+    //
+    // UNKNOWN data is going to be zlib compressed, which needs
+    // a little extra headroom
+    //
+
+    if (planarUncBufferSize[UNKNOWN] > 0)
+    {
+        planarUncBufferSize[UNKNOWN] =
+            exr_compress_max_buffer_size (planarUncBufferSize[UNKNOWN]);
+    }
+
+    for (int i = 0; i < NUM_COMPRESSOR_SCHEMES; ++i)
+    {
+        if (planarUncBufferSize[i] > me->_planarUncBufferSize[i])
+        {
+            me->_planarUncBufferSize[i] = planarUncBufferSize[i];
+            if (me->_planarUncBuffer[i] != NULL)
+                me->free_fn (me->_planarUncBuffer[i]);
+
+            if (planarUncBufferSize[i] > SIZE_MAX)
+            {
+                return EXR_ERR_OUT_OF_MEMORY;
+            }
+
+            me->_planarUncBuffer[i] = me->alloc_fn (planarUncBufferSize[i]);
+            if (!me->_planarUncBuffer[i]) return EXR_ERR_OUT_OF_MEMORY;
+        }
+    }
+
+    return rv;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_compressor.h
+static void
+DwaCompressor_destroy (DwaCompressor* me)
+{
+    if (me->_packedAcBuffer) me->free_fn (me->_packedAcBuffer);
+    if (me->_packedDcBuffer) me->free_fn (me->_packedDcBuffer);
+    if (me->_rleBuffer) me->free_fn (me->_rleBuffer);
+
+    if (me->_channel_mem)
+    {
+        for (int c = 0; c < me->_numChannels; ++c)
+            DctCoderChannelData_destroy (
+                me->free_fn, &(me->_channelData[c]._dctData));
+
+        me->free_fn (me->_channel_mem);
+    }
+
+    if (me->_cscChannelSets) me->free_fn (me->_cscChannelSets);
+    if (me->_channelRules != sLegacyChannelRules &&
+        me->_channelRules != sDefaultChannelRules)
+    {
+        for (size_t i = 0; i < me->_channelRuleCount; ++i)
+            Classifier_destroy (me->free_fn, &(me->_channelRules[i]));
+        me->free_fn (me->_channelRules);
+    }
+
+    for (int i = 0; i < NUM_COMPRESSOR_SCHEMES; ++i)
+    {
+        if (me->_planarUncBuffer[i]) me->free_fn (me->_planarUncBuffer[i]);
+    }
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfDwaCompressor.cpp
+void
+DwaCompressor::initializeFuncs ()
+{
+    convertFloatToHalf64 = convertFloatToHalf64_scalar;
+    fromHalfZigZag       = fromHalfZigZag_scalar;
+
+    CpuId cpuId;
+
+    //
+    // Setup HALF <-> FLOAT conversion implementations
+    //
+
+    if (cpuId.avx && cpuId.f16c)
+    {
+        convertFloatToHalf64 = convertFloatToHalf64_f16c;
+        fromHalfZigZag       = fromHalfZigZag_f16c;
+    }
+
+#ifdef IMF_HAVE_NEON_AARCH64
+    {
+        convertFloatToHalf64 = convertFloatToHalf64_neon;
+        fromHalfZigZag       = fromHalfZigZag_neon;
+    }
+#endif
+
+    //
+    // Setup inverse DCT implementations
+    //
+
+    dctInverse8x8_0 = dctInverse8x8_scalar<0>;
+    dctInverse8x8_1 = dctInverse8x8_scalar<1>;
+    dctInverse8x8_2 = dctInverse8x8_scalar<2>;
+    dctInverse8x8_3 = dctInverse8x8_scalar<3>;
+    dctInverse8x8_4 = dctInverse8x8_scalar<4>;
+    dctInverse8x8_5 = dctInverse8x8_scalar<5>;
+    dctInverse8x8_6 = dctInverse8x8_scalar<6>;
+    dctInverse8x8_7 = dctInverse8x8_scalar<7>;
+
+    if (cpuId.avx)
+    {
+        dctInverse8x8_0 = dctInverse8x8_avx<0>;
+        dctInverse8x8_1 = dctInverse8x8_avx<1>;
+        dctInverse8x8_2 = dctInverse8x8_avx<2>;
+        dctInverse8x8_3 = dctInverse8x8_avx<3>;
+        dctInverse8x8_4 = dctInverse8x8_avx<4>;
+        dctInverse8x8_5 = dctInverse8x8_avx<5>;
+        dctInverse8x8_6 = dctInverse8x8_avx<6>;
+        dctInverse8x8_7 = dctInverse8x8_avx<7>;
+    }
+    else if (cpuId.sse2)
+    {
+        dctInverse8x8_0 = dctInverse8x8_sse2<0>;
+        dctInverse8x8_1 = dctInverse8x8_sse2<1>;
+        dctInverse8x8_2 = dctInverse8x8_sse2<2>;
+        dctInverse8x8_3 = dctInverse8x8_sse2<3>;
+        dctInverse8x8_4 = dctInverse8x8_sse2<4>;
+        dctInverse8x8_5 = dctInverse8x8_sse2<5>;
+        dctInverse8x8_6 = dctInverse8x8_sse2<6>;
+        dctInverse8x8_7 = dctInverse8x8_sse2<7>;
+    }
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_compressor.h
+exr_result_t
+DwaCompressor_writeRelevantChannelRules (
+    DwaCompressor* me, uint8_t** outPtr, uint64_t nAvail, uint64_t* nWritten)
+{
+    uint64_t nOut = sizeof (uint16_t);
+
+    uint8_t* curp = *outPtr;
+
+    uint16_t* ruleSize = (uint16_t*) curp;
+    curp += sizeof (uint16_t);
+
+    if (nAvail < (*nWritten + nOut)) return EXR_ERR_OUT_OF_MEMORY;
+
+    for (size_t i = 0; i < me->_channelRuleCount; ++i)
+    {
+        for (int c = 0; c < me->_numChannels; ++c)
+        {
+            const exr_coding_channel_info_t* curc = me->_channelData[c].chan;
+            const char* suffix = Classifier_find_suffix (curc->channel_name);
+
+            if (Classifier_match (
+                    &(me->_channelRules[i]),
+                    suffix,
+                    (exr_pixel_type_t) curc->data_type))
+            {
+                if (nAvail < (*nWritten + nOut +
+                              Classifier_size (&(me->_channelRules[i]))))
+                    return EXR_ERR_OUT_OF_MEMORY;
+
+                nOut += Classifier_write (&(me->_channelRules[i]), &curp);
+                break;
+            }
+        }
+    }
+
+    if (nOut > 65535) return EXR_ERR_OUT_OF_MEMORY;
+    *ruleSize = one_from_native16 ((uint16_t) nOut);
+    *nWritten += nOut;
+
+    *outPtr = curp;
+    return EXR_ERR_SUCCESS;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_compressor.h
+exr_result_t
+DwaCompressor_setupChannelData (DwaCompressor* me)
+{
+    uint8_t* planarUncBuffer[NUM_COMPRESSOR_SCHEMES];
+
+    for (int i = 0; i < NUM_COMPRESSOR_SCHEMES; ++i)
+    {
+        planarUncBuffer[i] = 0;
+
+        if (me->_planarUncBuffer[i])
+            planarUncBuffer[i] = me->_planarUncBuffer[i];
+    }
+
+    for (int c = 0; c < me->_numChannels; ++c)
+    {
+        ChannelData*                     cd   = me->_channelData + c;
+        const exr_coding_channel_info_t* curc = cd->chan;
+        size_t                           uncSize;
+
+        uncSize = (size_t) curc->width * (size_t) curc->height *
+                  (size_t) curc->bytes_per_element;
+        cd->planarUncSize = uncSize;
+
+        cd->planarUncBuffer    = planarUncBuffer[cd->compression];
+        cd->planarUncBufferEnd = cd->planarUncBuffer;
+
+        cd->planarUncRle[0]    = cd->planarUncBuffer;
+        cd->planarUncRleEnd[0] = cd->planarUncRle[0];
+
+        for (int byte = 1; byte < curc->bytes_per_element; ++byte)
+        {
+            cd->planarUncRle[byte] =
+                cd->planarUncRle[byte - 1] + curc->width * curc->height;
+
+            cd->planarUncRleEnd[byte] = cd->planarUncRle[byte];
+        }
+
+        cd->planarUncType = (exr_pixel_type_t) curc->data_type;
+
+        if (cd->compression == LOSSY_DCT)
+        {
+            cd->planarUncType = EXR_PIXEL_FLOAT;
+        }
+        else { planarUncBuffer[cd->compression] += uncSize; }
+    }
+
+    return EXR_ERR_SUCCESS;
+}
+

@@ -1,0 +1,293 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// HTMLparser.c
+static void
+htmlParseCharData(htmlParserCtxtPtr ctxt) {
+    htmlParseCharDataInternal(ctxt, 0);
+}
+
+// the below code fragment can be found in:
+// parser.c
+xmlChar *
+xmlParseExternalID(xmlParserCtxtPtr ctxt, xmlChar **publicID, int strict) {
+    xmlChar *URI = NULL;
+
+    SHRINK;
+
+    *publicID = NULL;
+    if (CMP6(CUR_PTR, 'S', 'Y', 'S', 'T', 'E', 'M')) {
+        SKIP(6);
+	if (SKIP_BLANKS == 0) {
+	    xmlFatalErrMsg(ctxt, XML_ERR_SPACE_REQUIRED,
+	                   "Space required after 'SYSTEM'\n");
+	}
+	URI = xmlParseSystemLiteral(ctxt);
+	if (URI == NULL) {
+	    xmlFatalErr(ctxt, XML_ERR_URI_REQUIRED, NULL);
+        }
+    } else if (CMP6(CUR_PTR, 'P', 'U', 'B', 'L', 'I', 'C')) {
+        SKIP(6);
+	if (SKIP_BLANKS == 0) {
+	    xmlFatalErrMsg(ctxt, XML_ERR_SPACE_REQUIRED,
+		    "Space required after 'PUBLIC'\n");
+	}
+	*publicID = xmlParsePubidLiteral(ctxt);
+	if (*publicID == NULL) {
+	    xmlFatalErr(ctxt, XML_ERR_PUBID_REQUIRED, NULL);
+	}
+	if (strict) {
+	    /*
+	     * We don't handle [83] so "S SystemLiteral" is required.
+	     */
+	    if (SKIP_BLANKS == 0) {
+		xmlFatalErrMsg(ctxt, XML_ERR_SPACE_REQUIRED,
+			"Space required after the Public Identifier\n");
+	    }
+	} else {
+	    /*
+	     * We handle [83] so we return immediately, if
+	     * "S SystemLiteral" is not detected. We skip blanks if no
+             * system literal was found, but this is harmless since we must
+             * be at the end of a NotationDecl.
+	     */
+	    if (SKIP_BLANKS == 0) return(NULL);
+	    if ((CUR != '\'') && (CUR != '"')) return(NULL);
+	}
+	URI = xmlParseSystemLiteral(ctxt);
+	if (URI == NULL) {
+	    xmlFatalErr(ctxt, XML_ERR_URI_REQUIRED, NULL);
+        }
+    }
+    return(URI);
+}
+
+// the below code fragment can be found in:
+// parser.c
+static void
+xmlParseContentInternal(xmlParserCtxtPtr ctxt) {
+    int nameNr = ctxt->nameNr;
+
+    GROW;
+    while ((RAW != 0) &&
+	   (ctxt->instate != XML_PARSER_EOF)) {
+	const xmlChar *cur = ctxt->input->cur;
+
+	/*
+	 * First case : a Processing Instruction.
+	 */
+	if ((*cur == '<') && (cur[1] == '?')) {
+	    xmlParsePI(ctxt);
+	}
+
+	/*
+	 * Second case : a CDSection
+	 */
+	/* 2.6.0 test was *cur not RAW */
+	else if (CMP9(CUR_PTR, '<', '!', '[', 'C', 'D', 'A', 'T', 'A', '[')) {
+	    xmlParseCDSect(ctxt);
+	}
+
+	/*
+	 * Third case :  a comment
+	 */
+	else if ((*cur == '<') && (NXT(1) == '!') &&
+		 (NXT(2) == '-') && (NXT(3) == '-')) {
+	    xmlParseComment(ctxt);
+	    ctxt->instate = XML_PARSER_CONTENT;
+	}
+
+	/*
+	 * Fourth case :  a sub-element.
+	 */
+	else if (*cur == '<') {
+            if (NXT(1) == '/') {
+                if (ctxt->nameNr <= nameNr)
+                    break;
+	        xmlParseElementEnd(ctxt);
+            } else {
+	        xmlParseElementStart(ctxt);
+            }
+	}
+
+	/*
+	 * Fifth case : a reference. If if has not been resolved,
+	 *    parsing returns it's Name, create the node
+	 */
+
+	else if (*cur == '&') {
+	    xmlParseReference(ctxt);
+	}
+
+	/*
+	 * Last case, text. Note that References are handled directly.
+	 */
+	else {
+	    xmlParseCharData(ctxt, 0);
+	}
+
+	GROW;
+	SHRINK;
+    }
+}
+
+// the below code fragment can be found in:
+// parser.c
+const xmlChar *
+xmlParsePITarget(xmlParserCtxtPtr ctxt) {
+    const xmlChar *name;
+
+    name = xmlParseName(ctxt);
+    if ((name != NULL) &&
+        ((name[0] == 'x') || (name[0] == 'X')) &&
+        ((name[1] == 'm') || (name[1] == 'M')) &&
+        ((name[2] == 'l') || (name[2] == 'L'))) {
+	int i;
+	if ((name[0] == 'x') && (name[1] == 'm') &&
+	    (name[2] == 'l') && (name[3] == 0)) {
+	    xmlFatalErrMsg(ctxt, XML_ERR_RESERVED_XML_NAME,
+		 "XML declaration allowed only at the start of the document\n");
+	    return(name);
+	} else if (name[3] == 0) {
+	    xmlFatalErr(ctxt, XML_ERR_RESERVED_XML_NAME, NULL);
+	    return(name);
+	}
+	for (i = 0;;i++) {
+	    if (xmlW3CPIs[i] == NULL) break;
+	    if (xmlStrEqual(name, (const xmlChar *)xmlW3CPIs[i]))
+	        return(name);
+	}
+	xmlWarningMsg(ctxt, XML_ERR_RESERVED_XML_NAME,
+		      "xmlParsePITarget: invalid name prefix 'xml'\n",
+		      NULL, NULL);
+    }
+    if ((name != NULL) && (xmlStrchr(name, ':') != NULL)) {
+	xmlNsErr(ctxt, XML_NS_ERR_COLON,
+		 "colons are forbidden from PI names '%s'\n", name, NULL, NULL);
+    }
+    return(name);
+}
+
+// the below code fragment can be found in:
+// HTMLparser.c
+static void
+htmlParseComment(htmlParserCtxtPtr ctxt) {
+    xmlChar *buf = NULL;
+    int len;
+    int size = HTML_PARSER_BUFFER_SIZE;
+    int q, ql;
+    int r, rl;
+    int cur, l;
+    int next, nl;
+    int maxLength = (ctxt->options & XML_PARSE_HUGE) ?
+                    XML_MAX_HUGE_LENGTH :
+                    XML_MAX_TEXT_LENGTH;
+    xmlParserInputState state;
+
+    /*
+     * Check that there is a comment right here.
+     */
+    if ((RAW != '<') || (NXT(1) != '!') ||
+        (NXT(2) != '-') || (NXT(3) != '-')) return;
+
+    state = ctxt->instate;
+    ctxt->instate = XML_PARSER_COMMENT;
+    SHRINK;
+    SKIP(4);
+    buf = (xmlChar *) xmlMallocAtomic(size);
+    if (buf == NULL) {
+        htmlErrMemory(ctxt, "buffer allocation failed\n");
+	ctxt->instate = state;
+	return;
+    }
+    len = 0;
+    buf[len] = 0;
+    q = CUR_CHAR(ql);
+    if (q == 0)
+        goto unfinished;
+    if (q == '>') {
+        htmlParseErr(ctxt, XML_ERR_COMMENT_ABRUPTLY_ENDED, "Comment abruptly ended", NULL, NULL);
+        cur = '>';
+        goto finished;
+    }
+    NEXTL(ql);
+    r = CUR_CHAR(rl);
+    if (r == 0)
+        goto unfinished;
+    if (q == '-' && r == '>') {
+        htmlParseErr(ctxt, XML_ERR_COMMENT_ABRUPTLY_ENDED, "Comment abruptly ended", NULL, NULL);
+        cur = '>';
+        goto finished;
+    }
+    NEXTL(rl);
+    cur = CUR_CHAR(l);
+    while ((cur != 0) &&
+           ((cur != '>') ||
+	    (r != '-') || (q != '-'))) {
+	NEXTL(l);
+	next = CUR_CHAR(nl);
+	if (next == 0) {
+	    SHRINK;
+	    GROW;
+	    next = CUR_CHAR(nl);
+	}
+
+	if ((q == '-') && (r == '-') && (cur == '!') && (next == '>')) {
+	  htmlParseErr(ctxt, XML_ERR_COMMENT_NOT_FINISHED,
+		       "Comment incorrectly closed by '--!>'", NULL, NULL);
+	  cur = '>';
+	  break;
+	}
+
+	if (len + 5 >= size) {
+	    xmlChar *tmp;
+
+	    size *= 2;
+	    tmp = (xmlChar *) xmlRealloc(buf, size);
+	    if (tmp == NULL) {
+	        xmlFree(buf);
+	        htmlErrMemory(ctxt, "growing buffer failed\n");
+		ctxt->instate = state;
+		return;
+	    }
+	    buf = tmp;
+	}
+        if (IS_CHAR(q)) {
+	    COPY_BUF(ql,buf,len,q);
+        } else {
+            htmlParseErrInt(ctxt, XML_ERR_INVALID_CHAR,
+                            "Invalid char in comment 0x%X\n", q);
+        }
+        if (len > maxLength) {
+            htmlParseErr(ctxt, XML_ERR_COMMENT_NOT_FINISHED,
+                         "comment too long", NULL, NULL);
+            xmlFree(buf);
+            ctxt->instate = state;
+            return;
+        }
+
+	q = r;
+	ql = rl;
+	r = cur;
+	rl = l;
+	cur = next;
+	l = nl;
+    }
+finished:
+    buf[len] = 0;
+    if (cur == '>') {
+        NEXT;
+	if ((ctxt->sax != NULL) && (ctxt->sax->comment != NULL) &&
+	    (!ctxt->disableSAX))
+	    ctxt->sax->comment(ctxt->userData, buf);
+	xmlFree(buf);
+	ctxt->instate = state;
+	return;
+    }
+
+unfinished:
+    htmlParseErr(ctxt, XML_ERR_COMMENT_NOT_FINISHED,
+		 "Comment not terminated \n<!--%.50s\n", buf, NULL);
+    xmlFree(buf);
+}
+

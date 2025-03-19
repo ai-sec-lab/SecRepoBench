@@ -1,0 +1,163 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static gcry_error_t hkdf_expand(int hashalgo, const uint8_t *prk, uint32_t prk_len,
+				const uint8_t *info, uint32_t info_len,
+				uint8_t *out, uint32_t out_len)
+{
+  /* Current maximum hash output size: 48 bytes for SHA-384. */
+  uint8_t lastoutput[48];
+  gcry_md_hd_t h;
+  gcry_error_t err;
+  const unsigned int hash_len = gcry_md_get_algo_dlen(hashalgo);
+  uint32_t offset;
+
+  /* Some sanity checks */
+  if(!(out_len > 0 && out_len <= 255 * hash_len) ||
+     !(hash_len > 0 && hash_len <= sizeof(lastoutput))) {
+    return GPG_ERR_INV_ARG;
+  }
+
+  err = gcry_md_open(&h, hashalgo, GCRY_MD_FLAG_HMAC);
+  if(err) {
+    return err;
+  }
+
+  for(offset = 0; offset < out_len; offset += hash_len) {
+    gcry_md_reset(h);
+    gcry_md_setkey(h, prk, prk_len); /* Set PRK */
+    if(offset > 0) {
+      gcry_md_write(h, lastoutput, hash_len); /* T(1..N) */
+    }
+    gcry_md_write(h, info, info_len);                   /* info */
+
+    uint8_t c = offset / hash_len + 1;
+    gcry_md_write(h, &c, sizeof(c));                    /* constant 0x01..N */
+
+    memcpy(lastoutput, gcry_md_read(h, hashalgo), hash_len);
+    memcpy(out + offset, lastoutput, ndpi_min(hash_len, out_len - offset));
+  }
+
+  gcry_md_close(h);
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+void ndpi_set_bitmask_protocol_detection(char *label, struct ndpi_detection_module_struct *ndpi_str,
+                                         const u_int32_t idx,
+                                         u_int16_t ndpi_protocol_id,
+                                         void (*func)(struct ndpi_detection_module_struct *,
+                                                      struct ndpi_flow_struct *flow),
+                                         const NDPI_SELECTION_BITMASK_PROTOCOL_SIZE ndpi_selection_bitmask,
+                                         u_int8_t b_save_bitmask_unknow, u_int8_t b_add_detection_bitmask) {
+  /*
+    Compare specify protocol bitmask with main detection bitmask
+  */
+  if(is_proto_enabled(ndpi_str, ndpi_protocol_id)) {
+#ifdef NDPI_ENABLE_DEBUG_MESSAGES
+    NDPI_LOG_DBG2(ndpi_str,
+		  "[NDPI] ndpi_set_bitmask_protocol_detection: %s : [callback_buffer] idx= %u, [proto_defaults] "
+		  "protocol_id=%u\n",
+		  label, idx, ndpi_protocol_id);
+#endif
+
+    if(ndpi_str->proto_defaults[ndpi_protocol_id].protoIdx != 0) {
+      NDPI_LOG_DBG2(ndpi_str, "[NDPI] Internal error: protocol %s/%u has been already registered\n", label,
+		    ndpi_protocol_id);
+#ifdef NDPI_ENABLE_DEBUG_MESSAGES
+    } else {
+      NDPI_LOG_DBG2(ndpi_str, "[NDPI] Adding %s with protocol id %d\n", label, ndpi_protocol_id);
+#endif
+    }
+
+    /*
+      Set function and index protocol within proto_default structure for port protocol detection
+      and callback_buffer function for DPI protocol detection
+    */
+    ndpi_str->proto_defaults[ndpi_protocol_id].protoIdx = idx;
+    ndpi_str->proto_defaults[ndpi_protocol_id].func = ndpi_str->callback_buffer[idx].func = func;
+    ndpi_str->callback_buffer[idx].ndpi_protocol_id = ndpi_protocol_id;
+
+    /*
+      Set ndpi_selection_bitmask for protocol
+    */
+    ndpi_str->callback_buffer[idx].ndpi_selection_bitmask = ndpi_selection_bitmask;
+
+    /*
+      Reset protocol detection bitmask via NDPI_PROTOCOL_UNKNOWN and than add specify protocol bitmast to callback
+      buffer.
+    */
+    if(b_save_bitmask_unknow)
+      NDPI_SAVE_AS_BITMASK(ndpi_str->callback_buffer[idx].detection_bitmask, NDPI_PROTOCOL_UNKNOWN);
+    if(b_add_detection_bitmask)
+      NDPI_ADD_PROTOCOL_TO_BITMASK(ndpi_str->callback_buffer[idx].detection_bitmask, ndpi_protocol_id);
+
+    NDPI_SAVE_AS_BITMASK(ndpi_str->callback_buffer[idx].excluded_protocol_bitmask, ndpi_protocol_id);
+  } else {
+      NDPI_LOG_DBG(ndpi_str, "[NDPI] Protocol %s/%u disabled\n", label, ndpi_protocol_id);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/third_party/src/gcrypt/gcm.c
+int mbedtls_gcm_auth_decrypt( mbedtls_gcm_context *ctx,
+                      size_t length,
+                      const unsigned char *iv,
+                      size_t iv_len,
+                      const unsigned char *add,
+                      size_t add_len,
+                      const unsigned char *tag,
+                      size_t tag_len,
+                      const unsigned char *input,
+                      unsigned char *output )
+{
+    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+    unsigned char check_tag[16];
+    size_t i;
+    int diff;
+
+    GCM_VALIDATE_RET( ctx != NULL );
+    GCM_VALIDATE_RET( iv != NULL );
+    GCM_VALIDATE_RET( add_len == 0 || add != NULL );
+    GCM_VALIDATE_RET( tag != NULL );
+    GCM_VALIDATE_RET( length == 0 || input != NULL );
+    GCM_VALIDATE_RET( length == 0 || output != NULL );
+
+    if( ( ret = mbedtls_gcm_crypt_and_tag( ctx, MBEDTLS_GCM_DECRYPT, length,
+                                   iv, iv_len, add, add_len,
+                                   input, output, tag_len, check_tag ) ) != 0 )
+    {
+        return( ret );
+    }
+
+    /* Check tag in "constant-time" */
+    for( diff = 0, i = 0; i < tag_len; i++ )
+        diff |= tag[i] ^ check_tag[i];
+
+    if( diff != 0 )
+    {
+        mbedtls_platform_zeroize( output, length );
+        return( MBEDTLS_ERR_GCM_AUTH_FAILED );
+    }
+
+    return( 0 );
+}
+
+// the below code fragment can be found in:
+// src/lib/third_party/src/gcrypt/gcm.c
+void mbedtls_gcm_free( mbedtls_gcm_context *ctx )
+{
+    if( ctx == NULL )
+        return;
+    // mbedtls_cipher_free( &ctx->cipher_ctx );
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_serializer.c
+int ndpi_serialize_string_int64(ndpi_serializer *_serializer,
+				const char *key, int64_t value) {
+  return(ndpi_serialize_binary_int64(_serializer, key, strlen(key), value));
+}
+

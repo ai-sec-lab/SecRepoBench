@@ -1,0 +1,332 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/libdwarf/dwarf_debuglink.c
+static size_t
+mydirlen(char *s)
+{
+    char *cp = 0;
+    char *lastjoinchar = 0;
+    size_t count =0;
+
+    for (cp = s ; *cp ; ++cp,++count)  {
+        if (*cp == joinchar) {
+            lastjoinchar = cp;
+        }
+    }
+    if (lastjoinchar) {
+        /*  ptrdiff_t is generated but not named */
+        Dwarf_Unsigned sizetoendjoin =
+            (lastjoinchar >= s)?(lastjoinchar-s):0xffffffff;
+        /* count the last join as mydirlen. */
+        if (sizetoendjoin == 0xffffffff) {
+            /* impossible. */
+            return 0;
+        }
+        return sizetoendjoin;
+    }
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/lib/libdwarf/dwarf_generic_init.c
+int
+dwarf_init_b(int fd,
+    unsigned        group_number,
+    Dwarf_Handler   errhand,
+    Dwarf_Ptr       errarg,
+    Dwarf_Debug *   ret_dbg,
+    Dwarf_Error *   error)
+{
+    unsigned ftype = 0;
+    unsigned endian = 0;
+    unsigned offsetsize = 0;
+    Dwarf_Unsigned   filesize = 0;
+    int res = 0;
+    int errcode = 0;
+
+    if (!ret_dbg) {
+        DWARF_DBG_ERROR(NULL,DW_DLE_DWARF_INIT_DBG_NULL,DW_DLV_ERROR);
+    }
+    /*  Non-null *ret_dbg will cause problems dealing with
+        DW_DLV_ERROR */
+    *ret_dbg = 0;
+    res = dwarf_object_detector_fd(fd, &ftype,
+        &endian,&offsetsize,&filesize,&errcode);
+    if (res == DW_DLV_NO_ENTRY) {
+        return res;
+    }
+    if (res == DW_DLV_ERROR) {
+        /* This macro does a return. */
+        DWARF_DBG_ERROR(NULL, DW_DLE_FILE_WRONG_TYPE, DW_DLV_ERROR);
+    }
+    switch(ftype) {
+    case DW_FTYPE_ELF: {
+        int res2 = 0;
+
+        res2 = _dwarf_elf_nlsetup(fd,"",
+            ftype,endian,offsetsize,filesize,
+            group_number,errhand,errarg,ret_dbg,error);
+        if (res2 != DW_DLV_OK) {
+            return res2;
+        }
+        set_global_paths_init(*ret_dbg,error);
+        return res2;
+        }
+    case DW_FTYPE_MACH_O: {
+        int resm = 0;
+
+        resm = _dwarf_macho_setup(fd,"",
+            ftype,endian,offsetsize,filesize,
+            group_number,errhand,errarg,ret_dbg,error);
+        if (resm != DW_DLV_OK) {
+            return resm;
+        }
+        set_global_paths_init(*ret_dbg,error);
+        return resm;
+        }
+
+    case DW_FTYPE_PE: {
+        int resp = 0;
+
+        resp = _dwarf_pe_setup(fd,
+            "",
+            ftype,endian,offsetsize,filesize,
+            group_number,errhand,errarg,ret_dbg,error);
+        if (resp != DW_DLV_OK) {
+            return resp;
+        }
+        set_global_paths_init(*ret_dbg,error);
+        return resp;
+        }
+    default: break;
+    }
+    DWARF_DBG_ERROR(NULL, DW_DLE_FILE_WRONG_TYPE, DW_DLV_ERROR);
+    return res;
+}
+
+// the below code fragment can be found in:
+// src/lib/libdwarf/dwarf_debuglink.c
+static int
+_dwarf_extract_debuglink(Dwarf_Debug dbg,
+    struct Dwarf_Section_s * pdebuglink,
+    char ** name_returned,  /* static storage, do not free */
+    unsigned char ** crc_returned,   /* 32bit crc , do not free */
+    Dwarf_Error *error)
+{
+    Dwarf_Small *ptr = 0;
+    Dwarf_Small *endptr = 0;
+    unsigned namelen = 0;
+    unsigned m = 0;
+    unsigned incr = 0;
+    Dwarf_Small *crcptr = 0;
+    int res = DW_DLV_ERROR;
+    Dwarf_Unsigned secsize = 0;
+
+    if (!pdebuglink->dss_data) {
+        return DW_DLV_NO_ENTRY;
+    }
+    secsize = pdebuglink->dss_size;
+    ptr = pdebuglink->dss_data;
+    endptr = ptr + secsize;
+
+    res = _dwarf_check_string_valid(dbg,ptr,
+        ptr, endptr,  DW_DLE_FORM_STRING_BAD_STRING,
+        error);
+    if ( res != DW_DLV_OK) {
+        return res;
+    }
+    namelen = (unsigned)strlen((const char*)ptr);
+    m = (namelen+1) %4;
+    if (m) {
+        incr = 4 - m;
+    }
+    crcptr = (unsigned char *)ptr +namelen +1 +incr;
+    if ((crcptr +4) != (unsigned char*)endptr) {
+        _dwarf_error(dbg,error,DW_DLE_CORRUPT_GNU_DEBUGLINK);
+        return DW_DLV_ERROR;
+    }
+    *name_returned = (char *)ptr;
+    *crc_returned = crcptr;
+    return DW_DLV_OK;
+}
+
+// the below code fragment can be found in:
+// src/lib/libdwarf/dwarf_line_table_reader_common.h
+static int
+read_uword_de(Dwarf_Small **lp,
+    Dwarf_Unsigned *out_p,
+    Dwarf_Debug dbg,
+    Dwarf_Error *err,
+    Dwarf_Small *lpend)
+{
+    Dwarf_Small *inptr = *lp;
+    Dwarf_Unsigned out = 0;
+    DECODE_LEB128_UWORD_CK(inptr,
+        out,
+        dbg,err,lpend);
+    *lp = inptr;
+    *out_p = out;
+    return DW_DLV_OK;
+}
+
+// the below code fragment can be found in:
+// src/lib/libdwarf/dwarf_generic_init.c
+int
+dwarf_init_path_dl(const char *path,
+    char            * true_path_out_buffer,
+    unsigned        true_path_bufferlen,
+    unsigned        groupnumber,
+    Dwarf_Handler   errhand,
+    Dwarf_Ptr       errarg,
+    Dwarf_Debug     * ret_dbg,
+    char            ** dl_path_array,
+    unsigned int    dl_path_count,
+    unsigned char   * path_source,
+    Dwarf_Error     * error)
+{
+    unsigned       ftype = 0;
+    unsigned       endian = 0;
+    unsigned       offsetsize = 0;
+    Dwarf_Unsigned filesize = 0;
+    int res =  DW_DLV_ERROR;
+    int errcode = 0;
+    int fd = -1;
+    Dwarf_Debug dbg = 0;
+    char *file_path = 0;
+    unsigned char  lpath_source = DW_PATHSOURCE_basic;
+
+    if (!ret_dbg) {
+        DWARF_DBG_ERROR(NULL,DW_DLE_DWARF_INIT_DBG_NULL,
+            DW_DLV_ERROR);
+    }
+    /*  Non-null *ret_dbg will cause problems dealing with
+        DW_DLV_ERROR */
+    *ret_dbg = 0;
+    if (!path) {
+        /* Oops. Null path */
+        _dwarf_error_string(NULL,
+            error,DW_DLE_STRING_PTR_NULL,
+            "DW_DLE_STRING_PTR_NULL: Passing a"
+            " null path argument to "
+            "dwarf_init_path or dwarf_init_path_dl"
+            " cannot work. Error.");
+        return DW_DLV_ERROR;
+    }
+    /* a special dsym call so we only check once. */
+    if (true_path_out_buffer) {
+        res = dwarf_object_detector_path_dSYM(path,
+            true_path_out_buffer,
+            true_path_bufferlen,
+            dl_path_array,dl_path_count,
+            &ftype,&endian,&offsetsize,&filesize,
+            &lpath_source,
+            &errcode);
+        if (res != DW_DLV_OK) {
+            if (res == DW_DLV_ERROR) {
+                /* ignore error. Look further. */
+                errcode = 0;
+            }
+        }
+    }
+    if (res != DW_DLV_OK) {
+        res = dwarf_object_detector_path_b(path,
+            true_path_out_buffer,
+            true_path_bufferlen,
+            dl_path_array,dl_path_count,
+            &ftype,&endian,&offsetsize,&filesize,
+            &lpath_source,
+            &errcode);
+        if (res != DW_DLV_OK ) {
+            if (res == DW_DLV_ERROR) {
+                errcode = 0;
+            }
+        }
+    }
+    if (res != DW_DLV_OK) {
+        /*  So as a last resort in case
+            of data corruption in the object.
+            Lets try without
+            investigating debuglink  or dSYM. */
+        res = dwarf_object_detector_path_b(path,
+            0,
+            0,
+            dl_path_array,dl_path_count,
+            &ftype,&endian,&offsetsize,&filesize,
+            &lpath_source,
+            &errcode);
+    }
+    if (res != DW_DLV_OK) {
+        /* impossible. The last above *had* to work */
+        if (res == DW_DLV_ERROR) {
+            _dwarf_error(NULL, error, errcode);
+        }
+        return res;
+    }
+    /*  ASSERT: lpath_source != DW_PATHSOURCE_unspecified  */
+    if (lpath_source != DW_PATHSOURCE_basic &&
+        true_path_out_buffer && *true_path_out_buffer) {
+        /* MacOS dSYM or GNU debuglink */
+        file_path = true_path_out_buffer;
+        fd = open_a_file(true_path_out_buffer);
+    } else {
+        /*  ASSERT: lpath_source = DW_PATHSOURCE_basic */
+        file_path = (char *)path;
+        fd = open_a_file(path);
+    }
+
+    if (fd == -1) {
+        DWARF_DBG_ERROR(NULL, DW_DLE_FILE_UNAVAILABLE,
+            DW_DLV_ERROR);
+    }
+    switch(ftype) {
+    case DW_FTYPE_ELF: {
+        res = _dwarf_elf_nlsetup(fd,
+            file_path,
+            ftype,endian,offsetsize,filesize,
+            groupnumber,errhand,errarg,&dbg,error);
+        if (res != DW_DLV_OK) {
+            close(fd);
+            return res;
+        }
+        final_common_settings(dbg,file_path,fd,
+            lpath_source,path_source,error);
+        *ret_dbg = dbg;
+        return res;
+    }
+    case DW_FTYPE_MACH_O: {
+        res = _dwarf_macho_setup(fd,
+            file_path,
+            ftype,endian,offsetsize,filesize,
+            groupnumber,errhand,errarg,&dbg,error);
+        if (res != DW_DLV_OK) {
+            close(fd);
+            return res;
+        }
+        final_common_settings(dbg,file_path,fd,
+            lpath_source,path_source,error);
+        *ret_dbg = dbg;
+        return res;
+    }
+    case DW_FTYPE_PE: {
+        res = _dwarf_pe_setup(fd,
+            file_path,
+            ftype,endian,offsetsize,filesize,
+            groupnumber,errhand,errarg,&dbg,error);
+        if (res != DW_DLV_OK) {
+            close(fd);
+            return res;
+        }
+        final_common_settings(dbg,file_path,fd,
+            lpath_source,path_source,error);
+        *ret_dbg = dbg;
+        return res;
+    }
+    default:
+        close(fd);
+        DWARF_DBG_ERROR(NULL, DW_DLE_FILE_WRONG_TYPE,
+            DW_DLV_ERROR);
+    }
+    return DW_DLV_NO_ENTRY;
+}
+

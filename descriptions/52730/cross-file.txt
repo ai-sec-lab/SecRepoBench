@@ -1,0 +1,286 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfFastHuf.cpp
+FastHufDecoder::~FastHufDecoder ()
+{
+    delete[] _idToSymbol;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_huf.c
+static inline void
+FastHufDecoder_refill (
+    uint64_t*       buffer,
+    int             numBits,           // number of bits to refill
+    uint64_t*       bufferBack,        // the next 64-bits, to refill from
+    int*            bufferBackNumBits, // number of bits left in bufferBack
+    const uint8_t** currByte,          // current byte in the bitstream
+    int*            currBitsLeft)
+{
+    //
+    // Refill bits into the bottom of buffer, from the top of bufferBack.
+    // Always top up buffer to be completely full.
+    //
+
+    *buffer |= (*bufferBack) >> (64 - numBits);
+
+    if (*bufferBackNumBits < numBits)
+    {
+        numBits -= *bufferBackNumBits;
+
+        //
+        // Refill all of bufferBack from the bitstream. Either grab
+        // a full 64-bit chunk, or whatever bytes are left. If we
+        // don't have 64-bits left, pad with 0's.
+        //
+
+        if (*currBitsLeft >= 64)
+        {
+            *bufferBack        = READ64 (*currByte);
+            *bufferBackNumBits = 64;
+            *currByte += sizeof (uint64_t);
+            *currBitsLeft -= 8 * sizeof (uint64_t);
+        }
+        else
+        {
+            *bufferBack        = 0;
+            *bufferBackNumBits = 64;
+
+            uint64_t shift = 56;
+
+            while (*currBitsLeft > 0)
+            {
+                *bufferBack |= ((uint64_t) (**currByte)) << shift;
+
+                (*currByte)++;
+                shift -= 8;
+                *currBitsLeft -= 8;
+            }
+
+            //
+            // At this point, currBitsLeft might be negative, just because
+            // we're subtracting whole bytes. To keep anyone from freaking
+            // out, zero the counter.
+            //
+
+            if (*currBitsLeft < 0) *currBitsLeft = 0;
+        }
+
+        *buffer |= (*bufferBack) >> (64 - numBits);
+    }
+
+    //
+    // We can have cases where the previous shift of bufferBack is << 64 -
+    // this is an undefined operation but tends to create just zeroes.
+    // so if we won't have any bits left, zero out bufferBack instead of computing the shift
+    //
+
+    if (*bufferBackNumBits <= numBits) { *bufferBack = 0; }
+    else { *bufferBack = (*bufferBack) << numBits; }
+    *bufferBackNumBits -= numBits;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_huf.c
+uint64_t
+internal_exr_huf_compress_spare_bytes (void)
+{
+    uint64_t ret = 0;
+    ret += HUF_ENCSIZE * sizeof (uint64_t);  // freq
+    ret += HUF_ENCSIZE * sizeof (int);       // hlink
+    ret += HUF_ENCSIZE * sizeof (uint64_t*); // fheap
+    ret += HUF_ENCSIZE * sizeof (uint64_t);  // scode
+    return ret;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfFastHuf.h
+OPENEXR_IMF_INTERNAL_NAMESPACE_HEADER_ENTER
+
+//
+// Alternative Canonical Huffman decoder:
+//
+// Canonical Huffman decoder based on 'On the Implementation of Minimum
+// Redundancy Prefix Codes' by Moffat and Turpin - highly recommended
+// reading as a good description of the problem space, as well as
+// a fast decoding algorithm.
+//
+// The premise is that instead of working directly with the coded
+// symbols, we create a new ordering based on the frequency of symbols.
+// Less frequent symbols (and thus longer codes) are ordered earlier.
+// We're calling the values in this ordering 'Ids', as oppsed to
+// 'Symbols' - which are the short values we eventually want decoded.
+//
+// With this new ordering, a few small tables can be derived ('base'
+// and 'offset') which drive the decoding. To cut down on the
+// linear scanning of these tables, you can add a small table
+// to directly look up short codes (as you might in a traditional
+// lookup-table driven decoder).
+//
+// The decoder is meant to be compatible with the encoder (and decoder)
+// in ImfHuf.cpp, just faster. For ease of implementation, this decoder
+// should only be used on compressed bitstreams >= 128 bits long.
+//
+
+class FastHufDecoder
+{
+public:
+    //
+    // Longest compressed code length that ImfHuf supports (58 bits)
+    //
+
+    static const int MAX_CODE_LEN = 58;
+
+    //
+    // Number of bits in our acceleration table. Should match all
+    // codes up to TABLE_LOOKUP_BITS in length.
+    //
+
+    static const int TABLE_LOOKUP_BITS = 12;
+
+    FastHufDecoder (
+        const char*& table,
+        int          numBytes,
+        int          minSymbol,
+        int          maxSymbol,
+        int          rleSymbol);
+
+    ~FastHufDecoder ();
+
+    FastHufDecoder (const FastHufDecoder& other) = delete;
+    FastHufDecoder& operator= (const FastHufDecoder& other) = delete;
+    FastHufDecoder (FastHufDecoder&& other)                 = delete;
+    FastHufDecoder& operator= (FastHufDecoder&& other) = delete;
+
+    static bool enabled ();
+
+    void decode (
+        const unsigned char* src,
+        int                  numSrcBits,
+        unsigned short*      dst,
+        int                  numDstElems);
+
+private:
+    void buildTables (uint64_t*, uint64_t*);
+    void refill (uint64_t&, int, uint64_t&, int&, const unsigned char*&, int&);
+    uint64_t readBits (int, uint64_t&, int&, const char*&);
+
+    int _rleSymbol; // RLE symbol written by the encoder.
+                    // This could be 65536, so beware
+                    // when you use shorts to hold things.
+
+    int _numSymbols; // Number of symbols in the codebook.
+
+    unsigned char _minCodeLength; // Minimum code length, in bits.
+    unsigned char _maxCodeLength; // Maximum code length, in bits.
+
+    int* _idToSymbol; // Maps Ids to symbols. Ids are a symbol
+                      // ordering sorted first in terms of
+                      // code length, and by code within
+                      // the same length. Ids run from 0
+                      // to mNumSymbols-1.
+
+    uint64_t _ljBase[MAX_CODE_LEN + 1]; // the 'left justified base' table.
+                                        // Takes base[i] (i = code length)
+    // and 'left justifies' it into an uint64_t
+
+    uint64_t _ljOffset[MAX_CODE_LEN + 1]; // There are some other terms that can
+        // be folded into constants when taking
+        // the 'left justified' decode path. This
+        // holds those constants, indexed by
+        // code length
+
+    //
+    // We can accelerate the 'left justified' processing by running the
+    // top TABLE_LOOKUP_BITS through a LUT, to find the symbol and code
+    // length. These are those acceleration tables.
+    //
+    // Even though our evental 'symbols' are ushort's, the encoder adds
+    // a symbol to indicate RLE. So with a dense code book, we could
+    // have 2^16+1 codes, so both mIdToSymbol and mTableSymbol need
+    // to be bigger than 16 bits.
+    //
+
+    int           _tableSymbol[1 << TABLE_LOOKUP_BITS];
+    unsigned char _tableCodeLen[1 << TABLE_LOOKUP_BITS];
+    uint64_t      _tableMin;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfFastHuf.cpp
+inline void
+FastHufDecoder::refill (
+    uint64_t& buffer,
+    int       numBits,              // number of bits to refill
+    uint64_t& bufferBack,           // the next 64-bits, to refill from
+    int&      bufferBackNumBits,    // number of bits left in bufferBack
+    const unsigned char*& currByte, // current byte in the bitstream
+    int&                  currBitsLeft)              // number of bits left in the bitsream
+{
+    //
+    // Refill bits into the bottom of buffer, from the top of bufferBack.
+    // Always top up buffer to be completely full.
+    //
+
+    buffer |= bufferBack >> (64 - numBits);
+
+    if (bufferBackNumBits < numBits)
+    {
+        numBits -= bufferBackNumBits;
+
+        //
+        // Refill all of bufferBack from the bitstream. Either grab
+        // a full 64-bit chunk, or whatever bytes are left. If we
+        // don't have 64-bits left, pad with 0's.
+        //
+
+        if (currBitsLeft >= 64)
+        {
+            bufferBack        = READ64 (currByte);
+            bufferBackNumBits = 64;
+            currByte += sizeof (uint64_t);
+            currBitsLeft -= 8 * sizeof (uint64_t);
+        }
+        else
+        {
+            bufferBack        = 0;
+            bufferBackNumBits = 64;
+
+            uint64_t shift = 56;
+
+            while (currBitsLeft > 0)
+            {
+                bufferBack |= ((uint64_t) (*currByte)) << shift;
+
+                currByte++;
+                shift -= 8;
+                currBitsLeft -= 8;
+            }
+
+            //
+            // At this point, currBitsLeft might be negative, just because
+            // we're subtracting whole bytes. To keep anyone from freaking
+            // out, zero the counter.
+            //
+
+            if (currBitsLeft < 0) currBitsLeft = 0;
+        }
+
+        buffer |= bufferBack >> (64 - numBits);
+    }
+
+    //
+    // We can have cases where the previous shift of bufferBack is << 64 -
+    // this is an undefined operation but tends to create just zeroes.
+    // so if we won't have any bits left, zero out bufferBack instead of computing the shift
+    //
+
+    if (bufferBackNumBits <= numBits) { bufferBack = 0; }
+    else
+    {
+        bufferBack = bufferBack << numBits;
+    }
+    bufferBackNumBits -= numBits;
+}
+

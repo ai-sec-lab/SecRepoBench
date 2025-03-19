@@ -1,0 +1,480 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libyara/modules/dotnet/dotnet.c
+static bool dotnet_is_dotnet(PE* pe)
+{
+  PIMAGE_DATA_DIRECTORY directory = pe_get_directory_entry(
+      pe, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR);
+
+  if (!directory)
+    return false;
+
+  int64_t offset = pe_rva_to_offset(pe, yr_le32toh(directory->VirtualAddress));
+
+  if (offset < 0 || !struct_fits_in_pe(pe, pe->data + offset, CLI_HEADER))
+    return false;
+
+  CLI_HEADER* cli_header = (CLI_HEADER*) (pe->data + offset);
+
+  if (yr_le32toh(cli_header->Size) != sizeof(CLI_HEADER))
+    return false;
+
+  int64_t metadata_root = pe_rva_to_offset(
+      pe, yr_le32toh(cli_header->MetaData.VirtualAddress));
+
+  if (!struct_fits_in_pe(pe, pe->data + metadata_root, NET_METADATA))
+    return false;
+
+  NET_METADATA* metadata = (NET_METADATA*) (pe->data + metadata_root);
+
+  if (yr_le32toh(metadata->Magic) != NET_METADATA_MAGIC)
+    return false;
+
+  // Version length must be between 1 and 255, and be a multiple of 4.
+  // Also make sure it fits in pe.
+  uint32_t md_len = yr_le32toh(metadata->Length);
+  if (md_len == 0 || md_len > 255 || md_len % 4 != 0 ||
+      !fits_in_pe(pe, pe->data + offset, md_len))
+  {
+    return false;
+  }
+
+  if (IS_64BITS_PE(pe))
+  {
+    if (yr_le16toh(OptionalHeader(pe, NumberOfRvaAndSizes)) <
+        IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR)
+      return false;
+  }
+  else if (!(pe->header->FileHeader.Characteristics & IMAGE_FILE_DLL))  // 32bit
+  {
+    // Check first 2 bytes of the Entry point are equal to 0xFF 0x25
+    int64_t entry_offset = pe_rva_to_offset(
+        pe, yr_le32toh(pe->header->OptionalHeader.AddressOfEntryPoint));
+
+    if (offset < 0 || !fits_in_pe(pe, pe->data + entry_offset, 2))
+      return false;
+
+    const uint8_t* entry_data = pe->data + entry_offset;
+    if (!(entry_data[0] == 0xFF && entry_data[1] == 0x25))
+      return false;
+  }
+
+  return true;
+}
+
+// the below code fragment can be found in:
+// libyara/modules/dotnet/dotnet.c
+void dotnet_parse_tilde(
+    PE* pe,
+    int64_t metadata_root,
+    PCLI_HEADER cli_header,
+    PSTREAMS streams)
+{
+  PTILDE_HEADER tilde_header;
+  int64_t resource_base;
+  uint32_t* row_offset = NULL;
+
+  int bit_check;
+
+  // This is used as an offset into the rows and tables. For every bit set in
+  // Valid this will be incremented. This is because the bit position doesn't
+  // matter, just the number of bits that are set, when determining how many
+  // rows and what the table structure is.
+  int matched_bits = 0;
+
+  // We need to know the number of rows for some tables, because they are
+  // indexed into. The index will be either 2 or 4 bytes, depending upon the
+  // number of rows being indexed into.
+  ROWS rows;
+  INDEX_SIZES index_sizes;
+  uint32_t heap_sizes;
+
+  // Default all rows to 0. They will be set to actual values later on, if
+  // they exist in the file.
+  memset(&rows, '\0', sizeof(ROWS));
+
+  // Default index sizes are 2. Will be bumped to 4 if necessary.
+  memset(&index_sizes, 2, sizeof(index_sizes));
+
+  tilde_header =
+      (PTILDE_HEADER) (pe->data + metadata_root + yr_le32toh(streams->tilde->Offset));
+
+  if (!struct_fits_in_pe(pe, tilde_header, TILDE_HEADER))
+    return;
+
+  heap_sizes = yr_le32toh(tilde_header->HeapSizes);
+
+  // Set index sizes for various heaps.
+  if (heap_sizes & 0x01)
+    index_sizes.string = 4;
+
+  if (heap_sizes & 0x02)
+    index_sizes.guid = 4;
+
+  if (heap_sizes & 0x04)
+    index_sizes.blob = 4;
+
+  // Immediately after the tilde header is an array of 32bit values which
+  // indicate how many rows are in each table. The tables are immediately
+  // after the rows array.
+  //
+  // Save the row offset.
+  row_offset = (uint32_t*) (tilde_header + 1);
+
+  // Walk all the bits first because we need to know the number of rows for
+  // some tables in order to parse others. In particular this applies to
+  // coded indexes, which are documented in ECMA-335 II.24.2.6.
+  for (bit_check = 0; bit_check < 64; bit_check++)
+  {
+    if (!((yr_le64toh(tilde_header->Valid) >> bit_check) & 0x01))
+      continue;
+
+#define ROW_CHECK(name)                                                  \
+  if (fits_in_pe(pe, row_offset, (matched_bits + 1) * sizeof(uint32_t))) \
+    rows.name = *(row_offset + matched_bits);
+
+#define ROW_CHECK_WITH_INDEX(name)    \
+  ROW_CHECK(name);                    \
+  if (yr_le32toh(rows.name) > 0xFFFF) \
+    index_sizes.name = 4;
+
+    switch (bit_check)
+    {
+    case BIT_MODULE:
+      ROW_CHECK(module);
+      break;
+    case BIT_MODULEREF:
+      ROW_CHECK_WITH_INDEX(moduleref);
+      break;
+    case BIT_ASSEMBLYREF:
+      ROW_CHECK_WITH_INDEX(assemblyref);
+      break;
+    case BIT_ASSEMBLYREFPROCESSOR:
+      ROW_CHECK_WITH_INDEX(assemblyrefprocessor);
+      break;
+    case BIT_TYPEREF:
+      ROW_CHECK(typeref);
+      break;
+    case BIT_METHODDEF:
+      ROW_CHECK_WITH_INDEX(methoddef);
+      break;
+    case BIT_MEMBERREF:
+      ROW_CHECK_WITH_INDEX(memberref);
+      break;
+    case BIT_TYPEDEF:
+      ROW_CHECK_WITH_INDEX(typedef_);
+      break;
+    case BIT_TYPESPEC:
+      ROW_CHECK(typespec);
+      break;
+    case BIT_FIELD:
+      ROW_CHECK_WITH_INDEX(field);
+      break;
+    case BIT_PARAM:
+      ROW_CHECK_WITH_INDEX(param);
+      break;
+    case BIT_PROPERTY:
+      ROW_CHECK_WITH_INDEX(property);
+      break;
+    case BIT_INTERFACEIMPL:
+      ROW_CHECK(interfaceimpl);
+      break;
+    case BIT_EVENT:
+      ROW_CHECK_WITH_INDEX(event);
+      break;
+    case BIT_STANDALONESIG:
+      ROW_CHECK(standalonesig);
+      break;
+    case BIT_ASSEMBLY:
+      ROW_CHECK(assembly);
+      break;
+    case BIT_FILE:
+      ROW_CHECK(file);
+      break;
+    case BIT_EXPORTEDTYPE:
+      ROW_CHECK(exportedtype);
+      break;
+    case BIT_MANIFESTRESOURCE:
+      ROW_CHECK(manifestresource);
+      break;
+    case BIT_GENERICPARAM:
+      ROW_CHECK_WITH_INDEX(genericparam);
+      break;
+    case BIT_GENERICPARAMCONSTRAINT:
+      ROW_CHECK(genericparamconstraint);
+      break;
+    case BIT_METHODSPEC:
+      ROW_CHECK(methodspec);
+      break;
+    default:
+      break;
+    }
+
+    matched_bits++;
+  }
+
+  // This is used when parsing the MANIFEST RESOURCE table.
+  resource_base = pe_rva_to_offset(
+      pe, yr_le32toh(cli_header->Resources.VirtualAddress));
+
+  dotnet_parse_tilde_2(
+      pe,
+      tilde_header,
+      resource_base,
+      metadata_root,
+      rows,
+      index_sizes,
+      streams);
+}
+
+// the below code fragment can be found in:
+// libyara/modules/pe/pe.c
+void _parse_pkcs7(PE* pe, PKCS7* pkcs7, int* counter)
+{
+  int i, j;
+  time_t date_time;
+  int sig_nid;
+  char buffer[256];
+  int bytes;
+  int idx;
+  const EVP_MD* sha1_digest = EVP_sha1();
+  const unsigned char* p;
+  unsigned char thumbprint[YR_SHA1_LEN];
+  char thumbprint_ascii[YR_SHA1_LEN * 2 + 1];
+
+  PKCS7_SIGNER_INFO* signer_info = NULL;
+  PKCS7* nested_pkcs7 = NULL;
+  ASN1_INTEGER* serial = NULL;
+  ASN1_TYPE* nested = NULL;
+  ASN1_STRING* value = NULL;
+  X509* cert = NULL;
+  STACK_OF(X509)* certs = NULL;
+  X509_ATTRIBUTE* xa = NULL;
+  STACK_OF(X509_ATTRIBUTE)* attrs = NULL;
+
+  if (*counter >= MAX_PE_CERTS)
+    return;
+
+  certs = PKCS7_get0_signers(pkcs7, NULL, 0);
+
+  if (!certs)
+    return;
+
+  for (i = 0; i < sk_X509_num(certs) && *counter < MAX_PE_CERTS; i++)
+  {
+    cert = sk_X509_value(certs, i);
+
+    X509_digest(cert, sha1_digest, thumbprint, NULL);
+
+    for (j = 0; j < YR_SHA1_LEN; j++)
+      sprintf(thumbprint_ascii + (j * 2), "%02x", thumbprint[j]);
+
+    set_string(
+        (char*) thumbprint_ascii,
+        pe->object,
+        "signatures[%i].thumbprint",
+        *counter);
+
+    X509_NAME_oneline(X509_get_issuer_name(cert), buffer, sizeof(buffer));
+
+    set_string(buffer, pe->object, "signatures[%i].issuer", *counter);
+
+    X509_NAME_oneline(X509_get_subject_name(cert), buffer, sizeof(buffer));
+
+    set_string(buffer, pe->object, "signatures[%i].subject", *counter);
+
+    set_integer(
+        X509_get_version(cert) + 1,  // Versions are zero based, so add one.
+        pe->object,
+        "signatures[%i].version",
+        *counter);
+
+    sig_nid = X509_get_signature_nid(cert);
+    set_string(
+        OBJ_nid2ln(sig_nid), pe->object, "signatures[%i].algorithm", *counter);
+    OBJ_obj2txt(buffer, sizeof(buffer), OBJ_nid2obj(sig_nid), 1);
+    set_string(buffer, pe->object, "signatures[%i].algorithm_oid", *counter);
+
+    serial = X509_get_serialNumber(cert);
+
+    if (serial)
+    {
+      // ASN1_INTEGER can be negative (serial->type & V_ASN1_NEG_INTEGER),
+      // in which case the serial number will be stored in 2's complement.
+      //
+      // Handle negative serial numbers, which are technically not allowed
+      // by RFC5280, but do exist. An example binary which has a negative
+      // serial number is: 4bfe05f182aa273e113db6ed7dae4bb8.
+      //
+      // Negative serial numbers are handled by calling i2d_ASN1_INTEGER()
+      // with a NULL second parameter. This will return the size of the
+      // buffer necessary to store the proper serial number.
+      //
+      // Do this even for positive serial numbers because it makes the code
+      // cleaner and easier to read.
+
+      bytes = i2d_ASN1_INTEGER(serial, NULL);
+
+      // According to X.509 specification the maximum length for the
+      // serial number is 20 octets. Add two bytes to account for
+      // DER type and length information.
+
+      if (bytes > 2 && bytes <= 22)
+      {
+        // Now that we know the size of the serial number allocate enough
+        // space to hold it, and use i2d_ASN1_INTEGER() one last time to
+        // hold it in the allocated buffer.
+
+        unsigned char* serial_der = (unsigned char*) yr_malloc(bytes);
+
+        if (serial_der != NULL)
+        {
+          unsigned char* serial_bytes;
+          char* serial_ascii;
+
+          bytes = i2d_ASN1_INTEGER(serial, &serial_der);
+
+          // i2d_ASN1_INTEGER() moves the pointer as it writes into
+          // serial_bytes. Move it back.
+
+          serial_der -= bytes;
+
+          // Skip over DER type, length information
+          serial_bytes = serial_der + 2;
+          bytes -= 2;
+
+          // Also allocate space to hold the "common" string format:
+          // 00:01:02:03:04...
+          //
+          // For each byte in the serial to convert to hexlified format we
+          // need three bytes, two for the byte itself and one for colon.
+          // The last one doesn't have the colon, but the extra byte is used
+          // for the NULL terminator.
+
+          serial_ascii = (char*) yr_malloc(bytes * 3);
+
+          if (serial_ascii)
+          {
+            for (j = 0; j < bytes; j++)
+            {
+              // Don't put the colon on the last one.
+              if (j < bytes - 1)
+                snprintf(serial_ascii + 3 * j, 4, "%02x:", serial_bytes[j]);
+              else
+                snprintf(serial_ascii + 3 * j, 3, "%02x", serial_bytes[j]);
+            }
+
+            set_string(
+                serial_ascii, pe->object, "signatures[%i].serial", *counter);
+
+            yr_free(serial_ascii);
+          }
+
+          yr_free(serial_der);
+        }
+      }
+    }
+
+    date_time = ASN1_get_time_t(X509_get0_notBefore(cert));
+    set_integer(date_time, pe->object, "signatures[%i].not_before", *counter);
+
+    date_time = ASN1_get_time_t(X509_get0_notAfter(cert));
+    set_integer(date_time, pe->object, "signatures[%i].not_after", *counter);
+
+    (*counter)++;
+  }
+
+  // See if there is a nested signature, which is apparently an authenticode
+  // specific feature. See https://github.com/VirusTotal/yara/issues/515.
+  signer_info = sk_PKCS7_SIGNER_INFO_value(pkcs7->d.sign->signer_info, 0);
+
+  if (signer_info != NULL)
+  {
+    attrs = PKCS7_get_attributes(signer_info);
+
+    idx = X509at_get_attr_by_NID(
+        attrs, OBJ_txt2nid(SPC_NESTED_SIGNATURE_OBJID), -1);
+
+    xa = X509at_get_attr(attrs, idx);
+
+    for (j = 0; j < MAX_PE_CERTS; j++)
+    {
+      nested = X509_ATTRIBUTE_get0_type(xa, j);
+      if (nested == NULL)
+        break;
+      value = nested->value.sequence;
+      p = value->data;
+      nested_pkcs7 = d2i_PKCS7(NULL, &p, value->length);
+      if (nested_pkcs7 != NULL)
+      {
+        _parse_pkcs7(pe, nested_pkcs7, counter);
+        PKCS7_free(nested_pkcs7);
+      }
+    }
+  }
+
+  sk_X509_free(certs);
+}
+
+// the below code fragment can be found in:
+// libyara/modules/dotnet/dotnet.c
+end_declarations
+
+int module_initialize(YR_MODULE* module)
+{
+  return ERROR_SUCCESS;
+}
+
+// the below code fragment can be found in:
+// libyara/modules/dotnet/dotnet.c
+void dotnet_parse_us(PE* pe, int64_t metadata_root, PSTREAM_HEADER us_header)
+{
+  BLOB_PARSE_RESULT blob_result;
+  int i = 0;
+
+  const uint32_t ush_sz = yr_le32toh(us_header->Size);
+
+  const uint8_t* offset = pe->data + metadata_root +
+                          yr_le32toh(us_header->Offset);
+  const uint8_t* end_of_header = offset + ush_sz;
+
+  // Make sure the header size is larger than 0 and its end is not past the
+  // end of PE.
+  if (ush_sz == 0 || !fits_in_pe(pe, offset, ush_sz))
+    return;
+
+  // The first entry MUST be single NULL byte.
+  if (*offset != 0x00)
+    return;
+
+  offset++;
+
+  while (offset < end_of_header)
+  {
+    blob_result = dotnet_parse_blob_entry(pe, offset);
+
+    if (blob_result.size == 0)
+      break;
+
+    offset += blob_result.size;
+    // Avoid empty strings, which usually happen as padding at the end of the
+    // stream.
+
+    if (blob_result.length > 0 && fits_in_pe(pe, offset, blob_result.length))
+    {
+      set_sized_string(
+          (char*) offset,
+          blob_result.length,
+          pe->object,
+          "user_strings[%i]",
+          i);
+
+      offset += blob_result.length;
+      i++;
+    }
+  }
+
+  set_integer(i, pe->object, "number_of_user_strings");
+}
+

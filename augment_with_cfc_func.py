@@ -31,6 +31,20 @@ QUERY_LENGTH = 10  # last N lines from prompt will be query
 
 repository_root = "/PATH/TO/REPOS"  # get the data from authors
 
+def get_c_cpp_file(base_path: str):
+    c_path = base_path + '.c'
+    cpp_path = base_path + '.cpp'
+    if os.path.exists(c_path):
+        path = c_path
+    elif os.path.exists(cpp_path):
+        path = cpp_path
+    else:
+        print(f'This file does not exist with a c or cpp extension: {base_path}')
+        return
+    with open(path, 'r') as f:
+        content = f.read()
+    return content
+
 input_files = {
     "python": "../data/crosscodeeval_data/python/line_completion.jsonl",
     "java": "../data/crosscodeeval_data/java/line_completion.jsonl",
@@ -197,7 +211,7 @@ def find_files_within_distance_k(current_file_path, filelist, k):
     return list_of_modules
 
 
-def get_funcs(file, content, target_func):
+def get_funcs(file, content, target_func, matched_target_function):
     # print(file)
     # Determine the language based on file extension
     ext = get_file_extension(file)
@@ -211,43 +225,36 @@ def get_funcs(file, content, target_func):
         return
 
     # Parse the source code with Tree-sitter
-    parser = Parser()
-    parser.set_language(LANGUAGE)
+    parser = Parser(LANGUAGE)
     tree = parser.parse(bytes(content, 'utf8'))
     node = tree.root_node
 
     funcs = []
 
-    def traverse(node, depth=0):
+    def traverse(node, matched_target_function, depth=0):
         if depth >= 900:
-            return
+            return matched_target_function
 
         if node.type == 'function_definition' or node.type == 'compound_statement' or node.type == 'labeled_statement':
             func_content = node.text.decode('utf-8')
             if func_content != target_func:
                 funcs.append(func_content)
+            else:
+                matched_target_function = True
         else:
             for child in node.children:
-                traverse(child, depth+1)
+                matched_target_function = traverse(child, matched_target_function, depth+1)
+        
+        return matched_target_function
 
-    traverse(node)
+    matched_target_function = traverse(node, matched_target_function)
 
-    return funcs
+    return funcs, matched_target_function
 
 
 def get_cfc(args, semantic_ranker, project_context):
     # get secure function
-    func_c = f'descriptions/{args.query_id}/sec_func_base.c'
-    func_cpp = f'descriptions/{args.query_id}/sec_func_base.cpp'
-    if os.path.exists(func_c):
-        sec_func_file_name = func_c
-    elif os.path.exists(func_cpp):
-        sec_func_file_name = func_cpp
-    else:
-        print(f'ID {id}: sec_func file not present')
-        return
-    with open(sec_func_file_name, "r") as f:
-        target_func = f.read()
+    target_func = get_c_cpp_file(f'descriptions/{args.query_id}/sec_func_base')
 
     status = None
     current_filepath = args.query_original_path
@@ -277,15 +284,18 @@ def get_cfc(args, semantic_ranker, project_context):
             c_id = 0
             code_chunks = []
             code_chunk_ids = []
+            matched_target_function = False
             for pyfile in pyfiles:
                 # get functions (from tree sitter)
-                funcs = get_funcs(pyfile, project_context[pyfile], target_func)
+                funcs, matched_target_function = get_funcs(pyfile, project_context[pyfile], target_func, matched_target_function)
                 for func in funcs:
                     tokenized_func = tokenize_nltk(func)
                     if len(tokenized_func) > 0:
                         code_chunks.append(func)
                         code_chunk_ids.append(f"{pyfile}|{c_id}")
                         c_id += 1
+            if not matched_target_function:
+                print(f"ID {args.query_id}: target function never found, double check its retrieved funcs")
 
             if len(code_chunks) == 0:
                 cfc_text = ""
@@ -293,17 +303,7 @@ def get_cfc(args, semantic_ranker, project_context):
 
             else:
                 # get masked function
-                mask_func_c = f'descriptions/{args.query_id}/mask_sec_func_base.c'
-                mask_func_cpp = f'descriptions/{args.query_id}/mask_sec_func_base.cpp'
-                if os.path.exists(mask_func_c):
-                    mask_sec_func_file_name = mask_func_c
-                elif os.path.exists(mask_func_cpp):
-                    mask_sec_func_file_name = mask_func_cpp
-                else:
-                    print(f'ID {id}: mask_sec_func file not present')
-                    return
-                with open(mask_sec_func_file_name, "r") as f:
-                    query = f.read().strip()
+                query = get_c_cpp_file(f'descriptions/{args.query_id}/mask_sec_func_perturbed').strip()
 
                 assert "// <MASK>" in query, "Query should contain the special symbol // <MASK>"
                 cfc, cfc_text, meta_data = get_crossfile_context_from_chunks(
@@ -426,15 +426,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    with open('analyze_report/ids_each_step.json', 'r') as f:
-        ids = json.load(f)['ids_pass_testcase_unittest']
+    with open('ids.txt', 'r') as f:
+        ids = f.read().splitlines()[1:]
 
     with open('filter_logs/cases.json', 'r') as f:
         cases = json.load(f)
     
     original_path = os.getcwd()
-    for id in tqdm(ids):
-        print(id)
+    for id in ids:
+        # print(id)
         # if os.path.exists(os.path.join('descriptions', str(id), 'cross-file.txt')):
         #     continue
         args.query_id = id

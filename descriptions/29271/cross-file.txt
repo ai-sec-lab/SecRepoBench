@@ -1,0 +1,224 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// ext/spl/spl_observer.c
+{
+	spl_SplObjectStorage *intern = Z_SPLOBJSTORAGE_P(ZEND_THIS);
+	spl_SplObjectStorageElement *elem;
+	zval tmp;
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	array_init(return_value);
+
+	/* storage */
+	array_init_size(&tmp, 2 * zend_hash_num_elements(&intern->storage));
+	ZEND_HASH_FOREACH_PTR(&intern->storage, elem) {
+		zval obj;
+		ZVAL_OBJ_COPY(&obj, elem->obj);
+		zend_hash_next_index_insert(Z_ARRVAL(tmp), &obj);
+		Z_TRY_ADDREF(elem->inf);
+		zend_hash_next_index_insert(Z_ARRVAL(tmp), &elem->inf);
+	} ZEND_HASH_FOREACH_END();
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+
+	/* members */
+	ZVAL_ARR(&tmp, zend_std_get_properties(&intern->std));
+	Z_TRY_ADDREF(tmp);
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+}
+
+// the below code fragment can be found in:
+// ext/spl/spl_array.c
+{
+	spl_array_object *intern = Z_SPLARRAY_P(ZEND_THIS);
+	zval tmp;
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	array_init(return_value);
+
+	/* flags */
+	ZVAL_LONG(&tmp, (intern->ar_flags & SPL_ARRAY_CLONE_MASK));
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+
+	/* storage */
+	if (intern->ar_flags & SPL_ARRAY_IS_SELF) {
+		ZVAL_NULL(&tmp);
+	} else {
+		ZVAL_COPY(&tmp, &intern->array);
+	}
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+
+	/* members */
+	ZVAL_ARR(&tmp, zend_std_get_properties(&intern->std));
+	Z_TRY_ADDREF(tmp);
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+
+	/* iterator class */
+	if (intern->ce_get_iterator == spl_ce_ArrayIterator) {
+		ZVAL_NULL(&tmp);
+	} else {
+		ZVAL_STR_COPY(&tmp, intern->ce_get_iterator->name);
+	}
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+}
+
+// the below code fragment can be found in:
+// ext/spl/spl_dllist.c
+{
+	spl_dllist_object *intern = Z_SPLDLLIST_P(ZEND_THIS);
+	spl_ptr_llist_element *current = intern->llist->head;
+	zval tmp;
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	array_init(return_value);
+
+	/* flags */
+	ZVAL_LONG(&tmp, intern->flags);
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+
+	/* elements */
+	array_init_size(&tmp, intern->llist->count);
+	while (current) {
+		zend_hash_next_index_insert(Z_ARRVAL(tmp), &current->data);
+		Z_TRY_ADDREF(current->data);
+		current = current->next;
+	}
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+
+	/* members */
+	ZVAL_ARR(&tmp, zend_std_get_properties(&intern->std));
+	Z_TRY_ADDREF(tmp);
+	zend_hash_next_index_insert(Z_ARRVAL_P(return_value), &tmp);
+}
+
+// the below code fragment can be found in:
+// ext/gmp/gmp.c
+static ZEND_GINIT_FUNCTION(gmp)
+{
+#if defined(COMPILE_DL_GMP) && defined(ZTS)
+	ZEND_TSRMLS_CACHE_UPDATE();
+#endif
+	gmp_globals->rand_initialized = 0;
+}
+
+// the below code fragment can be found in:
+// ext/spl/spl_array.c
+{
+	zval *object = ZEND_THIS;
+	spl_array_object *intern = Z_SPLARRAY_P(object);
+
+	char *buf;
+	size_t buf_len;
+	const unsigned char *p, *s;
+	php_unserialize_data_t var_hash;
+	zval *members, *zflags, *array;
+	zend_long flags;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &buf, &buf_len) == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	if (buf_len == 0) {
+		return;
+	}
+
+	if (intern->nApplyCount > 0) {
+		zend_throw_error(NULL, "Modification of ArrayObject during sorting is prohibited");
+		return;
+	}
+
+	/* storage */
+	s = p = (const unsigned char*)buf;
+	PHP_VAR_UNSERIALIZE_INIT(var_hash);
+
+	if (*p!= 'x' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	zflags = var_tmp_var(&var_hash);
+	if (!php_var_unserialize(zflags, &p, s + buf_len, &var_hash) || Z_TYPE_P(zflags) != IS_LONG) {
+		goto outexcept;
+	}
+
+	--p; /* for ';' */
+	flags = Z_LVAL_P(zflags);
+	/* flags needs to be verified and we also need to verify whether the next
+	 * thing we get is ';'. After that we require an 'm' or something else
+	 * where 'm' stands for members and anything else should be an array. If
+	 * neither 'a' or 'm' follows we have an error. */
+
+	if (*p != ';') {
+		goto outexcept;
+	}
+	++p;
+
+	if (flags & SPL_ARRAY_IS_SELF) {
+		/* If IS_SELF is used, the flags are not followed by an array/object */
+		intern->ar_flags &= ~SPL_ARRAY_CLONE_MASK;
+		intern->ar_flags |= flags & SPL_ARRAY_CLONE_MASK;
+		zval_ptr_dtor(&intern->array);
+		ZVAL_UNDEF(&intern->array);
+	} else {
+		if (*p!='a' && *p!='O' && *p!='C' && *p!='r') {
+			goto outexcept;
+		}
+
+		array = var_tmp_var(&var_hash);
+		if (!php_var_unserialize(array, &p, s + buf_len, &var_hash)
+				|| (Z_TYPE_P(array) != IS_ARRAY && Z_TYPE_P(array) != IS_OBJECT)) {
+			goto outexcept;
+		}
+
+		intern->ar_flags &= ~SPL_ARRAY_CLONE_MASK;
+		intern->ar_flags |= flags & SPL_ARRAY_CLONE_MASK;
+
+		if (Z_TYPE_P(array) == IS_ARRAY) {
+			zval_ptr_dtor(&intern->array);
+			ZVAL_COPY_VALUE(&intern->array, array);
+			ZVAL_NULL(array);
+			SEPARATE_ARRAY(&intern->array);
+		} else {
+			spl_array_set_array(object, intern, array, 0L, 1);
+		}
+
+		if (*p != ';') {
+			goto outexcept;
+		}
+        ++p;
+	}
+
+	/* members */
+	if (*p!= 'm' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	members = var_tmp_var(&var_hash);
+	if (!php_var_unserialize(members, &p, s + buf_len, &var_hash) || Z_TYPE_P(members) != IS_ARRAY) {
+		goto outexcept;
+	}
+
+	/* copy members */
+	object_properties_load(&intern->std, Z_ARRVAL_P(members));
+
+	/* done reading $serialized */
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	return;
+
+outexcept:
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	zend_throw_exception_ex(spl_ce_UnexpectedValueException, 0, "Error at offset " ZEND_LONG_FMT " of %zd bytes", (zend_long)((char*)p - buf), buf_len);
+	RETURN_THROWS();
+
+}
+

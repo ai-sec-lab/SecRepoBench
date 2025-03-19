@@ -1,0 +1,599 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/hunspell/affixmgr.cxx
+int AffixMgr::have_contclass() const {
+  return havecontclass;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/affixmgr.cxx
+int AffixMgr::cpdcase_check(const std::string& word, int pos) {
+  if (utf8) {
+    const char* p;
+    const char* wordp = word.c_str();
+    for (p = wordp + pos - 1; p > wordp && (*p & 0xc0) == 0x80; p--)
+      ;
+    std::string pair(p);
+    std::vector<w_char> pair_u;
+    u8_u16(pair_u, pair);
+    unsigned short a = pair_u.size() > 1 ? (unsigned short)pair_u[1] : 0,
+                   b = !pair_u.empty() ? (unsigned short)pair_u[0] : 0;
+    if (((unicodetoupper(a, langnum) == a) ||
+         (unicodetoupper(b, langnum) == b)) &&
+        (a != '-') && (b != '-'))
+      return 1;
+  } else {
+    const unsigned char a = word[pos - 1], b = word[pos];
+    if ((csconv[a].ccase || csconv[b].ccase) && (a != '-') && (b != '-'))
+      return 1;
+  }
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/hashmgr.cxx
+int HashMgr::decode_flags(unsigned short** result, const std::string& flags, FileMgr* af) const {
+  int len;
+  if (flags.empty()) {
+    *result = NULL;
+    return 0;
+  }
+  switch (flag_mode) {
+    case FLAG_LONG: {  // two-character flags (1x2yZz -> 1x 2y Zz)
+      len = flags.size();
+      if ((len & 1) == 1)
+        HUNSPELL_WARNING(stderr, "error: line %d: bad flagvector\n",
+                         af->getlinenum());
+      len >>= 1;
+      *result = new unsigned short[len];
+      for (int i = 0; i < len; i++) {
+        unsigned short flag = ((unsigned short)((unsigned char)flags[i << 1]) << 8) |
+                              ((unsigned short)((unsigned char)flags[(i << 1) | 1]));
+
+        if (flag >= DEFAULTFLAGS) {
+          HUNSPELL_WARNING(stderr,
+                           "error: line %d: flag id %d is too large (max: %d)\n",
+                           af->getlinenum(), flag, DEFAULTFLAGS - 1);
+          flag = 0;
+        }
+
+        (*result)[i] = flag;
+      }
+      break;
+    }
+    case FLAG_NUM: {  // decimal numbers separated by comma (4521,23,233 -> 4521
+                      // 23 233)
+      len = int(1 + std::count_if(flags.begin(), flags.end(), [](char c) { return c == ','; }));
+      *result = new unsigned short[len];
+      unsigned short* dest = *result;
+      const char* src = flags.c_str();
+      for (size_t p = 0; p < flags.size(); ++p) {
+        if (flags[p] == ',') {
+          int i = atoi(src);
+          if (i >= DEFAULTFLAGS) {
+            HUNSPELL_WARNING(
+                stderr, "error: line %d: flag id %d is too large (max: %d)\n",
+                af->getlinenum(), i, DEFAULTFLAGS - 1);
+             i = 0;
+	  }
+          *dest = (unsigned short)i;
+          if (*dest == 0)
+            HUNSPELL_WARNING(stderr, "error: line %d: 0 is wrong flag id\n",
+                             af->getlinenum());
+          src = flags.c_str() + p + 1;
+          dest++;
+        }
+      }
+      int i = atoi(src);
+      if (i >= DEFAULTFLAGS) {
+        HUNSPELL_WARNING(stderr,
+                         "error: line %d: flag id %d is too large (max: %d)\n",
+                         af->getlinenum(), i, DEFAULTFLAGS - 1);
+        i = 0;
+      }
+      *dest = (unsigned short)i;
+      if (*dest == 0)
+        HUNSPELL_WARNING(stderr, "error: line %d: 0 is wrong flag id\n",
+                         af->getlinenum());
+      break;
+    }
+    case FLAG_UNI: {  // UTF-8 characters
+      std::vector<w_char> w;
+      u8_u16(w, flags);
+      len = w.size();
+      *result = new unsigned short[len];
+#if defined(__i386__) || defined(_M_IX86) || defined(_M_X64)
+      memcpy(*result, w.data(), len * sizeof(unsigned short));
+#else
+      unsigned short* dest = *result;
+      for (const w_char wc : w) {
+        *dest = (unsigned short)wc;
+        dest++;
+      }
+#endif
+      break;
+    }
+    default: {  // Ispell's one-character flags (erfg -> e r f g)
+      len = flags.size();
+      *result = new unsigned short[len];
+      unsigned short* dest = *result;
+      for (const char flag : flags) {
+        *dest = (unsigned char)flag;
+        dest++;
+      }
+    }
+  }
+  return len;
+}
+
+// the below code fragment can be found in:
+// src/hunspell/hashmgr.cxx
+int HashMgr::add_word(const std::string& in_word,
+                      int wcl,
+                      unsigned short* aff,
+                      int al,
+                      const std::string* in_desc,
+                      bool onlyupcase,
+                      int captype) {
+
+  if (al > std::numeric_limits<short>::max()) {
+    HUNSPELL_WARNING(stderr, "error: affix len %d is over max limit\n", al);
+    free_flag(aff, al);
+    return 1;
+  }
+
+  const std::string* word = &in_word;
+  const std::string* desc = in_desc;
+
+  std::string *word_copy = NULL;
+  std::string *desc_copy = NULL;
+  if ((!ignorechars.empty() && !has_no_ignored_chars(in_word, ignorechars)) || complexprefixes) {
+    word_copy = new std::string(in_word);
+
+    if (!ignorechars.empty()) {
+      if (utf8) {
+        wcl = remove_ignored_chars_utf(*word_copy, ignorechars_utf16);
+      } else {
+        remove_ignored_chars(*word_copy, ignorechars);
+      }
+    }
+
+    if (complexprefixes) {
+      if (utf8)
+        wcl = reverseword_utf(*word_copy);
+      else
+        reverseword(*word_copy);
+
+      if (in_desc && aliasm.empty()) {
+        desc_copy = new std::string(*in_desc);
+
+        if (complexprefixes) {
+          if (utf8)
+            reverseword_utf(*desc_copy);
+          else
+            reverseword(*desc_copy);
+        }
+        desc = desc_copy;
+      }
+    }
+
+    word = word_copy;
+  }
+
+  // limit of hp->blen
+  if (word->size() > std::numeric_limits<unsigned short>::max()) {
+    HUNSPELL_WARNING(stderr, "error: word len %ld is over max limit\n", word->size());
+    delete desc_copy;
+    delete word_copy;
+    free_flag(aff, al);
+    return 1;
+  }
+
+  bool upcasehomonym = false;
+  int descl = desc ? (!aliasm.empty() ? sizeof(char*) : desc->size() + 1) : 0;
+  // variable-length hash record with word and optional fields
+  auto hp =
+      (struct hentry*)malloc(sizeof(struct hentry) + word->size() + descl);
+  if (!hp) {
+    delete desc_copy;
+    delete word_copy;
+    free_flag(aff, al);
+    return 1;
+  }
+
+  char* hpw = hp->word;
+  memcpy(hpw, word->data(), word->size());
+  hpw[word->size()] = 0;
+
+  int i = hash(hpw, word->size());
+
+  hp->blen = (unsigned short)word->size();
+  hp->clen = (unsigned short)wcl;
+  hp->alen = (short)al;
+  hp->astr = aff;
+  hp->next = NULL;
+  hp->next_homonym = NULL;
+  hp->var = (captype == INITCAP) ? H_OPT_INITCAP : 0;
+
+  // store the description string or its pointer
+  if (desc) {
+    hp->var |= H_OPT;
+    if (!aliasm.empty()) {
+      hp->var |= H_OPT_ALIASM;
+      store_pointer(hpw + word->size() + 1, get_aliasm(atoi(desc->c_str())));
+    } else {
+      strcpy(hpw + word->size() + 1, desc->c_str());
+    }
+    if (HENTRY_FIND(hp, MORPH_PHON)) {
+      hp->var |= H_OPT_PHON;
+      // store ph: fields (pronounciation, misspellings, old orthography etc.)
+      // of a morphological description in reptable to use in REP replacements.
+      size_t predicted = tableptr.size() / MORPH_PHON_RATIO;
+      if (reptable.capacity() < predicted)
+          reptable.reserve(predicted);
+      std::string fields = HENTRY_DATA(hp);
+      std::string::const_iterator iter = fields.begin(), start_piece = mystrsep(fields, iter);
+      while (start_piece != fields.end()) {
+        if (std::string(start_piece, iter).find(MORPH_PHON) == 0) {
+          std::string ph = std::string(start_piece, iter).substr(sizeof MORPH_PHON - 1);
+          if (!ph.empty()) {
+            std::vector<w_char> w;
+            size_t strippatt;
+            std::string wordpart;
+            // dictionary based REP replacement, separated by "->"
+            // for example "pretty ph:prity ph:priti->pretti" to handle
+            // both prity -> pretty and pritier -> prettiest suggestions.
+            if (((strippatt = ph.find("->")) != std::string::npos) &&
+                    (strippatt > 0) && (strippatt < ph.size() - 2)) {
+                wordpart = ph.substr(strippatt + 2);
+                ph.erase(ph.begin() + strippatt, ph.end());
+            } else
+                wordpart = in_word;
+            // when the ph: field ends with the character *,
+            // strip last character of the pattern and the replacement
+            // to match in REP suggestions also at character changes,
+            // for example, "pretty ph:prity*" results "prit->prett"
+            // REP replacement instead of "prity->pretty", to get
+            // prity->pretty and pritiest->prettiest suggestions.
+            if (ph.at(ph.size()-1) == '*') {
+              strippatt = 1;
+              size_t stripword = 0;
+              if (utf8) {
+                while ((strippatt < ph.size()) &&
+                  ((ph.at(ph.size()-strippatt-1) & 0xc0) == 0x80))
+                     ++strippatt;
+                while ((stripword < wordpart.size()) &&
+                  ((wordpart.at(wordpart.size()-stripword-1) & 0xc0) == 0x80))
+                     ++stripword;
+              }
+              ++strippatt;
+              ++stripword;
+              if ((ph.size() > strippatt) && (wordpart.size() > stripword)) {
+                ph.erase(ph.size()-strippatt, strippatt);
+                wordpart.erase(wordpart.size()-stripword, stripword);
+              }
+            }
+            // capitalize lowercase pattern for capitalized words to support
+            // good suggestions also for capitalized misspellings, eg.
+            // Wednesday ph:wendsay
+            // results wendsay -> Wednesday and Wendsay -> Wednesday, too.
+            if (captype == INITCAP) {
+              std::string ph_capitalized;
+              if (utf8) {
+                u8_u16(w, ph);
+                if (get_captype_utf8(w, langnum) == NOCAP) {
+                  mkinitcap_utf(w, langnum);
+                  u16_u8(ph_capitalized, w);
+                }
+              } else if (get_captype(ph, csconv) == NOCAP)
+                  mkinitcap(ph_capitalized, csconv);
+
+              if (!ph_capitalized.empty()) {
+                // add also lowercase word in the case of German or
+                // Hungarian to support lowercase suggestions lowercased by
+                // compound word generation or derivational suffixes
+                // (for example by adjectival suffix "-i" of geographical
+                // names in Hungarian:
+                // Massachusetts ph:messzecsuzec
+                // messzecsuzeci -> massachusettsi (adjective)
+                // For lowercasing by conditional PFX rules, see
+                // tests/germancompounding test example or the
+                // Hungarian dictionary.)
+                if (langnum == LANG_de || langnum == LANG_hu) {
+                  std::string wordpart_lower(wordpart);
+                  if (utf8) {
+                    u8_u16(w, wordpart_lower);
+                    mkallsmall_utf(w, langnum);
+                    u16_u8(wordpart_lower, w);
+                  } else {
+                    mkallsmall(wordpart_lower, csconv);
+                  }
+                  reptable.emplace_back();
+                  reptable.back().pattern.assign(ph);
+                  reptable.back().outstrings[0].assign(wordpart_lower);
+                }
+                reptable.emplace_back();
+                reptable.back().pattern.assign(ph_capitalized);
+                reptable.back().outstrings[0].assign(wordpart);
+              }
+            }
+            reptable.emplace_back();
+            reptable.back().pattern.assign(ph);
+            reptable.back().outstrings[0].assign(wordpart);
+          }
+        }
+        start_piece = mystrsep(fields, iter);
+      }
+    }
+  }
+
+  struct hentry* dp = tableptr[i];
+  if (!dp) {
+    tableptr[i] = hp;
+    delete desc_copy;
+    delete word_copy;
+    return 0;
+  }
+  while (dp->next != NULL) {
+    if ((!dp->next_homonym) && (strcmp(hp->word, dp->word) == 0)) {
+      // remove hidden onlyupcase homonym
+      if (!onlyupcase) {
+        if ((dp->astr) && TESTAFF(dp->astr, ONLYUPCASEFLAG, dp->alen)) {
+          delete[] dp->astr;
+          dp->astr = hp->astr;
+          dp->alen = hp->alen;
+          free(hp);
+          delete desc_copy;
+          delete word_copy;
+          return 0;
+        } else {
+          dp->next_homonym = hp;
+        }
+      } else {
+        upcasehomonym = true;
+      }
+    }
+    dp = dp->next;
+  }
+  if (strcmp(hp->word, dp->word) == 0) {
+    // remove hidden onlyupcase homonym
+    if (!onlyupcase) {
+      if ((dp->astr) && TESTAFF(dp->astr, ONLYUPCASEFLAG, dp->alen)) {
+        delete[] dp->astr;
+        dp->astr = hp->astr;
+        dp->alen = hp->alen;
+        free(hp);
+        delete desc_copy;
+        delete word_copy;
+        return 0;
+      } else {
+        dp->next_homonym = hp;
+      }
+    } else {
+      upcasehomonym = true;
+    }
+  }
+  if (!upcasehomonym) {
+    dp->next = hp;
+  } else {
+    // remove hidden onlyupcase homonym
+    delete[] hp->astr;
+    free(hp);
+  }
+
+  delete desc_copy;
+  delete word_copy;
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/tools/hunspell.cxx
+TextParser* get_parser(int format, const char* extension, Hunspell* pMS) {
+  TextParser* p = NULL;
+  int io_utf8 = 0;
+  const char* denc = pMS->get_dict_encoding().c_str();
+#ifdef HAVE_ICONV
+  if (io_enc) {
+    if ((strcmp(io_enc, "UTF-8") == 0) || (strcmp(io_enc, "utf-8") == 0) ||
+        (strcmp(io_enc, "UTF8") == 0) || (strcmp(io_enc, "utf8") == 0)) {
+      io_utf8 = 1;
+      io_enc = "UTF-8";
+    }
+  } else if (ui_enc) {
+    io_enc = ui_enc;
+    if (strcmp(ui_enc, "UTF-8") == 0)
+      io_utf8 = 1;
+  } else {
+    io_enc = denc;
+    if (strcmp(denc, "UTF-8") == 0)
+      io_utf8 = 1;
+  }
+
+  if (io_utf8) {
+    const std::vector<w_char>& vec_wordchars_utf16 = pMS->get_wordchars_utf16();
+    const std::string& vec_wordchars = pMS->get_wordchars_cpp();
+    wordchars_utf16_len = vec_wordchars_utf16.size();
+    wordchars_utf16 = wordchars_utf16_len ? vec_wordchars_utf16.data() : NULL;
+    if ((strcmp(denc, "UTF-8") != 0) && !vec_wordchars.empty()) {
+      const char* wchars = vec_wordchars.c_str();
+      size_t c1 = vec_wordchars.size();
+      size_t c2 = MAXLNLEN;
+      char* dest = text_conv;
+      iconv_t conv = iconv_open("UTF-8", fix_encoding_name(denc));
+      if (conv == (iconv_t)-1) {
+        fprintf(stderr, gettext("error - iconv_open: UTF-8 -> %s\n"), denc);
+        wordchars_utf16 = NULL;
+        wordchars_utf16_len = 0;
+      } else {
+        iconv(conv, (ICONV_CONST char**)&wchars, &c1, &dest, &c2);
+        iconv_close(conv);
+        u8_u16(new_wordchars_utf16, text_conv);
+        std::sort(new_wordchars_utf16.begin(), new_wordchars_utf16.end());
+        wordchars_utf16 = new_wordchars_utf16.data();
+        wordchars_utf16_len = new_wordchars_utf16.size();
+      }
+    }
+  } else {
+    // 8-bit input encoding
+    // detect letters by unicodeisalpha() for tokenization
+    char letters[MAXLNLEN];
+    char* pletters = letters;
+    char ch[2];
+    char u8[10];
+    *pletters = '\0';
+    iconv_t conv = iconv_open("UTF-8", fix_encoding_name(io_enc));
+    if (conv == (iconv_t)-1) {
+      fprintf(stderr, gettext("error - iconv_open: UTF-8 -> %s\n"), io_enc);
+    } else {
+      for (int i = 32; i < 256; i++) {
+        size_t c1 = 1;
+        size_t c2 = 10;
+        char* dest = u8;
+        u8[0] = '\0';
+        char* ch8bit = ch;
+        ch[0] = (char)i;
+        ch[1] = '\0';
+        size_t res = iconv(conv, (ICONV_CONST char**)&ch8bit, &c1, &dest, &c2);
+        if (res != (size_t)-1) {
+          std::vector<w_char> w;
+          u8_u16(w, std::string(u8, dest));
+          unsigned short idx = w.empty() ? 0 : (w[0].h << 8) + w[0].l;
+          if (unicodeisalpha(idx)) {
+            *pletters = (char)i;
+            pletters++;
+          }
+        }
+      }
+      iconv_close(conv);
+    }
+    *pletters = '\0';
+
+    // UTF-8 wordchars -> 8 bit wordchars
+    const std::string& vec_wordchars = pMS->get_wordchars_cpp();
+    size_t len = vec_wordchars.size();
+    if (len) {
+      if ((strcmp(denc, "UTF-8") == 0)) {
+        len = pMS->get_wordchars_utf16().size();
+      }
+      char* dest = letters + strlen(letters);  // append wordchars
+      size_t c1 = len + 1;
+      size_t c2 = len + 1;
+      conv = iconv_open(fix_encoding_name(io_enc), fix_encoding_name(denc));
+      if (conv == (iconv_t)-1) {
+        fprintf(stderr, gettext("error - iconv_open: %s -> %s\n"), io_enc,
+                denc);
+      } else {
+        const char* wchars = vec_wordchars.c_str();
+        iconv(conv, (ICONV_CONST char**)&wchars, &c1, &dest, &c2);
+        iconv_close(conv);
+        *dest = '\0';
+      }
+    }
+    if (*letters)
+      wordchars.assign(letters);
+  }
+#else
+  if (strcmp(denc, "UTF-8") == 0) {
+    const std::vector<w_char>& vec_wordchars_utf16 = pMS->get_wordchars_utf16();
+    wordchars_utf16 = (vec_wordchars_utf16.size() == 0) ? NULL : vec_wordchars_utf16.data();
+    wordchars_utf16_len = vec_wordchars_utf16.size();
+    io_utf8 = 1;
+  } else {
+    std::string casechars = get_casechars(denc);
+    std::string wchars = pMS->get_wordchars_cpp();
+    wordchars = casechars + wchars;
+  }
+  io_enc = denc;
+#endif
+
+  if (io_utf8) {
+    switch (format) {
+      case FMT_LATEX:
+        p = new LaTeXParser(wordchars_utf16, wordchars_utf16_len);
+        break;
+      case FMT_HTML:
+        p = new HTMLParser(wordchars_utf16, wordchars_utf16_len);
+        break;
+      case FMT_MAN:
+        p = new ManParser(wordchars_utf16, wordchars_utf16_len);
+        break;
+      case FMT_XML:
+        p = new XMLParser(wordchars_utf16, wordchars_utf16_len);
+        break;
+      case FMT_ODF:
+        p = new ODFParser(wordchars_utf16, wordchars_utf16_len);
+        break;
+      case FMT_FIRST:
+        p = new FirstParser(wordchars.c_str());
+    }
+  } else {
+    switch (format) {
+      case FMT_LATEX:
+        p = new LaTeXParser(wordchars.c_str());
+        break;
+      case FMT_HTML:
+        p = new HTMLParser(wordchars.c_str());
+        break;
+      case FMT_MAN:
+        p = new ManParser(wordchars.c_str());
+        break;
+      case FMT_XML:
+        p = new XMLParser(wordchars.c_str());
+        break;
+      case FMT_ODF:
+        p = new ODFParser(wordchars.c_str());
+        break;
+      case FMT_FIRST:
+        p = new FirstParser(wordchars.c_str());
+    }
+  }
+
+  if ((!p) && (extension)) {
+    if ((strcmp(extension, "html") == 0) || (strcmp(extension, "htm") == 0) ||
+        (strcmp(extension, "xhtml") == 0)) {
+      if (io_utf8) {
+        p = new HTMLParser(wordchars_utf16, wordchars_utf16_len);
+      } else {
+        p = new HTMLParser(wordchars.c_str());
+      }
+    } else if ((strcmp(extension, "xml") == 0)) {
+      if (io_utf8) {
+        p = new XMLParser(wordchars_utf16, wordchars_utf16_len);
+      } else {
+        p = new XMLParser(wordchars.c_str());
+      }
+    } else if (((strlen(extension) == 3) &&
+                (strstr(ODF_EXT, extension) != NULL)) ||
+               ((strlen(extension) == 4) && (extension[0] == 'f') &&
+                (strstr(ODF_EXT, extension + 1) != NULL))) {
+      if (io_utf8) {
+        p = new ODFParser(wordchars_utf16, wordchars_utf16_len);
+      } else {
+        p = new ODFParser(wordchars.c_str());
+      }
+    } else if (((extension[0] > '0') && (extension[0] <= '9'))) {
+      if (io_utf8) {
+        p = new ManParser(wordchars_utf16, wordchars_utf16_len);
+      } else {
+        p = new ManParser(wordchars.c_str());
+      }
+    } else if ((strcmp(extension, "tex") == 0)) {
+      if (io_utf8) {
+        p = new LaTeXParser(wordchars_utf16, wordchars_utf16_len);
+      } else {
+        p = new LaTeXParser(wordchars.c_str());
+      }
+    }
+  }
+  if (!p) {
+    if (io_utf8) {
+      p = new TextParser(wordchars_utf16, wordchars_utf16_len);
+    } else {
+      p = new TextParser(wordchars.c_str());
+    }
+  }
+  p->set_url_checking(checkurl);
+  return p;
+}
+

@@ -1,6 +1,139 @@
 // Here are some relevant code fragments from other files of the repo:
 
 // the below code fragment can be found in:
+// src/dwg.c
+EXPORT int
+dxf_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
+{
+  int error;
+  FILE *fp;
+  struct_stat_t attrib;
+  size_t size;
+  Bit_Chain dat = { 0 };
+  Dwg_Version_Type version;
+
+  loglevel = dwg->opts & DWG_OPTS_LOGLEVEL;
+
+  if (!filename || stat (filename, &attrib))
+    {
+      LOG_ERROR ("File not found: %s\n", filename ? filename : "(null)")
+      return DWG_ERR_IOERROR;
+    }
+  if (!(S_ISREG (attrib.st_mode)
+#  ifndef _WIN32
+        || S_ISLNK (attrib.st_mode)
+#  endif
+            ))
+    {
+      LOG_ERROR ("Error: %s\n", filename)
+      return DWG_ERR_IOERROR;
+    }
+  fp = fopen (filename, "rb");
+  if (!fp)
+    {
+      LOG_ERROR ("Could not open file: %s\n", filename)
+      return DWG_ERR_IOERROR;
+    }
+
+  /* Load whole file into memory
+   */
+  version = dwg->header.version;
+  memset (dwg, 0, sizeof (Dwg_Data));
+  dwg->opts = loglevel | DWG_OPTS_INDXF;
+  dwg->header.version = version;
+
+  memset (&dat, 0, sizeof (Bit_Chain));
+#  ifdef HAVE_SYS_STAT_H
+  dat.size = attrib.st_size;
+#  endif
+  dat.chain = (unsigned char *)calloc (1, dat.size + 2);
+  if (!dat.chain)
+    {
+      LOG_ERROR ("Not enough memory.\n");
+      fclose (fp);
+      return DWG_ERR_OUTOFMEM;
+    }
+  dat.byte = 0;
+  dat.bit = 0;
+  dat.from_version = dwg->header.from_version;
+  dat.version = dwg->header.version;
+  dat.opts = dwg->opts;
+
+  size = fread (dat.chain, sizeof (char), dat.size, fp);
+  fclose (fp);
+  if (size != dat.size)
+    {
+      LOG_ERROR ("Could not read the entire file (%" PRIuSIZE
+                 " out of %" PRIuSIZE "): %s\n",
+                 size, dat.size, filename)
+      free (dat.chain);
+      dat.chain = NULL;
+      dat.size = 0;
+      return DWG_ERR_IOERROR;
+    }
+  /*
+0
+SECTION
+2
+ENTITIES
+0
+ENDSEC
+   */
+  if (size < 31)
+    {
+      LOG_ERROR ("File %s too small, %" PRIuSIZE " byte.\n", filename, size)
+      free (dat.chain);
+      dat.chain = NULL;
+      dat.size = 0;
+      return DWG_ERR_IOERROR;
+    }
+  // properly end the buffer for strtol()/... readers
+  if (dat.chain[size - 1] != '\n')
+    {
+      dat.chain[size] = '\n';
+      dat.size++;
+    }
+  dat.chain[size] = '\0';
+
+  /* Fail on DWG */
+  if (!memcmp (dat.chain, "AC10", 4) || !memcmp (dat.chain, "AC1.", 4)
+      || !memcmp (dat.chain, "AC2.10", 4) || !memcmp (dat.chain, "MC0.0", 4))
+    {
+      LOG_ERROR ("This is a DWG, not a DXF file: %s\n", filename)
+      free (dat.chain);
+      dat.chain = NULL;
+      dat.size = 0;
+      return DWG_ERR_INVALIDDWG;
+    }
+  /* See if binary or ascii */
+  if (!memcmp (dat.chain, "AutoCAD Binary DXF",
+               sizeof ("AutoCAD Binary DXF") - 1))
+    {
+      dat.byte = 22;
+      error = dwg_read_dxfb (&dat, dwg);
+    }
+  else
+    error = dwg_read_dxf (&dat, dwg);
+
+  dwg->opts |= (DWG_OPTS_INDXF | loglevel);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      LOG_ERROR ("Failed to decode DXF file: %s\n", filename)
+      free (dat.chain);
+      dat.chain = NULL;
+      dat.size = 0;
+      return error;
+    }
+
+  // TODO: does dwg hold any char* pointers to the dat or are they all copied?
+  free (dat.chain);
+  dat.chain = NULL;
+  dat.size = 0;
+
+  return 0;
+}
+
+// the below code fragment can be found in:
 // src/decode_r11.c
 {
     case SECTION_BLOCK:
@@ -265,45 +398,5 @@ dwg_decode_unknown_bits (Bit_Chain *restrict dat, Dwg_Object *restrict obj)
   LOG_TRACE ("\n");
   bit_set_position (dat, pos);
   return 0;
-}
-
-// the below code fragment can be found in:
-// src/encode.c
-Dwg_Object *
-find_prev_entity (Dwg_Object *obj)
-{
-  Dwg_Data *dwg = obj->parent;
-  if (obj->supertype != DWG_SUPERTYPE_ENTITY)
-    return NULL;
-  if (dwg->prev_entity_index < obj->index
-      && dwg->prev_entity_index < dwg->num_objects)
-    {
-      Dwg_Object *prev = &dwg->object[dwg->prev_entity_index];
-      if (prev->supertype == DWG_SUPERTYPE_ENTITY
-          && prev->tio.entity->entmode == obj->tio.entity->entmode)
-        {
-          if (prev->fixedtype == DWG_TYPE_SEQEND
-              || prev->fixedtype == DWG_TYPE_ENDBLK)
-            return NULL;
-          else
-            return prev;
-        }
-    }
-  /*
-  for (BITCODE_BL i = obj->index - 1; i > 0; i--)
-    {
-      Dwg_Object *prev = &dwg->object[i];
-      if (prev->supertype == DWG_SUPERTYPE_ENTITY
-          && prev->tio.entity->entmode == obj->tio.entity->entmode)
-        {
-          if (prev->fixedtype == DWG_TYPE_SEQEND
-              || prev->fixedtype == DWG_TYPE_ENDBLK)
-            return NULL;
-          else
-            return prev;
-        }
-    }
-  */
-  return NULL;
 }
 

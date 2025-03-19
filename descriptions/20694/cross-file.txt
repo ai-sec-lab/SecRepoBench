@@ -220,319 +220,6 @@ static int cram_encode_slice_read(cram_fd *fd,
 }
 
 // the below code fragment can be found in:
-// cram/cram_decode.c
-int cram_dependent_data_series(cram_fd *fd,
-                               cram_block_compression_hdr *hdr,
-                               cram_slice *s) {
-    int *block_used;
-    int core_used = 0;
-    int i;
-    static int i_to_id[] = {
-        DS_BF, DS_AP, DS_FP, DS_RL, DS_DL, DS_NF, DS_BA, DS_QS,
-        DS_FC, DS_FN, DS_BS, DS_IN, DS_RG, DS_MQ, DS_TL, DS_RN,
-        DS_NS, DS_NP, DS_TS, DS_MF, DS_CF, DS_RI, DS_RS, DS_PD,
-        DS_HC, DS_SC, DS_BB, DS_QQ,
-    };
-    uint32_t orig_ds;
-
-    /*
-     * Set the data_series bit field based on fd->required_fields
-     * contents.
-     */
-    if (fd->required_fields && fd->required_fields != INT_MAX) {
-        s->data_series = 0;
-
-        if (fd->required_fields & SAM_QNAME)
-            s->data_series |= CRAM_RN;
-
-        if (fd->required_fields & SAM_FLAG)
-            s->data_series |= CRAM_BF;
-
-        if (fd->required_fields & SAM_RNAME)
-            s->data_series |= CRAM_RI | CRAM_BF;
-
-        if (fd->required_fields & SAM_POS)
-            s->data_series |= CRAM_AP | CRAM_BF;
-
-        if (fd->required_fields & SAM_MAPQ)
-            s->data_series |= CRAM_MQ;
-
-        if (fd->required_fields & SAM_CIGAR)
-            s->data_series |= CRAM_CIGAR;
-
-        if (fd->required_fields & SAM_RNEXT)
-            s->data_series |= CRAM_CF | CRAM_NF | CRAM_RI | CRAM_NS |CRAM_BF;
-
-        if (fd->required_fields & SAM_PNEXT)
-            s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_NP | CRAM_BF;
-
-        if (fd->required_fields & SAM_TLEN)
-            s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_TS |
-                CRAM_BF | CRAM_MF | CRAM_RI | CRAM_CIGAR;
-
-        if (fd->required_fields & SAM_SEQ)
-            s->data_series |= CRAM_SEQ;
-
-        if (!(fd->required_fields & SAM_AUX))
-            // No easy way to get MD/NM without other tags at present
-            s->decode_md = 0;
-
-        if (fd->required_fields & SAM_QUAL)
-            s->data_series |= CRAM_QUAL;
-
-        if (fd->required_fields & SAM_AUX)
-            s->data_series |= CRAM_RG | CRAM_TL | CRAM_aux;
-
-        if (fd->required_fields & SAM_RGAUX)
-            s->data_series |= CRAM_RG | CRAM_BF;
-
-        // Always uncompress CORE block
-        if (cram_uncompress_block(s->block[0]))
-            return -1;
-    } else {
-        s->data_series = CRAM_ALL;
-
-        for (i = 0; i < s->hdr->num_blocks; i++) {
-            if (cram_uncompress_block(s->block[i]))
-                return -1;
-        }
-
-        return 0;
-    }
-
-    block_used = calloc(s->hdr->num_blocks+1, sizeof(int));
-    if (!block_used)
-        return -1;
-
-    do {
-        /*
-         * Also set data_series based on code prerequisites. Eg if we need
-         * CRAM_QS then we also need to know CRAM_RL so we know how long it
-         * is, or if we need FC/FP then we also need FN (number of features).
-         *
-         * It's not reciprocal though. We may be needing to decode FN
-         * but have no need to decode FC, FP and cigar ops.
-         */
-        if (s->data_series & CRAM_RS)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_PD)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_HC)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_QS)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_IN)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_SC)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_BS)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_DL)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_BA)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_BB)    s->data_series |= CRAM_FC|CRAM_FP;
-        if (s->data_series & CRAM_QQ)    s->data_series |= CRAM_FC|CRAM_FP;
-
-        // cram_decode_seq() needs seq[] array
-        if (s->data_series & (CRAM_SEQ|CRAM_CIGAR)) s->data_series |= CRAM_RL;
-
-        if (s->data_series & CRAM_FP)    s->data_series |= CRAM_FC;
-        if (s->data_series & CRAM_FC)    s->data_series |= CRAM_FN;
-        if (s->data_series & CRAM_aux)   s->data_series |= CRAM_TL;
-        if (s->data_series & CRAM_MF)    s->data_series |= CRAM_CF;
-        if (s->data_series & CRAM_MQ)    s->data_series |= CRAM_BF;
-        if (s->data_series & CRAM_BS)    s->data_series |= CRAM_RI;
-        if (s->data_series & (CRAM_MF |CRAM_NS |CRAM_NP |CRAM_TS |CRAM_NF))
-            s->data_series |= CRAM_CF;
-        if (!hdr->read_names_included && s->data_series & CRAM_RN)
-            s->data_series |= CRAM_CF | CRAM_NF;
-        if (s->data_series & (CRAM_BA | CRAM_QS | CRAM_BB | CRAM_QQ))
-            s->data_series |= CRAM_BF | CRAM_CF | CRAM_RL;
-
-        orig_ds = s->data_series;
-
-        // Find which blocks are in use.
-        for (i = 0; i < sizeof(i_to_id)/sizeof(*i_to_id); i++) {
-            int bnum1, bnum2, j;
-            cram_codec *c = hdr->codecs[i_to_id[i]];
-
-            if (!(s->data_series & (1<<i)))
-                continue;
-
-            if (!c)
-                continue;
-
-            bnum1 = cram_codec_to_id(c, &bnum2);
-
-            for (;;) {
-                switch (bnum1) {
-                case -2:
-                    break;
-
-                case -1:
-                    core_used = 1;
-                    break;
-
-                default:
-                    for (j = 0; j < s->hdr->num_blocks; j++) {
-                        if (s->block[j]->content_type == EXTERNAL &&
-                            s->block[j]->content_id == bnum1) {
-                            block_used[j] = 1;
-                            if (cram_uncompress_block(s->block[j])) {
-                                free(block_used);
-                                return -1;
-                            }
-                        }
-                    }
-                    break;
-                }
-
-                if (bnum2 == -2 || bnum1 == bnum2)
-                    break;
-
-                bnum1 = bnum2; // 2nd pass
-            }
-        }
-
-        // Tags too
-        if ((fd->required_fields & SAM_AUX) ||
-            (s->data_series & CRAM_aux)) {
-            for (i = 0; i < CRAM_MAP_HASH; i++) {
-                int bnum1, bnum2, j;
-                cram_map *m = hdr->tag_encoding_map[i];
-
-                while (m) {
-                    cram_codec *c = m->codec;
-                    if (!c) {
-                        m = m->next;
-                        continue;
-                    }
-
-                    bnum1 = cram_codec_to_id(c, &bnum2);
-
-                    for (;;) {
-                        switch (bnum1) {
-                        case -2:
-                            break;
-
-                        case -1:
-                            core_used = 1;
-                            break;
-
-                        default:
-                            for (j = 0; j < s->hdr->num_blocks; j++) {
-                                if (s->block[j]->content_type == EXTERNAL &&
-                                    s->block[j]->content_id == bnum1) {
-                                    block_used[j] = 1;
-                                    if (cram_uncompress_block(s->block[j])) {
-                                        free(block_used);
-                                        return -1;
-                                    }
-                                }
-                            }
-                            break;
-                        }
-
-                        if (bnum2 == -2 || bnum1 == bnum2)
-                            break;
-
-                        bnum1 = bnum2; // 2nd pass
-                    }
-
-                    m = m->next;
-                }
-            }
-        }
-
-        // We now know which blocks are in used, so repeat and find
-        // which other data series need to be added.
-        for (i = 0; i < sizeof(i_to_id)/sizeof(*i_to_id); i++) {
-            int bnum1, bnum2, j;
-            cram_codec *c = hdr->codecs[i_to_id[i]];
-
-            if (!c)
-                continue;
-
-            bnum1 = cram_codec_to_id(c, &bnum2);
-
-            for (;;) {
-                switch (bnum1) {
-                case -2:
-                    break;
-
-                case -1:
-                    if (core_used) {
-                        //printf(" + data series %08x:\n", 1<<i);
-                        s->data_series |= 1<<i;
-                    }
-                    break;
-
-                default:
-                    for (j = 0; j < s->hdr->num_blocks; j++) {
-                        if (s->block[j]->content_type == EXTERNAL &&
-                            s->block[j]->content_id == bnum1) {
-                            if (block_used[j]) {
-                                //printf(" + data series %08x:\n", 1<<i);
-                                s->data_series |= 1<<i;
-                            }
-                        }
-                    }
-                    break;
-                }
-
-                if (bnum2 == -2 || bnum1 == bnum2)
-                    break;
-
-                bnum1 = bnum2; // 2nd pass
-            }
-        }
-
-        // Tags too
-        for (i = 0; i < CRAM_MAP_HASH; i++) {
-            int bnum1, bnum2, j;
-            cram_map *m = hdr->tag_encoding_map[i];
-
-            while (m) {
-                cram_codec *c = m->codec;
-                if (!c) {
-                    m = m->next;
-                    continue;
-                }
-
-                bnum1 = cram_codec_to_id(c, &bnum2);
-
-                for (;;) {
-                    switch (bnum1) {
-                    case -2:
-                        break;
-
-                    case -1:
-                        //printf(" + data series %08x:\n", CRAM_aux);
-                        s->data_series |= CRAM_aux;
-                        break;
-
-                    default:
-                        for (j = 0; j < s->hdr->num_blocks; j++) {
-                            if (s->block[j]->content_type == EXTERNAL &&
-                                s->block[j]->content_id == bnum1) {
-                                if (block_used[j]) {
-                                    //printf(" + data series %08x:\n",
-                                    //       CRAM_aux);
-                                    s->data_series |= CRAM_aux;
-                                }
-                            }
-                        }
-                        break;
-                    }
-
-                    if (bnum2 == -2 || bnum1 == bnum2)
-                        break;
-
-                    bnum1 = bnum2; // 2nd pass
-                }
-
-                m = m->next;
-            }
-        }
-    } while (orig_ds != s->data_series);
-
-    free(block_used);
-    return 0;
-}
-
-// the below code fragment can be found in:
 // cram/cram_codecs.c
 void cram_byte_array_stop_decode_free(cram_codec *c) {
     if (!c) return;
@@ -552,82 +239,55 @@ void cram_free_block(cram_block *b) {
 
 // the below code fragment can be found in:
 // cram/cram_io.c
-static void cram_init_tables(cram_fd *fd) {
-    int i;
+static int cram_flush_container2(cram_fd *fd, cram_container *c) {
+    int i, j;
 
-    memset(fd->L1, 4, 256);
-    fd->L1['A'] = 0; fd->L1['a'] = 0;
-    fd->L1['C'] = 1; fd->L1['c'] = 1;
-    fd->L1['G'] = 2; fd->L1['g'] = 2;
-    fd->L1['T'] = 3; fd->L1['t'] = 3;
+    if (c->curr_slice > 0 && !c->slices)
+        return -1;
 
-    memset(fd->L2, 5, 256);
-    fd->L2['A'] = 0; fd->L2['a'] = 0;
-    fd->L2['C'] = 1; fd->L2['c'] = 1;
-    fd->L2['G'] = 2; fd->L2['g'] = 2;
-    fd->L2['T'] = 3; fd->L2['t'] = 3;
-    fd->L2['N'] = 4; fd->L2['n'] = 4;
+    //fprintf(stderr, "Writing container %d, sum %u\n", c->record_counter, sum);
 
-    if (CRAM_MAJOR_VERS(fd->version) == 1) {
-        for (i = 0; i < 0x200; i++) {
-            int f = 0;
+    off_t c_offset = htell(fd->fp); // File offset of container
 
-            if (i & CRAM_FPAIRED)      f |= BAM_FPAIRED;
-            if (i & CRAM_FPROPER_PAIR) f |= BAM_FPROPER_PAIR;
-            if (i & CRAM_FUNMAP)       f |= BAM_FUNMAP;
-            if (i & CRAM_FREVERSE)     f |= BAM_FREVERSE;
-            if (i & CRAM_FREAD1)       f |= BAM_FREAD1;
-            if (i & CRAM_FREAD2)       f |= BAM_FREAD2;
-            if (i & CRAM_FSECONDARY)   f |= BAM_FSECONDARY;
-            if (i & CRAM_FQCFAIL)      f |= BAM_FQCFAIL;
-            if (i & CRAM_FDUP)         f |= BAM_FDUP;
+    /* Write the container struct itself */
+    if (0 != cram_write_container(fd, c))
+        return -1;
 
-            fd->bam_flag_swap[i]  = f;
+    off_t hdr_size = htell(fd->fp) - c_offset;
+
+    /* And the compression header */
+    if (0 != cram_write_block(fd, c->comp_hdr_block))
+        return -1;
+
+    /* Followed by the slice blocks */
+    off_t file_offset = htell(fd->fp);
+    for (i = 0; i < c->curr_slice; i++) {
+        cram_slice *s = c->slices[i];
+        off_t spos = file_offset - c_offset - hdr_size;
+
+        if (0 != cram_write_block(fd, s->hdr_block))
+            return -1;
+
+        for (j = 0; j < s->hdr->num_blocks; j++) {
+            if (0 != cram_write_block(fd, s->block[j]))
+                return -1;
         }
 
-        for (i = 0; i < 0x1000; i++) {
-            int g = 0;
+        file_offset = htell(fd->fp);
+        off_t sz = file_offset - c_offset - hdr_size - spos;
 
-            if (i & BAM_FPAIRED)           g |= CRAM_FPAIRED;
-            if (i & BAM_FPROPER_PAIR)  g |= CRAM_FPROPER_PAIR;
-            if (i & BAM_FUNMAP)        g |= CRAM_FUNMAP;
-            if (i & BAM_FREVERSE)      g |= CRAM_FREVERSE;
-            if (i & BAM_FREAD1)        g |= CRAM_FREAD1;
-            if (i & BAM_FREAD2)        g |= CRAM_FREAD2;
-            if (i & BAM_FSECONDARY)    g |= CRAM_FSECONDARY;
-            if (i & BAM_FQCFAIL)       g |= CRAM_FQCFAIL;
-            if (i & BAM_FDUP)          g |= CRAM_FDUP;
-
-            fd->cram_flag_swap[i] = g;
+        if (fd->idxfp) {
+            if (cram_index_slice(fd, c, s, fd->idxfp, c_offset, spos, sz) < 0)
+                return -1;
         }
-    } else {
-        /* NOP */
-        for (i = 0; i < 0x1000; i++)
-            fd->bam_flag_swap[i] = i;
-        for (i = 0; i < 0x1000; i++)
-            fd->cram_flag_swap[i] = i;
     }
 
-    memset(fd->cram_sub_matrix, 4, 32*32);
-    for (i = 0; i < 32; i++) {
-        fd->cram_sub_matrix[i]['A'&0x1f]=0;
-        fd->cram_sub_matrix[i]['C'&0x1f]=1;
-        fd->cram_sub_matrix[i]['G'&0x1f]=2;
-        fd->cram_sub_matrix[i]['T'&0x1f]=3;
-        fd->cram_sub_matrix[i]['N'&0x1f]=4;
-    }
-    for (i = 0; i < 20; i+=4) {
-        int j;
-        for (j = 0; j < 20; j++) {
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-            fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][j]=3;
-        }
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+0]&0x1f]=0;
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+1]&0x1f]=1;
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+2]&0x1f]=2;
-        fd->cram_sub_matrix["ACGTN"[i>>2]&0x1f][CRAM_SUBST_MATRIX[i+3]&0x1f]=3;
-    }
+    return 0;
+}
+
+// the below code fragment can be found in:
+// sam.c
+static void *sam_parse_eof(void *arg) {
+    return NULL;
 }
 

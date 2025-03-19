@@ -1,0 +1,223 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void parse_response_code(struct ndpi_detection_module_struct *ndpi_struct,
+				struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  char buf[4];
+  char ec[48];
+
+  if(packet->payload_packet_len >= 12) {
+    /* Set server HTTP response code */
+    strncpy(buf, (char*)&packet->payload[9], 3);
+    buf[3] = '\0';
+
+    flow->http.response_status_code = atoi(buf);
+    NDPI_LOG_DBG2(ndpi_struct, "Response code %d\n", flow->http.response_status_code);
+
+    /* https://en.wikipedia.org/wiki/List_of_HTTP_status_codes */
+    if((flow->http.response_status_code < 100) || (flow->http.response_status_code > 509))
+      flow->http.response_status_code = 0; /* Out of range */
+
+    if(flow->http.response_status_code >= 400) {
+      snprintf(ec, sizeof(ec), "HTTP Error Code %u", flow->http.response_status_code);
+      ndpi_set_risk(ndpi_struct, flow, NDPI_ERROR_CODE_DETECTED, ec);
+
+      if(flow->http.url != NULL) {
+        /* Let's check for Wordpress */
+        char *slash = strchr(flow->http.url, '/');
+
+	if(slash != NULL &&
+           (((flow->http.method == NDPI_HTTP_METHOD_POST) && (strncmp(slash, "/wp-admin/", 10) == 0))
+	    || ((flow->http.method == NDPI_HTTP_METHOD_GET) && (strncmp(slash, "/wp-content/uploads/", 20) == 0))
+	   )) {
+          /* Example of popular exploits https://www.wordfence.com/blog/2022/05/millions-of-attacks-target-tatsu-builder-plugin/ */
+          ndpi_set_risk(ndpi_struct, flow, NDPI_POSSIBLE_EXPLOIT, "Possible Wordpress Exploit");
+	}
+      }
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static uint8_t non_ctrl(uint8_t c) {
+  return c < 32 ? '.':c;
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+void ndpi_parse_packet_line_info(struct ndpi_detection_module_struct *ndpi_str, struct ndpi_flow_struct *flow) {
+  u_int32_t a;
+  struct ndpi_packet_struct *packet = &ndpi_str->packet;
+
+  if((packet->payload_packet_len < 3) || (packet->payload == NULL))
+    return;
+
+  if(packet->packet_lines_parsed_complete != 0)
+    return;
+
+  packet->packet_lines_parsed_complete = 1;
+  ndpi_reset_packet_line_info(packet);
+
+  packet->line[packet->parsed_lines].ptr = packet->payload;
+  packet->line[packet->parsed_lines].len = 0;
+
+  for(a = 0; ((a+1) < packet->payload_packet_len) && (packet->parsed_lines < NDPI_MAX_PARSE_LINES_PER_PACKET); a++) {
+    if((packet->payload[a] == 0x0d) && (packet->payload[a+1] == 0x0a)) {
+      /* If end of line char sequence CR+NL "\r\n", process line */
+
+      if(((a + 3) < packet->payload_packet_len)
+	 && (packet->payload[a+2] == 0x0d)
+	 && (packet->payload[a+3] == 0x0a)) {
+	/* \r\n\r\n */
+	int diff; /* No unsigned ! */
+	u_int32_t a1 = a + 4;
+
+	diff = packet->payload_packet_len - a1;
+
+	if(diff > 0) {
+	  diff = ndpi_min((unsigned int)diff, sizeof(flow->initial_binary_bytes));
+	  memcpy(&flow->initial_binary_bytes, &packet->payload[a1], diff);
+	  flow->initial_binary_bytes_len = diff;
+	}
+      }
+
+      packet->line[packet->parsed_lines].len =
+	(u_int16_t)(((size_t) &packet->payload[a]) - ((size_t) packet->line[packet->parsed_lines].ptr));
+
+      ndpi_parse_single_packet_line(ndpi_str, flow);
+
+      if(packet->line[packet->parsed_lines].len == 0) {
+	packet->empty_line_position = a;
+	packet->empty_line_position_set = 1;
+      }
+
+      if(packet->parsed_lines >= (NDPI_MAX_PARSE_LINES_PER_PACKET - 1))
+	return;
+
+      packet->parsed_lines++;
+      packet->line[packet->parsed_lines].ptr = &packet->payload[a + 2];
+      packet->line[packet->parsed_lines].len = 0;
+
+      a++; /* next char in the payload */
+    }
+  }
+
+  if(packet->parsed_lines >= 1) {
+    packet->line[packet->parsed_lines].len =
+      (u_int16_t)(((size_t) &packet->payload[packet->payload_packet_len]) -
+		  ((size_t) packet->line[packet->parsed_lines].ptr));
+
+    ndpi_parse_single_packet_line(ndpi_str, flow);
+    packet->parsed_lines++;
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void ndpi_int_http_add_connection(struct ndpi_detection_module_struct *ndpi_struct,
+					 struct ndpi_flow_struct *flow,
+					 u_int16_t master_protocol) {
+#ifdef HTTP_DEBUG
+  printf("=> %s()\n", __FUNCTION__);
+#endif
+
+  /* Update the classification only if we don't already have master + app;
+     for example don't change the protocols if we have already detected a
+     sub-protocol via the (content-matched) subprotocols logic (i.e.
+     MPEGDASH, SOAP, ....) */
+  if(flow->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+    NDPI_LOG_DBG2(ndpi_struct, "Master: %d\n", master_protocol);
+    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_UNKNOWN,
+			       master_protocol, NDPI_CONFIDENCE_DPI);
+  }
+
+  flow->max_extra_packets_to_check = 8;
+  flow->extra_packets_func = ndpi_search_http_tcp_again;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/fastcgi.c
+static void ndpi_search_fastcgi(struct ndpi_detection_module_struct *ndpi_struct,
+                                struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct * const packet = &ndpi_struct->packet;
+  struct FCGI_Header const * fcgi_hdr;
+  enum FCGI_Type fcgi_type;
+  u_int16_t content_len;
+  ndpi_protocol_match_result ret_match;
+
+  NDPI_LOG_DBG(ndpi_struct, "search fastcgi\n");
+
+  if (packet->payload_packet_len < sizeof(struct FCGI_Header))
+  {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  fcgi_hdr = (struct FCGI_Header const *)&packet->payload[0];
+
+  if (fcgi_hdr->version != 0x01)
+  {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  fcgi_type = (enum FCGI_Type)fcgi_hdr->type;
+  if (fcgi_type < FCGI_MIN || fcgi_type > FCGI_MAX)
+  {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  content_len = ntohs(fcgi_hdr->contentLength);
+  if (packet->payload_packet_len != sizeof(*fcgi_hdr) + content_len + fcgi_hdr->paddingLength)
+  {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  if (fcgi_type == FCGI_PARAMS)
+  {
+    if (content_len == 0)
+    {
+      flow->max_extra_packets_to_check = 0;
+      flow->extra_packets_func = NULL;
+      return;
+    }
+
+    if (fcgi_parse_params(flow, packet) != 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET, "Invalid FastCGI PARAMS header");
+      ndpi_int_fastcgi_add_connection(ndpi_struct, flow, NULL);
+    } else {
+      ndpi_match_host_subprotocol(ndpi_struct, flow,
+                                  flow->host_server_name,
+                                  strlen(flow->host_server_name),
+                                  &ret_match, NDPI_PROTOCOL_FASTCGI);
+      ndpi_check_dga_name(ndpi_struct, flow,
+                          flow->host_server_name, 1, 0);
+      if(ndpi_is_valid_hostname(flow->host_server_name,
+                                strlen(flow->host_server_name)) == 0) {
+        char str[128];
+
+        snprintf(str, sizeof(str), "Invalid host %s", flow->host_server_name);
+        ndpi_set_risk(ndpi_struct, flow, NDPI_INVALID_CHARACTERS, str);
+
+        /* This looks like an attack */
+        ndpi_set_risk(ndpi_struct, flow, NDPI_POSSIBLE_EXPLOIT, NULL);
+      }
+      ndpi_int_fastcgi_add_connection(ndpi_struct, flow, &ret_match);
+    }
+    return;
+  }
+
+  if (flow->packet_counter > 2)
+  {
+    ndpi_int_fastcgi_add_connection(ndpi_struct, flow, NULL);
+  }
+}
+

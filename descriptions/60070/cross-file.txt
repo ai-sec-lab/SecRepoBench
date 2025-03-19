@@ -1,0 +1,130 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/thrift.c
+static void ndpi_dissect_compact_hdr(struct ndpi_detection_module_struct *ndpi_struct,
+                                     struct ndpi_flow_struct *flow,
+                                     struct thrift_compact_hdr const * const compact_hdr)
+{
+  struct ndpi_packet_struct const * const packet = &ndpi_struct->packet;
+
+  if (packet->udp == NULL) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  if (packet->payload_packet_len < sizeof(*compact_hdr) + compact_hdr->method_length) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  if (thrift_validate_version(compact_hdr->version) == 0) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  if (thrift_validate_type(compact_hdr->message_type) == 0) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  ndpi_int_thrift_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_UNKNOWN);
+
+  thrift_set_method(ndpi_struct, flow, compact_hdr->method, compact_hdr->method_length);
+  thrift_set_type(ndpi_struct, flow, compact_hdr->message_type);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/thrift.c
+static void ndpi_search_thrift_tcp_udp(struct ndpi_detection_module_struct *ndpi_struct,
+                                       struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct const * const packet = &ndpi_struct->packet;
+
+  NDPI_LOG_DBG(ndpi_struct, "search Apache Thrift\n");
+
+  if (flow->detected_protocol_stack[0] == NDPI_PROTOCOL_HTTP ||
+      flow->detected_protocol_stack[1] == NDPI_PROTOCOL_HTTP)
+  {
+    /* Check Thrift over HTTP */
+    if (packet->content_line.ptr != NULL)
+    {
+      if ((LINE_ENDS(packet->content_line, "application/vnd.apache.thrift.binary") != 0) ||
+          (LINE_ENDS(packet->content_line, "application/vnd.apache.thrift.compact") != 0) ||
+          (LINE_ENDS(packet->content_line, "application/vnd.apache.thrift.json") != 0))
+      {
+        NDPI_LOG_INFO(ndpi_struct, "found Apache Thrift over HTTP\n");
+        ndpi_int_thrift_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_HTTP);
+        return;
+      }
+    }
+  } else if (packet->payload_packet_len >= sizeof(struct thrift_compact_hdr)) {
+    const union {
+      uint8_t const * const raw_ptr;
+      struct thrift_strict_hdr const * const strict_hdr;
+      struct thrift_compact_hdr const * const compact_hdr;
+    } thrift_data = { .raw_ptr = &packet->payload[0] };
+
+    if (thrift_data.raw_ptr[0] == 0x80)
+    {
+      /* Strict Binary Protocol */
+      if (packet->payload_packet_len < sizeof(*thrift_data.strict_hdr))
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+
+      ndpi_dissect_strict_hdr(ndpi_struct, flow, thrift_data.strict_hdr);
+      return;
+    } else if (thrift_data.raw_ptr[0] == 0x82) {
+      /* Compact Protocol */
+      ndpi_dissect_compact_hdr(ndpi_struct, flow, thrift_data.compact_hdr);
+      return;
+    } else {
+      /* Probably not Apache Thrift. */
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+      return;
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/amqp.c
+void init_amqp_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id) {
+	ndpi_set_bitmask_protocol_detection("AMQP", ndpi_struct, *id,
+					    NDPI_PROTOCOL_AMQP,
+					    ndpi_search_amqp,
+					    NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+					    SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+					    ADD_TO_DETECTION_BITMASK);
+
+	*id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/ipp.c
+void init_ipp_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id)
+{
+  ndpi_set_bitmask_protocol_detection("IPP", ndpi_struct, *id,
+				      NDPI_PROTOCOL_IPP,
+				      ndpi_search_ipp,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_OR_UDP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/mining.c
+static void ndpi_search_mining(struct ndpi_detection_module_struct *ndpi_struct,
+			       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  if(packet->tcp)
+    return ndpi_search_mining_tcp(ndpi_struct, flow);
+  return ndpi_search_mining_udp(ndpi_struct, flow);
+}
+
