@@ -2,7 +2,7 @@
 
 # Lists of parameters to test
 MODELS=("gpt-4o" "claude-3.5-sonnet" "gemini-1.5-flash" "gpt-4o-mini" "claude-3-haiku" "gemini-1.5-pro")
-CONTEXTS=("cross-file in-file")
+CONTEXTS=("cross-file" "in-file")
 PROMPTS=("sec-generic" "sec-specific" "system-prompt")
 MODES=("perturbed")
 

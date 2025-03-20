@@ -85,7 +85,7 @@ MODELS = {
     'gemini-1.5-pro': 'gemini-1.5-pro',
     'llama-3.1-8b-instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
     'deepseekcoder-v2-16b-instruct': 'deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct',
-    'codestral': 'mistralai/Codestral-22B-v0.1',
+    'mistral-nemo': 'mistralai/Mistral-Nemo-Instruct-2407',
     'llama-3.1-70b-instruct': 'meta-llama/Meta-Llama-3.1-70B-Instruct',
 }
 
