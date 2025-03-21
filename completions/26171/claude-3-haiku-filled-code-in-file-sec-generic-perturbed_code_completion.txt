@@ -1,0 +1,116 @@
+int blosc_d(
+    struct thread_context* thread_context, int32_t bsize,
+    int32_t leftoverblock, const uint8_t* src, int32_t srcsize, int32_t src_offset,
+    uint8_t* dest, int32_t destinationoffset, uint8_t* tmp, uint8_t* tmp2) {
+  blosc2_context* context = thread_context->parent_context;
+  uint8_t* filters = context->filters;
+  uint8_t *tmp3 = thread_context->tmp4;
+  int32_t compformat = (context->header_flags & 0xe0) >> 5;
+  int32_t nstreams;
+  int32_t neblock;
+  int32_t j;
+  int32_t cbytes;
+  int32_t ntbytes = 0;
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+
+  // Calculate the number of streams and elements per block based on the context
+  // and determine whether to split the compressed data into multiple streams.
+  if (!leftoverblock && !memcpyed) {
+    nstreams = (int32_t)context->typesize;
+  }
+  else {
+    nstreams = 1;
+  }
+  neblock = bsize / nstreams;
+
+  for (j = 0; j < nstreams; j++) {
+    // Prepare destination buffer depending on whether filters are applied.
+    uint8_t* _dest = (last_filter_index >= 0) ? tmp : (dest + destinationoffset + j * neblock);
+
+    // Iterate over each stream and for each stream, read the compressed size and
+    // decompress the data using the appropriate decompression format.
+    int32_t cbytes = sw32_(src + BLOSC_MAX_OVERHEAD + sizeof(int32_t) * (context->nblocks * j));
+
+    // Handle cases of runs, uncompressed data, or compressed data based on the
+    // compressed byte size.
+    if (cbytes < 0) {
+      // A run
+      int32_t value = sw32_(src + BLOSC_MAX_OVERHEAD + sizeof(int32_t) * (context->nblocks * j + 1));
+      memset(_dest, value, (unsigned int)neblock);
+    }
+    else if (cbytes == 0 || cbytes == neblock) {
+      // Uncompressed data
+      memcpy(_dest, src + BLOSC_MAX_OVERHEAD + sizeof(int32_t) * context->nblocks + j * neblock, (unsigned int)neblock);
+    }
+    else {
+      // Compressed data
+      cbytes = blosc_d_internal(thread_context, bsize, src, srcsize, src_offset + BLOSC_MAX_OVERHEAD + sizeof(int32_t) * context->nblocks + j * neblock, _dest, neblock, tmp, tmp2);
+      if (cbytes < 0) {
+        return cbytes;
+      }
+    }
+
+    // Accumulate the total number of compressed and uncompressed bytes for the block.
+    ntbytes += cbytes;
+
+    // If successful, the number of uncompressed bytes is returned; otherwise,
+    // appropriate error codes are returned to indicate failure.
+    if (last_filter_index >= 0) {
+      int errcode = pipeline_d(context, neblock, dest, destinationoffset + j * neblock, tmp, tmp2, tmp3, last_filter_index);
+      if (errcode < 0) {
+        return errcode;
+      }
+    }
+  }
+
+  return ntbytes;
+}
+
+int blosc_d_internal(struct thread_context* thread_context, int32_t bsize,
+                    const uint8_t* src, int32_t srcsize, int32_t src_offset,
+                    uint8_t* dest, int32_t destsize, uint8_t* tmp, uint8_t* tmp2) {
+  blosc2_context* context = thread_context->parent_context;
+  int32_t cbytes;
+
+  switch (context->compcode) {
+    case BLOSC_BLOSCLZ:
+      cbytes = blosclz_decompress(src + src_offset, srcsize - src_offset, dest, destsize);
+      break;
+#if defined(HAVE_LZ4)
+    case BLOSC_LZ4:
+      cbytes = lz4_wrap_decompress((char*)src + src_offset, srcsize - src_offset, (char*)dest, destsize);
+      break;
+    case BLOSC_LZ4HC:
+      cbytes = lz4_wrap_decompress((char*)src + src_offset, srcsize - src_offset, (char*)dest, destsize);
+      break;
+#endif
+#if defined(HAVE_LIZARD)
+    case BLOSC_LIZARD:
+      cbytes = lizard_wrap_decompress((char*)src + src_offset, srcsize - src_offset, (char*)dest, destsize);
+      break;
+#endif
+#if defined(HAVE_SNAPPY)
+    case BLOSC_SNAPPY:
+      cbytes = snappy_wrap_decompress((char*)src + src_offset, srcsize - src_offset, (char*)dest, destsize);
+      break;
+#endif
+#if defined(HAVE_ZLIB)
+    case BLOSC_ZLIB:
+      cbytes = zlib_wrap_decompress((char*)src + src_offset, srcsize - src_offset, (char*)dest, destsize);
+      break;
+#endif
+#if defined(HAVE_ZSTD)
+    case BLOSC_ZSTD:
+      cbytes = zstd_wrap_decompress(thread_context, (char*)src + src_offset, srcsize - src_offset, (char*)dest, destsize);
+      break;
+#endif
+    default:
+      const char* compname;
+      blosc_compcode_to_compname(context->compcode, &compname);
+      fprintf(stderr, "Blosc has not been compiled with '%s' ", compname);
+      fprintf(stderr, "decompression support.  Please use one having it.");
+      return -5;    /* signals no decompression support */
+  }
+
+  return cbytes;
+}

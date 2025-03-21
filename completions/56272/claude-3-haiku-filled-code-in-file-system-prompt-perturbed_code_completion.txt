@@ -1,0 +1,52 @@
+// Initialize variables for processing and flags for hostname and FQDN detection.
+int hostname_detected = 0, fqdn_detected = 0;
+struct softether_value first_value, second_value;
+
+// Check if the payload length is sufficient and retrieve the tuple count from the payload.
+if(payload_len < 4)
+    return 1;
+tuple_count = ntohl(get_u_int32_t(payload, 0));
+payload += 4;
+payload_len -= 4;
+
+// Validate the tuple count and adjust the payload and its length accordingly.
+if(tuple_count == 0 || tuple_count > 100)
+    return 1;
+
+// Extract the first value from the payload to determine if it contains a "host_name" identifier.
+size_t value_size = dissect_softether_tuples(payload, payload_len, &first_value, &second_value);
+if(value_size == 0)
+    return 1;
+payload += value_size;
+payload_len -= value_size;
+
+if(first_value.type == VALUE_STR && strcmp(first_value.value.ptr.value_str, "host_name") == 0) {
+    hostname_detected = 1;
+    ndpi_set_detected_protocol_id(ndpi_struct, flow, NDPI_PROTOCOL_SOFTETHER);
+    strncpy(flow->protos.softether.hostname, second_value.value.ptr.value_str, sizeof(flow->protos.softether.hostname) - 1);
+    flow->protos.softether.hostname[sizeof(flow->protos.softether.hostname) - 1] = '\0';
+}
+
+// Iterate over each tuple in the payload, extracting values and checking their types and identifiers.
+while(payload_len > 0 && tuple_count > 0) {
+    value_size = dissect_softether_tuples(payload, payload_len, &first_value, &second_value);
+    if(value_size == 0)
+        return 1;
+    payload += value_size;
+    payload_len -= value_size;
+    tuple_count--;
+
+    if(first_value.type == VALUE_STR && strcmp(first_value.value.ptr.value_str, "ddns_fqdn") == 0) {
+        fqdn_detected = 1;
+        ndpi_set_detected_protocol_id(ndpi_struct, flow, NDPI_PROTOCOL_SOFTETHER);
+        strncpy(flow->protos.softether.fqdn, second_value.value.ptr.value_str, sizeof(flow->protos.softether.fqdn) - 1);
+        flow->protos.softether.fqdn[sizeof(flow->protos.softether.fqdn) - 1] = '\0';
+    }
+}
+
+// If any unprocessed data remains or tuple count is not exhausted, return an error code.
+if(payload_len > 0 || tuple_count > 0)
+    return 1;
+
+// If a hostname or FQDN was detected, return success.
+return (hostname_detected || fqdn_detected) ? 0 : 1;

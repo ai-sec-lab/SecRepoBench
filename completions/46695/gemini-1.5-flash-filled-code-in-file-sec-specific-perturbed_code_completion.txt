@@ -1,0 +1,170 @@
+if (ft_status != 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToSetCharacterSize",ft_status,
+        img->filename);
+      stream=(FT_StreamRec *) RelinquishMagickMemory(stream);
+      return(MagickFalse);
+    }
+  stream=(FT_StreamRec *) RelinquishMagickMemory(stream);
+  (void) memset(metrics,0,sizeof(*metrics));
+  metrics->ascent=face->size->metrics.ascender;
+  metrics->descent=face->size->metrics.descender;
+  metrics->width=0.0;
+  metrics->height=0.0;
+  metrics->max_advance=0.0;
+  metrics->bounds.x1=0.0;
+  metrics->bounds.y1=0.0;
+  metrics->bounds.x2=0.0;
+  metrics->bounds.y2=0.0;
+  metrics->origin.x=0.0;
+  metrics->origin.y=0.0;
+  metrics->underline_position=face->underline_position;
+  metrics->underline_thickness=face->underline_thickness;
+  if (draw_info->text == (char *) NULL)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  if (*draw_info->text == '\0')
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  length=strlen(draw_info->text);
+  utf8=(unsigned char *) AcquireQuantumMemory(length+1,sizeof(*utf8));
+  if (utf8 == (unsigned char *) NULL)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowMagickException(exception,GetMagickModule(),ResourceLimitError,
+        "MemoryAllocationFailed","`%s'",img->filename);
+      return(MagickFalse);
+    }
+  (void) memcpy(utf8,(const unsigned char *) draw_info->text,length+1);
+  flags=FT_LOAD_DEFAULT;
+  if (draw_info->antialias == MagickFalse)
+    flags|=FT_LOAD_MONOCHROME;
+  if (draw_info->hint != UndefinedHint)
+    {
+      if (draw_info->hint == FullHint)
+        flags|=FT_LOAD_FORCE_AUTOHINT;
+      else
+        flags|=FT_LOAD_NO_HINTING;
+    }
+  grapheme=(GraphemeInfo *) NULL;
+  (void) ComplexTextLayout(img,draw_info,(const char *) utf8,length,face,flags,
+    &grapheme,exception);
+  utf8=(unsigned char *) RelinquishMagickMemory(utf8);
+  if (grapheme == (GraphemeInfo *) NULL)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickFalse);
+    }
+  if (grapheme[0].index == 0)
+    {
+      grapheme=(GraphemeInfo *) RelinquishMagickMemory(grapheme);
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  annotate_info=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  annotate_info->primitive=AcquireString("");
+  resolution.x=DefaultResolution;
+  resolution.y=DefaultResolution;
+  if (draw_info->density != (char *) NULL)
+    {
+      GeometryInfo
+        geometry_info;
+
+      MagickStatusType
+        flags;
+
+      flags=ParseGeometry(draw_info->density,&geometry_info);
+      if ((flags & RhoValue) != 0)
+        resolution.x=geometry_info.rho;
+      resolution.y=resolution.x;
+      if ((flags & SigmaValue) != 0)
+        resolution.y=geometry_info.sigma;
+    }
+  affine.xx=(FT_Fixed) (0x10000L*resolution.x/DefaultResolution);
+  affine.xy=0;
+  affine.yx=0;
+  affine.yy=(FT_Fixed) (0x10000L*resolution.y/DefaultResolution);
+  origin.x=0;
+  origin.y=0;
+  last_character=-1;
+  for (i=0; i < (ssize_t) grapheme[0].cluster; i++)
+  {
+    code=GetUTFCode(draw_info->text+i);
+    if (code == '\n')
+      {
+        origin.x=0;
+        origin.y+=face->size->metrics.height;
+        continue;
+      }
+    ft_status=FT_Load_Glyph(face,(FT_UInt) grapheme[i].index,flags);
+    if (ft_status != 0)
+      {
+        (void) FT_Done_Face(face);
+        (void) FT_Done_FreeType(library);
+        ThrowFreetypeErrorException("UnableToLoadGlyph",ft_status,
+          draw_info->text);
+        grapheme=(GraphemeInfo *) RelinquishMagickMemory(grapheme);
+        return(MagickFalse);
+      }
+    if (FT_IS_SCALABLE(face) != MagickFalse)
+      {
+        FT_Outline_Transform(&face->glyph->outline,&affine);
+        if (IsEmptyOutline(face->glyph->outline) == MagickFalse)
+          {
+            ft_status=FT_Outline_Decompose(&face->glyph->outline,&OutlineMethods,
+              annotate_info);
+            if (ft_status != 0)
+              {
+                (void) FT_Done_Face(face);
+                (void) FT_Done_FreeType(library);
+                ThrowFreetypeErrorException("UnableToDecomposeOutline",
+                  ft_status,draw_info->text);
+                grapheme=(GraphemeInfo *) RelinquishMagickMemory(grapheme);
+                return(MagickFalse);
+              }
+          }
+      }
+    if (last_character != -1)
+      origin.x+=grapheme[i-1].x_advance;
+    if (origin.x < metrics->bounds.x1)
+      metrics->bounds.x1=origin.x;
+    if (origin.x > metrics->bounds.x2)
+      metrics->bounds.x2=origin.x;
+    if (origin.y < metrics->bounds.y1)
+      metrics->bounds.y1=origin.y;
+    if (origin.y > metrics->bounds.y2)
+      metrics->bounds.y2=origin.y;
+    if (FT_IS_SCALABLE(face) != MagickFalse)
+      {
+        point.x=origin.x+face->glyph->bitmap_left;
+        point.y=origin.y-face->glyph->bitmap_top;
+        if (draw_info->fill.alpha != TransparentAlpha)
+          {
+            (void) DrawImage(img,annotate_info,exception);
+            annotate_info->primitive=AcquireString("");
+          }
+      }
+    origin.x+=grapheme[i].x_advance;
+    last_character=code;
+  }
+  grapheme=(GraphemeInfo *) RelinquishMagickMemory(grapheme);
+  metrics->width=metrics->bounds.x2-metrics->bounds.x1;
+  metrics->height=metrics->bounds.y2-metrics->bounds.y1;
+  metrics->max_advance=face->size->metrics.max_advance;
+  metrics->origin.x=0.0;
+  metrics->origin.y=0.0;
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+  annotate_info=DestroyDrawInfo(annotate_info);
+  return(MagickTrue);

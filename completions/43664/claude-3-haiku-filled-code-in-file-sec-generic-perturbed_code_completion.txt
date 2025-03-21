@@ -1,0 +1,76 @@
+/* Process the TLS extensions in the client's "Client Hello" message.
+ * For the "supported versions" extension, extract and store the supported TLS versions in the flow structure.
+ * For the "encrypted server name" extension, extract and store the encrypted SNI details if present.
+ * For the "QUIC transport parameters" extension, extract transport parameters and process the user agent if available.
+ * Continue processing any additional extensions that are part of the Client Hello message.
+ */
+if(extension_id == 43 /* supported versions */) {
+    if(extension_len >= 2) {
+        u_int16_t tls_version = ntohs(*((u_int16_t*)&packet->payload[offset+4]));
+#ifdef DEBUG_TLS
+        printf("[TLS] [Supported Versions] TLS version: 0x%04X\n", tls_version);
+#endif
+        flow->protos.tls_quic.ssl_version = tls_version;
+    }
+} else if(extension_id == 0x28 /* encrypted server name (encrypted SNI) */) {
+    if(extension_len >= 1) {
+        u_int8_t esni_len = packet->payload[offset+4];
+        if((offset+4+esni_len) <= packet->payload_packet_len) {
+            flow->protos.tls_quic.encrypted_sni.esni = ndpi_malloc(esni_len);
+            flow->protos.tls_quic.encrypted_sni.esni_len = esni_len;
+            memcpy(flow->protos.tls_quic.encrypted_sni.esni, &packet->payload[offset+5], esni_len);
+#ifdef DEBUG_ENCRYPTED_SNI
+            printf("[TLS] [Encrypted SNI] len=%u\n", esni_len);
+#endif
+        } else {
+            ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+        }
+    }
+} else if(extension_id == 0x39 /* QUIC transport parameters */) {
+    if(extension_len >= 1) {
+        u_int8_t quic_params_len = packet->payload[offset+4];
+        if((offset+4+quic_params_len) <= packet->payload_packet_len) {
+            u_int64_t quic_version;
+            int rc = quic_len(&packet->payload[offset+5], &quic_version);
+            if(rc == 0) {
+                flow->protos.tls_quic.quic_version = quic_version;
+#ifdef DEBUG_TLS
+                printf("[TLS] [QUIC Transport Parameters] version=0x%"PRIx64"\n", quic_version);
+#endif
+                if(is_version_with_var_int_transport_params((uint32_t)quic_version)) {
+                    u_int8_t *quic_params = &packet->payload[offset+5+rc];
+                    u_int8_t quic_params_remaining = quic_params_len - rc;
+                    while(quic_params_remaining > 0) {
+                        u_int64_t param_type, param_len, param_value;
+                        rc = quic_len(quic_params, &param_type);
+                        if(rc < 0) break;
+                        quic_params += rc;
+                        quic_params_remaining -= rc;
+                        rc = quic_len(quic_params, &param_len);
+                        if(rc < 0) break;
+                        quic_params += rc;
+                        quic_params_remaining -= rc;
+                        if(quic_params_remaining < param_len) break;
+                        rc = quic_len(quic_params, &param_value);
+                        if(rc < 0) break;
+                        quic_params += rc;
+                        quic_params_remaining -= rc;
+#ifdef DEBUG_TLS
+                        printf("[TLS] [QUIC Transport Parameter] type=0x%"PRIx64" len=0x%"PRIx64" value=0x%"PRIx64"\n",
+                               param_type, param_len, param_value);
+#endif
+                        if(param_type == 0x0a /* user agent */) {
+                            http_process_user_agent(ndpi_struct, flow, quic_params, (u_int16_t)param_len);
+                        }
+                    }
+                }
+            } else {
+                ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+            }
+        } else {
+            ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+        }
+    }
+} else {
+    /* Process any other extensions */
+}

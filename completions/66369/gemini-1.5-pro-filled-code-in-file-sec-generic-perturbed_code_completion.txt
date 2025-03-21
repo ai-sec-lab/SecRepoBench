@@ -1,0 +1,145 @@
+key = string_ndup(c->comp_hdr->TD_keys, aux, 3);
+                if (!key)
+                    goto block_err;
+
+                if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4 &&
+                    !strcmp(key, "MD") && !verbatim_MD) {
+                    // Don't store MD if we regenerated it.
+                    if (MD && MD->l > 0 && *MD->s == 'Z') {
+                        if (strcmp(MD->s, (char *)aux+3)) {
+                            hts_log_warning("MD tag mismatch for record %s. "
+                                            "Storing verbatim.",
+                                            bam_get_qname(b));
+                            verbatim_MD = 1;
+                        } else {
+                            // MD tags match, so skip storing it.
+                            aux += 3 + strlen((char *)aux+3) + 1;
+                            continue;
+                        }
+                    } else if (MD && MD->l == 0) {
+                        // No regenerated MD, so store it.
+                    } else if (MD) {
+                        hts_log_warning("MD tag mismatch for record %s. "
+                                        "Storing verbatim.",
+                                        bam_get_qname(b));
+                        verbatim_MD = 1;
+                    }
+                }
+
+                if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4 &&
+                    !strcmp(key, "NM") && !verbatim_NM) {
+                    // Don't store NM if we regenerated it.
+                    if (NM == bam_aux2i_end(aux, aux_end)) {
+                        aux += 3 + 5; // "NM:i?"
+                        continue;
+                    } else {
+                        hts_log_warning("NM tag mismatch for record %s. "
+                                        "Storing verbatim.",
+                                        bam_get_qname(b));
+                        verbatim_NM = 1;
+                    }
+                }
+
+                k = kh_put(m_s2i, c->tags_used, CRAM_KEY(key[0], key[1]), &new);
+                if (new < 0)
+                    goto err;
+
+                cram_tag_map *tm = kh_val(c->tags_used, k);
+                if (new) {
+                    tm = kh_val(c->tags_used, k) = calloc(1, sizeof(*tm));
+                    if (!tm)
+                        goto block_err;
+
+                    tm->key = key;
+                    tm->key_len = 2;
+
+                    switch (aux[2]) {
+                    case 'Z':
+                    case 'A':
+                    case 'H':
+                        tm->codec = cram_encoder_init(E_BYTE_ARRAY_STOP, NULL,
+                                                      E_BYTE_ARRAY, NULL,
+                                                      filedescriptor->version,
+                                                      &filedescriptor->vv);
+                        break;
+                    case 'B':
+                        tm->codec = cram_encoder_init(E_BYTE_ARRAY_STOP, NULL,
+                                                      E_BYTE_ARRAY, NULL,
+                                                      filedescriptor->version,
+                                                      &filedescriptor->vv);
+                        break;
+
+                    case 'c':
+                    case 'C':
+                    case 's':
+                    case 'S':
+                    case 'i':
+                    case 'I':
+                        tm->codec = cram_encoder_init(E_INT, NULL, E_INT, NULL,
+                                                      filedescriptor->version,
+                                                      &filedescriptor->vv);
+                        break;
+                    case 'f':
+                        tm->codec = cram_encoder_init(E_FLOAT, NULL, E_FLOAT, NULL,
+                                                      filedescriptor->version,
+                                                      &filedescriptor->vv);
+                        break;
+
+                    default:
+                        hts_log_error("Unknown aux type '%c'", aux[2]);
+                        goto err;
+                    }
+                    if (!tm->codec)
+                        goto block_err;
+
+                    if (!(tm->blk = cram_new_block(EXTERNAL, 0)))
+                        goto block_err;
+                    tm->m = filedescriptor->m[DS_aux];
+                }
+
+                if (!tm->codec)
+                    goto err;
+
+                if (tm->codec->codec == E_BYTE_ARRAY_STOP) {
+                    int len = strlen(aux+3);
+                    r = tm->codec->encode(s, tm->codec, aux+3, len+1);
+                    if (cram_stats_add(tm->m, len+1) < 0)
+                        goto block_err;
+                    aux += len + 4;
+                } else if (tm->codec->codec == E_BYTE_ARRAY_LEN) {
+                    int len = strlen(aux+3);
+                    r = tm->codec->encode(s, tm->codec, aux+3, len+1);
+                    if (cram_stats_add(tm->m, len+1) < 0)
+                        goto block_err;
+                    aux += len + 4;
+                } else if (tm->codec->codec == E_INT) {
+                    int32_t i32 = bam_aux2i_end(aux, aux_end);
+                    r = tm->codec->encode(s, tm->codec, (char *)&i32, 1);
+                    if (cram_stats_add(tm->m, i32) < 0)
+                        goto block_err;
+                    aux += 3 + 5; // "??:i?"
+                } else if (tm->codec->codec == E_FLOAT) {
+                    float f = bam_aux2f(aux);
+                    r = tm->codec->encode(s, tm->codec, (char *)&f, 1);
+                    if (cram_stats_add(tm->m, f) < 0)
+                        goto block_err;
+                    aux += 3 + 5; // "??:f?"
+                }
+
+                if (r < 0)
+                    goto block_err;
+
+                cr->ntags++;
+                if (CRAM_MAJOR_VERS(filedescriptor->version) == 1) {
+                    if (s->nTN >= s->aTN) {
+                        s->aTN = s->aTN ? s->aTN*2 : 1024;
+                        s->TN = realloc(s->TN, s->aTN * sizeof(*s->TN));
+                        if (!s->TN)
+                            goto block_err;
+                    }
+                    s->TN[s->nTN++] = CRAM_KEY(key[0], key[1]);
+                    if (cram_stats_add(c->stats[DS_TN], CRAM_KEY(key[0], key[1])) < 0)
+                        goto block_err;
+                }
+
+                if (tm->blk)

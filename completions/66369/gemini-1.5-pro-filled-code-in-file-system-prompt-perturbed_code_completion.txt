@@ -1,0 +1,128 @@
+if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+            if (!brg) {
+                sam_hrec_rg_t *brg_hdr = sam_hrecs_find_rg(fd->header->hrecs, aux+3);
+                if (!brg_hdr) {
+                    hts_log_warning("Read group '%s' present in BAM but not in header RG lines", aux+3);
+                    goto err;
+                }
+                brg = brg_hdr;
+            }
+        }
+
+        key = string_ndup(c->comp_hdr->TD_keys, aux, 3);
+        if (!key)
+            goto block_err;
+
+        k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
+        if (new < 0) {
+            goto err;
+        } else if (new == 0) {
+            // Seen it before, so just store the TL
+        } else {
+            // New tag type
+            kh_val(c->comp_hdr->TD_hash, k) = c->comp_hdr->nTL++;
+            BLOCK_APPEND(td_b, aux, 3);
+        }
+
+        cram_tag_map *tm;
+        k = kh_get(m_tag, c->tags_used, kh_val(c->comp_hdr->TD_hash, k));
+        if (k == kh_end(c->tags_used)) {
+            int new2;
+            k = kh_put(m_tag, c->tags_used, kh_val(c->comp_hdr->TD_hash, k), &new2);
+            if (-1 == new2)
+                goto err;
+
+            if (!(tm = kh_val(c->tags_used, k) = calloc(1, sizeof(*tm))))
+                goto block_err;
+
+            tm->key   = kh_val(c->comp_hdr->TD_hash, k);
+            tm->codec = cram_encoder_init(E_EXTERNAL, NULL, 0, (void *)tm,
+                                          filedescriptor->version, &filedescriptor->vv);
+            if (!tm->codec)
+                goto block_err;
+
+            if (cram_allocate_block(tm->codec, s, s->hdr->num_blocks) < 0)
+                goto block_err;
+
+            tm->blk = s->block[s->hdr->num_blocks];
+            s->block[s->hdr->num_blocks] = NULL; // Prevent slice freeing it
+            s->hdr->num_blocks++;
+
+            if (tm->codec->codec == E_BYTE_ARRAY_LEN) {
+                if (cram_allocate_block(tm->codec->u.e_byte_array_len.len_codec,
+                                        s, s->hdr->num_blocks) < 0)
+                    goto block_err;
+                tm->blk2 = s->block[s->hdr->num_blocks];
+                s->block[s->hdr->num_blocks] = NULL; // Prevent slice freeing it
+                s->hdr->num_blocks++;
+            }
+
+            if (cram_stats_add(c->stats[DS_aux], tm->key) < 0)
+                goto block_err;
+        } else {
+            tm = kh_val(c->tags_used, k);
+            if (!tm)
+                goto err;
+        }
+
+        if (!tm->m) {
+            tm->m = cram_new_metrics();
+            if (!tm->m)
+                goto block_err;
+        }
+
+        // Append aux value to slice aux block
+        switch(aux[2]) {
+        case 'Z':也好
+        case 'A':
+        case 'H':
+            BLOCK_APPEND(tm->blk, aux+3, strlen(aux+3)+1);
+            if (cram_stats_add(tm->m, strlen(aux+3)+1) < 0)
+                goto block_err;
+            break;
+
+        case 'c':
+        case 'C':
+        case 's':
+        case 'S':
+        case 'i':
+        case 'I':
+            BLOCK_APPEND(tm->blk, aux+3, aux[2] == 'c' || aux[2] == 'C' ? 1 :
+                         aux[2] == 's' || aux[2] == 'S' ? 2 : 4);
+            if (cram_stats_add(tm->m, bam_aux2i_end(aux, aux_end)) < 0)
+                goto block_err;
+            break;
+
+        case 'f':
+            BLOCK_APPEND(tm->blk, aux+3, 4);
+            if (cram_stats_add(tm->m, bam_aux2f_end(aux, aux_end)) < 0)
+                goto block_err;
+            break;
+
+        default:
+            hts_log_error("Unknown aux type '%c'", aux[2]);
+            goto err;
+        }
+        aux += 3 + (aux[2] == 'c' || aux[2] == 'C' ? 1 :
+                    aux[2] == 's' || aux[2] == 'S' ? 2 :
+                    aux[2] == 'f' ? 4 : strlen(aux+3)+1);
+
+        // Add to slice metrics too, for global metrics.
+        if (cram_stats_add(c->stats[DS_aux], tm->key) < 0)
+            goto block_err;
+
+        if (tm->blk2)
+            BLOCK_APPEND_CHAR(tm->blk2, aux - orig - 3);
+
+        if (tm->codec->encode)
+            tm->codec->encode(tm->codec, (char *)BLOCK_DATA(tm->blk),
+                              BLOCK_SIZE(tm->blk), BLOCK_SIZE(tm->blk));
+        if (tm->codec->u.e_byte_array_len.len_codec &&
+            tm->codec->u.e_byte_array_len.len_codec->encode)
+            tm->codec->u.e_byte_array_len.len_codec->encode(tm->codec->u.e_byte_array_len.len_codec,
+                                                            (char *)BLOCK_DATA(tm->blk2),
+                                                            BLOCK_SIZE(tm->blk2),
+                                                            BLOCK_SIZE(tm->blk2));
+
+        // Prevent tm->blk being freed by cram_free_slice
+        // as it's also in s->aux_block.

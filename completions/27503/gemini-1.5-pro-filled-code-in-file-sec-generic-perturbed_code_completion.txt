@@ -1,0 +1,192 @@
+switch (tag)
+		{
+			case 0: // mono element
+			case 1: // stereo element
+				// mono and stereo elements are almost the same except for the interleaving
+				// of the output samples
+
+				// read the header bytes
+				RequireAction (bits->cur + 16 <= bits->end, status = kALAC_ParamError ; goto Exit ;) ;
+
+				headerByte = BitBufferReadSmall (bits, 8) ;
+				extraBits = headerByte & 0x07 ;
+
+				partialFrame = (headerByte >> 7) & 0x01 ;
+				escapeFlag = (headerByte >> 6) & 0x01 ;
+
+				if (!escapeFlag)
+				{
+					// compressed frame
+
+					mixBits = headerByte >> 3 & 0x03 ;
+					mixResiduals = headerByte >> 2 & 0x01 ;
+					unusedHeader = BitBufferReadSmall (bits, 10) ;
+
+					// fill AG parameter structure with the frame header data
+					agParams.mb = p->mConfig.mb ;
+					agParams.kb = p->mConfig.kb ;
+					agParams.numChannels = tag + 1 ;
+					agParams.maxRun = p->mConfig.maxRun ;
+					agParams.frameLength = numSamples ;
+					agParams.shift = mixBits ;
+					agParams.coefsU = coefsU ;
+					agParams.coefsV = coefsV ;
+					agParams.pbFactorU = &pbFactorU ;
+					agParams.pbFactorV = &pbFactorV ;
+
+					// if we have a stereo element, it can use either the mono or stereo mix mode
+					if (tag == 1)
+					{
+						agParams.modeU = BitBufferReadOne (bits) ? ALAC_STEREO_MODE : ALAC_MONO_MODE ;
+						agParams.modeV = BitBufferReadOne (bits) ? ALAC_STEREO_MODE : ALAC_MONO_MODE ;
+					}
+					else
+					{
+						agParams.modeU = ALAC_MONO_MODE ;
+						agParams.modeV = ALAC_MONO_MODE ;
+					}
+
+					// read predictor parameters
+					numU = BitBufferReadSmall (bits, 4) + 1 ;
+					numV = BitBufferReadSmall (bits, 4) + 1 ;
+
+					for (i = 0 ; i < numU ; i++)
+						coefsU [i] = (int16_t) BitBufferReadSmall (bits, 16) ;
+					for (i = 0 ; i < numV ; i++)
+						coefsV [i] = (int16_t) BitBufferReadSmall (bits, 16) ;
+
+					denShiftU = BitBufferReadSmall (bits, 4) ;
+					denShiftV = BitBufferReadSmall (bits, 4) ;
+
+					pbFactorU = BitBufferReadSmall (bits, 9) ;
+					pbFactorV = BitBufferReadSmall (bits, 9) ;
+
+					// check for valid prediction coefficients
+					RequireAction (pbFactorU != 0 && pbFactorV != 0, status = kALAC_ParamError ; goto Exit ;) ;
+
+					// compressed case, decode the individual samples
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						int32_t		outputSample ;
+
+						// decompress sample
+						outputSample = dyn_decomp (bits, extraBits) ;
+
+						// apply prediction
+						outputSample = predict (p, outputSample, coefsU, numU, coefsV, numV, denShiftU, denShiftV, pbFactorU, pbFactorV, mixBits, mixResiduals, &agParams, i) ;
+
+						// store output sample
+						if (tag == 0)
+						{
+							sampleBuffer [channelIndex + i * numChannels] = outputSample ;
+						}
+						else
+						{
+							sampleBuffer [channelIndex + i * numChannels] = outputSample ;
+							i++ ;
+							if (i < numSamples)
+							{
+								outputSample = dyn_decomp (bits, extraBits) ;
+								outputSample = predict (p, outputSample, coefsU, numU, coefsV, numV, denShiftU, denShiftV, pbFactorU, pbFactorV, mixBits, mixResiduals, &agParams, i) ;
+								sampleBuffer [channelIndex + 1 + (i - 1) * numChannels] = outputSample ;
+							}
+							else
+							{
+								*outNumSamples = numSamples - 1 ;
+							}
+						}
+					}
+				}
+				else
+				{
+					// uncompressed frame
+
+					// uncompressed frames are not allowed with extra bits
+					RequireAction (extraBits == 0, status = kALAC_ParamError ; goto Exit ;) ;
+
+					// read the samples
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						val = BitBufferReadSmall (bits, p->mConfig.bitDepth) ;
+						val = SignExtend24 (val, p->mConfig.bitDepth) ;
+
+						if (tag == 0)
+						{
+							sampleBuffer [channelIndex + i * numChannels] = val ;
+						}
+						else
+						{
+							sampleBuffer [channelIndex + i * numChannels] = val ;
+							i++ ;
+							if (i < numSamples)
+							{
+								val = BitBufferReadSmall (bits, p->mConfig.bitDepth) ;
+								val = SignExtend24 (val, p->mConfig.bitDepth) ;
+								sampleBuffer [channelIndex + 1 + (i - 1) * numChannels] = val ;
+							}
+							else
+							{
+								*outNumSamples = numSamples - 1 ;
+							}
+						}
+					}
+				}
+
+				channelIndex += (tag + 1) ;
+				break ;
+
+			case 2: // data stream element
+				status = alac_data_stream_element (bits) ;
+				break ;
+
+			case 3: // fill element
+				status = alac_fill_element (bits) ;
+				break ;
+
+			case 4: // 4-bit element
+			case 5: // 5-bit element
+			case 6: // 6-bit element
+				chanBits = tag - 3 ;
+
+				shiftBits = *bits ;
+
+				bytesShifted = BitBufferReadSmall (bits, chanBits) ;
+				shift = BitBufferReadSmall (bits, 5) ;
+
+				// byte align for shifted value
+				BitBufferByteAlign (bits, false) ;
+
+				// read shifted value
+				val = BitBufferReadSmall (bits, p->mConfig.bitDepth) ;
+				val = SignExtend24 (val, p->mConfig.bitDepth) ;
+
+				// shift the value as requested
+				val = ApplyShift (val, shift) ;
+
+				// now copy the value to the specified output bytes
+				out32 = sampleBuffer + channelIndex + bytesShifted * numChannels ;
+				for (j = 0 ; j < numSamples ; j++)
+				{
+					*out32 = val ;
+					out32 += numChannels ;
+				}
+
+				channelIndex++ ;
+				break ;
+
+			case 7: // lpc element
+				status = kALAC_UnsupportedFormat ;
+				break ;
+
+			default:
+				status = kALAC_InvalidTag ;
+				break ;
+		}
+
+		if (channelIndex == numChannels)
+			goto NoMoreChannels ;
+
+		if (status != ALAC_noErr)
+			goto Exit ;
+
+		BitBufferByteAlign (bits, false) ;

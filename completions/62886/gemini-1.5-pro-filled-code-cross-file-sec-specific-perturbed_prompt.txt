@@ -1,0 +1,353 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+ATTRIBUTE_NO_SANITIZE_INTEGER
+static const xmlDictEntry *
+xmlDictLookupInternal(xmlDictPtr dict, const xmlChar *pref,
+                      const xmlChar *name, int maybeLen, int update) {
+    xmlDictEntry *entry = NULL;
+    const xmlChar *ret;
+    unsigned hashValue;
+    size_t maxLen, len, plen, klen;
+    int found = 0;
+
+    if ((dict == NULL) || (name == NULL))
+	return(NULL);
+
+    maxLen = (maybeLen < 0) ? SIZE_MAX : (size_t) maybeLen;
+
+    if (pref == NULL) {
+        hashValue = xmlDictHashName(dict->seed, name, maxLen, &len);
+        if (len > INT_MAX)
+            return(NULL);
+        klen = len;
+    } else {
+        hashValue = xmlDictHashQName(dict->seed, pref, name, &plen, &len);
+        if ((len > INT_MAX) || (plen >= INT_MAX - len))
+            return(NULL);
+        klen = plen + 1 + len;
+    }
+
+    if ((dict->limit > 0) && (klen >= dict->limit))
+        return(NULL);
+
+    /*
+     * Check for an existing entry
+     */
+    if (dict->size > 0)
+        entry = xmlDictFindEntry(dict, pref, name, klen, hashValue, &found);
+    if (found)
+        return(entry);
+
+    // Check if the main dictionary has a subdictionary.
+    // If a subdictionary exists, compute the hash value for the provided name,
+    // using either the name alone or the combination of prefix and name,
+    // depending on whether a prefix is given.
+    // Attempt to find an existing entry in the subdictionary using the computed hash value.
+    // If an entry is found in the subdictionary, return that entry.
+    // <MASK>
+
+    if (!update)
+        return(NULL);
+
+    /*
+     * Grow the hash table if needed
+     */
+    if (dict->nbElems + 1 > dict->size / MAX_FILL_DENOM * MAX_FILL_NUM) {
+        unsigned newSize, mask, displ, pos;
+
+        if (dict->size == 0) {
+            newSize = MIN_HASH_SIZE;
+        } else {
+            if (dict->size >= MAX_HASH_SIZE)
+                return(NULL);
+            newSize = dict->size * 2;
+        }
+        if (xmlDictGrow(dict, newSize) != 0)
+            return(NULL);
+
+        /*
+         * Find new entry
+         */
+        mask = dict->size - 1;
+        displ = 0;
+        pos = hashValue & mask;
+        entry = &dict->table[pos];
+
+        while ((entry->hashValue != 0) &&
+               ((pos - entry->hashValue) & mask) >= displ) {
+            displ++;
+            pos++;
+            entry++;
+            if ((pos & mask) == 0)
+                entry = dict->table;
+        }
+    }
+
+    if (pref == NULL)
+        ret = xmlDictAddString(dict, name, len);
+    else
+        ret = xmlDictAddQString(dict, pref, plen, name, len);
+    if (ret == NULL)
+        return(NULL);
+
+    /*
+     * Shift the remainder of the probe sequence to the right
+     */
+    if (entry->hashValue != 0) {
+        const xmlDictEntry *end = &dict->table[dict->size];
+        const xmlDictEntry *cur = entry;
+
+        do {
+            cur++;
+            if (cur >= end)
+                cur = dict->table;
+        } while (cur->hashValue != 0);
+
+        if (cur < entry) {
+            /*
+             * If we traversed the end of the buffer, handle the part
+             * at the start of the buffer.
+             */
+            memmove(&dict->table[1], dict->table,
+                    (char *) cur - (char *) dict->table);
+            cur = end - 1;
+            dict->table[0] = *cur;
+        }
+
+        memmove(&entry[1], entry, (char *) cur - (char *) entry);
+    }
+
+    /*
+     * Populate entry
+     */
+    entry->hashValue = hashValue;
+    entry->name = ret;
+
+    dict->nbElems++;
+
+    return(entry);
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// hash.c
+void
+xmlHashDefaultDeallocator(void *entry, const xmlChar *key ATTRIBUTE_UNUSED) {
+    xmlFree(entry);
+}
+
+// the below code fragment can be found in:
+// dict.c
+static int
+xmlDictGrow(xmlDictPtr dict, unsigned size) {
+    const xmlDictEntry *oldentry, *oldend, *end;
+    xmlDictEntry *table;
+    unsigned oldsize, i;
+
+    /* Add 0 to avoid spurious -Wtype-limits warning on 64-bit GCC */
+    if ((size_t) size + 0 > SIZE_MAX / sizeof(table[0]))
+        return(-1);
+    table = xmlMalloc(size * sizeof(table[0]));
+    if (table == NULL)
+        return(-1);
+    memset(table, 0, size * sizeof(table[0]));
+
+    oldsize = dict->size;
+    if (oldsize == 0)
+        goto done;
+
+    oldend = &dict->table[oldsize];
+    end = &table[size];
+
+    /*
+     * Robin Hood sorting order is maintained if we
+     *
+     * - compute dict indices with modulo
+     * - resize by an integer factor
+     * - start to copy from the beginning of a probe sequence
+     */
+    oldentry = dict->table;
+    while (oldentry->hashValue != 0) {
+        if (++oldentry >= oldend)
+            oldentry = dict->table;
+    }
+
+    for (i = 0; i < oldsize; i++) {
+        if (oldentry->hashValue != 0) {
+            xmlDictEntry *entry = &table[oldentry->hashValue & (size - 1)];
+
+            while (entry->hashValue != 0) {
+                if (++entry >= end)
+                    entry = table;
+            }
+            *entry = *oldentry;
+        }
+
+        if (++oldentry >= oldend)
+            oldentry = dict->table;
+    }
+
+    xmlFree(dict->table);
+
+done:
+    dict->table = table;
+    dict->size = size;
+
+    return(0);
+}
+
+// the below code fragment can be found in:
+// hash.c
+ATTRIBUTE_NO_SANITIZE_INTEGER
+int
+xmlHashRemoveEntry3(xmlHashTablePtr hash, const xmlChar *key,
+                    const xmlChar *key2, const xmlChar *key3,
+                    xmlHashDeallocator dealloc) {
+    xmlHashEntry *entry, *cur, *next;
+    unsigned hashValue, mask, pos, nextpos;
+    int found;
+
+    if ((hash == NULL) || (hash->size == 0) || (key == NULL))
+        return(-1);
+
+    hashValue = xmlHashValue(hash->randomSeed, key, key2, key3, NULL);
+    entry = xmlHashFindEntry(hash, key, key2, key3, hashValue, &found);
+    if (!found)
+        return(-1);
+
+    if ((dealloc != NULL) && (entry->payload != NULL))
+        dealloc(entry->payload, entry->key);
+    if (hash->dict == NULL) {
+        if (entry->key)
+            xmlFree(entry->key);
+        if (entry->key2)
+            xmlFree(entry->key2);
+        if (entry->key3)
+            xmlFree(entry->key3);
+    }
+
+    /*
+     * Find end of probe sequence. Entries at their initial probe
+     * position start a new sequence.
+     */
+    mask = hash->size - 1;
+    pos = entry - hash->table;
+    cur = entry;
+
+    while (1) {
+        nextpos = pos + 1;
+        next = cur + 1;
+        if ((nextpos & mask) == 0)
+            next = hash->table;
+
+        if ((next->hashValue == 0) ||
+            (((next->hashValue - nextpos) & mask) == 0))
+            break;
+
+        cur = next;
+        pos = nextpos;
+    }
+
+    /*
+     * Backward shift
+     */
+    next = entry + 1;
+
+    if (cur < entry) {
+        xmlHashEntry *end = &hash->table[hash->size];
+
+        memmove(entry, next, (char *) end - (char *) next);
+        entry = hash->table;
+        end[-1] = *entry;
+        next = entry + 1;
+    }
+
+    memmove(entry, next, (char *) cur - (char *) entry);
+
+    /*
+     * Update entry
+     */
+    cur->hashValue = 0;
+
+    hash->nbElems--;
+
+    return(0);
+}
+
+// the below code fragment can be found in:
+// dict.c
+const xmlChar *
+xmlDictLookup(xmlDictPtr dict, const xmlChar *name, int len) {
+    const xmlDictEntry *entry;
+
+    entry = xmlDictLookupInternal(dict, NULL, name, len, 1);
+    if (entry == NULL)
+        return(NULL);
+    return(entry->name);
+}
+
+// the below code fragment can be found in:
+// hash.c
+static int
+xmlHashGrow(xmlHashTablePtr hash, unsigned size) {
+    const xmlHashEntry *oldentry, *oldend, *end;
+    xmlHashEntry *table;
+    unsigned oldsize, i;
+
+    /* Add 0 to avoid spurious -Wtype-limits warning on 64-bit GCC */
+    if ((size_t) size + 0 > SIZE_MAX / sizeof(table[0]))
+        return(-1);
+    table = xmlMalloc(size * sizeof(table[0]));
+    if (table == NULL)
+        return(-1);
+    memset(table, 0, size * sizeof(table[0]));
+
+    oldsize = hash->size;
+    if (oldsize == 0)
+        goto done;
+
+    oldend = &hash->table[oldsize];
+    end = &table[size];
+
+    /*
+     * Robin Hood sorting order is maintained if we
+     *
+     * - compute hash indices with modulo
+     * - resize by an integer factor
+     * - start to copy from the beginning of a probe sequence
+     */
+    oldentry = hash->table;
+    while (oldentry->hashValue != 0) {
+        if (++oldentry >= oldend)
+            oldentry = hash->table;
+    }
+
+    for (i = 0; i < oldsize; i++) {
+        if (oldentry->hashValue != 0) {
+            xmlHashEntry *entry = &table[oldentry->hashValue & (size - 1)];
+
+            while (entry->hashValue != 0) {
+                if (++entry >= end)
+                    entry = table;
+            }
+            *entry = *oldentry;
+        }
+
+        if (++oldentry >= oldend)
+            oldentry = hash->table;
+    }
+
+    xmlFree(hash->table);
+
+done:
+    hash->table = table;
+    hash->size = size;
+
+    return(0);
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

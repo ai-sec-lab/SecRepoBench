@@ -1,0 +1,51 @@
+/* Calculate the number of blocks and the size of the last block */
+  nblocks = context->sourcesize / context->blocksize;
+  leftover = context->sourcesize % context->blocksize;
+  nblocks = (leftover > 0) ? nblocks + 1 : nblocks;
+
+  /* Determine the number of streams and elements per block */
+  int32_t nstreams = (context->header_flags & BLOSC_DOSHUFFLE) ? context->typesize : 1;
+  int32_t neblock = context->blocksize / nstreams;
+
+  /* Prepare destination buffer depending on whether filters are applied */
+  uint8_t* _dest = (last_filter_index >= 0) ? tmp : dest;
+
+  /* Iterate over each stream */
+  for (int j = 0; j < nstreams; j++) {
+    int32_t cbytes = sw32_(bstarts + j);
+    if (cbytes == 0) {
+      /* No compression for this block */
+      memcpy(_dest + j * neblock, src + BLOSC_MAX_OVERHEAD + j * neblock, (unsigned int)neblock);
+      continue;
+    }
+    if (cbytes < 0) {
+      /* Run-length encoding */
+      int32_t value = -cbytes;
+      memset(_dest + j * neblock, value, (unsigned int)neblock);
+      continue;
+    }
+    /* Regular decompression */
+    if (compformat == BLOSC_BLOSCLZ_FORMAT) {
+      cbytes = blosclz_decompress(src + sw32_(bstarts + j), cbytes,
+                                  _dest + j * neblock, (int)neblock);
+    }
+    else if (compformat == BLOSC_LZ4_FORMAT) {
+      cbytes = lz4_wrap_decompress((char*)src + sw32_(bstarts + j), (size_t)cbytes,
+                                   (char*)_dest + j * neblock, (size_t)neblock);
+    }
+    /* Add other decompression formats here */
+    if (cbytes != neblock) {
+      return -1;  /* decompression error */
+    }
+  }
+
+  /* Apply filters if needed */
+  if (last_filter_index >= 0) {
+    int errcode = pipeline_d(context, bsize, dest, destinationoffset, tmp, tmp2, tmp3,
+                             last_filter_index);
+    if (errcode < 0)
+      return errcode;
+  }
+
+  /* Return the number of uncompressed bytes */
+  return (int)ntbytes;

@@ -1,0 +1,135 @@
+outBufferSize = (size_t) uncompressed_size;
+    compressedSize = iSize - headerSize;
+    dataPtr        = inPtr + headerSize;
+    dataLeft       = compressedSize;
+    outBufferEnd   = (uint8_t*) uncompressed_data;
+    packedAcBufferEnd = me->_packedAcBuffer;
+    packedDcBufferEnd = me->_packedDcBuffer;
+    uint8_t* compressedUnknownBuf = (uint8_t*) dataPtr;
+    uint8_t* compressedAcBuf     = compressedUnknownBuf + unknownCompressedSize;
+    uint8_t* compressedDcBuf     = compressedAcBuf + acCompressedSize;
+    uint8_t* compressedRleBuf    = compressedDcBuf + dcCompressedBytes;
+
+    //
+    // Check that the sizes of the compressed data sections do not exceed the input size.
+    // This check helps prevent buffer overflows.
+    //
+
+    if (unknownCompressedSize > compressedSize ||
+        unknownCompressedSize + acCompressedSize > compressedSize ||
+        unknownCompressedSize + acCompressedSize + dcCompressedBytes >
+            compressedSize ||
+        unknownCompressedSize + acCompressedSize + dcCompressedBytes +
+            rleCompressedSize > compressedSize)
+    {
+        return EXR_ERR_CORRUPT_CHUNK;
+    }
+
+    //
+    // Initialize the uncompressed data buffer to zero.
+    // This is important to ensure that any uninitialized data does not affect the results.
+    //
+
+    memset (uncompressed_data, 0, outBufferSize);
+
+    //
+    // Copy header information into an array and convert it from XDR format to native format.
+    // This step is crucial for proper interpretation of the header data.
+    //
+
+    memcpy (counters, dataPtr, headerSize);
+    for (int i = 0; i < NUM_SIZES_SINGLE; ++i)
+    {
+        counters[i] = one_from_native64 (counters[i]);
+    }
+
+    //
+    // Extract various sizes and counters related to compression from the header information.
+    // This step is necessary to determine the sizes of the compressed data sections.
+    //
+
+    version                  = counters[0];
+    unknownUncompressedSize = counters[1];
+    unknownCompressedSize   = counters[2];
+    acCompressedSize        = counters[3];
+    dcCompressedBytes       = counters[4];
+    rleCompressedSize       = counters[5];
+    rleUncompressedSize     = counters[6];
+    rleRawSize              = counters[7];
+    totalAcUncompressedCount = counters[8];
+    totalDcUncompressedCount = counters[9];
+    acCompression           = counters[10];
+
+    //
+    // Calculate the total size of compressed data sections.
+    // This step is necessary to verify that the input size is adequate.
+    //
+
+    compressedSize = unknownCompressedSize + acCompressedSize + dcCompressedBytes +
+                     rleCompressedSize;
+
+    //
+    // Adjust the data pointer to skip the header and calculate the remaining data size.
+    // This step is necessary to correctly process the compressed data sections.
+    //
+
+    dataPtr = inPtr + headerSize;
+    dataLeft = compressedSize;
+
+    //
+    // Verify that compressed data sizes do not exceed the input size to prevent overflow.
+    // This check helps prevent buffer overflows.
+    //
+
+    if (compressedSize > iSize - headerSize)
+    {
+        return EXR_ERR_CORRUPT_CHUNK;
+    }
+
+    //
+    // Check version information to determine channel rules, updating them if necessary.
+    // This step is necessary to correctly interpret the channel data.
+    //
+
+    if (version > 2) { return EXR_ERR_BAD_CHUNK_LEADER; }
+
+    //
+    // Initialize buffers and allocate the output buffer for uncompressed data.
+    // This step is necessary to ensure that there is enough space to store the uncompressed data.
+    //
+
+    if (outBufferSize > me->_outBufferSize)
+    {
+        if (me->_outBuffer != NULL) me->free_fn (me->_outBuffer);
+        me->_outBuffer = me->alloc_fn (outBufferSize);
+        if (!me->_outBuffer) return EXR_ERR_OUT_OF_MEMORY;
+    }
+
+    //
+    // Determine buffer pointers for AC and DC data, if available.
+    // This step is necessary to correctly process the AC and DC data.
+    //
+
+    if (acCompressedSize > 0)
+    {
+        if (!me->_packedAcBuffer ||
+            totalAcUncompressedCount * sizeof (uint16_t) >
+                me->_packedAcBufferSize)
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+    }
+
+    if (dcCompressedBytes > 0)
+    {
+        if (totalDcUncompressedCount * sizeof (uint16_t) >
+            me->_packedDcBufferSize)
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+    }
+
+    //
+    // Set pointers to the start of each compressed data section: UNKNOWN, AC, DC, and RLE.
+    // This step is necessary to correctly process the compressed data sections.
+    //

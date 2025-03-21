@@ -1,0 +1,93 @@
+key = (char *)aux;
+        if (aux_end - aux < 3)
+            goto err;
+
+        if (key[0] == 'R' && key[1] == 'G' && key[2] == 'Z') {
+            if (!brg) {
+                brg = malloc(sizeof(*brg));
+                if (!brg)
+                    goto block_err;
+                brg->rg = -1;
+                brg->id = -1;
+            }
+
+            if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4) {
+                if (brg->rg != -1) {
+                    hts_log_warning("Multiple @RG tags in one single BAM record");
+                }
+                brg->rg = -2; // Placeholder, fill out later
+            } else {
+                kstring_t rg_id = { 0, 0, NULL };
+
+                aux += 3;
+                if (aux >= aux_end)
+                    goto err;
+
+                while (aux < aux_end && *aux) {
+                    if (kputsn(aux, aux_end - aux, &rg_id) < 0)
+                        goto block_err;
+                    aux++;
+                }
+                aux++;
+
+                if (aux > aux_end)
+                    goto err;
+
+                if (brg->rg != -1) {
+                    hts_log_warning("Multiple @RG tags in one single BAM record");
+                }
+
+                if (filedescriptor->header) {
+                    brg->rg = sam_hdr_add_line(filedescriptor->header, "RG",
+                                               "ID", kstr(&rg_id), NULL);
+                }
+                free(rg_id.s);
+            }
+        }
+
+        // NM:i and MD:Z
+        if ((key[0] == 'N' && key[1] == 'M' && key[2] == 'i') ||
+            (key[0] == 'M' && key[1] == 'D' && key[2] == 'Z')) {
+            if (verbatim_NM && key[0] == 'N' && key[1] == 'M') {
+                key[2] = '*';
+            }
+            if (verbatim_MD && key[0] == 'M' && key[1] == 'D') {
+                key[2] = '*';
+            }
+        }
+
+        cram_tag_map *tm = cram_new_tag_map(filedescriptor, key);
+        if (!tm)
+            goto block_err;
+
+        aux += 3;
+        if (aux >= aux_end)
+            goto err;
+
+        while (aux < aux_end && *aux)
+            aux++;
+        aux++;
+        if (aux > aux_end)
+            goto err;
+
+        if (BLOCK_SIZE(td_b) + (aux-key) >= TD_blk_size) {
+            size_t new_size = TD_blk_size + (aux-key) + 1024;
+            if (new_size > INT_MAX)
+                goto err;
+            char *new_data = realloc(BLOCK_DATA(td_b), new_size);
+            if (!new_data)
+                goto block_err;
+            BLOCK_DATA(td_b) = new_data;
+            TD_blk_size = new_size;
+        }
+
+        BLOCK_APPEND(td_b, key, aux-key);
+        s->aux_size += tm->codec->encode(s, tm->codec,
+                                         (char *)bam_aux(b) + (aux - orig) - (aux-key),
+                                         aux-key-3, tm->blk);
+        if (cram_stats_add(c->stats[DS_aux], s->aux_size) < 0)
+            goto block_err;
+
+        if (tm->blk->byte_size > UINT32_MAX)
+            goto block_err;
+        c->aux_blk_size += tm->blk->byte_size;

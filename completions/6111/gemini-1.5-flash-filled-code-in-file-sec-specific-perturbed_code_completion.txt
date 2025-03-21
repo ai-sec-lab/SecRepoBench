@@ -1,0 +1,140 @@
+short int
+    hex_digits[256];
+
+  size_t
+    columns,
+    rows;
+
+  ssize_t
+    file;
+
+  unsigned char
+    *buffer;
+
+  /*
+    Initialize hex digits.
+  */
+  for (file=0; file < 256; file++)
+    hex_digits[file]=0;
+  for (file='0'; file <= '9'; file++)
+    hex_digits[file]=file-'0';
+  for (file='A'; file <= 'F'; file++)
+    hex_digits[file]=file-'A'+10;
+  for (file='a'; file <= 'f'; file++)
+    hex_digits[file]=file-'a'+10;
+  /*
+    Open the input image file.
+  */
+  file=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (file == -1)
+    return((Image *) NULL);
+  (void) CopyMagickString(input_filename,image->filename,MagickPathExtent);
+  (void) AcquireUniqueFilename(input_filename);
+  (void) CreateSymbolicLink(image->filename,input_filename,exception);
+  /*
+    Determine page geometry.
+  */
+  columns=0;
+  rows=0;
+  (void) ResetMagickMemory(&geometry_info,0,sizeof(geometry_info));
+  (void) CopyMagickString(geometry,PSPageGeometry,MagickPathExtent);
+  option=GetImageOption(image_info,"geometry");
+  if (option != (const char *) NULL)
+    (void) CopyMagickString(geometry,option,MagickPathExtent);
+  (void) ParseGeometry(geometry,&geometry_info);
+  if (geometry_info.rho != 0.0)
+    {
+      columns=(size_t) geometry_info.rho;
+      rows=(size_t) geometry_info.sigma;
+    }
+  /*
+    Create a control file for Ghostscript.
+  */
+  delegate_info=GetDelegateInfo("gs",exception);
+  if (delegate_info == (const DelegateInfo *) NULL)
+    ThrowReaderException(DelegateError,"UnableToFindGhostscriptDelegate");
+  (void) FormatLocaleString(command,MagickPathExtent,
+    "\"%s\" -q -dNOPAUSE -dBATCH -dSAFER -dQUIET -dMaxBitmap=512000000 "
+    "-sDEVICE=ppmraw -sOutputFile=%s -r%.20gx%.20g %s",delegate_info->path,
+    input_filename,resolution.x,resolution.y,input_filename);
+  (void) FormatLocaleString(postscript_filename,MagickPathExtent,"%s",
+    input_filename);
+  (void) CopyMagickString(filename,image->filename,MagickPathExtent);
+  (void) CopyMagickString(message,RenderPostscriptText,MagickPathExtent);
+  options=AcquireString(image_info->options);
+  if (InvokePostscriptDelegate(MagickTrue,command,message,exception) ==
+      MagickFalse)
+    {
+      (void) RelinquishMagickMemory(options);
+      (void) DeleteFile(input_filename);
+      CloseBlob(image);
+      return((Image *) NULL);
+    }
+  (void) RelinquishMagickMemory(options);
+  (void) DeleteFile(input_filename);
+  /*
+    Read the image.
+  */
+  read_info=CloneImageInfo(image_info);
+  (void) CopyMagickString(read_info->filename,postscript_filename,
+    MagickPathExtent);
+  (void) CopyMagickString(read_info->magick,"PPM",MagickPathExtent);
+  postscript_image=ReadImage(read_info,exception);
+  read_info=DestroyImageInfo(read_info);
+  if (postscript_image == (Image *) NULL)
+    return((Image *) NULL);
+  if (columns != 0)
+    postscript_image->columns=columns;
+  if (rows != 0)
+    postscript_image->rows=rows;
+  /*
+    Handle profiles.
+  */
+  image=DestroyImageList(image);
+  image=postscript_image;
+  if (IsPostscriptRendered(postscript_filename) == MagickFalse)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),FileOpenError,
+        "CouldNotReadPostscriptFile","`%s'",postscript_filename);
+      return((Image *) NULL);
+    }
+  (void) DeleteFile(postscript_filename);
+  /*
+    Proceed to handle the image list.
+  */
+  for (next=GetFirstImageInList(image); next != (Image *) NULL; )
+  {
+    (void) CopyMagickString(next->filename,filename,MagickPathExtent);
+    (void) CopyMagickString(next->magick,image->magick,MagickPathExtent);
+    if (columns != 0)
+      next->magick_columns=columns;
+    if (rows != 0)
+      next->magick_rows=rows;
+    next=GetNextImageInList(next);
+  }
+  /*
+    Append images to the image list.
+  */
+  for (next=GetFirstImageInList(image); next != (Image *) NULL; )
+  {
+    (void) CopyMagickString(next->filename,filename,MagickPathExtent);
+    (void) CopyMagickString(next->magick,image->magick,MagickPathExtent);
+    if (columns != 0)
+      next->magick_columns=columns;
+    if (rows != 0)
+      next->magick_rows=rows;
+    next->page=page;
+    (void) CloneImageProfiles(next,image);
+    (void) CloneImageProperties(next,image);
+    next=GetNextImageInList(next);
+  }
+  /*
+    Clean up and return the processed image list.
+  */
+  scene=0;
+  for (next=GetFirstImageInList(image); next != (Image *) NULL; )
+  {
+    next->scene=scene++;
+    next=GetNextImageInList(next);
+  }
+  return(GetFirstImageInList(image));

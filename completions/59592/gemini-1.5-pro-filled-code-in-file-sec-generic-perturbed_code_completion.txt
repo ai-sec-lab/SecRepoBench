@@ -1,0 +1,58 @@
+hb_vector_t<glyf_impl::SubsetGlyph> glyphs;
+    bool result = _populate_subset_glyphs (context->plan, font, glyphs);
+
+    if (font)
+      hb_font_destroy (font);
+
+    if (unlikely (!result))
+      return_trace (false);
+
+    unsigned total_size = 0;
+    for (const auto &glyph : glyphs)
+      total_size += glyph.get_size ();
+
+    bool use_short_loca = total_size < 65536 &&
+                          context->plan->flags & HB_SUBSET_FLAGS_GLYPH_NAMES_SHORT_LOCA;
+
+    unsigned int *padded_offsets = (unsigned int *) calloc (glyphs.length + 1, sizeof (unsigned int));
+    if (unlikely (!padded_offsets))
+    {
+      _free_compiled_subset_glyphs (glyphs);
+      return_trace (false);
+    }
+
+    unsigned int padded_size = 0;
+    for (unsigned i = 0; i < glyphs.length; i++)
+    {
+      padded_offsets[i] = padded_size;
+      unsigned glyph_size = glyphs[i].get_size ();
+      if (unlikely (padded_size + glyph_size < padded_size))
+      {
+        _free_compiled_subset_glyphs (glyphs);
+        free (padded_offsets);
+        return_trace (false);
+      }
+      padded_size += glyph_size;
+    }
+    padded_offsets[glyphs.length] = padded_size;
+
+    glyf *output_glyf = c->start_embed<glyf> ();
+    if (unlikely (!output_glyf))
+    {
+      _free_compiled_subset_glyphs (glyphs);
+      free (padded_offsets);
+      return_trace (false);
+    }
+
+    auto it =
+    + hb_zip (glyphs, hb_iter (padded_offsets))
+    | hb_map ([&] (const hb_pair_t<glyf_impl::SubsetGlyph&, const unsigned *> &_) {
+                const glyf_impl::SubsetGlyph& glyph = _.first;
+                unsigned start = *_.second;
+                return hb_pair_t<const hb_bytes_t, unsigned> (glyph.dest_start, start);
+              });
+
+    result = output_glyf->serialize (c, it, use_short_loca, context->plan);
+
+    free (padded_offsets);
+    _free_compiled_subset_glyphs (glyphs);

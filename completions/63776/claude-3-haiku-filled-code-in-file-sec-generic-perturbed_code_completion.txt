@@ -1,0 +1,50 @@
+// This code block handles the size validation and unknown data extraction for DWG objects in pre-R13 and later versions.
+// For pre-R11 versions, the code checks if the object's size is valid and within the bounds of the data, adjusting it if necessary.
+// It extracts any unknown remaining data if the object size doesn't match the current data position and logs errors if issues are found.
+// For later versions, additional CRC checks are performed to ensure data integrity, and adjustments are made to account for any size discrepancies.
+// If the object's address and size don't align with the data position, the code calculates the offset for any trailing unknown data and allocates memory to store it, logging appropriate messages.
+if (obj->address + obj->size <= bit_chain->size)
+{
+    if (obj->size != (bit_chain->byte - oldpos))
+    {
+        LOG_WARN("Object size mismatch: expected %u, got %zu", obj->size, bit_chain->byte - oldpos);
+        if (obj->size > bit_chain->byte - oldpos)
+        {
+            LOG_ERROR("Object size overflow: %u > %zu", obj->size, bit_chain->byte - oldpos);
+            obj->size = bit_chain->byte - oldpos;
+        }
+    }
+}
+else
+{
+    LOG_ERROR("Object size overflow: %u > %zu", obj->size, bit_chain->size - obj->address);
+    obj->size = bit_chain->size - obj->address;
+}
+
+if (obj->size != bit_chain->byte - oldpos)
+{
+    size_t unknown_size = bit_chain->byte - oldpos - obj->size;
+    obj->unknown_bits = (BITCODE_RC*)calloc(unknown_size, 1);
+    if (obj->unknown_bits)
+    {
+        memcpy(obj->unknown_bits, &bit_chain->chain[oldpos + obj->size], unknown_size);
+        obj->num_unknown_bits = unknown_size * 8;
+        LOG_TRACE("Unknown data: %zu bytes", unknown_size);
+    }
+    else
+    {
+        LOG_ERROR("Out of memory for unknown data");
+    }
+}
+
+// CRC check for later versions
+if (dwg->header.version >= R_2_0b)
+{
+    BITCODE_RS crc = bit_read_RS(bit_chain);
+    BITCODE_RS calc_crc = bit_calc_CRC(0xC0C1, &bit_chain->chain[obj->address], obj->size);
+    if (crc != calc_crc)
+    {
+        LOG_ERROR("Object CRC mismatch %04X <=> %04X", crc, calc_crc);
+        error |= DWG_ERR_WRONGCRC;
+    }
+}

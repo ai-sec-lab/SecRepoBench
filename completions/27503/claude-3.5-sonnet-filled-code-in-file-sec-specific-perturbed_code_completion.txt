@@ -1,0 +1,189 @@
+switch (tag)
+{
+    case ID_SCE:
+    case ID_LFE:
+        // mono or LFE element
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1 << elementInstanceTag);
+
+        // read the 12 unused header bits
+        unusedHeader = (uint16_t) BitBufferRead(bits, 12);
+
+        // read the 1-bit "partial frame" flag, 2-bit "shift-off" flag, and 1-bit "escape" flag
+        headerByte = (uint8_t) BitBufferRead(bits, 4);
+        partialFrame = headerByte >> 3;
+        bytesShifted = (headerByte >> 1) & 3;
+        escapeFlag = headerByte & 1;
+
+        if (escapeFlag == 0)
+        {
+            shift = bytesShifted * 8;
+            chanBits = p->mConfig.bitDepth - shift;
+        }
+        else
+        {
+            shift = BitBufferRead(bits, 16);
+            chanBits = BitBufferRead(bits, 16);
+        }
+
+        if (partialFrame)
+            numSamples = BitBufferRead(bits, 16);
+
+        BitBufferReadSmall(bits, 4);
+        BitBufferReadSmall(bits, 12);
+
+        // read the coefficients
+        numU = BitBufferReadSmall(bits, 8);
+        for (i = 0; i < numU && i < 32; i++)
+            coefsU[i] = (int16_t) BitBufferRead(bits, 16);
+
+        // read the prediction type and quantization
+        BitBufferReadSmall(bits, 4);
+        BitBufferReadSmall(bits, 4);
+
+        // read prediction quantization
+        BitBufferReadSmall(bits, 3);
+        BitBufferReadSmall(bits, 5);
+
+        // read the Rice parameters and do the decompression
+        status = dyn_decomp(&agParams, bits, p->u.mPredictor, numSamples, chanBits, &bits1);
+        RequireNoErr(status, goto Exit;);
+
+        // now do the prediction
+        if (numU > 0)
+        {
+            unpc_block(p->u.mPredictor, numSamples, numU, coefsU, chanBits, p->mConfig.pb);
+        }
+
+        // now apply the shift, if any
+        if (shift > 0)
+        {
+            for (i = 0; i < numSamples; i++)
+                p->u.mPredictor[i] = (p->u.mPredictor[i] << shift);
+        }
+
+        // and write the output buffer
+        out32 = sampleBuffer + channelIndex;
+        for (i = 0; i < numSamples; i++)
+        {
+            out32[i * numChannels] = p->u.mPredictor[i];
+        }
+
+        channelIndex += 1;
+        break;
+
+    case ID_CPE:
+        // stereo element
+        RequireAction(channelIndex + 2 <= numChannels, status = kALAC_TooManyChannels; goto Exit;);
+
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1 << elementInstanceTag);
+
+        // read the 12 unused header bits
+        unusedHeader = (uint16_t) BitBufferRead(bits, 12);
+
+        // read the 1-bit "partial frame" flag, 2-bit "shift-off" flag, and 1-bit "escape" flag
+        headerByte = (uint8_t) BitBufferRead(bits, 4);
+        partialFrame = headerByte >> 3;
+        bytesShifted = (headerByte >> 1) & 3;
+        escapeFlag = headerByte & 1;
+
+        if (escapeFlag == 0)
+        {
+            shift = bytesShifted * 8;
+            chanBits = p->mConfig.bitDepth - shift;
+        }
+        else
+        {
+            shift = BitBufferRead(bits, 16);
+            chanBits = BitBufferRead(bits, 16);
+        }
+
+        if (partialFrame)
+            numSamples = BitBufferRead(bits, 16);
+
+        // read the extra bits
+        extraBits = BitBufferReadSmall(bits, 4) << 12;
+        extraBits |= BitBufferReadSmall(bits, 12);
+
+        // read the coefficients
+        numU = BitBufferReadSmall(bits, 8);
+        numV = BitBufferReadSmall(bits, 8);
+        for (i = 0; i < numU && i < 32; i++)
+            coefsU[i] = (int16_t) BitBufferRead(bits, 16);
+        for (i = 0; i < numV && i < 32; i++)
+            coefsV[i] = (int16_t) BitBufferRead(bits, 16);
+
+        // read the prediction type and quantization
+        modeU = (uint8_t) BitBufferReadSmall(bits, 4);
+        modeV = (uint8_t) BitBufferReadSmall(bits, 4);
+        denShiftU = BitBufferReadSmall(bits, 4);
+        denShiftV = BitBufferReadSmall(bits, 4);
+        pbFactorU = (uint16_t) BitBufferReadSmall(bits, 3);
+        pbFactorV = (uint16_t) BitBufferReadSmall(bits, 3);
+        numU = (numU >= kMaxCoefs) ? kMaxCoefs : numU;
+        numV = (numV >= kMaxCoefs) ? kMaxCoefs : numV;
+
+        // read the Rice parameters and do the decompression
+        status = dyn_decomp(&agParams, bits, p->u.mPredictor, numSamples, chanBits, &bits1);
+        RequireNoErr(status, goto Exit;);
+
+        status = dyn_decomp(&agParams, bits, p->v.mPredictor, numSamples, chanBits, &bits2);
+        RequireNoErr(status, goto Exit;);
+
+        // now do the prediction
+        if (numU > 0)
+            unpc_block(p->u.mPredictor, numSamples, numU, coefsU, chanBits, pbFactorU);
+
+        if (numV > 0)
+            unpc_block(p->v.mPredictor, numSamples, numV, coefsV, chanBits, pbFactorV);
+
+        // undo the interleaving
+        uninterleaveStereo(p->u.mPredictor, p->v.mPredictor, p->mMixBufferU, numSamples);
+
+        // now apply the shift, if any
+        if (shift > 0)
+        {
+            for (i = 0; i < numSamples; i++)
+            {
+                p->u.mPredictor[i] = (p->u.mPredictor[i] << shift);
+                p->v.mPredictor[i] = (p->v.mPredictor[i] << shift);
+            }
+        }
+
+        // and write the output buffer
+        out32 = sampleBuffer + channelIndex;
+        for (i = 0; i < numSamples; i++)
+        {
+            int32_t valU = p->u.mPredictor[i];
+            int32_t valV = p->v.mPredictor[i];
+            out32[i * numChannels] = valU;
+            out32[i * numChannels + 1] = valV;
+        }
+
+        channelIndex += 2;
+        break;
+
+    case ID_CCE:
+        // not supported
+        status = kALAC_UnsupportedElement;
+        goto Exit;
+
+    case ID_PCE:
+        // not supported
+        status = kALAC_UnsupportedElement;
+        goto Exit;
+
+    case ID_DSE:
+        status = alac_data_stream_element(bits);
+        break;
+
+    case ID_FIL:
+        status = alac_fill_element(bits);
+        break;
+
+    case ID_END:
+        goto NoMoreChannels;
+}
+
+BitBufferByteAlign(bits, false);

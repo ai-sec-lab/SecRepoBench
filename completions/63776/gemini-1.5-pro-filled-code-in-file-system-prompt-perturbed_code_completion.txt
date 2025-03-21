@@ -1,0 +1,84 @@
+PRE (R_11)
+                  {
+                    obj->size = (bit_chain->byte - oldpos) & 0xFFFFFFFF;
+                    LOG_TRACE ("size: %u [implicit]\n", obj->size);
+                    if (obj->size > 0)
+                      {
+                        if (obj->size != bit_read_RS (bit_chain))
+                          LOG_ERROR ("Entity size mismatch");
+                      }
+                    else
+                      {
+                        LOG_ERROR ("Invalid entity size 0");
+                        dwg->num_objects--;
+                        num--;
+                        continue;
+                      }
+                    if (bit_chain->byte > oldpos + obj->size)
+                      {
+                        LOG_ERROR ("Invalid object size (overflow): %" PRIuSIZE
+                                   " > %" PRIuSIZE,
+                                   bit_chain->byte, oldpos + obj->size);
+                        return DWG_ERR_INVALIDDWG;
+                      }
+                    else if (bit_chain->byte < oldpos + obj->size)
+                      {
+                        BITCODE_RL trailing_size = oldpos + obj->size
+                                                    - bit_chain->byte;
+                        LOG_ERROR ("Invalid object size (underflow): %" PRIuSIZE
+                                   " < %" PRIuSIZE ", trailing: %u",
+                                   bit_chain->byte, oldpos + obj->size,
+                                   trailing_size);
+                        bit_chain->byte += trailing_size;
+                        error |= DWG_ERR_VALUEOUTOFBOUNDS;
+                      }
+                  }
+                  else
+                  {
+                    if (obj->size * 8 < bit_position (bit_chain) - objpos)
+                      {
+                        LOG_ERROR ("Invalid object size (underflow): %u < %" PRIuSIZE, obj->size, (bit_position (bit_chain) - objpos)/8);
+                        obj->size = (bit_position (bit_chain) - objpos)/8;
+                        error |= DWG_ERR_VALUEOUTOFBOUNDS;
+                      }
+                    else if (obj->size > bit_chain->size - bit_chain->byte)
+                      {
+                        LOG_ERROR ("Invalid object size (overflow): %u > %" PRIuSIZE, obj->size, bit_chain->size - bit_chain->byte);
+                        obj->size = bit_chain->size - bit_chain->byte;
+                        error |= DWG_ERR_VALUEOUTOFBOUNDS;
+                      }
+                    else if (obj->size > 0 && obj->address + obj->size > bit_chain->size)
+                      {
+                        LOG_ERROR ("Invalid object size (overflow): %u + %u > %" PRIuSIZE, obj->address, obj->size, bit_chain->size);
+                        obj->size = bit_chain->size - obj->address;
+                        error |= DWG_ERR_VALUEOUTOFBOUNDS;
+                      }
+                    if (bit_chain->version >= R_13 && obj->size > 0)
+                      {
+                        BITCODE_RS crc, crcc;
+                        size_t crc_pos = (obj->address + obj->size) * 8 - 16;
+                        bit_set_position (bit_chain, crc_pos);
+                        crcc = bit_calc_CRC (0xC0C1, &bit_chain->chain[obj->address], obj->size - 2);
+                        crc = bit_read_RS (bit_chain);
+                        if (crc != crcc)
+                          {
+                            LOG_ERROR ("Entity CRC mismatch %04X <=> %04X", crc, crcc);
+                            error |= DWG_ERR_WRONGCRC;
+                          }
+                      }
+                    if (obj->size * 8 > bit_position (bit_chain) - objpos)
+                      {
+                        size_t trailing_offset = (bit_position (bit_chain) - objpos) / 8;
+                        BITCODE_RL trailing_size = obj->size - trailing_offset;
+                        obj->unknown_rest = bit_read_TF (bit_chain, trailing_size);
+                        LOG_TRACE ("trailing unknown data %u TF: ", trailing_size);
+                        LOG_TRACE_TF (obj->unknown_rest, trailing_size);
+                        LOG_TRACE ("\n");
+                      }
+                    else if (obj->size * 8 < bit_position (bit_chain) - objpos)
+                      {
+                        LOG_ERROR ("Invalid object size (underflow): %u < %" PRIuSIZE, obj->size, (bit_position (bit_chain) - objpos)/8);
+                        error |= DWG_ERR_VALUEOUTOFBOUNDS;
+                      }
+                  }
+                  oldpos = bit_chain->byte;

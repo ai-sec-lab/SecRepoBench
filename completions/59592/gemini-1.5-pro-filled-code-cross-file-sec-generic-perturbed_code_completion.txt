@@ -1,0 +1,77 @@
+bool result = false;
+    hb_vector_t<hb_codepoint_t> subset_glyphs;
+    if (unlikely (!generate_subset_glyphs (context, font, &subset_glyphs)))
+    {
+      if (font) hb_font_destroy (font);
+      return_trace (false);
+    }
+
+    if (font) hb_font_destroy (font);
+
+    unsigned int glyf_count = subset_glyphs.length;
+    unsigned int *subset_glyph_ids = subset_glyphs.arrayZ;
+
+    unsigned int padded_offset[glyf_count + 1];
+    bool short_loca = true;
+    unsigned int last_glyph_size = 0;
+
+    padded_offset[0] = 0;
+    for (unsigned int i = 0; i < glyf_count; i++)
+    {
+      unsigned int glyph_size = get_glyph_size (context->plan->source, subset_glyph_ids[i]);
+      padded_offset[i + 1] = padded_offset[i] + PAD4 (glyph_size);
+      if (padded_offset[i + 1] > 65535)
+        short_loca = false;
+      last_glyph_size = glyph_size;
+    }
+
+    if (context->plan->drop_hints)
+      drop_hints (context->plan->source, subset_glyph_ids, glyf_count);
+
+    {
+      glyf_object_t glyf;
+      glyf.init ();
+
+      if (unlikely (!glyf.serialize_glyf (context->plan->source,
+					 subset_glyph_ids,
+					 glyf_count,
+					 short_loca)))
+      {
+	DEBUG_MSG (SUBSET, nullptr, "Could not subset glyf table.");
+        goto fail;
+      }
+
+      bool add_result = context->add_table (HB_TAG ('g','l','y','f'), &glyf);
+      glyf.fini ();
+
+      if (unlikely (!add_result))
+        goto fail;
+    }
+
+    if (context->plan->drop_hints)
+    {
+      unsigned int loca_length;
+      if (short_loca)
+        loca_length = (glyf_count + 1) * 2;
+      else
+        loca_length = (glyf_count + 1) * 4;
+
+      table_t loca;
+      loca.init ();
+
+      if (unlikely (!loca.serialize_loca (padded_offset, glyf_count + 1, short_loca)))
+      {
+        DEBUG_MSG (SUBSET, nullptr, "Could not subset loca table.");
+        goto fail;
+      }
+
+      if (unlikely (!context->add_table (HB_TAG ('l','o','c','a'), &loca)))
+        goto fail;
+
+      loca.fini ();
+    }
+
+    result = true;
+fail:
+    hb_free (subset_glyph_ids);
+    subset_glyphs.fini ();

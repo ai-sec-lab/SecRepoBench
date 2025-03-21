@@ -1,0 +1,73 @@
+// Copy aux keys to td_b and aux values to slice aux blocks
+while (aux_end - aux >= 1 && aux[0] != 0) {
+    int r;
+
+    // Room for code + type + at least 1 byte of data
+    if (aux - orig >= aux_size - 3)
+        goto err;
+
+    // RG:Z
+    if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+        // Find the read group header record
+        aux += 3;
+        brg = sam_hdr_find_rg(s->hdr->hrecs, aux);
+        if (!brg) {
+            hts_log_warning("Missing RG header for tag '%s'", aux);
+            cr->rg = -1;
+        } else {
+            cr->rg = brg->id;
+        }
+        aux += strlen(aux) + 1;
+    }
+    // MD:Z
+    else if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
+        if (!verbatim_MD) {
+            aux += 3;
+            MD->s = aux;
+            MD->l = strlen(aux);
+            aux += MD->l + 1;
+        } else {
+            // Copy verbatim
+            BLOCK_APPEND(s->aux_blk, aux, strlen(aux)+1);
+            cr->aux_size += strlen(aux)+1;
+            aux += strlen(aux) + 1;
+        }
+    }
+    // NM:i
+    else if (aux[0] == 'N' && aux[1] == 'M' && aux[2] == 'i') {
+        if (!verbatim_NM) {
+            aux += 3;
+            r = safe_int32_decode(aux, &NM);
+            if (r < 0)
+                goto err;
+            aux += r;
+        } else {
+            // Copy verbatim
+            BLOCK_APPEND(s->aux_blk, aux, strlen(aux)+1);
+            cr->aux_size += strlen(aux)+1;
+            aux += strlen(aux) + 1;
+        }
+    }
+    // Other tags
+    else {
+        // Encode the tag key in the TD block
+        BLOCK_APPEND(td_b, aux, 3);
+        tm = map_find(c->comp_hdr->tag_encoding_map, aux, (aux[0]<<16) | (aux[1]<<8) | aux[2]);
+        if (!tm || !tm->codec) {
+            hts_log_warning("Unrecognised aux tag '%c%c%c'", aux[0], aux[1], aux[2]);
+            BLOCK_APPEND_CHAR(s->aux_blk, aux[0]);
+            BLOCK_APPEND_CHAR(s->aux_blk, aux[1]);
+            BLOCK_APPEND_CHAR(s->aux_blk, aux[2]);
+            BLOCK_APPEND_CHAR(s->aux_blk, 'Z');
+            BLOCK_APPEND_CHAR(s->aux_blk, 0);
+            cr->aux_size += 5;
+        } else {
+            // Encode the tag value in the slice aux block
+            r = tm->codec->encode(s, tm->codec, s->aux_blk, aux+3);
+            if (r < 0)
+                goto err;
+            cr->aux_size += r + 3;
+        }
+        aux += strlen(aux) + 1;
+    }
+}

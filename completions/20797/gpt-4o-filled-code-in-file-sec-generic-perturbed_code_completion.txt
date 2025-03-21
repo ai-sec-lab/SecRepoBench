@@ -1,0 +1,100 @@
+{
+      /* Server Hello */
+      if((base_offset + session_id_len + 2) < total_len) {
+        offset += session_id_len + 2;
+        ja3.num_cipher = 1;
+        ja3.cipher[0] = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      }
+    } else if(handshake_type == 0x01 /* Client Hello */) {
+      /* Client Hello */
+      offset += session_id_len + 2;
+      ja3.num_cipher = ntohs(*((u_int16_t*)&packet->payload[offset-2])) / 2;
+
+      if((offset + ja3.num_cipher * 2) > total_len) return(0);
+
+      for(i = 0; i < ja3.num_cipher; i++) {
+        ja3.cipher[i] = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+      }
+
+      if(offset < total_len) {
+        u_int16_t compression_len = packet->payload[offset];
+        offset += 1 + compression_len;
+
+        if(offset < total_len) {
+          extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+          offset += 2;
+
+          if((offset + extension_len) <= total_len) {
+            while(offset < (total_len - 4)) {
+              u_int16_t extension_type = ntohs(*((u_int16_t*)&packet->payload[offset]));
+              u_int16_t extension_size = ntohs(*((u_int16_t*)&packet->payload[offset+2]));
+              offset += 4;
+
+              if((offset + extension_size) > total_len) break;
+
+              if(extension_type == 0x000a) {
+                /* Elliptic Curves */
+                ja3.num_elliptic_curve = ntohs(*((u_int16_t*)&packet->payload[offset])) / 2;
+                offset += 2;
+
+                for(j = 0; j < ja3.num_elliptic_curve; j++) {
+                  ja3.elliptic_curve[j] = ntohs(*((u_int16_t*)&packet->payload[offset]));
+                  offset += 2;
+                }
+              } else if(extension_type == 0x000b) {
+                /* Elliptic Curve Point Formats */
+                ja3.num_elliptic_curve_point_format = packet->payload[offset];
+                offset += 1;
+
+                for(j = 0; j < ja3.num_elliptic_curve_point_format; j++) {
+                  ja3.elliptic_curve_point_format[j] = packet->payload[offset];
+                  offset += 1;
+                }
+              } else {
+                offset += extension_size;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    /* Create JA3 string */
+    ja3_str_len = snprintf(ja3_str, sizeof(ja3_str), "%u,", ja3.tls_handshake_version);
+
+    for(i = 0; i < ja3.num_cipher; i++) {
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, "%s%u",
+                              (i == 0) ? "" : "-", ja3.cipher[i]);
+    }
+
+    ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",");
+
+    for(i = 0; i < ja3.num_tls_extension; i++) {
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, "%s%u",
+                              (i == 0) ? "" : "-", ja3.tls_extension[i]);
+    }
+
+    ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",");
+
+    for(i = 0; i < ja3.num_elliptic_curve; i++) {
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, "%s%u",
+                              (i == 0) ? "" : "-", ja3.elliptic_curve[i]);
+    }
+
+    ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",");
+
+    for(i = 0; i < ja3.num_elliptic_curve_point_format; i++) {
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, "%s%u",
+                              (i == 0) ? "" : "-", ja3.elliptic_curve_point_format[i]);
+    }
+
+    /* Calculate MD5 hash */
+    ndpi_MD5_Init(&ctx);
+    ndpi_MD5_Update(&ctx, (unsigned char*)ja3_str, ja3_str_len);
+    ndpi_MD5_Final(md5_hash, &ctx);
+
+    /* Store the JA3 hash */
+    memcpy(flow->protos.stun_ssl.ssl.ja3_hash, md5_hash, sizeof(md5_hash));
+
+    return(handshake_type == 0x01 ? 1 : 2); /* 1 for Client Hello, 2 for Server Hello */

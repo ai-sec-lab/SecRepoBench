@@ -1,0 +1,115 @@
+int32_t j, neblock, nstreams;
+  int32_t dbytes;                   /* number of decompressed bytes in split */
+  int32_t dtbytes = 0;              /* number of decompressed bytes in block */
+  int32_t typesize = context->typesize;
+  int last_filter_index = last_filter(context->filters, 'd');
+  int32_t* bstarts = context->bstarts;
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+
+  /* The number of compressed data streams for this block */
+  if (!leftoverblock && !memcpyed) {
+    nstreams = (int32_t)typesize;
+  }
+  else {
+    nstreams = 1;
+  }
+  neblock = bsize / nstreams;
+  for (j = 0; j < nstreams; j++) {
+    int32_t cbytes;
+    if (!memcpyed) {
+      cbytes = sw32_(src + src_offset + j * sizeof(int32_t));
+      src += sizeof(int32_t);
+      srcsize -= sizeof(int32_t);
+    }
+    else {
+      cbytes = neblock;
+    }
+
+    // Check for runs
+    if (cbytes < 0) {
+      // A run.  Decode the repeated byte.
+      int32_t value = -cbytes;
+      memset(dest + destinationoffset + j * neblock, value, (unsigned int)neblock);
+      dtbytes += neblock;
+      continue;
+    }
+
+    // Check for uncompressed data
+    if (cbytes == neblock) {
+      memcpy(dest + destinationoffset + j * neblock, src + src_offset, (unsigned int)neblock);
+      src += neblock;
+      srcsize -= neblock;
+      dtbytes += neblock;
+      continue;
+    }
+
+    // Check for compressed data
+    if (cbytes > 0) {
+      if (cbytes > srcsize) {
+        /* Compressed data is larger than available data */
+        return -1;
+      }
+      if (context->compcode == BLOSC_BLOSCLZ) {
+        dbytes = blosclz_decompress(src + src_offset, cbytes,
+                                    dest + destinationoffset + j * neblock,
+                                    (int)neblock);
+      }
+#if defined(HAVE_LZ4)
+      else if (context->compcode == BLOSC_LZ4) {
+        dbytes = lz4_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                     (char*)dest + destinationoffset + j * neblock,
+                                     (size_t)neblock);
+      }
+      else if (context->compcode == BLOSC_LZ4HC) {
+        dbytes = lz4_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                     (char*)dest + destinationoffset + j * neblock,
+                                     (size_t)neblock);
+      }
+#endif /* HAVE_LZ4 */
+#if defined(HAVE_LIZARD)
+      else if (context->compcode == BLOSC_LIZARD) {
+        dbytes = lizard_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                        (char*)dest + destinationoffset + j * neblock,
+                                        (size_t)neblock);
+      }
+#endif /* HAVE_LIZARD */
+#if defined(HAVE_SNAPPY)
+      else if (context->compcode == BLOSC_SNAPPY) {
+        dbytes = snappy_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                        (char*)dest + destinationoffset + j * neblock,
+                                        (size_t)neblock);
+      }
+#endif /* HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+      else if (context->compcode == BLOSC_ZLIB) {
+        dbytes = zlib_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                      (char*)dest + destinationoffset + j * neblock,
+                                      (size_t)neblock);
+      }
+#endif /* HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+      else if (context->compcode == BLOSC_ZSTD) {
+        dbytes = zstd_wrap_decompress(thread_context,
+                                      (char*)src + src_offset, (size_t)cbytes,
+                                      (char*)dest + destinationoffset + j * neblock,
+                                      (size_t)neblock);
+      }
+#endif /* HAVE_ZSTD */
+      else {
+        const char* compname;
+        blosc_compcode_to_compname(context->compcode, &compname);
+        fprintf(stderr, "Blosc has not been compiled with '%s' ", compname);
+        fprintf(stderr, "decompression support.  Please use one having it.");
+        return -5;    /* signals no compression support */
+      }
+
+      if (dbytes != neblock) {
+        /* Decompression failed */
+        return -1;
+      }
+      src += cbytes;
+      srcsize -= cbytes;
+      dtbytes += neblock;
+    }
+  }
+  int32_t ntbytes = dtbytes;

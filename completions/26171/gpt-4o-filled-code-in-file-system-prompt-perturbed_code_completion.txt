@@ -1,0 +1,104 @@
+int32_t last_filter_index = last_filter(context->filters, 'd');
+  int32_t ntbytes = 0;
+  int32_t nstreams;
+  int32_t neblock;
+  int32_t j;
+  int32_t compformat = (context->header_flags & 0xe0) >> 5;
+  int32_t dont_split = (context->header_flags & 0x10) >> 4;
+  int32_t* bstarts = context->bstarts;
+  uint8_t* _dest;
+  uint8_t* _tmp = tmp;
+  uint8_t* _tmp2 = tmp2;
+  int32_t typesize = context->typesize;
+  const char* compname;
+
+  /* The number of compressed data streams for this block */
+  if (!dont_split && !leftoverblock) {
+    nstreams = (int32_t)typesize;
+  }
+  else {
+    nstreams = 1;
+  }
+  neblock = bsize / nstreams;
+
+  for (j = 0; j < nstreams; j++) {
+    int32_t cbytes = sw32_(bstarts + j);
+    int32_t nbytes = neblock;
+    int32_t bsize2 = bsize;
+
+    if (cbytes < 0) {
+      /* We have a run here.  Extract the value and set it in dest. */
+      int32_t value = -cbytes;
+      memset(dest + j * neblock, value, (unsigned int)neblock);
+      ntbytes += neblock;
+      continue;
+    }
+
+    if (cbytes == 0) {
+      /* This should never happen */
+      return -1;
+    }
+
+    if (cbytes == nbytes) {
+      /* The block is uncompressed */
+      memcpy(dest + j * neblock, src + src_offset, (unsigned int)nbytes);
+      ntbytes += nbytes;
+      src_offset += nbytes;
+      continue;
+    }
+
+    if (compformat == BLOSC_BLOSCLZ_FORMAT) {
+      nbytes = blosclz_decompress(src + src_offset, cbytes, dest + j * neblock, nbytes);
+    }
+#if defined(HAVE_LZ4)
+    else if (compformat == BLOSC_LZ4_FORMAT) {
+      nbytes = lz4_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                   (char*)dest + j * neblock, (size_t)nbytes);
+    }
+    else if (compformat == BLOSC_LZ4HC_FORMAT) {
+      nbytes = lz4_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                   (char*)dest + j * neblock, (size_t)nbytes);
+    }
+#endif /* HAVE_LZ4 */
+#if defined(HAVE_LIZARD)
+    else if (compformat == BLOSC_LIZARD_FORMAT) {
+      nbytes = lizard_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                      (char*)dest + j * neblock, (size_t)nbytes);
+    }
+#endif /* HAVE_LIZARD */
+#if defined(HAVE_SNAPPY)
+    else if (compformat == BLOSC_SNAPPY_FORMAT) {
+      nbytes = snappy_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                      (char*)dest + j * neblock, (size_t)nbytes);
+    }
+#endif /* HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+    else if (compformat == BLOSC_ZLIB_FORMAT) {
+      nbytes = zlib_wrap_decompress((char*)src + src_offset, (size_t)cbytes,
+                                    (char*)dest + j * neblock, (size_t)nbytes);
+    }
+#endif /* HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+    else if (compformat == BLOSC_ZSTD_FORMAT) {
+      nbytes = zstd_wrap_decompress(thread_context, (char*)src + src_offset, (size_t)cbytes,
+                                    (char*)dest + j * neblock, (size_t)nbytes);
+    }
+#endif /* HAVE_ZSTD */
+    else {
+      blosc_compcode_to_compname(context->compcode, &compname);
+      fprintf(stderr, "Blosc has not been compiled with '%s' ", compname);
+      fprintf(stderr, "compression support.  Please use one having it.");
+      return -5;    /* signals no decompression support */
+    }
+
+    if (nbytes < 0) {
+      return -1;
+    }
+
+    if (nbytes != neblock) {
+      return -1;
+    }
+
+    ntbytes += nbytes;
+    src_offset += cbytes;
+  }

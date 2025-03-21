@@ -1,0 +1,87 @@
+linesize   = s->current_picture.f->linesize[0] << field_based;
+    uvlinesize = s->current_picture.f->linesize[1] << field_based;
+
+    // Adjust motion vector for quarter-sample precision if needed
+    if (s->quarter_sample) {
+        motion_x /= 2;
+        motion_y /= 2;
+    }
+
+    // Calculate source positions
+    sourcex = s->mb_x * 2 * block_s + (motion_x >> (lowres + 1));
+    src_y   = (mb_y * 2 * block_s >> field_based) + (motion_y >> (lowres + 1));
+    src_y  += (s->mb_y & 1) << field_based;
+    sx      = motion_x & s_mask;
+    sy      = motion_y & s_mask;
+
+    // Handle chroma (color) components
+    if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+        uvsrc_x = sourcex >> 1;
+        uvsrc_y = src_y >> 1;
+        uvsx = (motion_x << 2) >> lowres;
+        uvsy = (motion_y << 2) >> lowres;
+        if (s->chroma_y_shift) {
+            uvsx = (uvsx + 1) >> 1;
+            uvsy = (uvsy + 1) >> 1;
+        }
+        if (field_select)
+            uvsrc_y += s->current_picture.f->linesize[1];
+    }
+
+    ptr_y  = ref_picture[0] + src_y * linesize + sourcex;
+    ptr_cb = ref_picture[1] + uvsrc_y * uvlinesize + uvsrc_x;
+    ptr_cr = ref_picture[2] + uvsrc_y * uvlinesize + uvsrc_x;
+
+    if ((unsigned)sourcex > FFMAX(h_edge_pos - (!!sx) - 2 * block_s, 0) ||
+        (unsigned)src_y   > FFMAX((v_edge_pos >> field_based) - (!!sy) - h, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_y,
+                                 linesize >> field_based, linesize >> field_based,
+                                 17, 17 + field_based,
+                                 sourcex, src_y * (1 << field_based),
+                                 h_edge_pos, v_edge_pos);
+        ptr_y = s->sc.edge_emu_buffer;
+        if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+            uint8_t *uvbuf = s->sc.edge_emu_buffer + 18 * s->linesize;
+            s->vdsp.emulated_edge_mc(uvbuf, ptr_cb,
+                                     uvlinesize >> field_based, uvlinesize >> field_based,
+                                     9, 9 + field_based,
+                                     uvsrc_x, uvsrc_y * (1 << field_based),
+                                     h_edge_pos >> 1, v_edge_pos >> 1);
+            s->vdsp.emulated_edge_mc(uvbuf + 16, ptr_cr,
+                                     uvlinesize >> field_based, uvlinesize >> field_based,
+                                     9, 9 + field_based,
+                                     uvsrc_x, uvsrc_y * (1 << field_based),
+                                     h_edge_pos >> 1, v_edge_pos >> 1);
+            ptr_cb = uvbuf;
+            ptr_cr = uvbuf + 16;
+        }
+    }
+
+    // Apply motion compensation
+    if (bottom_field) {
+        dest_y  += s->linesize;
+        dest_cb += s->uvlinesize;
+        dest_cr += s->uvlinesize;
+    }
+
+    if (field_select) {
+        ptr_y  += linesize;
+        ptr_cb += uvlinesize;
+        ptr_cr += uvlinesize;
+    }
+
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+    pix_op[lowres - 1](dest_y, ptr_y, linesize, h, sx, sy);
+
+    if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+        pix_op[op_index](dest_cb, ptr_cb, uvlinesize, h >> s->chroma_y_shift, uvsx, uvsy);
+        pix_op[op_index](dest_cr, ptr_cr, uvlinesize, h >> s->chroma_y_shift, uvsx, uvsy);
+    }
+
+    // Handle specific quirks
+    if ((s->flags & CODEC_FLAG_INTERLACED_ME) && !s->avctx->lowres) {
+        // FIXME: Not completely correct for interlaced
+    } else if (s->quarter_sample) {
+        // FIXME: Not completely correct for field-based
+    }

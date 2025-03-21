@@ -1,0 +1,181 @@
+switch (tag)
+{
+    case ID_SCE:
+    case ID_LFE:
+        // Mono or LFE element
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        
+        // Read and process header parameters
+        headerByte = (uint8_t)BitBufferRead(bits, 8);
+        bytesShifted = (headerByte & 0x07) >> 1;
+        isCompressed = !(headerByte & 0x01);
+        
+        if (headerByte & 0x08)
+            numSamples = BitBufferRead(bits, 32);
+        
+        if (isCompressed)
+        {
+            // Compressed frame
+            mixBits = (uint8_t)BitBufferRead(bits, 8);
+            mixRes = (int8_t)BitBufferRead(bits, 8);
+            headerByte = (uint8_t)BitBufferRead(bits, 8);
+            modeU = (headerByte >> 4) & 0x0F;
+            denShiftU = headerByte & 0x0F;
+            headerByte = (uint8_t)BitBufferRead(bits, 8);
+            pbFactorU = (headerByte >> 5) & 0x07;
+            numU = headerByte & 0x1F;
+            
+            for (i = 0; i < numU; i++)
+                coefsU[i] = (int16_t)BitBufferRead(bits, 16);
+            
+            if (bytesShifted > 0)
+            {
+                shift = bytesShifted * 8;
+                for (i = 0; i < numSamples; i++)
+                    BitBufferRead(bits, shift);
+            }
+            
+            status = dyn_decomp(&agParams, bits, p->mMixBufferU, numSamples, p->mConfig.bitDepth, &bits1);
+            RequireNoErr(status, goto Exit;);
+            
+            if (bytesShifted > 0)
+            {
+                shift = bytesShifted * 8;
+                for (i = 0; i < numSamples; i++)
+                {
+                    val = p->mMixBufferU[i];
+                    val = (val << shift) | BitBufferRead(bits, shift);
+                    p->mMixBufferU[i] = val;
+                }
+            }
+            
+            unpc_block(p->mMixBufferU, p->mPredictor, numSamples, coefsU, numU, modeU, denShiftU, pb, p->mConfig.bitDepth);
+            
+            if (mixRes != 0)
+                unmix_16(p->mMixBufferU, p->mMixBufferU, numSamples, mixBits, mixRes);
+        }
+        else
+        {
+            // Uncompressed frame
+            shift = 32 - p->mConfig.bitDepth;
+            for (i = 0; i < numSamples; i++)
+                p->mMixBufferU[i] = BitBufferRead(bits, p->mConfig.bitDepth) << shift;
+        }
+        
+        out32 = sampleBuffer + channelIndex;
+        for (i = 0; i < numSamples; i++)
+        {
+            *out32 = p->mMixBufferU[i];
+            out32 += numChannels;
+        }
+        
+        channelIndex++;
+        break;
+        
+    case ID_CPE:
+        // Stereo element
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        RequireAction(channelIndex + 2 <= numChannels, status = kALAC_ParamError; goto Exit;);
+        
+        // Process left and right channels
+        for (j = 0; j < 2; j++)
+        {
+            // Read and process header parameters (similar to mono case)
+            headerByte = (uint8_t)BitBufferRead(bits, 8);
+            bytesShifted = (headerByte & 0x07) >> 1;
+            isCompressed = !(headerByte & 0x01);
+            
+            if (headerByte & 0x08)
+                numSamples = BitBufferRead(bits, 32);
+            
+            if (isCompressed)
+            {
+                // Compressed frame (similar to mono case)
+                mixBits = (uint8_t)BitBufferRead(bits, 8);
+                mixRes = (int8_t)BitBufferRead(bits, 8);
+                headerByte = (uint8_t)BitBufferRead(bits, 8);
+                modeU = (headerByte >> 4) & 0x0F;
+                denShiftU = headerByte & 0x0F;
+                headerByte = (uint8_t)BitBufferRead(bits, 8);
+                pbFactorU = (headerByte >> 5) & 0x07;
+                numU = headerByte & 0x1F;
+                
+                for (i = 0; i < numU; i++)
+                    coefsU[i] = (int16_t)BitBufferRead(bits, 16);
+                
+                if (bytesShifted > 0)
+                {
+                    shift = bytesShifted * 8;
+                    for (i = 0; i < numSamples; i++)
+                        BitBufferRead(bits, shift);
+                }
+                
+                status = dyn_decomp(&agParams, bits, j == 0 ? p->mMixBufferU : p->mMixBufferV, numSamples, p->mConfig.bitDepth, &bits1);
+                RequireNoErr(status, goto Exit;);
+                
+                if (bytesShifted > 0)
+                {
+                    shift = bytesShifted * 8;
+                    for (i = 0; i < numSamples; i++)
+                    {
+                        val = j == 0 ? p->mMixBufferU[i] : p->mMixBufferV[i];
+                        val = (val << shift) | BitBufferRead(bits, shift);
+                        if (j == 0)
+                            p->mMixBufferU[i] = val;
+                        else
+                            p->mMixBufferV[i] = val;
+                    }
+                }
+                
+                unpc_block(j == 0 ? p->mMixBufferU : p->mMixBufferV, p->mPredictor, numSamples, coefsU, numU, modeU, denShiftU, pb, p->mConfig.bitDepth);
+                
+                if (mixRes != 0)
+                    unmix_16(j == 0 ? p->mMixBufferU : p->mMixBufferV, j == 0 ? p->mMixBufferU : p->mMixBufferV, numSamples, mixBits, mixRes);
+            }
+            else
+            {
+                // Uncompressed frame
+                shift = 32 - p->mConfig.bitDepth;
+                for (i = 0; i < numSamples; i++)
+                {
+                    if (j == 0)
+                        p->mMixBufferU[i] = BitBufferRead(bits, p->mConfig.bitDepth) << shift;
+                    else
+                        p->mMixBufferV[i] = BitBufferRead(bits, p->mConfig.bitDepth) << shift;
+                }
+            }
+        }
+        
+        out32 = sampleBuffer + channelIndex;
+        for (i = 0; i < numSamples; i++)
+        {
+            *out32 = p->mMixBufferU[i];
+            out32 += numChannels;
+        }
+        
+        out32 = sampleBuffer + channelIndex + 1;
+        for (i = 0; i < numSamples; i++)
+        {
+            *out32 = p->mMixBufferV[i];
+            out32 += numChannels;
+        }
+        
+        channelIndex += 2;
+        break;
+        
+    case ID_END:
+        goto NoMoreChannels;
+        
+    case ID_FIL:
+        // Skip fill element
+        BitBufferAdvance(bits, 4);
+        extraBits = BitBufferRead(bits, 8);
+        BitBufferAdvance(bits, extraBits * 8);
+        break;
+        
+    default:
+        status = kALAC_ParamError;
+        goto Exit;
+}
+
+BitBufferByteAlign(bits);

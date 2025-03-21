@@ -1,0 +1,73 @@
+for (a = 0; a < packet->payload_packet_len; a++) {
+    if(packet->payload[a] == '\n') {
+      if(a > 0 && packet->payload[a - 1] == '\r') {
+        // End of line found
+        packet->line[packet->parsed_lines].len =
+          (u_int16_t)(&packet->payload[a] - packet->line[packet->parsed_lines].ptr - 1);
+
+        // Check for double newline
+        if (packet->line[packet->parsed_lines].len == 0) {
+          if (!packet->empty_line_position_set) {
+            packet->empty_line_position = a + 1;
+            packet->empty_line_position_set = 1;
+          }
+        }
+
+        // Extract initial bytes after double newline
+        if(packet->empty_line_position_set && packet->empty_line_position > 0 &&
+           packet->payload_packet_len > packet->empty_line_position) {
+          int len = packet->payload_packet_len - packet->empty_line_position;
+          if(len > 0) {
+            if(dataflow->initial_binary_bytes.data == NULL) {
+              dataflow->initial_binary_bytes.data = (u_int8_t *)ndpi_malloc(len);
+              if(dataflow->initial_binary_bytes.data != NULL) {
+                memcpy(dataflow->initial_binary_bytes.data, &packet->payload[packet->empty_line_position], len);
+                dataflow->initial_binary_bytes.len = len;
+              }
+            }
+          }
+        }
+
+        // HTTP response status code check
+        if(packet->parsed_lines == 0 && packet->payload_packet_len > 5) { // Check if it's the first line and long enough
+          if(memcmp(packet->payload, "HTTP", 4) == 0) {
+            int http_major, http_minor, status_code;
+
+            if(sscanf((const char *)&packet->payload[5], "%u.%u %u", &http_major, &http_minor, &status_code) == 3) {
+              packet->http_response.ptr = &packet->payload[9];
+              packet->http_response.len = 3;
+            }
+          }
+        }
+
+        // HTTP header extraction
+        if(packet->parsed_lines < NDPI_MAX_PARSE_LINES_PER_PACKET - 1) {
+          if(packet->host_line.ptr == NULL && packet->line[packet->parsed_lines].len > 5 &&
+             strncasecmp((const char *)packet->line[packet->parsed_lines].ptr, "Host:", 5) == 0) {
+            packet->host_line.ptr = packet->line[packet->parsed_lines].ptr + 5;
+            packet->host_line.len = packet->line[packet->parsed_lines].len - 5;
+            packet->http_num_headers++;
+          } else if(packet->referer_line.ptr == NULL && packet->line[packet->parsed_lines].len > 8 &&
+                    strncasecmp((const char *)packet->line[packet->parsed_lines].ptr, "Referer:", 8) == 0) {
+            packet->referer_line.ptr = packet->line[packet->parsed_lines].ptr + 8;
+            packet->referer_line.len = packet->line[packet->parsed_lines].len - 8;
+            packet->http_num_headers++;
+          } else if(packet->content_line.ptr == NULL && packet->line[packet->parsed_lines].len > 13 &&
+                    strncasecmp((const char *)packet->line[packet->parsed_lines].ptr, "Content-Type:", 13) == 0) {
+            packet->content_line.ptr = packet->line[packet->parsed_lines].ptr + 13;
+            packet->content_line.len = packet->line[packet->parsed_lines].len - 13;
+            packet->http_num_headers++;
+          }
+          // ... other header extractions
+
+          packet->parsed_lines++;
+          if (packet->parsed_lines < NDPI_MAX_PARSE_LINES_PER_PACKET) {
+            packet->line[packet->parsed_lines].ptr = &packet->payload[a + 1];
+            packet->line[packet->parsed_lines].len = 0;
+          }
+        } else {
+          break; // Stop parsing if max lines reached
+        }
+      }
+    }
+  }

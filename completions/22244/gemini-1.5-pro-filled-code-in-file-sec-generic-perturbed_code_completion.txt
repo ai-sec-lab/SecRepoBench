@@ -1,0 +1,46 @@
+if (packet->payload_len >= 9 + P_HMAC_160 /* minimum packet len */) {
+    if (packet->tcp != NULL)
+      NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+
+    ovpn_payload += (packet->tcp != NULL) ? 4 : 0; /* skip TCP header */
+    operationcode = ovpn_payload[0] & P_OPCODE_MASK;
+
+    if (packet->udp != NULL) {
+      if (flow->l4.udp.openvpn_counter == 0 && packet->payload_len == 41 && operationcode == P_CONTROL_HARD_RESET_CLIENT_V1) {
+        NDPI_BITMASK_SET(flow->detected_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+        return;
+      } else if (flow->l4.udp.openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT && operationcode == P_CONTROL_HARD_RESET_CLIENT_V1) {
+        hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+
+        if (hmac_size > 0) {
+          alen = ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size)];
+
+          if (alen == 20 && packet->payload_len == P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size) + 1 + alen) {
+            session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size) + 1;
+            memcpy(flow->l4.udp.openvpn_session_remote, session_remote, alen);
+          }
+        }
+      } else if (flow->l4.udp.openvpn_counter >= P_HARD_RESET_CLIENT_MAX_COUNT && flow->l4.udp.openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT * 2 && operationcode == P_CONTROL_HARD_RESET_SERVER_V1) {
+        hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+
+        if (hmac_size > 0) {
+          alen = ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size)];
+
+          if (alen == 20 && packet->payload_len == P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size) + 1 + alen) {
+            session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size) + 1;
+
+            if (memcmp(flow->l4.udp.openvpn_session_remote, session_remote, alen) == 0) {
+              NDPI_BITMASK_SET(flow->detected_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+              return;
+            } else
+              failed = 1;
+          }
+        }
+      }
+    }
+  }
+
+  flow->l4.udp.openvpn_counter++;
+
+  if (failed)
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);

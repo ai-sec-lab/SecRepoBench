@@ -1,0 +1,58 @@
+while (step) {
+    b = __archive_read_ahead(archivereader, iso9660->logical_block_size, NULL);
+    if (b == NULL) {
+        archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+            "Failed to read full block when scanning ISO9660 directory list");
+        return (ARCHIVE_FATAL);
+    }
+
+    p = b;
+    while (p < b + iso9660->logical_block_size) {
+        if (p[0] == 0) {
+            skip_size = iso9660->logical_block_size;
+            break;
+        }
+
+        multi = calloc(1, sizeof(*multi));
+        if (multi == NULL) {
+            archive_set_error(&archivereader->archive, ENOMEM,
+                "Can't allocate file info");
+            return (ARCHIVE_FATAL);
+        }
+
+        if (parse_file_entry(archivereader, iso9660, p, multi) != ARCHIVE_OK) {
+            free(multi);
+            return (ARCHIVE_FATAL);
+        }
+
+        if (multi->name.s[0] == '.' &&
+            (multi->name.s[1] == '\0' ||
+             (multi->name.s[1] == '.' && multi->name.s[2] == '\0'))) {
+            free(multi);
+        } else if (multi->number == parent->number) {
+            multi->parent = parent;
+            if (parent->contents.last == NULL) {
+                parent->contents.first = multi;
+            } else {
+                parent->contents.last->next = multi;
+            }
+            parent->contents.last = multi;
+            parent->subdirs++;
+        } else {
+            if (multi->cl_offset) {
+                if (multi_extent_add(iso9660, multi) != ARCHIVE_OK) {
+                    free(multi);
+                    return (ARCHIVE_FATAL);
+                }
+            } else {
+                cache_add_entry(iso9660, multi);
+            }
+        }
+
+        p += multi->size;
+        step -= multi->size;
+    }
+
+    __archive_read_consume(archivereader, skip_size);
+    iso9660->current_position += skip_size;
+}

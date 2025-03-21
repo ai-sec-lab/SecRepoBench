@@ -1,0 +1,71 @@
+php_unserialize_data_t var_hash;
+	zval *pmembers;
+	size_t buf_len;
+
+	// Parse the input parameters to retrieve the serialized buffer and its length.
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &serialized_data_buffer, &buf_len) == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	const unsigned char *p = (const unsigned char *)serialized_data_buffer;
+	const unsigned char *s = p + buf_len;
+
+	PHP_VAR_UNSERIALIZE_INIT(var_hash);
+
+	// Check for expected buffer format and unserialize the count of elements in the buffer.
+	if (*p != 'x' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	zend_long count;
+	if (php_var_unserialize(&count, &p, s, &var_hash) != SUCCESS || count < 0) {
+		goto outexcept;
+	}
+
+	// Iterate through the serialized elements, checking for the correct format of each entry.
+	for (zend_long i = 0; i < count; i++) {
+		zval obj;
+		if (php_var_unserialize(&obj, &p, s, &var_hash) != SUCCESS) {
+			goto outexcept;
+		}
+
+		if (Z_TYPE(obj) != IS_OBJECT) {
+			zval_ptr_dtor(&obj);
+			goto outexcept;
+		}
+
+		zval inf;
+		if (php_var_unserialize(&inf, &p, s, &var_hash) != SUCCESS) {
+			zval_ptr_dtor(&obj);
+			goto outexcept;
+		}
+
+		// Validate the unserialized data, ensuring it is an object, and retrieve or create a storage element.
+		spl_object_storage_attach(intern, Z_OBJ(obj), &inf);
+		zval_ptr_dtor(&obj);
+		zval_ptr_dtor(&inf);
+	}
+
+	// Manage references and memory for the unserialized entries, facilitating cross-references.
+	if (*p != ';') {
+		goto outexcept;
+	}
+	++p;
+
+	/* members */
+	if (*p != 'm' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	pmembers = var_tmp_var(&var_hash);
+	if (!php_var_unserialize(pmembers, &p, s + buf_len, &var_hash) || Z_TYPE_P(pmembers) != IS_ARRAY) {
+		goto outexcept;
+	}
+
+	/* copy members */
+	object_properties_load(&intern->std, Z_ARRVAL_P(pmembers));
+
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	return;

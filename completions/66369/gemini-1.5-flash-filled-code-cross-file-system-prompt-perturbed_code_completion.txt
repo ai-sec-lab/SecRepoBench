@@ -1,0 +1,67 @@
+key = aux;
+        k = kh_get(m_s2i, c->comp_hdr->TD_hash, key);
+        if (k == kh_end(c->comp_hdr->TD_hash)) {
+            int new;
+            k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
+            if (new < 0)
+                goto err;
+            else if (new == 0) {
+                // Key already exists.
+                // This should not happen, but if it does, we'll just skip
+                // this tag.
+                aux += 3 + bam_aux2size(aux);
+                continue;
+            }
+            c->comp_hdr->nTL++;
+        }
+        int len = bam_aux2size(aux);
+        cram_map *tm = map_find(c->comp_hdr->tag_encoding_map, key,
+                                 (key[0]<<16) | (key[1]<<8) | key[2]);
+        if (!tm) {
+            // This should not happen, but if it does, we'll just skip this tag.
+            aux += len;
+            continue;
+        }
+        if (tm->codec) {
+            int r = tm->codec->encode(s, tm->codec, aux, len);
+            if (r < 0)
+                goto err;
+        }
+        BLOCK_APPEND(td_b, aux, len);
+        BLOCK_APPEND_CHAR(td_b, 0);
+        aux += len;
+        if (aux - orig >= aux_size - 3)
+            goto err;
+        if (key[0] == 'R' && key[1] == 'G') {
+            brg = (sam_hrec_rg_t *)aux + 1;
+        }
+        if (key[0] == 'M' && key[1] == 'D' && !verbatim_MD) {
+            if (MD->l) {
+                if (cram_encode_MD(filedescriptor, b, c, s, cr, MD,
+                                    &tm->blk) < 0)
+                    goto err;
+            } else {
+                if (no_ref) {
+                    hts_log_warning("MD tag missing for read %s",
+                                    bam_get_qname(b));
+                }
+            }
+        } else if (key[0] == 'N' && key[1] == 'M' && !verbatim_NM) {
+            if (NM >= 0) {
+                if (cram_encode_NM(filedescriptor, b, c, s, cr, NM,
+                                    &tm->blk) < 0)
+                    goto err;
+            } else {
+                if (no_ref) {
+                    hts_log_warning("NM tag missing for read %s",
+                                    bam_get_qname(b));
+                }
+            }
+        }
+        if (tm->codec) {
+            int r = tm->codec->encode(s, tm->codec, aux, len);
+            if (r < 0)
+                goto err;
+        }
+        if (cram_stats_add(c->stats[DS_aux], len) < 0)
+            goto block_err;
