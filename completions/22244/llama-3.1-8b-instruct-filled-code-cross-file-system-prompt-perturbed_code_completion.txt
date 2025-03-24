@@ -1,0 +1,60 @@
+// Analyze the packet payload to determine if it might be an OpenVPN packet.
+// If the payload length is sufficient, adjust the payload pointer if it's over TCP.
+// Extract the operation code from the payload and, if it's over UDP, perform additional checks:
+//   - If the first packet in the flow matches specific length and operation code criteria, identify it as OpenVPN.
+//   - Otherwise, check if the flow's OpenVPN counter is below a threshold and the operation code indicates a client reset.
+//     - If so, attempt to extract and store the session ID from the payload.
+//   - If the counter is within a range and the operation code indicates a server reset, verify the session ID matches.
+//     - If a match is found, identify the protocol as OpenVPN; otherwise, mark the attempt as failed.
+// Increment the flow's OpenVPN counter after processing.
+// If the detection attempt fails, exclude the protocol from the flow's possible protocols.
+if (packet->payload_len >= 5) {
+  if (packet->tcp!= NULL) {
+    ovpn_payload = packet->tcp->payload;
+  } else if (packet->udp!= NULL) {
+    ovpn_payload = packet->udp->payload;
+  }
+
+  operationcode = ovpn_payload[0];
+  alen = ovpn_payload[1];
+
+  if (operationcode == 0x01 && alen == 0x00) {
+    // First packet in the flow, identify as OpenVPN
+    flow->detected_protocol = NDPI_PROTOCOL_OPENVPN;
+    flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+    flow->openvpn_counter = 1;
+  } else if (flow->openvpn_counter < 10 && operationcode == 0x01) {
+    // Client reset, attempt to extract session ID
+    session_remote = ovpn_payload + 2;
+    hmac_size = ovpn_payload[2];
+    if (hmac_size == 0x00) {
+      // Session ID found, identify as OpenVPN
+      flow->detected_protocol = NDPI_PROTOCOL_OPENVPN;
+      flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+      flow->openvpn_counter = 1;
+    } else {
+      // Session ID not found, mark attempt as failed
+      failed = 1;
+    }
+  } else if (flow->openvpn_counter >= 10 && flow->openvpn_counter <= 20 && operationcode == 0x02) {
+    // Server reset, verify session ID matches
+    session_remote = ovpn_payload + 2;
+    hmac_size = ovpn_payload[2];
+    if (hmac_size == 0x00) {
+      // Session ID matches, identify as OpenVPN
+      flow->detected_protocol = NDPI_PROTOCOL_OPENVPN;
+      flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+    } else {
+      // Session ID does not match, mark attempt as failed
+      failed = 1;
+    }
+  }
+
+  if (failed) {
+    // Detection attempt failed, exclude protocol from possible protocols
+    flow->possible_protocols = 0;
+  } else {
+    // Increment OpenVPN counter
+    flow->openvpn_counter++;
+  }
+}

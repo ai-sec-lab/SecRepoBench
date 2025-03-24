@@ -1,0 +1,46 @@
+// <MASK>
+if (packet->payload_len >= 5) {
+  if (packet->proto == IPPROTO_TCP) {
+    ovpn_payload += 5;
+  } else if (packet->proto == IPPROTO_UDP) {
+    if (ovpn_payload[0] == 0x15 && ovpn_payload[1] == 0x26 && ovpn_payload[2] == 0xa1 && ovpn_payload[3] == 0x0f && ovpn_payload[4] == 0x00) {
+      operationcode = ovpn_payload[5];
+      alen = ovpn_payload[6];
+      hmac_size = ovpn_payload[7];
+      if (operationcode == 0x01 && alen == 0x00 && hmac_size == 0x00) {
+        session_remote = ovpn_payload + 8;
+        // Identify the protocol as OpenVPN
+        flow->detected_protocol = NDPI_PROTOCOL_OPENVPN;
+        flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+        flow->openvpn_counter = 0;
+      } else if (flow->openvpn_counter < 10 && (operationcode == 0x01 || operationcode == 0x02)) {
+        session_remote = ovpn_payload + 8;
+        // Attempt to extract and store the session ID from the payload
+        if (operationcode == 0x01) {
+          // Client reset
+          flow->openvpn_counter++;
+        } else {
+          // Server reset
+          if (flow->openvpn_counter >= 2 && flow->openvpn_counter <= 10) {
+            // Verify the session ID matches
+            if (memcmp(session_remote, flow->openvpn_session_id, 16) == 0) {
+              // Identify the protocol as OpenVPN
+              flow->detected_protocol = NDPI_PROTOCOL_OPENVPN;
+              flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+              flow->openvpn_counter = 0;
+            } else {
+              // Mark the attempt as failed
+              failed = 1;
+            }
+          }
+        }
+      }
+    }
+  }
+  // Increment the flow's OpenVPN counter after processing
+  flow->openvpn_counter++;
+  // If the detection attempt fails, exclude the protocol from the flow's possible protocols
+  if (failed) {
+    flow->possible_protocols &= ~NDPI_PROTOCOL_OPENVPN;
+  }
+}

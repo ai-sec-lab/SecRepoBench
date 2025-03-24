@@ -1,0 +1,374 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static size_t dissect_softether_type(enum softether_value_type t,
+                                     struct softether_value *v,
+                                     u_int8_t const *databuffer,
+                                     u_int16_t payload_len) {
+  size_t ret = 0;
+  v->type = t;
+  v->value_size = 0;
+
+  switch (t)
+    {
+    case VALUE_INT:
+      if(payload_len < 4)
+	return 0;
+
+      v->value.value_int = ntohl(get_u_int32_t(databuffer, 0));
+      v->value_size = sizeof(v->value.value_int);
+      ret = v->value_size;
+      break;
+
+    case VALUE_DATA:
+    case VALUE_STR:
+    case 
+    // Handle the VALUE_UNISTR case for extracting and setting the value from the buffer.
+    // Check if the payload length is sufficient for the expected data size.
+    // Set the pointer to the raw data starting after the size indicator.
+    // Verify that the buffer value size is non-zero and does not exceed the payload length.
+    // Adjust the size if handling VALUE_DATA type.
+    // Update the value size and return the total size processed, including size indicator.
+    // <MASK>
+
+    case VALUE_INT64:
+      if(payload_len < 8)
+	return 0;
+
+      v->value.value_int64 = ndpi_ntohll(get_u_int64_t(databuffer, 0));
+      v->value_size = sizeof(v->value.value_int64);
+      ret = v->value_size;
+      break;
+    }
+
+  if(ret > payload_len)
+    return 0;
+
+  return ret;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/softether.c
+static int dissect_softether_ip_port(struct ndpi_flow_struct *flow,
+                                     struct ndpi_packet_struct const *packet) {
+  char * ip_port_separator;
+  size_t ip_len, port_len;
+
+  if(packet->payload_packet_len < NDPI_STATICSTRING_LEN("IP=") +
+     NDPI_STATICSTRING_LEN(",PORT="))
+    return 1;    
+
+  if(strncmp((char *)&packet->payload[0], "IP=", NDPI_STATICSTRING_LEN("IP=")) != 0)    
+    return 1;    
+
+  ip_port_separator = ndpi_strnstr((char const *)packet->payload + NDPI_STATICSTRING_LEN("IP="),
+                                   ",PORT=",
+                                   packet->payload_packet_len - NDPI_STATICSTRING_LEN("IP="));
+  if(ip_port_separator == NULL)    
+    return 1;    
+
+  ip_len = ndpi_min(sizeof(flow->protos.softether.ip) - 1,
+                    ip_port_separator - (char const *)packet->payload -
+                    NDPI_STATICSTRING_LEN("IP="));
+
+  strncpy(flow->protos.softether.ip,
+	  (char const *)packet->payload + NDPI_STATICSTRING_LEN("IP="),
+          ip_len);
+  flow->protos.softether.ip[ip_len] = '\0';
+
+  if (packet->payload_packet_len < (ip_port_separator - (char const *)packet->payload) +
+                                   NDPI_STATICSTRING_LEN(",PORT="))
+    return 1;
+
+  port_len = ndpi_min(sizeof(flow->protos.softether.port) - 1,
+                      packet->payload_packet_len - (ip_port_separator - (char const *)packet->payload) -
+                      NDPI_STATICSTRING_LEN(",PORT="));
+  strncpy(flow->protos.softether.port, ip_port_separator + NDPI_STATICSTRING_LEN(",PORT="),
+          port_len);
+  
+  flow->protos.softether.port[port_len] = '\0';
+
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/btlib.c
+const u_int8_t *bt_decode(const u_int8_t *b, size_t *l, int *ret, bt_parse_data_cb_t *cbd) {
+
+  unsigned int n=0,neg=0;
+  int64_t d = 0;
+  u_int8_t c;
+
+  if(!l || *l == 0) return NULL;
+  if(cbd->level > BDEC_MAXDEPT) goto bad_data;
+  c = *b++; (*l)--;
+  if(c == 'i') { // integer
+    while(*l) {
+      c = *b++; (*l)--;
+      n++;
+      if(c == '-') {
+	if(n != 1) goto bad_data;
+	n--;
+	neg=1;
+	continue;
+      }
+      if(c >= '0' && c <= '9') {
+	if(c == '0' && n > 1 && !d && *b != 'e') goto bad_data;
+	d *= 10;
+	d += c-'0';
+	continue;
+      }
+      if(c != 'e') goto bad_data;
+      break;
+    }
+    if(neg) d=-d;
+    cbd->t = 1;
+    cbd->v.i = neg ? -d:d;
+    return b;
+  }
+  if(c >= '1' && c <= '9') { //string
+    d=c-'0';
+    while(*l) {
+      c = *b++; (*l)--;
+      n++;
+      if(c >= '0' && c <= '9') {
+	if(c == '0' && n > 1 && d == 0) goto bad_data;
+	d *= 10;
+	d += c-'0';
+	continue;
+      }
+      if(c != ':') goto bad_data;
+      break;
+    }
+    if((size_t)d > *l) goto bad_data;
+    cbd->t = 2;
+    cbd->v.s.s = b;
+    cbd->v.s.l = d;
+    b += d;
+    *l -= d;
+    return b;
+  }
+  if(c == 'l') {
+    cbd->level++;
+    do {
+      b = bt_decode(b,l,ret,cbd);
+      if(*ret < 0 || *l == 0) goto bad_data;
+      cb_data(cbd,ret);
+      if(*ret < 0) goto bad_data;
+      cbd->t = 0;
+    } while (*b != 'e' && *l != 0);
+    b++; (*l)--;
+    cbd->level--;
+    return b;
+  }
+  if(c == 'd') {
+    cbd->level++;
+    do {
+      char *ls = cbd->buf + strlen(cbd->buf);
+      int l1 = ls != cbd->buf ? 1:0;
+      if(!(*b >= '1' && *b <= '9')) goto bad_data;
+      b = bt_decode(b,l,ret,cbd);
+      if(*ret < 0 || *l == 0) goto bad_data;
+      if(ls+cbd->v.s.l+l1 < &cbd->buf[sizeof(cbd->buf)-1]) {
+	if(l1)	ls[0]='.';
+	strncpy(ls+l1,(char *)cbd->v.s.s,cbd->v.s.l);
+	ls[cbd->v.s.l+l1]=0;
+      }
+      b = bt_decode(b,l,ret,cbd);
+      if(*ret < 0 || *l == 0) goto bad_data;
+      cb_data(cbd,ret);
+      if(*ret < 0) goto bad_data;
+      cbd->t = 0;
+      *ls = 0;
+    } while (*b != 'e' && l != 0);
+
+    b++; (*l)--;
+    cbd->level--;
+    return b;
+  }
+
+ bad_data:
+  *ret=-1;
+  return b;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/softether.c
+static int dissect_softether_host_fqdn(struct ndpi_flow_struct *flow,
+                                       struct ndpi_packet_struct const *packet) {
+  u_int8_t const *payload = packet->payload;
+  u_int16_t payload_len = packet->payload_packet_len;
+  u_int32_t tuple_count;
+  size_t value_siz;
+  struct softether_value val1, val2;
+  uint8_t got_hostname = 0, got_fqdn = 0;
+
+  if(payload_len < 4)
+    return 1;
+
+  tuple_count = ntohl(get_u_int32_t(payload, 0));
+  if(tuple_count == 0 || tuple_count * 8 > payload_len)
+    return 1;
+
+  payload += 4;
+  payload_len -= 4;
+
+  value_siz = dissect_softether_type(VALUE_DATA, &val1, payload, payload_len);
+  if(value_siz == 0)
+    return 1;
+
+  payload += value_siz;
+  payload_len -= value_siz;
+
+  if(strncmp(val1.value.ptr.value_str, "host_name", value_siz) == 0)
+    got_hostname = 1;
+
+  for (; tuple_count > 0; --tuple_count) {
+    value_siz = dissect_softether_tuples(payload, payload_len, &val1, &val2);
+    if(value_siz == 0)
+      break;
+
+    if(got_hostname == 1) {
+      if(val1.type == VALUE_STR && val1.value_size > 0) {
+	size_t len = ndpi_min(val1.value_size, sizeof(flow->protos.softether.hostname) - 1);
+	      
+	strncpy(flow->protos.softether.hostname, val1.value.ptr.value_str, len);
+	flow->protos.softether.hostname[len] = '\0';
+      }
+	  
+      got_hostname = 0;
+    }
+    if(got_fqdn == 1) {
+      if(val1.type == VALUE_STR && val1.value_size > 0)  {
+	size_t len = ndpi_min(val1.value_size, sizeof(flow->protos.softether.fqdn) - 1);
+	      
+	strncpy(flow->protos.softether.fqdn, val1.value.ptr.value_str, len);
+	flow->protos.softether.fqdn[len] = '\0';
+      }
+	  
+      got_fqdn = 0;
+    }
+
+    if(val2.type == VALUE_DATA && val2.value_size > 0 &&
+       strncmp(val2.value.ptr.value_str, "ddns_fqdn", val2.value_size) == 0)	{
+      got_fqdn = 1;
+    }
+
+    payload += value_siz;
+    payload_len -= value_siz;
+  }
+
+  if(payload_len != 0 || tuple_count != 0)
+    return 1;
+
+  return 0;
+}
+
+// the below code fragment can be found in:
+// example/ndpiReader.c
+void desUnitTest() {
+  struct ndpi_des_struct des;
+  u_int8_t trace = 0;
+  double v[] = {
+    31.908466339111,
+    87.339714050293,
+    173.47660827637,
+    213.92568969727,
+    223.32124328613,
+    230.60134887695,
+    238.09457397461,
+    245.8137512207,
+    251.09228515625,
+    251.09228515625,
+    259.21997070312,
+    261.98754882812,
+    264.78540039062,
+    264.78540039062,
+    270.47451782227,
+    173.3671875,
+    288.34222412109,
+    288.34222412109,
+    304.24795532227,
+    304.24795532227,
+    350.92227172852,
+    384.54431152344,
+    423.25942993164,
+    439.43322753906,
+    445.05981445312,
+    445.05981445312,
+    445.05981445312,
+    445.05981445312
+  };
+  u_int i, num = sizeof(v) / sizeof(double);
+  float alpha = 0.9, beta = 0.5;
+  FILE *fd = fopen("/tmp/des_result.csv", "w");
+
+  assert(ndpi_des_init(&des, alpha, beta, 0.05) == 0);
+
+  if(trace) {
+    printf("\nDouble Exponential Smoothing [alpha: %.1f][beta: %.1f]\n", alpha, beta);
+
+    if(fd)
+      fprintf(fd, "index;value;prediction;lower;upper;anomaly\n");
+  }
+
+  for(i=0; i<num; i++) {
+    double prediction, confidence_band;
+    double lower, upper;
+    int rc = ndpi_des_add_value(&des, v[i], &prediction, &confidence_band);
+
+    lower = prediction - confidence_band, upper = prediction + confidence_band;
+
+    if(trace) {
+      printf("%2u)\t%12.3f\t%.3f\t%12.3f\t%12.3f\t %s [%.3f]\n", i, v[i], prediction, lower, upper,
+	     (rc == 0) ? "LEARNING" : (((v[i] >= lower) && (v[i] <= upper)) ? "OK" : "ANOMALY"),
+	     confidence_band);
+
+      if(fd)
+	fprintf(fd, "%u;%.0f;%.0f;%.0f;%.0f;%s\n",
+		i, v[i], prediction, lower, upper,
+		((rc == 0) || ((v[i] >= lower) && (v[i] <= upper))) ? "OK" : "ANOMALY");
+    }
+  }
+
+  if(fd) fclose(fd);
+
+  ndpi_des_fitting(v, num, &alpha, &beta); /* Compute the best alpha/beta */
+}
+
+// the below code fragment can be found in:
+// example/ndpiReader.c
+void desUnitStressTest() {
+  struct ndpi_des_struct des;
+  u_int8_t trace = 1;
+  u_int i;
+  float alpha = 0.9, beta = 0.5;
+  double init_value = time(NULL) % 1000;
+
+  assert(ndpi_des_init(&des, alpha, beta, 0.05) == 0);
+
+  if(trace) {
+    printf("\nDouble Exponential Smoothing [alpha: %.1f][beta: %.1f]\n", alpha, beta);
+  }
+
+  for(i=0; i<512; i++) {
+    double prediction, confidence_band;
+    double lower, upper;
+    double value = init_value + rand() % 25;
+    int rc = ndpi_des_add_value(&des, value, &prediction, &confidence_band);
+
+    lower = prediction - confidence_band, upper = prediction + confidence_band;
+
+    if(trace) {
+      printf("%2u)\t%12.3f\t%.3f\t%12.3f\t%12.3f\t %s [%.3f]\n", i, value, prediction, lower, upper,
+	     ((rc == 0) || ((value >= lower) && (value <= upper))) ? "OK" : "ANOMALY",
+	     confidence_band);
+    }
+  }
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

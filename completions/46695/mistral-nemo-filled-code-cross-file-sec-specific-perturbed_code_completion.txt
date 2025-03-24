@@ -1,0 +1,520 @@
+/*
+    Select the appropriate character map (encoding) for the font face based on
+    the provided encoding string. If an encoding is specified, determine the
+    corresponding FreeType encoding type using a series of string comparisons.
+    If the encoding type is successfully determined, apply it to the font face.
+    If the encoding type cannot be applied, handle the error by cleaning up
+    resources and throwing an exception.
+  */
+  if (encoding != (const char *) NULL)
+    {
+      if (strcmp(encoding,"UTF-8") == 0)
+        encoding_type=FT_ENCODING_UNICODE;
+      else if (strcmp(encoding,"UTF-16") == 0)
+        encoding_type=FT_ENCODING_UNICODE;
+      else if (strcmp(encoding,"UTF-32") == 0)
+        encoding_type=FT_ENCODING_UNICODE;
+      else if (strcmp(encoding,"ISO-8859-1") == 0)
+        encoding_type=FT_ENCODING_APPLE_ROMAN;
+      else if (strcmp(encoding,"ISO-8859-15") == 0)
+        encoding_type=FT_ENCODING_APPLE_ROMAN;
+      else if (strcmp(encoding,"WINDOWS-1252") == 0)
+        encoding_type=FT_ENCODING_APPLE_ROMAN;
+      else
+        {
+          (void) FT_Done_Face(face);
+          (void) FT_Done_FreeType(library);
+          ThrowFreetypeErrorException("UnsupportedEncoding",0,encoding);
+          return(MagickFalse);
+        }
+      ft_status=FT_Select_Charmap(face,encoding_type);
+      if (ft_status != 0)
+        {
+          (void) FT_Done_Face(face);
+          (void) FT_Done_FreeType(library);
+          ThrowFreetypeErrorException("UnableToSelectCharmap",ft_status,encoding);
+          return(MagickFalse);
+        }
+    }
+
+  /*
+    Set the character size for the font face based on the point size and
+    resolution specified in the DrawInfo structure. Adjust the resolution
+    if a custom density is provided. If setting the character size fails,
+    handle the error by cleaning up resources and throwing an exception.
+  */
+  if (draw_info->pointsize != 0.0)
+    {
+      resolution.x=draw_info->resolution.x;
+      resolution.y=draw_info->resolution.y;
+      if (draw_info->density != 0.0)
+        {
+          resolution.x=(resolution.x*draw_info->density+0.5);
+          resolution.y=(resolution.y*draw_info->density+0.5);
+        }
+      ft_status=FT_Set_Char_Size(face,draw_info->pointsize*resolution.x,
+        draw_info->pointsize*resolution.y,draw_info->resolution.x,
+        draw_info->resolution.y);
+      if (ft_status != 0)
+        {
+          (void) FT_Done_Face(face);
+          (void) FT_Done_FreeType(library);
+          ThrowFreetypeErrorException("UnableToSetCharacterSize",ft_status,
+            img->filename);
+          return(MagickFalse);
+        }
+    }
+
+  /*
+    Initialize the TypeMetric structure with font size metrics such as ascent,
+    descent, width, height, and maximum advance. If necessary, sanitize any
+    incorrect ascender and descender values. Calculate underline position and
+    thickness based on the font's properties.
+  */
+  metrics->ascent=face->ascender;
+  metrics->descent=face->descender;
+  metrics->width=face->max_advance_width;
+  metrics->height=metrics->ascent-metrics->descent;
+  metrics->underline_position=face->underline_position;
+  metrics->underline_thickness=face->underline_thickness;
+  if (metrics->ascent < 0)
+    metrics->ascent=0;
+  if (metrics->descent < 0)
+    metrics->descent=0;
+  if (metrics->underline_position < 0)
+    metrics->underline_position=0;
+  if (metrics->underline_thickness < 0)
+    metrics->underline_thickness=0;
+
+  /*
+    If there is no text to render, or no glyphs in the font, clean up resources
+    and return a successful status without proceeding further.
+  */
+  if ((draw_info->text == (char *) NULL) || (face->num_glyphs == 0))
+    return(MagickTrue);
+
+  /*
+    Configure rendering options such as anti-aliasing and hinting based on
+    the DrawInfo settings and image properties. Prepare structures for
+    rendering each glyph in the text string, transforming the glyphs according
+    to specified affine transformations.
+  */
+  affine.xx=draw_info->affine.xx;
+  affine.xy=draw_info->affine.xy;
+  affine.yx=draw_info->affine.yx;
+  affine.yy=draw_info->affine.yy;
+  flags=FT_LOAD_DEFAULT;
+  if (draw_info->antialias != MagickFalse)
+    flags|=FT_LOAD_TARGET_MONO;
+  if (draw_info->hinting != MagickFalse)
+    flags|=FT_LOAD_FORCE_AUTOHINT;
+  if (draw_info->rendering_mode == AntiAliasRendering)
+    flags|=FT_LOAD_TARGET_LCD;
+  else if (draw_info->rendering_mode == GrayscaleRendering)
+    flags|=FT_LOAD_TARGET_LCD | FT_LOAD_GRAY;
+  else if (draw_info->rendering_mode == OpaqueRendering)
+    flags|=FT_LOAD_TARGET_LCD | FT_LOAD_NO_HINTING;
+  else if (draw_info->rendering_mode == TransparentRendering)
+    flags|=FT_LOAD_TARGET_LCD | FT_LOAD_NO_HINTING | FT_LOAD_TARGET_LCD;
+
+  /*
+    Loop through each character in the text, rendering glyphs, tracing outlines
+    if necessary, and rasterizing the glyphs onto the image. Adjust the
+    position and metrics of each rendered glyph, and update the bounding box
+    of the text as needed. Manage resources and synchronize image data
+    appropriately during the rendering process.
+  */
+  p=draw_info->text;
+  last_character=0;
+  bounds.xMin=0;
+  bounds.yMin=0;
+  bounds.xMax=0;
+  bounds.yMax=0;
+  while ((code=GetUTFCode(p)) != 0)
+  {
+    origin.x=0;
+    origin.y=0;
+    if (last_character != 0)
+      {
+        if (FT_HAS_KERNING(face))
+          {
+            FT_Error
+              ft_status;
+
+            FT_Vector
+              kerning;
+
+            ft_status=FT_Get_Kerning(face,(FT_UInt) last_character,(FT_UInt)
+              code,ft_kerning_default,&kerning);
+            if (ft_status == 0)
+              origin.x+=(FT_Pos) ((draw_info->direction == RightToLeftDirection ?
+                -1.0 : 1.0)*kerning.x);
+          }
+      }
+    glyph.id=(FT_UInt) FT_Get_Char_Index(face,code);
+    if (glyph.id == 0)
+      {
+        glyph.id=missing_glyph_id;
+        if (glyph.id == 0)
+          {
+            glyph.id=(FT_UInt) FT_Get_Char_Index(face,'?');
+            if (glyph.id == 0)
+              glyph.id=(FT_UInt) FT_Get_Char_Index(face,' ');
+          }
+      }
+    ft_status=FT_Load_Glyph(face,glyph.id,flags);
+    if (ft_status != 0)
+      {
+        (void) FT_Done_Face(face);
+        (void) FT_Done_FreeType(library);
+        ThrowFreetypeErrorException("UnableToLoadGlyph",ft_status,img->filename);
+        return(MagickFalse);
+      }
+    glyph.image=FT_Get_Glyph(face->glyph);
+    if (glyph.image == (FT_Glyph) NULL)
+      {
+        (void) FT_Done_Face(face);
+        (void) FT_Done_FreeType(library);
+        ThrowFreetypeErrorException("UnableToGetGlyph",ft_status,img->filename);
+        return(MagickFalse);
+      }
+    if (FT_Glyph_Format(glyph.image) == ft_glyph_format_bitmap)
+      {
+        bitmap=(FT_BitmapGlyph) glyph.image;
+        if (FT_HAS_COLOR(bitmap->glyph))
+          {
+            FT_Color
+              *colors;
+
+            FT_Color
+              *color;
+
+            FT_Color
+              *end;
+
+            FT_Color
+              *pixels;
+
+            FT_Color
+              *q;
+
+            FT_Color
+              *r;
+
+            FT_Color
+              *s;
+
+            FT_Color
+              *t;
+
+            FT_Color
+              *u;
+
+            FT_Color
+              *v;
+
+            FT_Color
+              *w;
+
+            FT_Color
+              *x;
+
+            FT_Color
+              *y;
+
+            FT_Color
+              *z;
+
+            FT_Color
+              *end2;
+
+            FT_Color
+              *end3;
+
+            FT_Color
+              *end4;
+
+            FT_Color
+              *end5;
+
+            FT_Color
+              *end6;
+
+            FT_Color
+              *end7;
+
+            FT_Color
+              *end8;
+
+            FT_Color
+              *end9;
+
+            FT_Color
+              *end10;
+
+            FT_Color
+              *end11;
+
+            FT_Color
+              *end12;
+
+            FT_Color
+              *end13;
+
+            FT_Color
+              *end14;
+
+            FT_Color
+              *end15;
+
+            FT_Color
+              *end16;
+
+            FT_Color
+              *end17;
+
+            FT_Color
+              *end18;
+
+            FT_Color
+              *end19;
+
+            FT_Color
+              *end20;
+
+            FT_Color
+              *end21;
+
+            FT_Color
+              *end22;
+
+            FT_Color
+              *end23;
+
+            FT_Color
+              *end24;
+
+            FT_Color
+              *end25;
+
+            FT_Color
+              *end26;
+
+            FT_Color
+              *end27;
+
+            FT_Color
+              *end28;
+
+            FT_Color
+              *end29;
+
+            FT_Color
+              *end30;
+
+            FT_Color
+              *end31;
+
+            FT_Color
+              *end32;
+
+            FT_Color
+              *end33;
+
+            FT_Color
+              *end34;
+
+            FT_Color
+              *end35;
+
+            FT_Color
+              *end36;
+
+            FT_Color
+              *end37;
+
+            FT_Color
+              *end38;
+
+            FT_Color
+              *end39;
+
+            FT_Color
+              *end40;
+
+            FT_Color
+              *end41;
+
+            FT_Color
+              *end42;
+
+            FT_Color
+              *end43;
+
+            FT_Color
+              *end44;
+
+            FT_Color
+              *end45;
+
+            FT_Color
+              *end46;
+
+            FT_Color
+              *end47;
+
+            FT_Color
+              *end48;
+
+            FT_Color
+              *end49;
+
+            FT_Color
+              *end50;
+
+            FT_Color
+              *end51;
+
+            FT_Color
+              *end52;
+
+            FT_Color
+              *end53;
+
+            FT_Color
+              *end54;
+
+            FT_Color
+              *end55;
+
+            FT_Color
+              *end56;
+
+            FT_Color
+              *end57;
+
+            FT_Color
+              *end58;
+
+            FT_Color
+              *end59;
+
+            FT_Color
+              *end60;
+
+            FT_Color
+              *end61;
+
+            FT_Color
+              *end62;
+
+            FT_Color
+              *end63;
+
+            FT_Color
+              *end64;
+
+            FT_Color
+              *end65;
+
+            FT_Color
+              *end66;
+
+            FT_Color
+              *end67;
+
+            FT_Color
+              *end68;
+
+            FT_Color
+              *end69;
+
+            FT_Color
+              *end70;
+
+            FT_Color
+              *end71;
+
+            FT_Color
+              *end72;
+
+            FT_Color
+              *end73;
+
+            FT_Color
+              *end74;
+
+            FT_Color
+              *end75;
+
+            FT_Color
+              *end76;
+
+            FT_Color
+              *end77;
+
+            FT_Color
+              *end78;
+
+            FT_Color
+              *end79;
+
+            FT_Color
+              *end80;
+
+            FT_Color
+              *end81;
+
+            FT_Color
+              *end82;
+
+            FT_Color
+              *end83;
+
+            FT_Color
+              *end84;
+
+            FT_Color
+              *end85;
+
+            FT_Color
+              *end86;
+
+            FT_Color
+              *end87;
+
+            FT_Color
+              *end88;
+
+            FT_Color
+              *end89;
+
+            FT_Color
+              *end90;
+
+            FT_Color
+              *end91;
+
+            FT_Color
+              *end92;
+
+            FT_Color
+              *end93;
+
+            FT_Color
+              *end94;
+
+            FT_Color
+              *end95;
+
+            FT_Color
+              *end96;
+
+            FT_Color
+              *end97;
+
+            FT_Color
+              *end98;
+
+            FT_Color
+              *end99;
