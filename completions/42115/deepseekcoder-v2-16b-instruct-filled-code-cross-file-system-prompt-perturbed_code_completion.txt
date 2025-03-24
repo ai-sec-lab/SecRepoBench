@@ -1,0 +1,61 @@
+// Parse the payload to extract the DNS name or IP address from the subjectAltName extension.
+// Convert the extracted address to a string format for IPv4 and IPv6.
+// Clean up the extracted DNS name and ensure it is printable.
+// Check if the extracted DNS name matches the host server name.
+// If a match is found, set the matched_name flag and update the server names list in the flow structure.
+// If the server names list is not initialized, create a new entry for the current DNS name.
+// If the server names list already exists, append the current DNS name to it with a comma separator.
+// Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly.
+
+char dNSName[256];
+u_int8_t *name_start = &packet->payload[i + 2]; // Skip the initial pattern 55 1D 11
+u_int8_t name_length = packet->payload[i + 1];
+u_int8_t *name_end = name_start + name_length;
+u_int8_t *name_ptr = name_start;
+
+while (name_ptr < name_end) {
+  u_int8_t type = *name_ptr++;
+  u_int8_t length = *name_ptr++;
+  u_int8_t *value_start = name_ptr;
+  u_int8_t *value_end = value_start + length;
+
+  if (type == 0x81 || type == 0x82 || type == 0x87) { // rfc822Name, dNSName, ipAddress
+    if (length > 0 && value_start < value_end) {
+      char *name_str = (char *)value_start;
+      size_t name_len = value_end - value_start;
+
+      // Clean up the extracted DNS name and ensure it is printable
+      if (ndpi_is_printable_string(name_str, name_len) == 0) {
+        // Check if the extracted DNS name matches the host server name
+        if (connection->host_server_name[0] != '\0' && strncasecmp(name_str, connection->host_server_name, strlen(connection->host_server_name)) == 0) {
+          matched_name = 1;
+
+          // If the server names list is not initialized, create a new entry for the current DNS name
+          if (connection->server_names_list == NULL) {
+            connection->server_names_list = ndpi_strdup(name_str);
+          } else {
+            // If the server names list already exists, append the current DNS name to it with a comma separator
+            char *new_entry = (char *)malloc(strlen(connection->server_names_list) + strlen(name_str) + 2);
+            strcpy(new_entry, connection->server_names_list);
+            strcat(new_entry, ", ");
+            strcat(new_entry, name_str);
+            free(connection->server_names_list);
+            connection->server_names_list = new_entry;
+          }
+
+          // Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly
+          if (ndpi_struct->subprotocols != NULL) {
+            for (struct ndpi_subprotocol *subproto = ndpi_struct->subprotocols; subproto->name != NULL; subproto++) {
+              if (strstr(name_str, subproto->name) != NULL) {
+                ndpi_set_detected_subprotocol(ndpi_struct, flow, subproto->id);
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  name_ptr = value_end;
+}
