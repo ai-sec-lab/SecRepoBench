@@ -1,0 +1,86 @@
+// Parse the TLS handshake message from the packet to determine whether it is a Client Hello or Server Hello.
+if(handshake_type == 0x02 /* Server Hello */) {
+  offset += 2 + session_id_len;
+  extension_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+  offset += 2;
+
+  // Extract the server's cipher suite.
+  ja3.server_cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset]));
+
+  // Extract TLS extensions.
+  for(j = 0; j < extension_len; j += packet->payload[offset+j+1] + 4) {
+    if(packet->payload[offset+j] == 0x00 /* server_name */ ||
+       packet->payload[offset+j] == 0x05 /* status_request */ ||
+       packet->payload[offset+j] == 0x0f /* heartbeat */) {
+      ja3.extensions[packet->payload[offset+j]] = 1;
+    }
+  }
+
+  // Construct a JA3 string based on extracted details.
+  ja3_str_len = snprintf(ja3_str, JA3_STR_LEN, "%04X,%04X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X",
+                         ja3.tls_handshake_version, ja3.server_cipher_suite,
+                         ja3.extensions[0x00], ja3.extensions[0x05], ja3.extensions[0x0f],
+                         0, 0, 0, 0, 0, 0, 0);
+
+  // Compute an MD5 hash of the JA3 string for both Client and Server handshakes to create a unique JA3 fingerprint.
+  ndpi_MD5Init(&ctx);
+  ndpi_MD5Update(&ctx, (const unsigned char*)ja3_str, ja3_str_len);
+  ndpi_MD5Final(md5_hash, &ctx);
+
+  // Store the computed JA3 hash in the flow structure for later analysis or comparison.
+  memcpy(flow->ja3_hash, md5_hash, 16);
+
+  return 1; /* Server Hello */
+} else if(handshake_type == 0x01 /* Client Hello */) {
+  // Parse the cipher suites and extensions, skipping GREASE values.
+  for(i = 0; i < total_len; i++) {
+    if(packet->payload[offset+i] == 0x00 /* cipher suites */) {
+      ja3.cipher_suites_len = packet->payload[offset+i+1];
+      for(j = 0; j < ja3.cipher_suites_len; j += 2) {
+        ja3.cipher_suites[j/2] = ntohs(*((u_int16_t*)&packet->payload[offset+i+2+j]));
+      }
+    } else if(packet->payload[offset+i] == 0x00ff /* GREASE */) {
+      // Skip GREASE values.
+      i += packet->payload[offset+i+1] + 1;
+    } else if(packet->payload[offset+i] == 0x01 /* supported_versions */) {
+      ja3.supported_versions_len = packet->payload[offset+i+1];
+      for(j = 0; j < ja3.supported_versions_len; j += 2) {
+        ja3.supported_versions[j/2] = ntohs(*((u_int16_t*)&packet->payload[offset+i+2+j]));
+      }
+    } else if(packet->payload[offset+i] == 0x0d /* signature_algorithms */) {
+      ja3.signature_algorithms_len = packet->payload[offset+i+1];
+      for(j = 0; j < ja3.signature_algorithms_len; j += 2) {
+        ja3.signature_algorithms[j/2] = ntohs(*((u_int16_t*)&packet->payload[offset+i+2+j]));
+      }
+    } else if(packet->payload[offset+i] == 0x10 /* supported_groups */) {
+      ja3.supported_groups_len = packet->payload[offset+i+1];
+      for(j = 0; j < ja3.supported_groups_len; j += 2) {
+        ja3.supported_groups[j/2] = ntohs(*((u_int16_t*)&packet->payload[offset+i+2+j]));
+      }
+    } else if(packet->payload[offset+i] == 0x1a /* key_share */) {
+      ja3.key_share_len = packet->payload[offset+i+1];
+      for(j = 0; j < ja3.key_share_len; j += 2) {
+        ja3.key_share[j/2] = ntohs(*((u_int16_t*)&packet->payload[offset+i+2+j]));
+      }
+    }
+  }
+
+  // Construct a JA3 string based on extracted details.
+  ja3_str_len = snprintf(ja3_str, JA3_STR_LEN, "%04X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X",
+                         ja3.tls_handshake_version, ja3.cipher_suites_len,
+                         ja3.supported_versions_len, ja3.signature_algorithms_len,
+                         ja3.supported_groups_len, ja3.key_share_len,
+                         0, 0, 0, 0, 0, 0);
+
+  // Compute an MD5 hash of the JA3 string for both Client and Server handshakes to create a unique JA3 fingerprint.
+  ndpi_MD5Init(&ctx);
+  ndpi_MD5Update(&ctx, (const unsigned char*)ja3_str, ja3_str_len);
+  ndpi_MD5Final(md5_hash, &ctx);
+
+  // Store the computed JA3 hash in the flow structure for later analysis or comparison.
+  memcpy(flow->ja3_hash, md5_hash, 16);
+
+  return 2; /* Client Hello */
+}
+
+return 0; /* Not found */
