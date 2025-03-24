@@ -1,0 +1,380 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+exr_result_t
+internal_huf_decompress (
+    exr_decode_pipeline_t* decode,
+    const uint8_t*         compressed,
+    uint64_t               nCompressed,
+    uint16_t*              raw,
+    uint64_t               nRawSize,
+    void*                  spare,
+    uint64_t               sparebytes)
+{
+    uint32_t                            im, iM, nBits;
+    uint64_t                            nBytes;
+    const uint8_t*                      ptr;
+    exr_result_t                        rv;
+    const struct _internal_exr_context* pctxt = NULL;
+    // Retrieve the context from the decode structure if available.
+    // Check if the compressed data size is at least 20 bytes for a valid header.
+    // Validate that 'im' and 'iM' are within acceptable limits.
+    // Ensure there is enough data in the buffer to perform decompression.
+    // Check if fast Huffman decoding is enabled and applicable based on the data size.
+    // If so, initialize and perform fast Huffman decoding.
+    // If not, use a slower, standard Huffman decoding method.
+    // Clear and unpack the Huffman encoding table for use in decoding.
+    // Build the Huffman decoding table based on frequency data.
+    // Execute the appropriate decoding function (fast or standard) and return the result.
+    // <MASK>
+    return rv;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_huf.c
+exr_result_t
+internal_huf_compress (
+    uint64_t*       encbytes,
+    void*           out,
+    uint64_t        outsz,
+    const uint16_t* raw,
+    uint64_t        nRaw,
+    void*           spare,
+    uint64_t        sparebytes)
+{
+    uint64_t*  freq;
+    uint32_t*  hlink;
+    uint64_t** fHeap;
+    uint64_t*  scode;
+    uint32_t   im = 0;
+    uint32_t   iM = 0;
+    uint32_t   tableLength, nBits, dataLength;
+    uint8_t*   dataStart;
+    uint8_t*   compressed = (uint8_t*) out;
+    uint8_t*   tableStart = compressed + 20;
+    uint8_t*   tableEnd   = tableStart;
+
+    if (nRaw == 0)
+    {
+        *encbytes = 0;
+        return EXR_ERR_SUCCESS;
+    }
+
+    (void) outsz;
+    if (sparebytes != internal_exr_huf_compress_spare_bytes ())
+        return EXR_ERR_INVALID_ARGUMENT;
+
+    freq  = (uint64_t*) spare;
+    scode = freq + HUF_ENCSIZE;
+    fHeap = (uint64_t**) (scode + HUF_ENCSIZE);
+    hlink = (uint32_t*) (fHeap + HUF_ENCSIZE);
+
+    countFrequencies (freq, raw, nRaw);
+
+    hufBuildEncTable (freq, &im, &iM, hlink, fHeap, scode);
+
+    hufPackEncTable (freq, im, iM, &tableEnd);
+
+    tableLength =
+        (uint32_t) (((uintptr_t) tableEnd) - ((uintptr_t) tableStart));
+    dataStart = tableEnd;
+
+    nBits      = (uint32_t) hufEncode (freq, raw, nRaw, iM, dataStart);
+    dataLength = (nBits + 7) / 8;
+
+    writeUInt (compressed, im);
+    writeUInt (compressed + 4, iM);
+    writeUInt (compressed + 8, tableLength);
+    writeUInt (compressed + 12, nBits);
+    writeUInt (compressed + 16, 0); // room for future extensions
+
+    *encbytes =
+        (((uintptr_t) dataStart) + ((uintptr_t) dataLength) -
+         ((uintptr_t) compressed));
+    return EXR_ERR_SUCCESS;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfHuf.cpp
+void
+hufUncompress (
+    const char compressed[], int nCompressed, unsigned short raw[], int nRaw)
+{
+    //
+    // need at least 20 bytes for header
+    //
+    if (nCompressed < 20)
+    {
+        if (nRaw != 0) notEnoughData ();
+
+        return;
+    }
+
+    int im = readUInt (compressed);
+    int iM = readUInt (compressed + 4);
+    // int tableLength = readUInt (compressed + 8);
+    int nBits = readUInt (compressed + 12);
+
+    if (im < 0 || im >= HUF_ENCSIZE || iM < 0 || iM >= HUF_ENCSIZE)
+        invalidTableSize ();
+
+    const char* ptr = compressed + 20;
+
+    uint64_t nBytes = (static_cast<uint64_t> (nBits) + 7) / 8;
+
+    if (ptr + nBytes > compressed + nCompressed)
+    {
+        notEnoughData ();
+        return;
+    }
+
+    //
+    // Fast decoder needs at least 2x64-bits of compressed data, and
+    // needs to be run-able on this platform. Otherwise, fall back
+    // to the original decoder
+    //
+
+    if (FastHufDecoder::enabled () && nBits > 128)
+    {
+        FastHufDecoder fhd (ptr, nCompressed - (ptr - compressed), im, iM, iM);
+
+        // must be nBytes remaining in buffer
+        if (ptr - compressed + nBytes > static_cast<uint64_t> (nCompressed))
+        {
+            notEnoughData ();
+            return;
+        }
+
+        fhd.decode ((unsigned char*) ptr, nBits, raw, nRaw);
+    }
+    else
+    {
+        AutoArray<uint64_t, HUF_ENCSIZE> freq;
+        AutoArray<HufDec, HUF_DECSIZE>   hdec;
+
+        hufClearDecTable (hdec);
+
+        hufUnpackEncTable (
+            &ptr, nCompressed - (ptr - compressed), im, iM, freq);
+
+        try
+        {
+            if (nBits > 8 * (nCompressed - (ptr - compressed))) invalidNBits ();
+
+            hufBuildDecTable (freq, im, iM, hdec);
+            hufDecode (freq, hdec, ptr, nBits, iM, nRaw, raw);
+        }
+        catch (...)
+        {
+            hufFreeDecTable (hdec);
+            throw;
+        }
+
+        hufFreeDecTable (hdec);
+    }
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_piz.c
+exr_result_t
+internal_exr_undo_piz (
+    exr_decode_pipeline_t* decode,
+    const void*            src,
+    uint64_t               packsz,
+    void*                  outptr,
+    uint64_t               outsz)
+{
+    uint8_t*       out  = outptr;
+    uint64_t       nOut = 0;
+    uint8_t *      scratch, *tmp;
+    const uint8_t* packed;
+    int            nx, ny, wcount;
+    uint64_t       nBytes;
+    exr_result_t   rv;
+    uint8_t*       bitmap;
+    uint16_t*      lut;
+    uint8_t*       hufspare;
+    size_t         hufSpareBytes = internal_exr_huf_decompress_spare_bytes ();
+    uint16_t       minNonZero, maxNonZero, maxValue;
+    uint16_t*      wavbuf;
+    uint32_t       hufbytes;
+
+    rv = internal_decode_alloc_buffer (
+        decode,
+        EXR_TRANSCODE_BUFFER_SCRATCH1,
+        &(decode->scratch_buffer_1),
+        &(decode->scratch_alloc_size_1),
+        outsz);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+
+    rv = internal_decode_alloc_buffer (
+        decode,
+        EXR_TRANSCODE_BUFFER_SCRATCH2,
+        &(decode->scratch_buffer_2),
+        &(decode->scratch_alloc_size_2),
+        BITMAP_SIZE * sizeof (uint8_t) + USHORT_RANGE * sizeof (uint16_t) +
+            hufSpareBytes);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+
+    hufspare = decode->scratch_buffer_2;
+    lut      = (uint16_t*) (hufspare + hufSpareBytes);
+    bitmap   = (uint8_t*) (lut + USHORT_RANGE);
+
+    //
+    // Read range compression data
+    //
+
+    memset (bitmap, 0, sizeof (uint8_t) * BITMAP_SIZE);
+
+    nBytes = 0;
+    if (sizeof (uint16_t) * 2 > packsz) return EXR_ERR_CORRUPT_CHUNK;
+
+    packed     = src;
+    minNonZero = unaligned_load16 (packed + nBytes);
+    nBytes += sizeof (uint16_t);
+    maxNonZero = unaligned_load16 (packed + nBytes);
+    nBytes += sizeof (uint16_t);
+
+    if (maxNonZero >= BITMAP_SIZE) return EXR_ERR_CORRUPT_CHUNK;
+
+    if (minNonZero <= maxNonZero)
+    {
+        uint64_t bytesToRead = maxNonZero - minNonZero + 1;
+        if (nBytes + bytesToRead > packsz) return EXR_ERR_CORRUPT_CHUNK;
+
+        memcpy (bitmap + minNonZero, packed + nBytes, bytesToRead);
+        nBytes += bytesToRead;
+    }
+
+    maxValue = reverseLutFromBitmap (bitmap, lut);
+
+    //
+    // Huffman decoding
+    //
+    if (nBytes + sizeof (uint32_t) > packsz) return EXR_ERR_CORRUPT_CHUNK;
+
+    hufbytes = unaligned_load32 (packed + nBytes);
+    nBytes += sizeof (uint32_t);
+
+    if (nBytes + hufbytes > packsz) return EXR_ERR_CORRUPT_CHUNK;
+
+    wavbuf = decode->scratch_buffer_1;
+    rv     = internal_huf_decompress (
+        decode,
+        packed + nBytes,
+        hufbytes,
+        wavbuf,
+        outsz / 2,
+        hufspare,
+        hufSpareBytes);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+
+    //
+    // Wavelet decoding
+    //
+
+    wavbuf = decode->scratch_buffer_1;
+    for (int c = 0; c < decode->channel_count; ++c)
+    {
+        const exr_coding_channel_info_t* curc = decode->channels + c;
+
+        nx     = curc->width;
+        ny     = curc->height;
+        wcount = (int) (curc->bytes_per_element / 2);
+        for (int j = 0; j < wcount; ++j)
+        {
+            wav_2D_decode (wavbuf + j, nx, wcount, ny, wcount * nx, maxValue);
+        }
+        wavbuf += nx * ny * wcount;
+    }
+
+    //
+    // Expand the pixel data to their original range
+    //
+
+    wavbuf = decode->scratch_buffer_1;
+    applyLut (lut, wavbuf, outsz / 2);
+
+    //
+    // Rearrange the pixel data into the format expected by the caller.
+    //
+
+    for (int y = 0; y < decode->chunk.height; ++y)
+    {
+        int cury = y + decode->chunk.start_y;
+
+        scratch = decode->scratch_buffer_1;
+        for (int c = 0; c < decode->channel_count; ++c)
+        {
+            const exr_coding_channel_info_t* curc = decode->channels + c;
+
+            nx = curc->width;
+            ny = curc->height;
+            nBytes =
+                ((uint64_t) curc->width) * ((uint64_t) curc->bytes_per_element);
+
+            if (nBytes == 0) continue;
+
+            tmp = scratch;
+            scratch += ((uint64_t) ny) * nBytes;
+
+            if (curc->y_samples > 1)
+            {
+                if ((cury % curc->y_samples) != 0) continue;
+                tmp += ((uint64_t) (y / curc->y_samples)) * nBytes;
+            }
+            else
+                tmp += ((uint64_t) y) * nBytes;
+
+            memcpy (out, tmp, nBytes);
+            priv_from_native16 (out, nx * (curc->bytes_per_element / 2));
+            out += nBytes;
+            nOut += nBytes;
+        }
+    }
+
+    if (nOut != outsz) return EXR_ERR_CORRUPT_CHUNK;
+    return EXR_ERR_SUCCESS;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_pxr24.c
+exr_result_t
+internal_exr_undo_pxr24 (
+    exr_decode_pipeline_t* decode,
+    const void*            compressed_data,
+    uint64_t               comp_buf_size,
+    void*                  uncompressed_data,
+    uint64_t               uncompressed_size)
+{
+    exr_result_t rv;
+    rv = internal_decode_alloc_buffer (
+        decode,
+        EXR_TRANSCODE_BUFFER_SCRATCH1,
+        &(decode->scratch_buffer_1),
+        &(decode->scratch_alloc_size_1),
+        uncompressed_size);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+    return undo_pxr24_impl (
+        decode,
+        compressed_data,
+        comp_buf_size,
+        uncompressed_data,
+        uncompressed_size,
+        decode->scratch_buffer_1,
+        decode->scratch_alloc_size_1);
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_huf.c
+static void
+hufClearDecTable (HufDec* hdecod)
+{
+    memset (hdecod, 0, sizeof (HufDec) * HUF_DECSIZE);
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

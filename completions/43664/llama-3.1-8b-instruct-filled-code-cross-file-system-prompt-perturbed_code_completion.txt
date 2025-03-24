@@ -1,0 +1,300 @@
+} else if(extension_id == 43 /* supported versions */) {
+  if(extension_len >= 2) {
+    u_int16_t tls_version = ntohs(*((u_int16_t*)&packet->payload[offset+4]));
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [TLS version: 0x%04X]\n", tls_version);
+#endif
+
+    flow->protos.tls_quic.ssl_version = ja3.client.tls_supported_version = tls_version;
+  }
+} else if(extension_id == 16 /* application_layer_protocol_negotiation (ALPN) */ &&
+          offset + 6 < packet->payload_packet_len) {
+  u_int16_t s_offset = offset+4;
+  u_int16_t tot_alpn_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+  char alpn_str[256];
+  u_int8_t alpn_str_len = 0, i;
+
+#ifdef DEBUG_TLS
+  printf("Server TLS [ALPN: block_len=%u/len=%u]\n", extension_len, tot_alpn_len);
+#endif
+  s_offset += 2;
+  tot_alpn_len += s_offset;
+
+  if(tot_alpn_len > packet->payload_packet_len)
+    return 0;
+
+  while(s_offset < tot_alpn_len && s_offset < total_len) {
+    u_int8_t alpn_i, alpn_len = packet->payload[s_offset++];
+
+    if((s_offset + alpn_len) <= tot_alpn_len) {
+#ifdef DEBUG_TLS
+      printf("Server TLS [ALPN: %u]\n", alpn_len);
+#endif
+
+      if(((uint32_t)alpn_str_len+alpn_len+1) < (sizeof(alpn_str)-1)) {
+        if(alpn_str_len > 0) {
+          alpn_str[alpn_str_len] = ',';
+          alpn_str_len++;
+        }
+
+        for(alpn_i=0; alpn_i<alpn_len; alpn_i++)
+        {
+          alpn_str[alpn_str_len+alpn_i] = packet->payload[s_offset+alpn_i];
+        }
+
+        s_offset += alpn_len, alpn_str_len += alpn_len;;
+      } else {
+        ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_UNCOMMON_ALPN);
+        break;
+      }
+    } else {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_UNCOMMON_ALPN);
+      break;
+    }
+  } /* while */
+
+  alpn_str[alpn_str_len] = '\0';
+
+#ifdef DEBUG_TLS
+  printf("Server TLS [ALPN: %s][len: %u]\n", alpn_str, alpn_str_len);
+#endif
+  if(ndpi_is_printable_string(alpn_str, alpn_str_len) == 0)
+    ndpi_set_risk(ndpi_struct, flow, NDPI_INVALID_CHARACTERS);
+
+  if(flow->protos.tls_quic.alpn == NULL)
+    flow->protos.tls_quic.alpn = ndpi_strdup(alpn_str);
+
+  if(flow->protos.tls_quic.alpn!= NULL)
+    tlsCheckUncommonALPN(ndpi_struct, flow);
+
+  snprintf(ja3.server.alpn, sizeof(ja3.server.alpn), "%s", alpn_str);
+
+  /* Replace, with - as in JA3 */
+  for(i=0; ja3.server.alpn[i]!= '\0'; i++)
+    if(ja3.server.alpn[i] == ',') ja3.server.alpn[i] = '-';
+} else if(extension_id == 11 /* ec_point_formats groups */) {
+  u_int16_t s_offset = offset+4 + 1;
+
+#ifdef DEBUG_TLS
+  printf("Server TLS [EllipticCurveFormat: len=%u]\n", extension_len);
+#endif
+  if((s_offset+extension_len-1) <= total_len) {
+    for(i=0; i<extension_len-1 && s_offset+i<packet->payload_packet_len; i++) {
+      u_int8_t s_group = packet->payload[s_offset+i];
+
+#ifdef DEBUG_TLS
+      printf("Server TLS [EllipticCurveFormat: %u]\n", s_group);
+#endif
+
+      if(ja3.server.num_elliptic_curve_point_format < MAX_NUM_JA3)
+        ja3.server.elliptic_curve_point_format[ja3.server.num_elliptic_curve_point_format++] = s_group;
+      else {
+        invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+        printf("Server TLS Invalid num elliptic %u\n", ja3.server.num_elliptic_curve_point_format);
+#endif
+      }
+    }
+  } else {
+    invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+    printf("Server TLS Invalid len %u vs %u\n", s_offset+extension_len, total_len);
+#endif
+  }
+} else if(extension_id == 13 /* signature algorithms */) {
+  int s_offset = offset+extension_offset, safari_signature_algorithms = 0, chrome_signature_algorithms = 0,
+    duplicate_found = 0, last_signature = 0;
+  u_int16_t tot_signature_algorithms_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+
+#ifdef DEBUG_TLS
+  printf("Client TLS [SIGNATURE_ALGORITHMS: block_len=%u/len=%u]\n", extension_len, tot_signature_algorithms_len);
+#endif
+
+  s_offset += 2;
+  tot_signature_algorithms_len = ndpi_min((sizeof(ja3.client.signature_algorithms) / 2) - 1, tot_signature_algorithms_len);
+
+#ifdef TLS_HANDLE_SIGNATURE_ALGORITMS
+  flow->protos.tls_quic.num_tls_signature_algorithms = ndpi_min(tot_signature_algorithms_len / 2, MAX_NUM_TLS_SIGNATURE_ALGORITHMS);
+
+  memcpy(flow->protos.tls_quic.client_signature_algorithms,
+         &packet->payload[s_offset], 2 /* 16 bit */*flow->protos.tls_quic.num_tls_signature_algorithms);
+#endif
+
+  for(i=0; i<tot_signature_algorithms_len && s_offset+i<total_len; i++) {
+    int rc = snprintf(&ja3.client.signature_algorithms[i*2], sizeof(ja3.client.signature_algorithms)-i*2, "%02X", packet->payload[s_offset+i]);
+
+    if(rc < 0) break;
+  }
+
+  for(i=0; i<tot_signature_algorithms_len && s_offset + (int)i + 2 < packet->payload_packet_len; i+=2) {
+    u_int16_t signature_algo = (u_int16_t)ntohs(*((u_int16_t*)&packet->payload[s_offset+i]));
+
+    if(last_signature == signature_algo) {
+      /* Consecutive duplication */
+      duplicate_found = 1;
+      continue;
+    } else {
+      /* Check for other duplications */
+      u_int all_ok = 1;
+
+      for(md5_index=0; md5_index<tot_signature_algorithms_len; md5_index+=2) {
+        if(md5_index!= i && s_offset + (int)md5_index + 2 < packet->payload_packet_len) {
+          u_int16_t j_signature_algo = (u_int16_t)ntohs(*((u_int16_t*)&packet->payload[s_offset+md5_index]));
+
+          if((signature_algo == j_signature_algo)
+             && (i < md5_index) /* Don't skip both of them */) {
+#ifdef DEBUG_HEURISTIC
+            printf("[SIGNATURE] [TLS Signature Algorithm] Skipping duplicate 0x%04X\n", signature_algo);
+#endif
+
+            duplicate_found = 1, all_ok = 0;
+            break;
+          }
+        }
+      }
+
+      if(!all_ok)
+        continue;
+    }
+
+    last_signature = signature_algo;
+
+#ifdef DEBUG_HEURISTIC
+    printf("[SIGNATURE] [TLS Signature Algorithm] 0x%04X\n", signature_algo);
+#endif
+    switch(signature_algo) {
+    case ECDSA_SECP521R1_SHA512:
+      flow->protos.tls_quic.browser_heuristics.is_firefox_tls = 1;
+      break;
+
+    case ECDSA_SECP256R1_SHA256:
+    case ECDSA_SECP384R1_SHA384:
+    case RSA_PKCS1_SHA256:
+    case RSA_PKCS1_SHA384:
+    case RSA_PKCS1_SHA512:
+    case RSA_PSS_RSAE_SHA256:
+    case RSA_PSS_RSAE_SHA384:
+    case RSA_PSS_RSAE_SHA512:
+      chrome_signature_algorithms++, safari_signature_algorithms++;
+#ifdef DEBUG_HEURISTIC
+      printf("[SIGNATURE] [Chrome/Safari] Found 0x%04X [chrome: %u][safari: %u]\n",
+             signature_algo, chrome_signature_algorithms, safari_signature_algorithms);
+#endif
+
+      break;
+    }
+  }
+
+#ifdef DEBUG_HEURISTIC
+  printf("[SIGNATURE] [safari_signature_algorithms: %u][chrome_signature_algorithms: %u]\n",
+         safari_signature_algorithms, chrome_signature_algorithms);
+#endif
+
+  if(flow->protos.tls_quic.browser_heuristics.is_firefox_tls)
+    flow->protos.tls_quic.browser_heuristics.is_safari_tls = 0,
+      flow->protos.tls_quic.browser_heuristics.is_chrome_tls = 0;
+
+  if(safari_signature_algorithms!= 8)
+     flow->protos.tls_quic.browser_heuristics.is_safari_tls = 0;
+
+  if((chrome_signature_algorithms!= 8) || duplicate_found)
+     flow->protos.tls_quic.browser_heuristics.is_chrome_tls = 0;
+
+  /* Avoid Chrome and Safari overlaps, thing that cannot happen with Firefox */
+  if(flow->protos.tls_quic.browser_heuristics.is_safari_tls)
+    flow->protos.tls_quic.browser_heuristics.is_chrome_tls = 0;
+
+  if((flow->protos.tls_quic.browser_heuristics.is_chrome_tls == 0)
+     && duplicate_found)
+    flow->protos.tls_quic.browser_heuristics.is_safari_tls = 1; /* Safari */
+
+#ifdef DEBUG_HEURISTIC
+  printf("[SIGNATURE] [is_firefox_tls: %u][is_chrome_tls: %u][is_safari_tls: %u][duplicate_found: %u]\n",
+         flow->protos.tls_quic.browser_heuristics.is_firefox_tls,
+         flow->protos.tls_quic.browser_heuristics.is_chrome_tls,
+         flow->protos.tls_quic.browser_heuristics.is_safari_tls,
+         duplicate_found);
+#endif
+
+  if(i > 0 && i >= tot_signature_algorithms_len) {
+    ja3.client.signature_algorithms[i*2 - 1] = '\0';
+  } else {
+    ja3.client.signature_algorithms[i*2] = '\0';
+  }
+
+#ifdef DEBUG_TLS
+  printf("Client TLS [SIGNATURE_ALGORITHMS: %s]\n", ja3.client.signature_algorithms);
+#endif
+} else if(extension_id == 10 /* supported groups */) {
+  u_int16_t s_offset = offset+extension_offset + 2;
+
+#ifdef DEBUG_TLS
+  printf("Client TLS [EllipticCurveGroups: len=%u]\n", extension_len);
+#endif
+
+  if((s_offset+extension_len-2) <= total_len) {
+    for(i=0; i<(u_int32_t)extension_len-2 && s_offset + i + 1 < total_len; i += 2) {
+      u_int16_t s_group = ntohs(*((u_int16_t*)&packet->payload[s_offset+i]));
+
+#ifdef DEBUG_TLS
+      printf("Client TLS [EllipticCurve: %u/0x%04X]\n", s_group, s_group);
+#endif
+      if((s_group == 0) || (packet->payload[s_offset+i]!= packet->payload[s_offset+i+1])) {
+        /* Skip GREASE */
+        if(ja3.client.num_elliptic_curve < MAX_NUM_JA3)
+          ja3.client.elliptic_curve[ja3.client.num_elliptic_curve++] = s_group;
+        else {
+          invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+          printf("Client TLS Invalid num elliptic %u\n", ja3.client.num_elliptic_curve);
+#endif
+        }
+      }
+    }
+  } else {
+    invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+    printf("Client TLS Invalid len %u vs %u\n", (s_offset+extension_len-1), total_len);
+#endif
+  }
+} else if(extension_id == 11 /* ec_point_formats groups */) {
+  u_int16_t s_offset = offset+extension_offset + 1;
+
+#ifdef DEBUG_TLS
+  printf("Client TLS [EllipticCurveFormat: len=%u]\n", extension_len);
+#endif
+  if((s_offset+extension_len-1) <= total_len) {
+    for(i=0; i<(u_int32_t)extension_len-1 && s_offset+i < total_len; i++) {
+      u_int8_t s_group = packet->payload[s_offset+i];
+
+#ifdef DEBUG_TLS
+      printf("Client TLS [EllipticCurveFormat: %u]\n", s_group);
+#endif
+
+      if(ja3.client.num_elliptic_curve_point_format < MAX_NUM_JA3)
+        ja3.client.elliptic_curve_point_format[ja3.client.num_elliptic_curve_point_format++] = s_group;
+      else {
+        invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+        printf("Client TLS Invalid num elliptic %u\n", ja3.client.num_elliptic_curve_point_format);
+#endif
+      }
+    }
+  } else {
+    invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+    printf("Client TLS Invalid len %u vs %u\n", s_offset+extension_len, total_len);
+#endif
+  }
+} else if(extension_id == 0 /* server name */) {
+  u_int16_t len;
+
+#ifdef DEBUG_TLS
+  printf("[TLS] Extensions: found server name\n");
+#endif
+  if((offset+extension_offset+4) < packet->payload_packet_len) {
+
+    len = (packet->payload[offset+extension_offset+3] << 8) + packet->payload[offset+extension_offset+4];
+
+    if((offset+extension_offset+5+len) <= packet->payloa

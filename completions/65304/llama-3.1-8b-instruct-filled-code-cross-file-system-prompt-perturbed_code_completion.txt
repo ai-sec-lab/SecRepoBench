@@ -1,0 +1,80 @@
+// Extract the signature algorithms from the packet payload starting from the given offset.
+// Calculate the number of signature algorithms and store it in the appropriate field.
+// Optionally, copy the signature algorithms into a dedicated structure if a specific flag is enabled.
+// Convert each signature algorithm to a string format and append it to a string buffer for logging or further processing.
+// <MASK>
+
+for(i=0; i<tot_signature_algorithms_len && sessoffset + (int)i + 2 < packet->payload_packet_len; i+=2) {
+  u_int16_t signature_algo = (u_int16_t)ntohs(*((u_int16_t*)&packet->payload[sessoffset+i]));
+
+  if(last_signature == signature_algo) {
+    /* Consecutive duplication */
+    duplicate_found = 1;
+    continue;
+  } else {
+    /* Check for other duplications */
+    u_int all_ok = 1;
+
+    for(j=0; j<tot_signature_algorithms_len; j+=2) {
+      if(j!= i && sessoffset + (int)j + 2 < packet->payload_packet_len) {
+        u_int16_t j_signature_algo = (u_int16_t)ntohs(*((u_int16_t*)&packet->payload[sessoffset+j]));
+
+        if((signature_algo == j_signature_algo)
+           && (i < j) /* Don't skip both of them */) {
+#ifdef DEBUG_HEURISTIC
+          printf("[SIGNATURE] [TLS Signature Algorithm] Skipping duplicate 0x%04X\n", signature_algo);
+#endif
+
+          duplicate_found = 1, all_ok = 0;
+          break;
+        }
+      }
+    }
+
+    if(!all_ok)
+      continue;
+  }
+
+  last_signature = signature_algo;
+
+#ifdef DEBUG_HEURISTIC
+  printf("[SIGNATURE] [TLS Signature Algorithm] 0x%04X\n", signature_algo);
+#endif
+  switch(signature_algo) {
+  case ECDSA_SECP521R1_SHA512:
+    flow->protos.tls_quic.browser_heuristics.is_firefox_tls = 1;
+    break;
+
+  case ECDSA_SECP256R1_SHA256:
+  case ECDSA_SECP384R1_SHA384:
+  case RSA_PKCS1_SHA256:
+  case RSA_PKCS1_SHA384:
+  case RSA_PKCS1_SHA512:
+  case RSA_PSS_RSAE_SHA256:
+  case RSA_PSS_RSAE_SHA384:
+  case RSA_PSS_RSAE_SHA512:
+    chrome_signature_algorithms++, safari_signature_algorithms++;
+#ifdef DEBUG_HEURISTIC
+    printf("[SIGNATURE] [Chrome/Safari] Found 0x%04X [chrome: %u][safari: %u]\n",
+           signature_algo, chrome_signature_algorithms, safari_signature_algorithms);
+#endif
+
+    break;
+  }
+
+  // Convert signature algorithm to string and append to ja.client.signature_algorithms_str
+  char signature_str[32];
+  int rc = ndpi_snprintf(signature_str, sizeof(signature_str), "0x%04X", signature_algo);
+  if(rc > 0) {
+    if((uint32_t)i*2 + rc < sizeof(ja.client.signature_algorithms_str)) {
+      if(i > 0) {
+        ja.client.signature_algorithms_str[i*2 - 1] = ',';
+        i--;
+      }
+      memcpy(&ja.client.signature_algorithms_str[i*2], signature_str, rc);
+      ja.client.signature_algorithms_str[i*2 + rc] = '\0';
+    } else {
+      ja.client.signature_algorithms_str[i*2] = '\0';
+    }
+  }
+}

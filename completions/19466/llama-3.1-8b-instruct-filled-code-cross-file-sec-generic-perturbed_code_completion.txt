@@ -1,0 +1,311 @@
+for(i = 9; i < packet->payload_packet_len-4; i++) {
+  /* Organization OID: 2.5.4.10 */
+  if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0a)) {
+    u_int8_t server_len = packet->payload[i+4];
+
+    num_found++;
+    /* what we want is subject certificate, so we bypass the issuer certificate */
+    if(num_found!= 2) continue;
+
+    // packet is truncated... further inspection is not needed
+    if(i+4+server_len >= packet->payload_packet_len) {
+      break;
+    }
+
+    char *server_org = (char*)&packet->payload[i+5];
+
+    u_int len = (u_int)ndpi_min(server_len, buffer_len-1);
+    strncpy(buffer, server_org, len);
+    buffer[len] = '\0';
+
+    // check if organization string are all printable
+    u_int8_t is_printable = 1;
+    for (j = 0; j < len; j++) {
+      if(!ndpi_isprint(buffer[j])) {
+        is_printable = 0;
+        break;
+      }
+    }
+
+    if(is_printable == 1) {
+      snprintf(flow->protos.stun_ssl.ssl.server_organization,
+               sizeof(flow->protos.stun_ssl.ssl.server_organization), "%s", buffer);
+#ifdef DEBUG_TLS
+      printf("Certificate organization: %s\n", flow->protos.stun_ssl.ssl.server_organization);
+#endif
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x1e) && (packet->payload[i+2] == 0x17)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char utcDate[32];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] notBefore [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(utcDate)-1)) {
+        struct tm utc;
+        utc.tm_isdst = -1; /* Not set by strptime */
+
+        strncpy(utcDate, (const char*)&packet->payload[i+4], len);
+        utcDate[len] = '\0';
+
+        /* 141021000000Z */
+        if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc)!= NULL) {
+          flow->protos.stun_ssl.ssl.notBefore = timegm(&utc);
+#ifdef DEBUG_TLS
+          printf("[CERTIFICATE] notBefore %u [%s]\n",
+                 flow->protos.stun_ssl.ssl.notBefore, utcDate);
+#endif
+        }
+      }
+
+      offset += len;
+
+      if((offset+1) < packet->payload_packet_len) {
+        len = packet->payload[offset+1];
+
+        offset += 2;
+
+        if((offset+len) < packet->payload_packet_len) {
+#ifdef DEBUG_TLS
+          printf("[CERTIFICATE] notAfter [len: %u][", len);
+          for(j=0; j<len; j++) printf("%c", packet->payload[offset+j]);
+          printf("]\n");
+#endif
+
+          if(len < (sizeof(utcDate)-1)) {
+            struct tm utc;
+            utc.tm_isdst = -1; /* Not set by strptime */
+
+            strncpy(utcDate, (const char*)&packet->payload[offset], len);
+            utcDate[len] = '\0';
+
+            /* 141021000000Z */
+            if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc)!= NULL) {
+              flow->protos.stun_ssl.ssl.notAfter = timegm(&utc);
+#ifdef DEBUG_TLS
+              printf("[CERTIFICATE] notAfter %u [%s]\n",
+                     flow->protos.stun_ssl.ssl.notAfter, utcDate);
+#endif
+            }
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x0d) && (packet->payload[i+2] == 0x06)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char subjectName[256];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] subjectName [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(subjectName)-1)) {
+        strncpy(subjectName, (const char*)&packet->payload[i+4], len);
+        subjectName[len] = '\0';
+
+        if(strchr(subjectName, '.')!= NULL) {
+          char *domain = strrchr(subjectName, '.');
+
+          if(domain!= NULL) {
+            *domain = '\0';
+            snprintf(flow->protos.stun_ssl.ssl.server_name, sizeof(flow->protos.stun_ssl.ssl.server_name), "%s", subjectName);
+#ifdef DEBUG_TLS
+            printf("Certificate subjectName: %s\n", flow->protos.stun_ssl.ssl.server_name);
+#endif
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x0d) && (packet->payload[i+2] == 0x05)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char subjectName[256];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] subjectName [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(subjectName)-1)) {
+        strncpy(subjectName, (const char*)&packet->payload[i+4], len);
+        subjectName[len] = '\0';
+
+        if(strchr(subjectName, '.')!= NULL) {
+          char *domain = strrchr(subjectName, '.');
+
+          if(domain!= NULL) {
+            *domain = '\0';
+            snprintf(flow->protos.stun_ssl.ssl.server_name, sizeof(flow->protos.stun_ssl.ssl.server_name), "%s", subjectName);
+#ifdef DEBUG_TLS
+            printf("Certificate subjectName: %s\n", flow->protos.stun_ssl.ssl.server_name);
+#endif
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x0d) && (packet->payload[i+2] == 0x04)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char subjectName[256];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] subjectName [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(subjectName)-1)) {
+        strncpy(subjectName, (const char*)&packet->payload[i+4], len);
+        subjectName[len] = '\0';
+
+        if(strchr(subjectName, '.')!= NULL) {
+          char *domain = strrchr(subjectName, '.');
+
+          if(domain!= NULL) {
+            *domain = '\0';
+            snprintf(flow->protos.stun_ssl.ssl.server_name, sizeof(flow->protos.stun_ssl.ssl.server_name), "%s", subjectName);
+#ifdef DEBUG_TLS
+            printf("Certificate subjectName: %s\n", flow->protos.stun_ssl.ssl.server_name);
+#endif
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x0d) && (packet->payload[i+2] == 0x03)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char subjectName[256];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] subjectName [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(subjectName)-1)) {
+        strncpy(subjectName, (const char*)&packet->payload[i+4], len);
+        subjectName[len] = '\0';
+
+        if(strchr(subjectName, '.')!= NULL) {
+          char *domain = strrchr(subjectName, '.');
+
+          if(domain!= NULL) {
+            *domain = '\0';
+            snprintf(flow->protos.stun_ssl.ssl.server_name, sizeof(flow->protos.stun_ssl.ssl.server_name), "%s", subjectName);
+#ifdef DEBUG_TLS
+            printf("Certificate subjectName: %s\n", flow->protos.stun_ssl.ssl.server_name);
+#endif
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x0d) && (packet->payload[i+2] == 0x02)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char subjectName[256];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] subjectName [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(subjectName)-1)) {
+        strncpy(subjectName, (const char*)&packet->payload[i+4], len);
+        subjectName[len] = '\0';
+
+        if(strchr(subjectName, '.')!= NULL) {
+          char *domain = strrchr(subjectName, '.');
+
+          if(domain!= NULL) {
+            *domain = '\0';
+            snprintf(flow->protos.stun_ssl.ssl.server_name, sizeof(flow->protos.stun_ssl.ssl.server_name), "%s", subjectName);
+#ifdef DEBUG_TLS
+            printf("Certificate subjectName: %s\n", flow->protos.stun_ssl.ssl.server_name);
+#endif
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x0d) && (packet->payload[i+2] == 0x01)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char subjectName[256];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] subjectName [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(subjectName)-1)) {
+        strncpy(subjectName, (const char*)&packet->payload[i+4], len);
+        subjectName[len] = '\0';
+
+        if(strchr(subjectName, '.')!= NULL) {
+          char *domain = strrchr(subjectName, '.');
+
+          if(domain!= NULL) {
+            *domain = '\0';
+            snprintf(flow->protos.stun_ssl.ssl.server_name, sizeof(flow->protos.stun_ssl.ssl.server_name), "%s", subjectName);
+#ifdef DEBUG_TLS
+            printf("Certificate subjectName: %s\n", flow->protos.stun_ssl.ssl.server_name);
+#endif
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x0d) && (packet->payload[i+2] == 0x00)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char subjectName[256];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] subjectName [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(subjectName)-1)) {
+        strncpy(subjectName, (const char*)&packet->payload[i+4], len);
+        subjectName[len] = '\0';
+
+        if(strchr(subjectName, '.')!= NULL) {
+          char *domain = strrchr(subjectName, '.');
+
+          if(domain!= NULL) {
+            *domain = '\0';
+            snprintf(flow->protos.stun_ssl.ssl.server_name, sizeof(flow->protos.stun_ssl.ssl.server_name), "%s", subjectName);
+#ifdef DEBUG_TLS
+            printf("Certificate subjectName: %s\n", flow->protos.stun_ssl.ssl.server_name);
+#endif
+          }
+        }
+      }
+    }
+  }
+}

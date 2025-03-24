@@ -1,0 +1,77 @@
+/* Iterate over directory entries in the buffer while there is data to process. */
+	while (step) {
+		struct file_info *file;
+		const unsigned char *entry;
+		int entry_length;
+
+		entry = b;
+		entry_length = (int)__archive_read_iso9660_entry_size(iso9660, entry);
+		if (entry_length < 0) {
+			archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+			    "Failed to parse ISO9660 directory entry");
+			return (ARCHIVE_FATAL);
+		}
+		if (entry_length == 0)
+			break;
+
+		file = next_cache_entry(archivereader, iso9660, &file);
+		if (file == NULL) {
+			archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+			    "Failed to get next file entry");
+			return (ARCHIVE_FATAL);
+		}
+
+		/* Skip entries for '.' and '..' directories. */
+		if (file->name_continues == 0 && file->name.s[0] == '.') {
+			if (file->name.s[1] == '\0' || (file->name.s[1] == '.' && file->name.s[2] == '\0'))
+				continue;
+		}
+
+		/* Manage multi-extent files by collecting their contents into a list. */
+		if (file->contents.first != NULL) {
+			struct file_info *multi;
+			multi = file;
+			while (multi->contents.first != NULL) {
+				multi = multi->contents.first;
+				if (multi->size > 0) {
+					if (multi_extent_add_entry(iso9660, multi) < 0)
+						return (ARCHIVE_FATAL);
+				}
+			}
+		}
+
+		/* For each valid directory entry, add it to the archive structure. */
+		if (archive_entry_filetype(entry) != AE_IFDIR) {
+			if (archive_read_format_iso9660_read_header(archivereader, entry) != ARCHIVE_OK)
+				return (ARCHIVE_FATAL);
+		}
+
+		/* Handle memory allocation and error management for multi-extent file handling. */
+		if (file->contents.first != NULL) {
+			struct file_info *multi;
+			multi = file;
+			while (multi->contents.first != NULL) {
+				multi = multi->contents.first;
+				if (multi->size > 0) {
+					if (multi_extent_add_entry(iso9660, multi) < 0)
+						return (ARCHIVE_FATAL);
+				}
+			}
+		}
+
+		b += entry_length;
+		step -= entry_length;
+	}
+
+	/* Handle memory deallocation for multi-extent file handling. */
+	if (iso9660->multi_extent_files.first != NULL) {
+		struct file_info *multi;
+		multi = iso9660->multi_extent_files.first;
+		while (multi != NULL) {
+			struct file_info *next = multi->next;
+			free(multi);
+			multi = next;
+		}
+		iso9660->multi_extent_files.first = NULL;
+		iso9660->multi_extent_files.last = NULL;
+	}
