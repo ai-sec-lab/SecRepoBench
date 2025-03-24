@@ -1,0 +1,72 @@
+p = b;
+while (step) {
+    struct file_info *file;
+    int entry_size;
+
+    if (step < 34) {
+        archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+            "Directory entry too short: %jd", (intmax_t)step);
+        return (ARCHIVE_FATAL);
+    }
+    entry_size = p[0];
+    if (entry_size == 0) {
+        /* Empty entry, skip it. */
+        step -= 2;
+        p += 2;
+        continue;
+    }
+    if (entry_size + 2 > step) {
+        archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+            "Directory entry extends past end of buffer: %jd", (intmax_t)step);
+        return (ARCHIVE_FATAL);
+    }
+    file = parse_entry(iso9660, p, entry_size);
+    if (file == NULL) {
+        /* Skip entries for '.' and '..' directories. */
+        step -= entry_size + 2;
+        p += entry_size + 2;
+        continue;
+    }
+    if (file->mode & AE_IFMT) {
+        if ((file->mode & AE_IFMT) == AE_IFDIR) {
+            if (file->name.s[0] == '.' && file->name.s[1] == '\0') {
+                /* Skip entries for '.' directories. */
+                step -= entry_size + 2;
+                p += entry_size + 2;
+                continue;
+            }
+            if (file->name.s[0] == '.' && file->name.s[1] == '.' && file->name.s[2] == '\0') {
+                /* Skip entries for '..' directories. */
+                step -= entry_size + 2;
+                p += entry_size + 2;
+                continue;
+            }
+        }
+    }
+    if (file->pz) {
+        /* Manage multi-extent files by collecting their contents into a list. */
+        if (multi == NULL) {
+            multi = file;
+        } else {
+            struct file_info *last;
+
+            last = multi;
+            while (last->next!= NULL)
+                last = last->next;
+            last->next = file;
+        }
+    } else {
+        if (multi!= NULL) {
+            /* For each valid directory entry, add it to the archive structure. */
+            add_to_archive(archivereader, multi);
+            multi = NULL;
+        }
+        add_to_archive(archivereader, file);
+    }
+    step -= entry_size + 2;
+    p += entry_size + 2;
+}
+if (multi!= NULL) {
+    /* Handle memory allocation and error management for multi-extent file handling. */
+    add_to_archive(archivereader, multi);
+}
