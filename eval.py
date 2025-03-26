@@ -246,6 +246,10 @@ def get_targets(local_id, model_names, context_types, prompt_types, test_types, 
 class ParseException(Exception):
     pass
 
+def remove_ansi(text):
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+    return ansi_escape.sub('', text)
+
 def parse_testcase(output):
     local_id, patch, test_type, proc = output
     stderr = proc.stderr.decode(errors='ignore')
@@ -287,6 +291,35 @@ def parse_testcase(output):
     else:
         raise ParseException(f"no matching regex case ({proc.returncode})")
 
+def parse_unittest_libxml2(stdout, result):
+    # libxml2 is weird, doesn't contain a status for passing tests.
+    # Failure is indicated by a list of failing tests after a "## {NAME}" line.
+    # Technically, the "## {NAME}" is the name of a group of unit tests
+    # but we treat NAME as a single unit test since it doesn't list the 
+    # component unit tests that pass.
+    # The failure line after "## {NAME}" is something like:
+    # ./test/valid/781333.xml:4: element a: validity error
+    # A passing test should just list the next "## {NAME}" line or state the 
+    # total, like "Total 9 tests, no errors"
+    re_all = r'^## (?P<name>.*)$'
+    re_failing = r'^## (?P<name>.*)\n.*error : '  # fail
+
+    all_tests = set()
+    all_matches = re.finditer(re_all, stdout, re.MULTILINE)
+    for match in all_matches:
+        all_tests.add(match.group("name"))
+    
+    failing_tests = set()
+    failing_matches = re.finditer(re_failing, stdout, re.MULTILINE)
+    for match in failing_matches:
+        failing_tests.add(match.group("name"))
+    
+    passing_tests = all_tests - failing_tests
+
+    result["pass"] = list(passing_tests)
+    result["fail"] = list(failing_tests)
+    result["total"] = len(all_tests)
+
 def parse_unittest(output, project_name):
     project_name = project_name.lower()
 
@@ -294,13 +327,22 @@ def parse_unittest(output, project_name):
     stderr = proc.stderr.decode(errors='ignore')
     stdout = proc.stdout.decode(errors='ignore')
 
+    # remove ansi escape
+    stderr = remove_ansi(stderr)
+    stdout = remove_ansi(stdout)
+
     result = {
         "pass":  [], # list of str
         "fail":  [], # list of strs or int
         "skip":  [], # list of strs or int
         "total": None  # int
     }
-    
+
+    # libxml2 stdout is weird, handle as special case
+    if project_name == 'libxml2':
+        parse_unittest_libxml2(stdout, result)
+        return result
+
     if not project_name in unittest_patterns:
         raise ParseException(f"no pattern for {project_name}")
 
@@ -354,7 +396,7 @@ def parse_output(output, project_name, report, root="./"):
         except ParseException as e:
             result = "error: " + str(e)
 
-    report[local_id][model_name][context_type][prompt_type][test_type][mode] = result
+    report[local_id][model_name][context_type][prompt_type][mode][test_type] = result
 
     return report
 
@@ -616,8 +658,12 @@ def main():
                     for model in all_report[id].keys():
                         for context in all_report[id][model].keys():
                             for prompt in all_report[id][model][context].keys():
-                                for test in all_report[id][model][context][prompt].keys():
-                                    completed.add((id, model, context, prompt, test))
+                                for mode in all_report[id][model][context][prompt].keys():
+                                    for test in all_report[id][model][context][prompt][mode].keys():
+                                        completed.add((id, model, context, prompt, test, mode))
+            # Remove non-relevant completed
+            targets_comp_format = {target[:6] for target in targets}
+            completed = completed.intersection(targets_comp_format)
 
             # # for now-- report not written, use files
             # for target in targets:
@@ -627,39 +673,41 @@ def main():
             #     if os.path.exists(cache_file):
             #         completed.add((id, model_name, context_type, prompt_type, test_type, mode))
 
-            # Count cached results and identify rate-limited cases
-            cached_count = 0
-            rate_limited_count = 0
-            time_out_count = 0
-            for target in targets:
-                local_id, model_name, context_type, prompt_type, test_type, mode, _ = target
-                cache_file = Path(args.output) / str(local_id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}_mode" / "cache.pkl"
-                if cache_file.exists() and not args.rerun:
-                    try:
-                        with cache_file.open("rb") as f:
-                            cached_data = pickle.load(f)
-                        if "429 Too Many Requests" in cached_data.get('stderr', b'').decode(errors="ignore"):
-                            rate_limited_count += 1
-                            # Remove from completed set to ensure it's rerun
-                            completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
-                        elif cached_data.get('stderr', b'').decode(errors="ignore").startswith("Timeout") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("Truncated") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: container ID file found"):
-                            time_out_count += 1
-                            completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
-                        else:
-                            cached_count += 1
-                    except:
-                        pass
+            # # I don't want to alter what's rerun based on Timeout, Truncated, docker: , or Too Many Requests
+            # # Count cached results and identify rate-limited cases
+            # cached_count = 0
+            # rate_limited_count = 0
+            # time_out_count = 0
+            # for target in targets:
+            #     local_id, model_name, context_type, prompt_type, test_type, mode, _ = target
+            #     cache_file = Path(args.output) / str(local_id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}" / "cache.pkl"
+            #     if cache_file.exists() and not args.rerun:
+            #         try:
+            #             with cache_file.open("rb") as f:
+            #                 cached_data = pickle.load(f)
+            #             stderr = cached_data.get('stderr', b'').decode(errors="ignore")
+            #             if "429 Too Many Requests" in stderr:
+            #                 rate_limited_count += 1
+            #                 # Remove from completed set to ensure it's rerun
+            #                 completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
+            #             elif stderr.startswith("Timeout") or stderr.startswith("Truncated") or stderr.startswith("docker: "):
+            #                 time_out_count += 1
+            #                 completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
+            #             else:
+            #                 cached_count += 1
+            #         except:
+            #             pass
 
-            print(f"Found {cached_count} valid cached results, {rate_limited_count} rate-limited cases, and {time_out_count} time out cases out of {len(targets)} total targets.")
-            if args.rerun:
-                print("Rerunning all targets, including those with cached results.")
+            # print(f"Found {cached_count} valid cached results, {rate_limited_count} rate-limited cases, and {time_out_count} time out cases out of {len(targets)} total targets.")
+            # if args.rerun:
+            #     print("Rerunning all targets, including those with cached results.")
 
             procs = []
             pool_size = min(42, len(targets))
             try:
-                with alive_bar(len(targets)) as bar, Pool(pool_size) as p:
-                    remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
-                    targets_with_output = [(target, args.output, args.rerun) for target in remaining_targets]
+                remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
+                targets_with_output = [(target, args.output, args.rerun) for target in remaining_targets]
+                with alive_bar(len(targets_with_output)) as bar, Pool(pool_size) as p:
                     for proc in p.imap_unordered(proc_runner, targets_with_output):
                         procs.append(proc)
                         bar()
@@ -671,10 +719,11 @@ def main():
             report = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format the current date and time
             new_report_file = Path(args.output) / f"report_eval_{timestamp}.json"
+            
             if not args.rerun:
                 # useful when parse_output has changed, and we already have the stdout and stderr
                 for complete in completed:
-                    id, model_name, context_type, prompt_type, test_type, mode = complete
+                    local_id, model_name, context_type, prompt_type, test_type, mode = complete
                     test_patch = f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
 
                     cache_file = f'/data/oss-fuzz-bench/output/{local_id}/{test_patch}/cache.pkl'
@@ -685,7 +734,7 @@ def main():
                     stderr = cache['stderr']
                     returncode = cache['returncode']
 
-                    output = (id, model_name, context_type, prompt_type, test_type, mode, {
+                    output = (local_id, model_name, context_type, prompt_type, test_type, mode, {
                         "stdout": stdout,
                         "stderr": stderr,
                         "returncode": returncode
@@ -702,7 +751,7 @@ def main():
                         parse_output(output, data[str(local_id)]["project_name"], report=report)
 
                     bar()
-            
+
             json.dump(report, new_report_file.open("w"), indent=4)
 
 
