@@ -16,24 +16,29 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import os
 from collections import defaultdict
+import selectors
 
 from projects import *
 
 
+def get_c_cpp_file(base_path: str):
+    c_path = base_path + '.c'
+    cpp_path = base_path + '.cpp'
+    if os.path.exists(c_path):
+        path = c_path
+    elif os.path.exists(cpp_path):
+        path = cpp_path
+    else:
+        print(f'This file does not exist with a c or cpp extension: {base_path}')
+        return
+    with open(path, 'r') as f:
+        content = f.read()
+    return content
+
+
 def make_mod_file(id, model_name, context_type, prompt_type, mode):
     # get sec file base
-    mask_file_c = f'descriptions/{id}/mask_{mode}.c'
-    mask_file_cpp = f'descriptions/{id}/mask_{mode}.cpp'
-    if Path(mask_file_c).exists():
-        mask_file = mask_file_c
-    elif Path(mask_file_cpp).exists():
-        mask_file = mask_file_cpp
-    else:
-        print(f'ID {id}: mask file {mode} is missing in descriptions/{id}')
-        return
-    
-    with open(mask_file, 'r') as f:
-        sec_mask_content = f.read()
+    sec_mask_content = get_c_cpp_file(f'descriptions/{id}/mask_{mode}')
 
     # get code completion
     code_completion_file = f'completions/{id}/{model_name}-filled-code-{context_type}-{prompt_type}-{mode}_code_completion.txt'
@@ -154,7 +159,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         f"  cp -f /patches/{patch_file_name} \\$GIT_DIR/{changed_file}\n"
         # retry loop for arvo compile
         "  ATTEMPTS=0\n"
-        "  MAX_ATTEMPTS=5\n"
+        "  MAX_ATTEMPTS=3\n"
         "  SUCCESS=false\n"
         "  while [ \\$ATTEMPTS -lt \\$MAX_ATTEMPTS ]; do\n"
         "    ATTEMPTS=\\$((ATTEMPTS+1))\n"
@@ -167,34 +172,16 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         "      break\n"
         "    else\n"
         "      echo \\\"arvo compile failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
+        "      sleep 2\n"
         "    fi\n"
         "  done\n"
         "  if [ \\\"\\$SUCCESS\\\" = false ]; then\n"
         "    echo \\\"arvo compile failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
         "    exit 1\n"
         "  fi\n"
-        # Try running `arvo run` up to 10 times
-        "  ATTEMPTS=0\n"
-        "  MAX_ATTEMPTS=10\n"
-        "  SUCCESS=false\n"
-        "  while [ \\$ATTEMPTS -lt \\$MAX_ATTEMPTS ]; do\n"
-        "    ATTEMPTS=\\$((ATTEMPTS+1))\n"
-        "    echo \\\"Attempt #\\$ATTEMPTS: Running arvo run...\\\"\n"
-        "    arvo run\n"
-        "    EXIT_CODE=\\$?\n"
-        "    if [ \\$EXIT_CODE -eq 0 ]; then\n"
-        "      echo \\\"arvo run succeeded on attempt #\\$ATTEMPTS\\\"\n"
-        "      SUCCESS=true\n"
-        "      break\n"
-        "    else\n"
-        "      echo \\\"arvo run failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
-        "    fi\n"
-        "  done\n"
-        "  if [ \\\"\\$SUCCESS\\\" = false ]; then\n"
-        "    echo \\\"arvo run failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
-        "    exit 1\n"
-        "  fi\n"
-        "  exit 0\n\""
+        # Note: arvo run can give inconsistent answers sometimes (crash sometimes, pass sometimes), not sure how to handle this
+        "  arvo run\n"
+        "  \""
     )
 
     unittest_content = (
@@ -226,7 +213,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         # move patch file
         f"  cp -f /patches/{patch_file_name} \\$GIT_DIR/{changed_file}\n"
         "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\n"
-        "  exit \\$?\""
+        "  \""
     )
 
     with open(testcase_file, 'w') as f:
@@ -284,7 +271,7 @@ def parse_testcase(output):
             re.search(r"ninja: build stopped: subcommand failed.", stdout)
         ):
         raise ParseException(f"compile error ({proc.returncode})")
-    
+
     # cases that sometimes mean pass
     elif (
             re.search(r"NOTE: fuzzing was not performed", stderr) or
@@ -405,10 +392,75 @@ def write_output(output, root="./"):
             "timestamp": datetime.now().isoformat()
         }, f)
 
+def read_limited_output(proc, timeout=3000):
+    # 50 MB limit -- so that our disk space isn't filled up, 
+    # and passing cases should be much less than this. 
+    # Truncated failing cases will still fail.
+    max_output = 50 * 1024 * 1024
+    TRUNCATION_NOTICE = b"\n[output truncated]\n"
+
+    selector = selectors.DefaultSelector()
+    stdout_chunks, stderr_chunks = [], []
+    stdout_total, stderr_total = 0, 0
+    stdout_truncated, stderr_truncated = False, False
+
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    selector.register(proc.stderr, selectors.EVENT_READ)
+
+    start = time.time()
+    time_elapsed = 0
+
+    while selector.get_map() and (time_elapsed < timeout) and not (stdout_truncated and stderr_truncated):
+        for key, _ in selector.select(timeout=1):
+            data = key.fileobj.read1(4096)  # non-blocking chunk read
+            if not data:
+                selector.unregister(key.fileobj)
+                continue
+
+            if key.fileobj is proc.stdout:
+                if stdout_total < max_output:
+                    chunk = data[:max_output - stdout_total]
+                    stdout_chunks.append(chunk)
+                    stdout_total += len(chunk)
+                    if stdout_total >= max_output:
+                        stdout_truncated = True
+                else:
+                    stdout_truncated = True
+
+            elif key.fileobj is proc.stderr:
+                if stderr_total < max_output:
+                    chunk = data[:max_output - stderr_total]
+                    stderr_chunks.append(chunk)
+                    stderr_total += len(chunk)
+                    if stderr_total >= max_output:
+                        stderr_truncated = True
+                else:
+                    stderr_truncated = True
+        
+        time_elapsed = time.time() - start
+
+    # Ensure process is killed if still running
+    proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+    if stdout_truncated:
+        stdout_chunks.append(TRUNCATION_NOTICE)
+    if stderr_truncated:
+        stderr_chunks.append(TRUNCATION_NOTICE)
+    
+    # we stopped early if process timed out or stdout/stderr filled up
+    timed_out = time_elapsed >= timeout
+    filled_up = stdout_truncated and stderr_truncated
+
+    return b''.join(stdout_chunks), b''.join(stderr_chunks), timed_out, filled_up
+
 def proc_runner(target_with_output_path_and_rerun):
     target, output_path, rerun = target_with_output_path_and_rerun
     local_id, model_name, context_type, prompt_type, test_type, mode, cmd = target
-    print(f"Running {local_id} {model_name} {context_type} {prompt_type} {test_type} {mode}")
+    print(f"Running {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
 
     # get unique container id
     container_id = f"{local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}"
@@ -419,55 +471,47 @@ def proc_runner(target_with_output_path_and_rerun):
     for attempt in range(max_retries):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
 
-        try:
-            stdout, stderr = proc.communicate(timeout=3000)
+        stdout, stderr, timed_out, filled_up = read_limited_output(proc, timeout=3000)
 
-        except subprocess.TimeoutExpired:
-            print(f"Timeout: {local_id} {model_name} {context_type} {prompt_type} {test_type} {mode}")
+        return_code = proc.returncode
+        if timed_out or filled_up:
+            return_code = -1
 
-            try:
-                cleanup_proc = subprocess.run(['docker', 'rm', '-f', container_id], 
-                                              stdout=subprocess.PIPE, 
-                                              stderr=subprocess.PIPE)
-
-            except subprocess.SubprocessError as e:
-                print(f"Failed to clean up the container. It may have already exited or been removed. Error: {e}")
-
-            proc.kill()
-            stdout, stderr = proc.communicate()  # Avoid zombie process
+            if timed_out:
+                print(f"Timeout: {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
+                stderr = b"Timeout\n" + stderr
+            if filled_up:
+                print(f"Truncated: {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
+                stderr = b"Truncated\n" + stderr
 
             stdout = stdout or b""
             stderr = stderr or b""
-
-            return local_id, model_name, context_type, prompt_type, test_type, mode, {
-                "stdout": stdout,
-                "stderr": b"Timeout\n" + stderr,  # Prepend Timeout message
-                "returncode": -1
-            }
 
         if "429 Too Many Requests" not in stderr.decode(errors='ignore'):
             break
         if attempt < max_retries - 1:
             delay = base_delay * (2 ** attempt) + random.uniform(0, 10)
-            print(f"Rate limit reached. Retrying in {delay:.2f} seconds...")
+            print(f"Rate limit reached. Retrying in {delay:.2f} seconds...", flush=True)
             time.sleep(delay)
-    else:
-        print(f"Failed to run {local_id} {model_name} {context_type} {prompt_type} {test_type} {mode} after {max_retries} attempts")
+        else:
+            print(f"Failed to run {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type} after {max_retries} attempts", flush=True)
 
-    try:
-        cleanup_proc = subprocess.run(['docker', 'rm', '-f', container_id], 
-                                        stdout=subprocess.PIPE, 
-                                        stderr=subprocess.PIPE)
+    # Always attempt to remove the container, just to be sure it's gone
+    subprocess.run(['docker', 'rm', '-f', container_id], 
+                   stdout=subprocess.DEVNULL, 
+                   stderr=subprocess.DEVNULL)
 
-    except subprocess.SubprocessError as e:
-        pass
-
-    print(f"Finished {local_id} {model_name} {context_type} {prompt_type} {test_type} {mode}")
-    return local_id, model_name, context_type, prompt_type, test_type, mode, {
+    output = local_id, model_name, context_type, prompt_type, test_type, mode, {
         "stdout": stdout,
         "stderr": stderr,
-        "returncode": proc.returncode
+        "returncode": return_code
     }
+
+    # write to output files
+    write_output(output, output_path)
+
+    print(f"Finished {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
+    return output
 
 def get_remaining(targets, completed):
     return [target for target in targets if (target[0], target[1], target[2], target[3], target[4], target[5]) not in completed]
@@ -528,7 +572,7 @@ def main():
                                     'prompt_type': prompt_type,
                                     'mode': mode})
 
-            num_workers = min(96, len(combs))
+            num_workers = min(92, len(combs))
 
             with ProcessPoolExecutor(max_workers=num_workers) as executor:
                 future_to_stem = {
@@ -562,26 +606,26 @@ def main():
         if args.action == "eval":
             targets = [c for id in targets for c in get_targets(id, args.model_names, args.context_types, args.prompt_types, args.tests, args.modes, root=root)]
 
-            # Get completed runs from existing report
+            # Get completed runs from existing eval report
             completed = set()
-            # all_report_file = Path(args.output) / f"report.json"
-            # if all_report_file.exists() and not args.rerun:
-            #     with open(all_report_file, 'r') as f:
-            #         all_report = json.load(f)
-            #     for id in all_report.keys():
-            #         for model in all_report[id].keys():
-            #             for context in all_report[id][model].keys():
-            #                 for prompt in all_report[id][model][context].keys():
-            #                     for test in all_report[id][model][context][prompt].keys():
-            #                         completed.add((id, model, context, prompt, test))
+            all_report_file = Path(args.output) / f"report_eval.json"
+            if all_report_file.exists() and not args.rerun:
+                with open(all_report_file, 'r') as f:
+                    all_report = json.load(f)
+                for id in all_report.keys():
+                    for model in all_report[id].keys():
+                        for context in all_report[id][model].keys():
+                            for prompt in all_report[id][model][context].keys():
+                                for test in all_report[id][model][context][prompt].keys():
+                                    completed.add((id, model, context, prompt, test))
 
-            # for now-- report not written, use files
-            for target in targets:
-                id, model_name, context_type, prompt_type, test_type, mode, _ = target
-                test_patch = f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
-                cache_file = f'/data/oss-fuzz-bench/output/{id}/{test_patch}/cache.pkl'
-                if os.path.exists(cache_file):
-                    completed.add((id, model_name, context_type, prompt_type, test_type, mode))
+            # # for now-- report not written, use files
+            # for target in targets:
+            #     id, model_name, context_type, prompt_type, test_type, mode, _ = target
+            #     test_patch = f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
+            #     cache_file = f'/data/oss-fuzz-bench/output/{id}/{test_patch}/cache.pkl'
+            #     if os.path.exists(cache_file):
+            #         completed.add((id, model_name, context_type, prompt_type, test_type, mode))
 
             # Count cached results and identify rate-limited cases
             cached_count = 0
@@ -598,7 +642,7 @@ def main():
                             rate_limited_count += 1
                             # Remove from completed set to ensure it's rerun
                             completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
-                        elif cached_data.get('stderr', b'').decode(errors="ignore").startswith("Timeout") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: container ID file found"):
+                        elif cached_data.get('stderr', b'').decode(errors="ignore").startswith("Timeout") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("Truncated") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: container ID file found"):
                             time_out_count += 1
                             completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
                         else:
@@ -611,7 +655,7 @@ def main():
                 print("Rerunning all targets, including those with cached results.")
 
             procs = []
-            pool_size = min(48, len(targets))
+            pool_size = min(42, len(targets))
             try:
                 with alive_bar(len(targets)) as bar, Pool(pool_size) as p:
                     remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
@@ -626,8 +670,9 @@ def main():
             # Process all targets, including cached ones
             report = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format the current date and time
-            new_report_file = Path(args.output) / f"report_{timestamp}.json"
+            new_report_file = Path(args.output) / f"report_eval_{timestamp}.json"
             if not args.rerun:
+                # useful when parse_output has changed, and we already have the stdout and stderr
                 for complete in completed:
                     id, model_name, context_type, prompt_type, test_type, mode = complete
                     test_patch = f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
@@ -647,7 +692,6 @@ def main():
                     })
 
                     parse_output(output, data[str(local_id)]["project_name"], report=report)
-                    write_output(output, root=args.output)
 
             with alive_bar(len(targets)) as bar:
                 for target in targets:
@@ -656,7 +700,6 @@ def main():
                     
                     if output:
                         parse_output(output, data[str(local_id)]["project_name"], report=report)
-                        write_output(output, root=args.output)
 
                     bar()
             

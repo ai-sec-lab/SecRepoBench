@@ -1,6 +1,7 @@
 import json
 from collections import defaultdict
 
+
 def combine_reports(base_report_path, update_report_path):
     with open(base_report_path, 'r') as f:
         base_report = json.load(f)
@@ -29,6 +30,25 @@ def combine_reports(base_report_path, update_report_path):
 
 
 if __name__ == "__main__":
-    base_report_path = "/home/cdilgren/project_benchmark/oss-fuzz-bench/output/report.json"
-    update_report_path = "/home/cdilgren/project_benchmark/oss-fuzz-bench/output/report_sec-generic_api-models_bm25_1378_1427_1468_1699_1832.json"
-    combine_reports(base_report_path, update_report_path)
+    base_report_path = "/data/oss-fuzz-bench/output/report_eval.json"
+
+    update_reports = [
+        "report_eval_llama-70b_cross-file_system-prompt",
+        "report_eval_llama-70b_cross-file_sec-specific",
+        "report_eval_llama-70b_cross-file_sec-generic",
+
+        "report_eval_deepseek_cross-file_system-prompt",
+        "report_eval_deepseek_cross-file_sec-specifc",
+        "report_eval_deepseek_cross-file_sec-generic",
+
+        "report_eval_llama-8b_cross-file_system-prompt",
+        "report_eval_llama-8b_cross-file_sec-specific",
+        "report_eval_llama-8b_cross-file_sec-generic",
+
+        "report_eval_closed_weight_models_in-file_sec-specific_perturbed",
+    ]
+
+    for update_report in update_reports:
+        update_report_path = f"/data/oss-fuzz-bench/output/{update_report}.json"
+
+        combine_reports(base_report_path, update_report_path)
