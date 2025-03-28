@@ -1,0 +1,84 @@
+/*
+ * spotify.c
+ *
+ * Copyright (C) 2011-18 by ntop.org
+ *
+ * This file is part of nDPI, an open source deep packet inspection
+ * library based on the OpenDPI and PACE technology by ipoque GmbH
+ *
+ * nDPI is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * nDPI is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with nDPI.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "ndpi_protocol_ids.h"
+
+#define NDPI_CURRENT_PROTO NDPI_PROTOCOL_SPOTIFY
+
+#include "ndpi_api.h"
+
+
+static void ndpi_int_spotify_add_connection(struct ndpi_detection_module_struct *ndpi_struct,
+					    struct ndpi_flow_struct *flow,
+					    u_int8_t due_to_correlation)
+{
+  ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SPOTIFY, NDPI_PROTOCOL_UNKNOWN);
+}
+
+
+static void ndpi_check_spotify(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *stream)
+{
+  struct ndpi_packet_struct *packet = &stream->packet;
+  // const u_int8_t *packet_payload = packet->payload;
+  u_int32_t payload_len = packet->payload_packet_len;
+
+  if
+  // Check if the packet is a UDP packet, specifically targeting a known Spotify port.
+  // If it is, verify the payload for a specific Spotify identifier to recognize Spotify traffic.
+  // If recognized, log the detection and mark the flow structure as a Spotify connection, returning early from the function.
+  // If the packet is not a UDP packet, check if it is a TCP packet and analyze the payload for specific byte patterns
+  // indicative of Spotify, logging and marking the protocol as Spotify if detected.
+  // Further, analyze IP packets by checking if the source or destination IP addresses fall within specific known Spotify
+  // IP ranges. If they do, log the detection and set the detected protocol as Spotify, then return from the function.
+  // <MASK>
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, stream);
+}
+
+void ndpi_search_spotify(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &flow->packet;
+
+  NDPI_LOG_DBG(ndpi_struct, "search spotify\n");
+
+  /* skip marked packets */
+  if (packet->detected_protocol_stack[0] != NDPI_PROTOCOL_SPOTIFY) {
+    if (packet->tcp_retransmission == 0) {
+      ndpi_check_spotify(ndpi_struct, flow);
+    }
+  }
+}
+
+
+void init_spotify_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask)
+{
+  ndpi_set_bitmask_protocol_detection("SPOTIFY", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_SPOTIFY,
+				      ndpi_search_spotify,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_TCP_OR_UDP_WITH_PAYLOAD,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+

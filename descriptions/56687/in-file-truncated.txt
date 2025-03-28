@@ -1,0 +1,892 @@
+<｜begin▁of▁sentence｜>/*
+** io.c - IO class
+*/
+
+#include "mruby.h"
+#include "mruby/array.h"
+#include "mruby/class.h"
+#include "mruby/data.h"
+#include "mruby/hash.h"
+#include "mruby/string.h"
+#include "mruby/variable.h"
+#include "mruby/ext/io.h"
+#include "mruby/error.h"
+#include "mruby/internal.h"
+#include "mruby/presym.h"
+
+#include <sys/types.h>
+#include <sys/stat.h>
+
+#if defined(_WIN32) || defined(_WIN64)
+  #include <winsock.h>
+  #include <io.h>
+  #include <basetsd.h>
+  #define open  _open
+  #define close _close
+  #define dup _dup
+  #define dup2 _dup2
+  #define read  _read
+  #define write _write
+  #define lseek _lseek
+  #define isatty _isatty
+  #define WEXITSTATUS(x) (x)
+  typedef int fsize_t;
+  typedef long ftime_t;
+  typedef long fsuseconds_t;
+  typedef int fmode_t;
+  typedef int fssize_t;
+
+  #ifndef O_TMPFILE
+    #define O_TMPFILE O_TEMPORARY
+  #endif
+
+#else
+  #include <sys/wait.h>
+  #include <sys/time.h>
+  #include <unistd.h>
+  typedef size_t fsize_t;
+  typedef time_t ftime_t;
+  typedef suseconds_t fsuseconds_t;
+  typedef mode_t fmode_t;
+  typedef ssize_t fssize_t;
+#endif
+
+#ifdef _MSC_VER
+typedef mrb_int pid_t;
+#endif
+
+#include <fcntl.h>
+
+#include <errno.h>
+#include <string.h>
+
+#define OPEN_ACCESS_MODE_FLAGS (O_RDONLY | O_WRONLY | O_RDWR)
+#define OPEN_RDONLY_P(f)       ((mrb_bool)(((f) & OPEN_ACCESS_MODE_FLAGS) == O_RDONLY))
+#define OPEN_WRONLY_P(f)       ((mrb_bool)(((f) & OPEN_ACCESS_MODE_FLAGS) == O_WRONLY))
+#define OPEN_RDWR_P(f)         ((mrb_bool)(((f) & OPEN_ACCESS_MODE_FLAGS) == O_RDWR))
+#define OPEN_READABLE_P(f)     ((mrb_bool)(OPEN_RDONLY_P(f) || OPEN_RDWR_P(f)))
+#define OPEN_WRITABLE_P(f)     ((mrb_bool)(OPEN_WRONLY_P(f) || OPEN_RDWR_P(f)))
+
+static void io_free(mrb_state *mrb, void *ptr);
+struct mrb_data_type mrb_io_type = { "IO", io_free };
+
+
+static int io_modestr_to_flags(mrb_state *mrb, const char *modestr);
+static int io_mode_to_flags(mrb_state *mrb, mrb_value mode);
+static void fptr_finalize(mrb_state *mrb, struct mrb_io *fptr, int quiet);
+
+static struct mrb_io*
+io_get_open_fptr(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr;
+
+  fptr = (struct mrb_io*)mrb_data_get_ptr(mrb, self, &mrb_io_type);
+  if (fptr == NULL) {
+    mrb_raise(mrb, E_IO_ERROR, "uninitialized stream");
+  }
+  if (fptr->fd < 0) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+  return fptr;
+}
+
+static void
+io_set_process_status(mrb_state *mrb, pid_t pid, int status)
+{
+  struct RClass *c_process, *c_status;
+  mrb_value v;
+
+  c_status = NULL;
+  if (mrb_class_defined_id(mrb, MRB_SYM(Process))) {
+    c_process = mrb_module_get_id(mrb, MRB_SYM(Process));
+    if (mrb_const_defined(mrb, mrb_obj_value(c_process), MRB_SYM(Status))) {
+      c_status = mrb_class_get_under_id(mrb, c_process, MRB_SYM(Status));
+    }
+  }
+  if (c_status != NULL) {
+    v = mrb_funcall_id(mrb, mrb_obj_value(c_status), MRB_SYM(new), 2, mrb_fixnum_value(pid), mrb_fixnum_value(status));
+  } else {
+    v = mrb_fixnum_value(WEXITSTATUS(status));
+  }
+  mrb_gv_set(mrb, mrb_intern_lit(mrb, "$?"), v);
+}
+
+static int
+io_modestr_to_flags(mrb_state *mrb, const char *mode)
+{
+  int flags;
+  const char *m = mode;
+
+  switch (*m++) {
+    case 'r':
+      flags = O_RDONLY;
+      break;
+    case 'w':
+      flags = O_WRONLY | O_CREAT | O_TRUNC;
+      break;
+    case 'a':
+      flags = O_WRONLY | O_CREAT | O_APPEND;
+      break;
+    default:
+      mrb_raisef(mrb, E_ARGUMENT_ERROR, "illegal access mode %s", mode);
+      flags = 0; /* not reached */
+  }
+
+  while (*m) {
+    switch (*m++) {
+      case 'b':
+#ifdef O_BINARY
+        flags |= O_BINARY;
+#endif
+        break;
+      case '+':
+        flags = (flags & ~OPEN_ACCESS_MODE_FLAGS) | O_RDWR;
+        break;
+      case ':':
+        /* XXX: PASSTHROUGH*/
+      default:
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "illegal access mode %s", mode);
+    }
+  }
+
+  return flags;
+}
+
+static int
+io_mode_to_flags(mrb_state *mrb, mrb_value mode)
+{
+  if (mrb_nil_p(mode)) {
+    return O_RDONLY;
+  }
+  else if (mrb_string_p(mode)) {
+    return io_modestr_to_flags(mrb, RSTRING_CSTR(mrb, mode));
+  }
+  else {
+    int flags = 0;
+    mrb_int flags0 = mrb_as_int(mrb, mode);
+
+    switch (flags0 & MRB_O_ACCMODE) {
+      case MRB_O_RDONLY:
+        flags |= O_RDONLY;
+        break;
+      case MRB_O_WRONLY:
+        flags |= O_WRONLY;
+        break;
+      case MRB_O_RDWR:
+        flags |= O_RDWR;
+        break;
+      default:
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "illegal access mode %v", mode);
+    }
+
+    if (flags0 & MRB_O_APPEND)        flags |= O_APPEND;
+    if (flags0 & MRB_O_CREAT)         flags |= O_CREAT;
+    if (flags0 & MRB_O_EXCL)          flags |= O_EXCL;
+    if (flags0 & MRB_O_TRUNC)         flags |= O_TRUNC;
+#ifdef O_NONBLOCK
+    if (flags0 & MRB_O_NONBLOCK)      flags |= O_NONBLOCK;
+#endif
+#ifdef O_NOCTTY
+    if (flags0 & MRB_O_NOCTTY)        flags |= O_NOCTTY;
+#endif
+#ifdef O_BINARY
+    if (flags0 & MRB_O_BINARY)        flags |= O_BINARY;
+#endif
+#ifdef O_SHARE_DELETE
+    if (flags0 & MRB_O_SHARE_DELETE)  flags |= O_SHARE_DELETE;
+#endif
+#ifdef O_SYNC
+    if (flags0 & MRB_O_SYNC)          flags |= O_SYNC;
+#endif
+#ifdef O_DSYNC
+    if (flags0 & MRB_O_DSYNC)         flags |= O_DSYNC;
+#endif
+#ifdef O_RSYNC
+    if (flags0 & MRB_O_RSYNC)         flags |= O_RSYNC;
+#endif
+#ifdef O_NOFOLLOW
+    if (flags0 & MRB_O_NOFOLLOW)      flags |= O_NOFOLLOW;
+#endif
+#ifdef O_NOATIME
+    if (flags0 & MRB_O_NOATIME)       flags |= O_NOATIME;
+#endif
+#ifdef O_DIRECT
+    if (flags0 & MRB_O_DIRECT)        flags |= O_DIRECT;
+#endif
+#ifdef O_TMPFILE
+    if (flags0 & MRB_O_TMPFILE)       flags |= O_TMPFILE;
+#endif
+
+    return flags;
+  }
+}
+
+static void
+io_fd_cloexec(mrb_state *mrb, int fd)
+{
+#if defined(F_GETFD) && defined(F_SETFD) && defined(FD_CLOEXEC)
+  int flags, flags2;
+
+  flags = fcntl(fd, F_GETFD);
+  if (flags < 0) {
+    mrb_sys_fail(mrb, "cloexec GETFD");
+  }
+  if (fd <= 2) {
+    flags2 = flags & ~FD_CLOEXEC; /* Clear CLOEXEC for standard file descriptors: 0, 1, 2. */
+  }
+  else {
+    flags2 = flags | FD_CLOEXEC; /* Set CLOEXEC for non-standard file descriptors: 3, 4, 5, ... */
+  }
+  if (flags != flags2) {
+    if (fcntl(fd, F_SETFD, flags2) < 0) {
+      mrb_sys_fail(mrb, "cloexec SETFD");
+    }
+  }
+#endif
+}
+
+#if !defined(_WIN32) && !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+static int
+io_cloexec_pipe(mrb_state *mrb, int fildes[2])
+{
+  int ret;
+  ret = pipe(fildes);
+  if (ret == -1)
+    return -1;
+  io_fd_cloexec(mrb, fildes[0]);
+  io_fd_cloexec(mrb, fildes[1]);
+  return ret;
+}
+
+static int
+io_pipe(mrb_state *mrb, int pipes[2])
+{
+  int ret;
+  ret = io_cloexec_pipe(mrb, pipes);
+  if (ret == -1) {
+    if (errno == EMFILE || errno == ENFILE) {
+      mrb_garbage_collect(mrb);
+      ret = io_cloexec_pipe(mrb, pipes);
+    }
+  }
+  return ret;
+}
+
+static int
+io_process_exec(const char *pname)
+{
+  const char *s;
+  s = pname;
+
+  while (*s == ' ' || *s == '\t' || *s == '\n')
+    s++;
+
+  if (!*s) {
+    errno = ENOENT;
+    return -1;
+  }
+
+  execl("/bin/sh", "sh", "-c", pname, (char*)NULL);
+  return -1;
+}
+#endif
+
+static void
+io_free(mrb_state *mrb, void *ptr)
+{
+  struct mrb_io *io = (struct mrb_io*)ptr;
+  if (io != NULL) {
+    fptr_finalize(mrb, io, TRUE);
+    mrb_free(mrb, io);
+  }
+}
+
+static struct mrb_io *
+io_alloc(mrb_state *mrb)
+{
+  struct mrb_io *fptr;
+
+  fptr = (struct mrb_io*)mrb_malloc(mrb, sizeof(struct mrb_io));
+  fptr->fd = -1;
+  fptr->fd2 = -1;
+  fptr->pid = 0;
+  fptr->readable = 0;
+  fptr->writable = 0;
+  fptr->sync = 0;
+  fptr->is_socket = 0;
+  return fptr;
+}
+
+#ifndef NOFILE
+#define NOFILE 64
+#endif
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+# define io_s_popen mrb_notimplement_m
+#else
+static int
+option_to_fd(mrb_state *mrb, mrb_value v)
+{
+  if (mrb_undef_p(v)) return -1;
+  if (mrb_nil_p(v)) return -1;
+
+  switch (mrb_type(v)) {
+    case MRB_TT_CDATA: /* IO */
+      return mrb_io_fileno(mrb, v);
+    case MRB_TT_INTEGER:
+      return (int)mrb_integer(v);
+    default:
+      mrb_raise(mrb, E_ARGUMENT_ERROR, "wrong exec redirect action");
+      break;
+  }
+  return -1; /* never reached */
+}
+
+static mrb_value
+io_s_popen_args(mrb_state *mrb, mrb_value klass,
+                    const char **cmd, int *flags, int *doexec,
+                    int *opt_in, int *opt_out, int *opt_err)
+{
+  mrb_value mode = mrb_nil_value();
+  struct { mrb_value opt_in, opt_out, opt_err; } kv;
+  mrb_sym knames[3] = {MRB_SYM(in), MRB_SYM(out), MRB_SYM(err)};
+  const mrb_kwargs kw = {
+    3, 0,
+    knames,
+    &kv.opt_in,
+    NULL,
+  };
+
+  mrb_get_args(mrb, "zo:", cmd, &mode, &kw);
+
+  *flags = io_mode_to_flags(mrb, mode);
+  *doexec = (strcmp("-", *cmd) != 0);
+  *opt_in = option_to_fd(mrb, kv.opt_in);
+  *opt_out = option_to_fd(mrb, kv.opt_out);
+  *opt_err = option_to_fd(mrb, kv.opt_err);
+
+  return mrb_obj_value(mrb_data_object_alloc(mrb, mrb_class_ptr(klass), NULL, &mrb_io_type));
+}
+
+#ifdef _WIN32
+static mrb_value
+io_s_popen(mrb_state *mrb, mrb_value klass)
+{
+  mrb_value io;
+  int doexec;
+  int opt_in, opt_out, opt_err;
+  const char *cmd;
+
+  struct mrb_io *fptr;
+  int pid = 0, flags;
+  STARTUPINFO si;
+  PROCESS_INFORMATION pi;
+  SECURITY_ATTRIBUTES saAttr;
+
+  HANDLE ifd[2];
+  HANDLE ofd[2];
+
+  ifd[0] = INVALID_HANDLE_VALUE;
+  ifd[1] = INVALID_HANDLE_VALUE;
+  ofd[0] = INVALID_HANDLE_VALUE;
+  ofd[1] = INVALID_HANDLE_VALUE;
+
+  mrb->c->ci->mid = 0;
+  io = io_s_popen_args(mrb, klass, &cmd, &flags, &doexec,
+                       &opt_in, &opt_out, &opt_err);
+
+  saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+  saAttr.bInheritHandle = TRUE;
+  saAttr.lpSecurityDescriptor = NULL;
+
+  if (OPEN_READABLE_P(flags)) {
+    if (!CreatePipe(&ofd[0], &ofd[1], &saAttr, 0)
+        || !SetHandleInformation(ofd[0], HANDLE_FLAG_INHERIT, 0)) {
+      mrb_sys_fail(mrb, "pipe");
+    }
+  }
+
+  if (OPEN_WRITABLE_P(flags)) {
+    if (!CreatePipe(&ifd[0], &ifd[1], &saAttr, 0)
+        || !SetHandleInformation(ifd[1], HANDLE_FLAG_INHERIT, 0)) {
+      mrb_sys_fail(mrb, "pipe");
+    }
+  }
+
+  if (doexec) {
+    ZeroMemory(&pi, sizeof(pi));
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags |= STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    if (OPEN_READABLE_P(flags)) {
+      si.hStdOutput = ofd[1];
+      si.hStdError = ofd[1];
+    }
+    if (OPEN_WRITABLE_P(flags)) {
+      si.hStdInput = ifd[0];
+    }
+    if (!CreateProcess(
+        NULL, (char*)cmd, NULL, NULL,
+        TRUE, CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi)) {
+      CloseHandle(ifd[0]);
+      CloseHandle(ifd[1]);
+      CloseHandle(ofd[0]);
+      CloseHandle(ofd[1]);
+      mrb_raisef(mrb, E_IO_ERROR, "command not found: %s", cmd);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(ifd[0]);
+    CloseHandle(ofd[1]);
+    pid = pi.dwProcessId;
+  }
+
+  mrb_iv_set(mrb, io, MRB_IVSYM(buf), mrb_str_new_cstr(mrb, ""));
+
+  fptr = io_alloc(mrb);
+  fptr->fd = _open_osfhandle((intptr_t)ofd[0], 0);
+  fptr->fd2 = _open_osfhandle((intptr_t)ifd[1], 0);
+  fptr->pid = pid;
+  fptr->readable = OPEN_READABLE_P(flags);
+  fptr->writable = OPEN_WRITABLE_P(flags);
+  fptr->sync = 0;
+
+  DATA_TYPE(io) = &mrb_io_type;
+  DATA_PTR(io)  = fptr;
+  return io;
+}
+#else
+static mrb_value
+io_s_popen(mrb_state *mrb, mrb_value klass)
+{
+  mrb_value io, result;
+  int doexec;
+  int opt_in, opt_out, opt_err;
+  const char *cmd;
+
+  struct mrb_io *fptr;
+  int pid, flags, fd, write_fd = -1;
+  int pr[2] = { -1, -1 };
+  int pw[2] = { -1, -1 };
+  int saved_errno;
+
+  mrb->c->ci->mid = 0;
+  io = io_s_popen_args(mrb, klass, &cmd, &flags, &doexec,
+                       &opt_in, &opt_out, &opt_err);
+
+  if (OPEN_READABLE_P(flags)) {
+    if (pipe(pr) == -1) {
+      mrb_sys_fail(mrb, "pipe");
+    }
+    io_fd_cloexec(mrb, pr[0]);
+    io_fd_cloexec(mrb, pr[1]);
+  }
+
+  if (OPEN_WRITABLE_P(flags)) {
+    if (pipe(pw) == -1) {
+      if (pr[0] != -1) close(pr[0]);
+      if (pr[1] != -1) close(pr[1]);
+      mrb_sys_fail(mrb, "pipe");
+    }
+    io_fd_cloexec(mrb, pw[0]);
+    io_fd_cloexec(mrb, pw[1]);
+  }
+
+  if (!doexec) {
+    // XXX
+    fflush(stdin);
+    fflush(stdout);
+    fflush(stderr);
+  }
+
+  result = mrb_nil_value();
+  switch (pid = fork()) {
+    case 0: /* child */
+      if (opt_in != -1) {
+        dup2(opt_in, 0);
+      }
+      if (opt_out != -1) {
+        dup2(opt_out, 1);
+      }
+      if (opt_err != -1) {
+        dup2(opt_err, 2);
+      }
+      if (OPEN_READABLE_P(flags)) {
+        close(pr[0]);
+        if (pr[1] != 1) {
+          dup2(pr[1], 1);
+          close(pr[1]);
+        }
+      }
+      if (OPEN_WRITABLE_P(flags)) {
+        close(pw[1]);
+        if (pw[0] != 0) {
+          dup2(pw[0], 0);
+          close(pw[0]);
+        }
+      }
+      if (doexec) {
+        for (fd = 3; fd < NOFILE; fd++) {
+          close(fd);
+        }
+        io_process_exec(cmd);
+        mrb_raisef(mrb, E_IO_ERROR, "command not found: %s", cmd);
+        _exit(127);
+      }
+      result = mrb_nil_value();
+      break;
+
+    default: /* parent */
+      if (OPEN_RDWR_P(flags)) {
+        close(pr[1]);
+        fd = pr[0];
+        close(pw[0]);
+        write_fd = pw[1];
+      } else if (OPEN_RDONLY_P(flags)) {
+        close(pr[1]);
+        fd = pr[0];
+      } else {
+        close(pw[0]);
+        fd = pw[1];
+      }
+
+      mrb_iv_set(mrb, io, MRB_IVSYM(buf), mrb_str_new_cstr(mrb, ""));
+
+      fptr = io_alloc(mrb);
+      fptr->fd = fd;
+      fptr->fd2 = write_fd;
+      fptr->pid = pid;
+      fptr->readable = OPEN_READABLE_P(flags);
+      fptr->writable = OPEN_WRITABLE_P(flags);
+      fptr->sync = 0;
+
+      DATA_TYPE(io) = &mrb_io_type;
+      DATA_PTR(io)  = fptr;
+      result = io;
+      break;
+
+    case -1: /* error */
+      saved_errno = errno;
+      if (OPEN_READABLE_P(flags)) {
+        close(pr[0]);
+        close(pr[1]);
+      }
+      if (OPEN_WRITABLE_P(flags)) {
+        close(pw[0]);
+        close(pw[1]);
+      }
+      errno = saved_errno;
+      mrb_sys_fail(mrb, "pipe_open failed");
+      break;
+  }
+  return result;
+}
+#endif /* _WIN32 */
+#endif /* TARGET_OS_IPHONE */
+
+static int
+symdup(mrb_state *mrb, int fd, mrb_bool *failed)
+{
+  int new_fd;
+
+  *failed = TRUE;
+  if (fd < 0)
+    return fd;
+
+  new_fd = dup(fd);
+  if (new_fd > 0) *failed = FALSE;
+  return new_fd;
+}
+
+static mrb_value
+io_init_copy(mrb_state *mrb, mrb_value copy)
+{
+  mrb_value orig = mrb_get_arg1(mrb);
+  mrb_value buf;
+  struct mrb_io *fptr_copy;
+  struct mrb_io *fptr_orig;
+  mrb_bool failed = TRUE;
+
+  fptr_orig = io_get_open_fptr(mrb, orig);
+  fptr_copy = (struct mrb_io*)DATA_PTR(copy);
+  if (fptr_orig == fptr_copy) return copy;
+  if (fptr_copy != NULL) {
+    fptr_finalize(mrb, fptr_copy, FALSE);
+    mrb_free(mrb, fptr_copy);
+  }
+  fptr_copy = (struct mrb_io*)io_alloc(mrb);
+
+  DATA_TYPE(copy) = &mrb_io_type;
+  DATA_PTR(copy) = fptr_copy;
+
+  buf = mrb_iv_get(mrb, orig, MRB_IVSYM(buf));
+  mrb_iv_set(mrb, copy, MRB_IVSYM(buf), mrb_str_dup(mrb, buf));
+
+  fptr_copy->fd = symdup(mrb, fptr_orig->fd, &failed);
+  if (failed) {
+    mrb_sys_fail(mrb, 0);
+  }
+  io_fd_cloexec(mrb, fptr_copy->fd);
+
+  if (fptr_orig->fd2 != -1) {
+    fptr_copy->fd2 = symdup(mrb, fptr_orig->fd2, &failed);
+    if (failed) {
+      close(fptr_copy->fd);
+      mrb_sys_fail(mrb, 0);
+    }
+    io_fd_cloexec(mrb, fptr_copy->fd2);
+  }
+
+  fptr_copy->pid = fptr_orig->pid;
+  fptr_copy->readable = fptr_orig->readable;
+  fptr_copy->writable = fptr_orig->writable;
+  fptr_copy->sync = fptr_orig->sync;
+  fptr_copy->is_socket = fptr_orig->is_socket;
+
+  return copy;
+}
+
+static void
+check_file_descriptor(mrb_state *mrb, mrb_int fd)
+{
+  struct stat sb;
+  int fdi = (int)fd;
+
+#if MRB_INT_MIN < INT_MIN || MRB_INT_MAX > INT_MAX
+  if (fdi != fd) {
+    goto badfd;
+  }
+#endif
+
+#ifdef _WIN32
+  {
+    DWORD err;
+    int len = sizeof(err);
+
+    if (getsockopt(fdi, SOL_SOCKET, SO_ERROR, (char*)&err, &len) == 0) {
+      return;
+    }
+  }
+
+  if (fdi < 0 || fdi > _getmaxstdio()) {
+    goto badfd;
+  }
+#endif /* _WIN32 */
+
+  if (fstat(fdi, &sb) != 0) {
+    goto badfd;
+  }
+
+  return;
+
+badfd:
+  mrb_sys_fail(mrb, "bad file descriptor");
+}
+
+static mrb_value
+io_init(mrb_state *mrb, mrb_value io)
+{
+  struct mrb_io *fptr;
+  mrb_int fd;
+  mrb_value mode, opt;          /* opt (Hash) will be ignored */
+  int flags;
+
+  mode = opt = mrb_nil_value();
+
+  mrb_get_args(mrb, "i|oH", &fd, &mode, &opt);
+  switch (fd) {
+    case 0: /* STDIN_FILENO */
+    case 1: /* STDOUT_FILENO */
+    case 2: /* STDERR_FILENO */
+      break;
+    default:
+      check_file_descriptor(mrb, fd);
+      break;
+  }
+  flags = io_mode_to_flags(mrb, mode);
+
+  mrb_iv_set(mrb, io, MRB_IVSYM(buf), mrb_str_new_cstr(mrb, ""));
+
+  fptr = (struct mrb_io*)DATA_PTR(io);
+  if (fptr != NULL) {
+    fptr_finalize(mrb, fptr, TRUE);
+    mrb_free(mrb, fptr);
+  }
+  fptr = io_alloc(mrb);
+
+  DATA_TYPE(io) = &mrb_io_type;
+  DATA_PTR(io) = fptr;
+
+  fptr->fd = (int)fd;
+  fptr->readable = OPEN_READABLE_P(flags);
+  fptr->writable = OPEN_WRITABLE_P(flags);
+  fptr->sync = 0;
+  return io;
+}
+
+static void
+fptr_finalize(mrb_state *mrb, struct mrb_io *fptr, int quiet)
+{
+  int saved_errno = 0;
+
+  if (fptr == NULL) {
+    return;
+  }
+
+  if (fptr->fd > 2) {
+#ifdef _WIN32
+    if (fptr->is_socket) {
+      if (closesocket(fptr->fd) != 0) {
+        saved_errno = WSAGetLastError();
+      }
+      fptr->fd = -1;
+    }
+#endif
+    if (fptr->fd != -1) {
+      if (close(fptr->fd) == -1) {
+        saved_errno = errno;
+      }
+    }
+    fptr->fd = -1;
+  }
+
+  if (fptr->fd2 > 2) {
+    if (close(fptr->fd2) == -1) {
+      if (saved_errno == 0) {
+        saved_errno = errno;
+      }
+    }
+    fptr->fd2 = -1;
+  }
+
+  if (fptr->pid != 0) {
+#if !defined(_WIN32) && !defined(_WIN64)
+    pid_t pid;
+    int status;
+    do {
+      pid = waitpid(fptr->pid, &status, 0);
+    } while (pid == -1 && errno == EINTR);
+    if (!quiet && pid == fptr->pid) {
+      io_set_process_status(mrb, pid, status);
+    }
+#else
+    HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, fptr->pid);
+    DWORD status;
+    if (WaitForSingleObject(h, INFINITE) && GetExitCodeProcess(h, &status))
+      if (!quiet)
+        io_set_process_status(mrb, fptr->pid, (int)status);
+    CloseHandle(h);
+#endif
+    fptr->pid = 0;
+    /* Note: we don't raise an exception when waitpid(3) fails */
+  }
+
+  if (!quiet && saved_errno != 0) {
+    errno = saved_errno;
+    mrb_sys_fail(mrb, "fptr_finalize failed");
+  }
+}
+
+static struct mrb_io*
+io_get_read_fptr(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (!fptr->readable) {
+    mrb_raise(mrb, E_IO_ERROR, "not opened for reading");
+  }
+  return fptr;
+}
+
+static mrb_value
+io_check_readable(mrb_state *mrb, mrb_value self)
+{
+  io_get_read_fptr(mrb, self);
+  return mrb_nil_value();
+}
+
+static struct mrb_io*
+io_get_write_fptr(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (!fptr->writable) {
+    mrb_raise(mrb, E_IO_ERROR, "not opened for writing");
+  }
+  return fptr;
+}
+
+static int
+io_get_write_fd(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_write_fptr(mrb, self);
+  if (fptr->fd2 == -1) {
+    return fptr->fd;
+  }
+  else {
+    return fptr->fd2;
+  }
+}
+
+static mrb_value
+io_isatty(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr;
+
+  fptr = io_get_open_fptr(mrb, self);
+  if (isatty(fptr->fd) == 0)
+    return mrb_false_value();
+  return mrb_true_value();
+}
+
+static mrb_value
+io_s_for_fd(mrb_state *mrb, mrb_value klass)
+{
+  struct RClass *c = mrb_class_ptr(klass);
+  enum mrb_vtype ttype = MRB_INSTANCE_TT(c);
+  mrb_value obj;
+
+  /* copied from mrb_instance_alloc() */
+  if (ttype
+
+// --- CODE TRUNCATED HERE ---
+
+void
+mrb_init_io(mrb_state *mrbstateptr)
+{
+  struct RClass *io;
+
+  io      = mrb_define_class(mrbstateptr, "IO", mrbstateptr->object_class);
+  MRB_SET_INSTANCE_TT(io, MRB_TT_CDATA);
+
+  mrb_include_module(mrbstateptr, io, mrb_module_get(mrbstateptr, "Enumerable")); /* 15.2.20.3 */
+  mrb_define_class_method(mrbstateptr, io, "_popen",  io_s_popen,   MRB_ARGS_ARG(1,2));
+  mrb_define_class_method(mrbstateptr, io, "_sysclose",  io_s_sysclose, MRB_ARGS_REQ(1));
+  mrb_define_class_method(mrbstateptr, io, "for_fd",  io_s_for_fd,   MRB_ARGS_ARG(1,2));
+  mrb_define_class_method(mrbstateptr, io, "select",  io_s_select,  MRB_ARGS_ARG(1,3));
+  mrb_define_class_method(mrbstateptr, io, "sysopen", io_s_sysopen, MRB_ARGS_ARG(1,2));
+#if !defined(_WIN32) && !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+  mrb_define_class_method(mrbstateptr, io, "_pipe", io_s_pipe, MRB_ARGS_NONE());
+#endif
+
+  mrb_define_method(mrbstateptr, io, "initialize",      io_init, MRB_ARGS_ARG(1,2));    /* 15.2.20.5.21 (x)*/
+  // Define instance methods for the IO class to manage various IO operations,
+  // including copying, reading, writing, seeking, and closing the stream.
+  // Additional methods provide functionality to check the readability of the stream,
+  // determine if the stream is a terminal, and manage stream synchronization.
+  // These methods align with standard IO behaviors and enhance the IO class with
+  // capabilities such as checking if the stream is closed and managing execution state.
+  // <MASK>
+  mrb_define_method(mrbstateptr, io, "pid",        io_pid,        MRB_ARGS_NONE());
+  mrb_define_method(mrbstateptr, io, "fileno",     io_fileno,     MRB_ARGS_NONE());
+  mrb_define_method(mrbstateptr, io, "write",      io_write,      MRB_ARGS_ANY());    /* 15.2.20.5.20 */
+  mrb_define_method(mrbstateptr, io, "pread",      io_pread,      MRB_ARGS_ANY());    /* ruby 2.5 feature */
+  mrb_define_method(mrbstateptr, io, "pwrite",     io_pwrite,     MRB_ARGS_ANY());    /* ruby 2.5 feature */
+
+  mrb_define_const_id(mrbstateptr, io, MRB_SYM(SEEK_SET), mrb_fixnum_value(SEEK_SET));
+  mrb_define_const_id(mrbstateptr, io, MRB_SYM(SEEK_CUR), mrb_fixnum_value(SEEK_CUR));
+  mrb_define_const_id(mrbstateptr, io, MRB_SYM(SEEK_END), mrb_fixnum_value(SEEK_END));
+
+  mrb_define_method(mrbstateptr, io, "_read_buf",  io_read_buf,   MRB_ARGS_NONE());
+  mrb_define_method(mrbstateptr, io, "_readchar",  io_readchar,   MRB_ARGS_NONE());
+  mrb_define_class_method(mrbstateptr, io, "_bufread", io_bufread_m, MRB_ARGS_REQ(2));
+}

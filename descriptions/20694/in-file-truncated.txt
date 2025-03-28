@@ -1,0 +1,767 @@
+<｜begin▁of▁sentence｜>/*
+Copyright (c) 2012-2019 Genome Research Ltd.
+Author: James Bonfield <jkb@sanger.ac.uk>
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+   1. Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+   3. Neither the names Genome Research Ltd and Wellcome Trust Sanger
+Institute nor the names of its contributors may be used to endorse or promote
+products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY GENOME RESEARCH LTD AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL GENOME RESEARCH LTD OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+/*
+ * - In-memory decoding of CRAM data structures.
+ * - Iterator for reading CRAM record by record.
+ */
+
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
+#include <config.h>
+
+#include <stdio.h>
+#include <errno.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <math.h>
+#include <stdint.h>
+#include <inttypes.h>
+
+#include "cram/cram.h"
+#include "cram/os.h"
+#include "htslib/hts.h"
+
+//Whether CIGAR has just M or uses = and X to indicate match and mismatch
+//#define USE_X
+
+/* ----------------------------------------------------------------------
+ * CRAM compression headers
+ */
+
+/*
+ * Decodes the Tag Dictionary record in the preservation map
+ * Updates the cram compression header.
+ *
+ * Returns number of bytes decoded on success
+ *        -1 on failure
+ */
+int cram_decode_TD(char *cp, const char *endp, cram_block_compression_hdr *h) {
+    char *op = cp;
+    unsigned char *dat;
+    cram_block *b;
+    int32_t blk_size = 0;
+    int nTL, i, sz;
+
+    if (!(b = cram_new_block(0, 0)))
+        return -1;
+
+    if (h->TD_blk || h->TL) {
+        hts_log_warning("More than one TD block found in compression header");
+        cram_free_block(h->TD_blk);
+        free(h->TL);
+        h->TD_blk = NULL;
+        h->TL = NULL;
+    }
+
+    /* Decode */
+    cp += safe_itf8_get(cp, endp, &blk_size);
+    if (!blk_size) {
+        h->nTL = 0;
+        cram_free_block(b);
+        return cp - op;
+    }
+
+    if (blk_size < 0 || endp - cp < blk_size) {
+        cram_free_block(b);
+        return -1;
+    }
+
+    BLOCK_APPEND(b, cp, blk_size);
+    cp += blk_size;
+    sz = cp - op;
+    // Force nul termination if missing
+    if (BLOCK_DATA(b)[BLOCK_SIZE(b)-1])
+        BLOCK_APPEND_CHAR(b, '\0');
+
+    /* Set up TL lookup table */
+    dat = BLOCK_DATA(b);
+
+    // Count
+    for (nTL = i = 0; i < BLOCK_SIZE(b); i++) {
+        nTL++;
+        while (dat[i])
+            i++;
+    }
+
+    // Copy
+    if (!(h->TL = calloc(nTL, sizeof(*h->TL)))) {
+        cram_free_block(b);
+        return -1;
+    }
+    for (nTL = i = 0; i < BLOCK_SIZE(b); i++) {
+        h->TL[nTL++] = &dat[i];
+        while (dat[i])
+            i++;
+    }
+    h->TD_blk = b;
+    h->nTL = nTL;
+
+    return sz;
+
+ block_err:
+    cram_free_block(b);
+    return -1;
+}
+
+/*
+ * Decodes a CRAM block compression header.
+ * Returns header ptr on success
+ *         NULL on failure
+ */
+cram_block_compression_hdr *cram_decode_compression_header(cram_fd *fd,
+                                                           cram_block *b) {
+    char *cp, *endp, *cp_copy;
+    cram_block_compression_hdr *hdr = calloc(1, sizeof(*hdr));
+    int i;
+    int32_t map_size = 0, map_count = 0;
+
+    if (!hdr)
+        return NULL;
+
+    if (b->method != RAW) {
+        if (cram_uncompress_block(b)) {
+            free(hdr);
+            return NULL;
+        }
+    }
+
+    cp = (char *)b->data;
+    endp = cp + b->uncomp_size;
+
+    if (CRAM_MAJOR_VERS(fd->version) == 1) {
+        int32_t i32;
+        cp += safe_itf8_get(cp, endp, &hdr->ref_seq_id);
+/*
+ * LARGE_POS used in this code is purely a debugging mechanism for testing
+ * whether the htslib API can cope with 64-bit quantities.  These are
+ * possible in SAM, but not *yet* in BAM or CRAM.
+ *
+ * DO NOT ENABLE LARGE_POS for anything other than debugging / testing.
+ *
+ * At some point it is expected these ifdefs will become a version check
+ * instead.
+ */
+#ifdef LARGE_POS
+        cp += safe_ltf8_get(cp, endp, &hdr->ref_seq_start);
+        cp += safe_ltf8_get(cp, endp, &hdr->ref_seq_span);
+#else
+        cp += safe_itf8_get(cp, endp, &i32); hdr->ref_seq_start=i32;
+        cp += safe_itf8_get(cp, endp, &i32); hdr->ref_seq_span=i32;
+#endif
+        cp += safe_itf8_get(cp, endp, &hdr->num_records);
+        cp += safe_itf8_get(cp, endp, &hdr->num_landmarks);
+        if (hdr->num_landmarks < 0 ||
+            hdr->num_landmarks >= SIZE_MAX / sizeof(int32_t) ||
+            endp - cp < hdr->num_landmarks) {
+            free(hdr);
+            return NULL;
+        }
+        if (!(hdr->landmark = malloc(hdr->num_landmarks * sizeof(int32_t)))) {
+            free(hdr);
+            return NULL;
+        }
+        for (i = 0; i < hdr->num_landmarks; i++) {
+            cp += safe_itf8_get(cp, endp, &hdr->landmark[i]);
+        }
+    }
+
+    hdr->preservation_map = kh_init(map);
+
+    memset(hdr->rec_encoding_map, 0,
+           CRAM_MAP_HASH * sizeof(hdr->rec_encoding_map[0]));
+    memset(hdr->tag_encoding_map, 0,
+           CRAM_MAP_HASH * sizeof(hdr->tag_encoding_map[0]));
+
+    if (!hdr->preservation_map) {
+        cram_free_compression_header(hdr);
+        return NULL;
+    }
+
+    /* Initialise defaults for preservation map */
+    hdr->read_names_included = 0;
+    hdr->AP_delta = 1;
+    memcpy(hdr->substitution_matrix, "CGTNAGTNACTNACGNACGT", 20);
+
+    /* Preservation map */
+    cp += safe_itf8_get(cp, endp, &map_size); cp_copy = cp;
+    cp += safe_itf8_get(cp, endp, &map_count);
+    for (i = 0; i < map_count; i++) {
+        pmap_t hd;
+        khint_t k;
+        int r;
+
+        if (endp - cp < 3) {
+            cram_free_compression_header(hdr);
+            return NULL;
+        }
+        cp += 2;
+        switch(CRAM_KEY(cp[-2],cp[-1])) {
+        case CRAM_KEY('M','I'): // was mapped QS included in V1.0
+        case CRAM_KEY('U','I'): // was unmapped QS included in V1.0
+        case CRAM_KEY('P','I'): // was unmapped placed in V1.0
+            hd.i = *cp++;
+            break;
+
+        case CRAM_KEY('R','N'):
+            hd.i = *cp++;
+            k = kh_put(map, hdr->preservation_map, "RN", &r);
+            if (-1 == r) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+
+            kh_val(hdr->preservation_map, k) = hd;
+            hdr->read_names_included = hd.i;
+            break;
+
+        case CRAM_KEY('A','P'):
+            hd.i = *cp++;
+            k = kh_put(map, hdr->preservation_map, "AP", &r);
+            if (-1 == r) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+
+            kh_val(hdr->preservation_map, k) = hd;
+            hdr->AP_delta = hd.i;
+            break;
+
+        case CRAM_KEY('R','R'):
+            hd.i = *cp++;
+            k = kh_put(map, hdr->preservation_map, "RR", &r);
+            if (-1 == r) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+
+            kh_val(hdr->preservation_map, k) = hd;
+            hdr->no_ref = !hd.i;
+            break;
+
+        case CRAM_KEY('S','M'):
+            if (endp - cp < 5) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+            hdr->substitution_matrix[0][(cp[0]>>6)&3] = 'C';
+            hdr->substitution_matrix[0][(cp[0]>>4)&3] = 'G';
+            hdr->substitution_matrix[0][(cp[0]>>2)&3] = 'T';
+            hdr->substitution_matrix[0][(cp[0]>>0)&3] = 'N';
+
+            hdr->substitution_matrix[1][(cp[1]>>6)&3] = 'A';
+            hdr->substitution_matrix[1][(cp[1]>>4)&3] = 'G';
+            hdr->substitution_matrix[1][(cp[1]>>2)&3] = 'T';
+            hdr->substitution_matrix[1][(cp[1]>>0)&3] = 'N';
+
+            hdr->substitution_matrix[2][(cp[2]>>6)&3] = 'A';
+            hdr->substitution_matrix[2][(cp[2]>>4)&3] = 'C';
+            hdr->substitution_matrix[2][(cp[2]>>2)&3] = 'T';
+            hdr->substitution_matrix[2][(cp[2]>>0)&3] = 'N';
+
+            hdr->substitution_matrix[3][(cp[3]>>6)&3] = 'A';
+            hdr->substitution_matrix[3][(cp[3]>>4)&3] = 'C';
+            hdr->substitution_matrix[3][(cp[3]>>2)&3] = 'G';
+            hdr->substitution_matrix[3][(cp[3]>>0)&3] = 'N';
+
+            hdr->substitution_matrix[4][(cp[4]>>6)&3] = 'A';
+            hdr->substitution_matrix[4][(cp[4]>>4)&3] = 'C';
+            hdr->substitution_matrix[4][(cp[4]>>2)&3] = 'G';
+            hdr->substitution_matrix[4][(cp[4]>>0)&3] = 'T';
+
+            hd.p = cp;
+            cp += 5;
+
+            k = kh_put(map, hdr->preservation_map, "SM", &r);
+            if (-1 == r) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+            kh_val(hdr->preservation_map, k) = hd;
+            break;
+
+        case CRAM_KEY('T','D'): {
+            int sz = cram_decode_TD(cp, endp, hdr); // tag dictionary
+            if (sz < 0) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+
+            hd.p = cp;
+            cp += sz;
+
+            k = kh_put(map, hdr->preservation_map, "TD", &r);
+            if (-1 == r) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+            kh_val(hdr->preservation_map, k) = hd;
+            break;
+        }
+
+        default:
+            hts_log_warning("Unrecognised preservation map key %c%c", cp[-2], cp[-1]);
+            // guess byte;
+            cp++;
+            break;
+        }
+    }
+    if (cp - cp_copy != map_size) {
+        cram_free_compression_header(hdr);
+        return NULL;
+    }
+
+    /* Record encoding map */
+    cp += safe_itf8_get(cp, endp, &map_size); cp_copy = cp;
+    cp += safe_itf8_get(cp, endp, &map_count);
+    for (i = 0; i < map_count; i++) {
+        char *key = cp;
+        int32_t encoding = E_NULL;
+        int32_t size = 0;
+        ptrdiff_t offset;
+        cram_map *m;
+        enum cram_DS_ID ds_id;
+        enum cram_external_type type;
+
+        if (endp - cp < 4) {
+            cram_free_compression_header(hdr);
+            return NULL;
+        }
+
+        cp += 2;
+        cp += safe_itf8_get(cp, endp, &encoding);
+        cp += safe_itf8_get(cp, endp, &size);
+
+        offset = cp - (char *)b->data;
+
+        if (encoding == E_NULL)
+            continue;
+
+        if (size < 0 || endp - cp < size) {
+            cram_free_compression_header(hdr);
+            return NULL;
+        }
+
+        //printf("%s codes for %.2s\n", cram_encoding2str(encoding), key);
+
+        /*
+         * For CRAM1.0 CF and BF are Byte and not Int.
+         * Practically speaking it makes no difference unless we have a
+         * 1.0 format file that stores these in EXTERNAL as only then
+         * does Byte vs Int matter.
+         *
+         * Neither this C code nor Java reference implementations did this,
+         * so we gloss over it and treat them as int.
+         */
+        ds_id = DS_CORE;
+        if (key[0] == 'B' && key[1] == 'F') {
+            ds_id = DS_BF; type = E_INT;
+        } else if (key[0] == 'C' && key[1] == 'F') {
+            ds_id = DS_CF; type = E_INT;
+        } else if (key[0] == 'R' && key[1] == 'I') {
+            ds_id = DS_RI; type = E_INT;
+        } else if (key[0] == 'R' && key[1] == 'L') {
+            ds_id = DS_RL; type = E_INT;
+        } else if (key[0] == 'A' && key[1] == 'P') {
+            ds_id = DS_AP;
+#ifdef LARGE_POS
+            type = E_LONG,
+#else
+            type = E_INT;
+#endif
+        } else if (key[0] == 'R' && key[1] == 'G') {
+            ds_id = DS_RG; type = E_INT;
+        } else if (key[0] == 'M' && key[1] == 'F') {
+            ds_id = DS_MF; type = E_INT;
+        } else if (key[0] == 'N' && key[1] == 'S') {
+            ds_id = DS_NS; type = E_INT;
+        } else if (key[0] == 'N' && key[1] == 'P') {
+            ds_id = DS_NP;
+#ifdef LARGE_POS
+            type = E_LONG,
+#else
+            type = E_INT;
+#endif
+        } else if (key[0] == 'T' && key[1] == 'S') {
+            ds_id = DS_TS;
+#ifdef LARGE_POS
+            type = E_LONG,
+#else
+            type = E_INT;
+#endif
+        } else if (key[0] == 'N' && key[1] == 'F') {
+            ds_id = DS_NF; type = E_INT;
+        } else if (key[0] == 'T' && key[1] == 'C') {
+            ds_id = DS_TC; type = E_BYTE;
+        } else if (key[0] == 'T' && key[1] == 'N') {
+            ds_id = DS_TN; type = E_INT;
+        } else if (key[0] == 'F' && key[1] == 'N') {
+            ds_id = DS_FN; type = E_INT;
+        } else if (key[0] == 'F' && key[1] == 'C') {
+            ds_id = DS_FC; type = E_BYTE;
+        } else if (key[0] == 'F' && key[1] == 'P') {
+            ds_id = DS_FP; type = E_INT;
+        } else if (key[0] == 'B' && key[1] == 'S') {
+            ds_id = DS_BS; type = E_BYTE;
+        } else if (key[0] == 'I' && key[1] == 'N') {
+            ds_id = DS_IN; type = E_BYTE_ARRAY;
+        } else if (key[0] == 'S' && key[1] == 'C') {
+            ds_id = DS_SC; type = E_BYTE_ARRAY;
+        } else if (key[0] == 'D' && key[1] == 'L') {
+            ds_id = DS_DL; type = E_INT;
+        } else if (key[0] == 'B' && key[1] == 'A') {
+            ds_id = DS_BA; type = E_BYTE;
+        } else if (key[0] == 'B' && key[1] == 'B') {
+            ds_id = DS_BB; type = E_BYTE_ARRAY;
+        } else if (key[0] == 'R' && key[1] == 'S') {
+            ds_id = DS_RS; type = E_INT;
+        } else if (key[0] == 'P' && key[1] == 'D') {
+            ds_id = DS_PD; type = E_INT;
+        } else if (key[0] == 'H' && key[1] == 'C') {
+            ds_id = DS_HC; type = E_INT;
+        } else if (key[0] == 'M' && key[1] == 'Q') {
+            ds_id = DS_MQ; type = E_INT;
+        } else if (key[0] == 'R' && key[1] == 'N') {
+            ds_id = DS_RN; type = E_BYTE_ARRAY_BLOCK;
+        } else if (key[0] == 'Q' && key[1] == 'S') {
+            ds_id = DS_QS; type = E_BYTE;
+        } else if (key[0] == 'Q' && key[1] == 'Q') {
+            ds_id = DS_QQ; type = E_BYTE_ARRAY;
+        } else if (key[0] == 'T' && key[1] == 'L') {
+            ds_id = DS_TL; type = E_INT;
+        } else if (key[0] == 'T' && key[1] == 'M') {
+        } else if (key[0] == 'T' && key[1] == 'V') {
+        } else {
+            hts_log_warning("Unrecognised key: %.2s", key);
+        }
+
+        if (ds_id != DS_CORE) {
+            if (hdr->codecs[ds_id] != NULL) {
+                hts_log_warning("Codec for key %.2s defined more than once",
+                                key);
+                hdr->codecs[ds_id]->free(hdr->codecs[ds_id]);
+            }
+            hdr->codecs[ds_id] = cram_decoder_init(encoding, cp, size,
+                                                   type, fd->version);
+            if (!hdr->codecs[ds_id]) {
+                cram_free_compression_header(hdr);
+                return NULL;
+            }
+        }
+
+        cp += size;
+
+        // Fill out cram_map purely for cram_dump to dump out.
+        m = malloc(sizeof(*m));
+        if (!m) {
+            cram_free_compression_header(hdr);
+            return NULL;
+        }
+        m->key = CRAM_KEY(key[0], key[1]);
+        m->encoding = encoding;
+        m->size     = size;
+        m->offset   = offset;
+        m->codec = NULL;
+
+        m->next = hdr->rec_encoding_map[CRAM_MAP(key[0], key[1])];
+        hdr->rec_encoding_map[CRAM_MAP(key[0], key[1])] = m;
+    }
+    if (cp - cp_copy != map_size) {
+        cram_free_compression_header(hdr);
+        return NULL;
+    }
+
+    /* Tag encoding map */
+    cp += safe_itf8_get(cp, endp, &map_size); cp_copy = cp;
+    cp += safe_itf8_get(cp, endp, &map_count);
+    for (i = 0; i < map_count; i++) {
+        int32_t encoding = E_NULL;
+        int32_t size = 0;
+        cram_map *m = malloc(sizeof(*m)); // FIXME: use pooled_alloc
+        uint8_t *key;
+
+        if (!m || endp - cp < 6) {
+            free(m);
+            cram_free_compression_header(hdr);
+            return NULL;
+        }
+
+        key = (uint8_t *) cp + 1;
+        m->key = (key[0]<<16)|(key[1]<<8)|key[2];
+
+        cp += 4; // Strictly ITF8, but this suffices
+        cp += safe_itf8_get(cp, endp, &encoding);
+        cp += safe_itf8_get(cp, endp, &size);
+
+        m->encoding = encoding;
+        m->size     = size;
+        m->offset   = cp - (char *)b->data;
+        if (size < 0 || endp - cp < size ||
+            !(m->codec = cram_decoder_init(encoding, cp, size,
+                                           E_BYTE_ARRAY_BLOCK, fd->version))) {
+            cram_free_compression_header(hdr);
+            free(m);
+            return NULL;
+        }
+
+        cp += size;
+
+        m->next = hdr->tag_encoding_map[CRAM_MAP(key[0],key[1])];
+        hdr->tag_encoding_map[CRAM_MAP(key[0],key[1])] = m;
+    }
+    if (cp - cp_copy != map_size) {
+        cram_free_compression_header(hdr);
+        return NULL;
+    }
+
+    return hdr;
+}
+
+/*
+ * Note we also need to scan through the record encoding map to
+ * see which data series share the same block, either external or
+ * CORE. For example if we need the BF data series but MQ and CF
+ * are also encoded in the same block then we need to add those in
+ * as a dependency in order to correctly decode BF.
+ *
+ * Returns 0 on success
+ *        -1 on failure
+ */
+int cram_dependent_data_series(cram_fd *fd,
+                               cram_block_compression_hdr *hdr,
+                               cram_slice *s) {
+    int *block_used;
+    int core_used = 0;
+    int i;
+    static int i_to_id[] = {
+        DS_BF, DS_AP, DS_FP, DS_RL, DS_DL, DS_NF, DS_BA, DS_QS,
+        DS_FC, DS_FN, DS_BS, DS_IN, DS_RG, DS_MQ, DS_TL, DS_RN,
+        DS_NS, DS_NP, DS_TS, DS_MF, DS_CF, DS_RI, DS_RS, DS_PD,
+        DS_HC, DS_SC, DS_BB, DS_QQ,
+    };
+    uint32_t orig_ds;
+
+    /*
+     * Set the data_series bit field based on fd->required_fields
+     * contents.
+     */
+    if (fd->required_fields && fd->required_fields != INT_MAX) {
+        s->data_series = 0;
+
+        if (fd->required_fields & SAM_QNAME)
+            s->data_series |= CRAM_RN;
+
+        if (fd->required_fields & SAM_FLAG)
+            s->data_series |= CRAM_BF;
+
+        if (fd->required_fields & SAM_RNAME)
+            s->data_series |= CRAM_RI | CRAM_BF;
+
+        if (fd->required_fields & SAM_POS)
+            s->data_series |= CRAM_AP | CRAM_BF;
+
+        if (fd->required_fields & SAM_MAPQ)
+            s->data_series |= CRAM_MQ;
+
+        if (fd->required_fields & SAM_CIGAR)
+            s->data_series |= CRAM_CIGAR;
+
+        if (fd->required_fields & SAM_RNEXT)
+            s->data_series |= CRAM_CF | CRAM_NF | CRAM_RI | CRAM_NS |CRAM_BF;
+
+        if (fd->required_fields & SAM_PNEXT)
+            s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_NP | CRAM_BF;
+
+        if (fd->required_fields & SAM_TLEN)
+            s->data_series |= CRAM_CF | CRAM_NF | CRAM_AP | CRAM_TS |
+                CRAM_BF | CRAM_MF | CRAM_RI | CRAM_CIGAR;
+
+        if (fd->required_fields & SAM_SEQ)
+            s->data_series |= CRAM_SEQ;
+
+        if (!(fd->required_fields & SAM_AUX))
+            // No easy way to get MD/NM without other tags at present
+            s->decode_md = 0;
+
+        if (fd->required_fields & SAM_QUAL)
+            s->data_series |= CRAM_QUAL;
+
+        if (fd->required_fields & SAM_AUX)
+            s->data_series |= CRAM_RG | CRAM_TL | CRAM_aux;
+
+        if (fd->required_fields & SAM_RGAUX)
+            s->data_series |= CRAM_RG | CRAM_BF;
+
+        // Always uncompress CORE block
+        if (cram_uncompress_block(s->block[0]))
+            return -1;
+    } else {
+        s->data_series = CRAM_ALL;
+
+        for (i = 0; i < s->hdr->num_blocks; i++) {
+            if (cram_uncompress_block(s->block[i]))
+                return -1;
+        }
+
+        return 0;
+    }
+
+    block_used = calloc(s->hdr->num_blocks+1, sizeof(int));
+    if (!block_used)
+        return -1;
+
+    do {
+        /*
+         * Also set data_series based on code prerequisites. Eg if we need
+         * CRAM_QS then we also need to know CRAM_RL so we know how long it
+         * is, or if we need FC/FP then we also need FN (number of features).
+         *
+         * It's not reciprocal though. We may be needing to decode FN
+         * but have no need to decode FC, FP and cigar ops.
+         */
+        if (s->data_series & CRAM_RS)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_PD)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_HC)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_QS)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_IN)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_SC)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_BS)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_DL)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_BA)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_BB)    s->data_series |= CRAM_FC|CRAM_FP;
+        if (s->data_series & CRAM_QQ)    s->data_series |= CRAM_FC|CRAM_FP;
+
+        // cram_decode_seq() needs seq[] array
+        if (s->data_series & (CRAM_SEQ|CRAM_CIGAR)) s->data_series |= CRAM_RL;
+
+        if (s->data_series & CRAM_FP)    s->data_series |= CRAM_FC;
+        if (s->data_series & CRAM_FC)    s->data_series |= CRAM_FN;
+        if (s->data_series & CRAM_aux)   s->data_series |= CRAM_TL;
+        if (s->data_series & CRAM_MF)    s->data_series |= CRAM_CF;
+        if (s->data_series & CRAM_MQ)    s->data_series |= CRAM_BF;
+        if (s->data_series & CRAM_BS)    s->data_series |= CRAM_RI;
+        if (s->data_series & (CRAM_MF |CRAM_NS |CRAM_NP |CRAM_TS |CRAM_NF))
+            s->data_series |= CRAM_CF;
+        if (!hdr->read_names_included && s->data_series & CRAM_RN)
+            s->data_series |= CRAM_CF | CRAM_NF;
+        if (s->data_series & (CRAM_BA | CRAM_QS | CRAM_BB | CRAM_QQ))
+            s->data_series |= CRAM
+
+// --- CODE TRUNCATED HERE ---
+
+cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
+    cram_block_slice_hdr *slice_header;
+    unsigned char *cp;
+    unsigned char *cp_end;
+    int i;
+
+    if (b->method != RAW) {
+        /* Spec. says slice header should be RAW, but we can future-proof
+           by trying to decode it if it isn't. */
+        if (cram_uncompress_block(b) < 0)
+            return NULL;
+    }
+    cp =  (unsigned char *)BLOCK_DATA(b);
+    cp_end = cp + b->uncomp_size;
+
+    if (b->content_type != MAPPED_SLICE &&
+        b->content_type != UNMAPPED_SLICE)
+        return NULL;
+
+    if (!(slice_header  = calloc(1, sizeof(*slice_header))))
+        return NULL;
+
+    slice_header->content_type = b->content_type;
+
+    if (b->content_type == MAPPED_SLICE) {
+        // Extract reference sequence ID, start, and span from the slice header.
+        // This includes special handling for the LARGE_POS macro, which uses
+        // larger data types for positions and spans. If LARGE_POS is defined,
+        // use safe_ltf8_get to extract 64-bit values for ref_seq_start and
+        // ref_seq_span; otherwise, use safe_itf8_get for standard 32-bit values.
+        // <MASK>
+    }
+    cp += safe_itf8_get((char *)cp,  (char *)cp_end, &slice_header->num_records);
+    slice_header->record_counter = 0;
+    if (CRAM_MAJOR_VERS(fd->version) == 2) {
+        int32_t i32 = 0;
+        cp += safe_itf8_get((char *)cp, (char *)cp_end, &i32);
+        slice_header->record_counter = i32;
+    } else if (CRAM_MAJOR_VERS(fd->version) >= 3) {
+        cp += safe_ltf8_get((char *)cp, (char *)cp_end, &slice_header->record_counter);
+    }
+
+    cp += safe_itf8_get((char *)cp, (char *)cp_end, &slice_header->num_blocks);
+
+    cp += safe_itf8_get((char *)cp, (char *)cp_end, &slice_header->num_content_ids);
+    if (slice_header->num_content_ids < 1 ||
+        slice_header->num_content_ids >= SIZE_MAX / sizeof(int32_t)) {
+        /* Slice must have at least one data block,
+           and malloc'd size shouldn't wrap. */
+        free(slice_header);
+        return NULL;
+    }
+    slice_header->block_content_ids = malloc(slice_header->num_content_ids * sizeof(int32_t));
+    if (!slice_header->block_content_ids) {
+        free(slice_header);
+        return NULL;
+    }
+
+    for (i = 0; i < slice_header->num_content_ids; i++) {
+        int l = safe_itf8_get((char *)cp, (char *)cp_end,
+                              &slice_header->block_content_ids[i]);
+        if (l <= 0) {
+            free(slice_header->block_content_ids);
+            free(slice_header);
+            return NULL;
+        }
+        cp += l;
+    }
+
+    if (b->content_type == MAPPED_SLICE) {
+        cp += safe_itf8_get((char *)cp, (char *) cp_end, &slice_header->ref_base_id);
+    }
+
+    if (CRAM_MAJOR_VERS(fd->version) != 1) {
+        if (cp_end - cp < 16) {
+            free(slice_header->block_content_ids);
+            free(slice_header);
+            return NULL;
+        }
+        memcpy(slice_header->md5, cp, 16);
+    } else {
+        memset(slice_header->md5, 0, 16);
+    }
+
+    return slice_header;
+}

@@ -1,0 +1,1087 @@
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%                  SSSSS   TTTTT  RRRR   IIIII  N   N   GGGG                  %
+%                  SS        T    R   R    I    NN  N  G                      %
+%                   SSS      T    RRRR     I    N N N  G GGG                  %
+%                     SS     T    R R      I    N  NN  G   G                  %
+%                  SSSSS     T    R  R   IIIII  N   N   GGGG                  %
+%                                                                             %
+%                                                                             %
+%                        MagickCore String Methods                            %
+%                                                                             %
+%                             Software Design                                 %
+%                                  Cristy                                     %
+%                               August 2003                                   %
+%                                                                             %
+%                                                                             %
+%  Copyright 1999-2021 ImageMagick Studio LLC, a non-profit organization      %
+%  dedicated to making software imaging solutions freely available.           %
+%                                                                             %
+%  You may not use this file except in compliance with the license.  You may  %
+%  obtain a copy of the license at                                            %
+%                                                                             %
+%    https://imagemagick.org/script/license.php                               %
+%                                                                             %
+%  unless required by applicable law or agreed to in writing, software        %
+%  distributed under the license is distributed on an "as is" basis,          %
+%  without warranties or conditions of any kind, either express or implied.   %
+%  See the license for the specific language governing permissions and        %
+%  limitations under the license.                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%
+*/
+
+/*
+  Include declarations.
+*/
+#include "MagickCore/studio.h"
+#include "MagickCore/blob.h"
+#include "MagickCore/blob-private.h"
+#include "MagickCore/exception.h"
+#include "MagickCore/exception-private.h"
+#include "MagickCore/image-private.h"
+#include "MagickCore/list.h"
+#include "MagickCore/locale_.h"
+#include "MagickCore/log.h"
+#include "MagickCore/memory_.h"
+#include "MagickCore/memory-private.h"
+#include "MagickCore/nt-base-private.h"
+#include "MagickCore/property.h"
+#include "MagickCore/resource_.h"
+#include "MagickCore/signature-private.h"
+#include "MagickCore/string_.h"
+#include "MagickCore/string-private.h"
+#include "MagickCore/utility-private.h"
+
+/*
+  Define declarations.
+*/
+#define CharsPerLine  0x14
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   A c q u i r e S t r i n g                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AcquireString() returns an new extended string, containing a clone of the
+%  given string.
+%
+%  An extended string is the string length, plus an extra MagickPathExtent space
+%  to allow for the string to be actively worked on.
+%
+%  The returned string shoud be freed using DestoryString().
+%
+%  The format of the AcquireString method is:
+%
+%      char *AcquireString(const char *source)
+%
+%  A description of each parameter follows:
+%
+%    o source: A character string.
+%
+*/
+MagickExport char *AcquireString(const char *source)
+{
+  char
+    *destination;
+
+  size_t
+    length;
+
+  length=0;
+  if (source != (char *) NULL)
+    length+=strlen(source);
+  if (~length < MagickPathExtent)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToAcquireString");
+  destination=(char *) AcquireQuantumMemory(length+MagickPathExtent,
+    sizeof(*destination));
+  if (destination == (char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToAcquireString");
+  if (source != (char *) NULL)
+    (void) memcpy(destination,source,length*sizeof(*destination));
+  destination[length]='\0';
+  return(destination);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   A c q u i r e S t r i n g I n f o                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AcquireStringInfo() allocates the StringInfo structure.
+%
+%  The format of the AcquireStringInfo method is:
+%
+%      StringInfo *AcquireStringInfo(const size_t length)
+%
+%  A description of each parameter follows:
+%
+%    o length: the string length.
+%
+*/
+
+static StringInfo *AcquireStringInfoContainer()
+{
+  StringInfo
+    *string_info;
+
+  string_info=(StringInfo *) AcquireCriticalMemory(sizeof(*string_info));
+  (void) memset(string_info,0,sizeof(*string_info));
+  string_info->signature=MagickCoreSignature;
+  return(string_info);
+}
+
+MagickExport StringInfo *AcquireStringInfo(const size_t length)
+{
+  StringInfo
+    *string_info;
+
+  string_info=AcquireStringInfoContainer();
+  string_info->length=length;
+  if (~string_info->length >= (MagickPathExtent-1))
+    string_info->datum=(unsigned char *) AcquireQuantumMemory(
+      string_info->length+MagickPathExtent,sizeof(*string_info->datum));
+  if (string_info->datum == (unsigned char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  (void) memset(string_info->datum,0,(length+MagickPathExtent)*
+    sizeof(*string_info->datum));
+  return(string_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   B l o b T o S t r i n g I n f o                                           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  BlobToStringInfo() returns the contents of a blob as a StringInfo structure
+%  with MagickPathExtent extra space.
+%
+%  The format of the BlobToStringInfo method is:
+%
+%      StringInfo *BlobToStringInfo(const void *blob,const size_t length)
+%
+%  A description of each parameter follows:
+%
+%    o blob: the blob.
+%
+%    o length: the length of the blob.
+%
+*/
+MagickExport StringInfo *BlobToStringInfo(const void *blob,const size_t length)
+{
+  StringInfo
+    *string_info;
+
+  if (~length < MagickPathExtent)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  string_info=AcquireStringInfoContainer();
+  string_info->length=length;
+  string_info->datum=(unsigned char *) AcquireQuantumMemory(length+
+    MagickPathExtent,sizeof(*string_info->datum));
+  if (string_info->datum == (unsigned char *) NULL)
+    {
+      string_info=DestroyStringInfo(string_info);
+      return((StringInfo *) NULL);
+    }
+  if (blob != (const void *) NULL)
+    (void) memcpy(string_info->datum,blob,length);
+  else
+    (void) memset(string_info->datum,0,length*sizeof(*string_info->datum));
+  (void) memset(string_info->datum+length,0,MagickPathExtent*
+    sizeof(*string_info->datum));
+  return(string_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C l o n e S t r i n g                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  CloneString() replaces or frees the destination string to make it
+%  a clone of the input string plus MagickPathExtent more space so the string
+%  may be worked on.
+%
+%  If source is a NULL pointer the destination string will be freed and set to
+%  a NULL pointer.  A pointer to the stored in the destination is also returned.
+%
+%  When finished the non-NULL string should be freed using DestoryString()
+%  or using CloneString() with a NULL pointed for the source.
+%
+%  The format of the CloneString method is:
+%
+%      char *CloneString(char **destination,const char *source)
+%
+%  A description of each parameter follows:
+%
+%    o destination:  A pointer to a character string.
+%
+%    o source: A character string.
+%
+*/
+MagickExport char *CloneString(char **destination,const char *source)
+{
+  size_t
+    length;
+
+  assert(destination != (char **) NULL);
+  if (source == (const char *) NULL)
+    {
+      if (*destination != (char *) NULL)
+        *destination=DestroyString(*destination);
+      return(*destination);
+    }
+  if (*destination == (char *) NULL)
+    {
+      *destination=AcquireString(source);
+      return(*destination);
+    }
+  length=strlen(source);
+  if (~length < MagickPathExtent)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToAcquireString");
+  *destination=(char *) ResizeQuantumMemory(*destination,length+
+    MagickPathExtent,sizeof(**destination));
+  if (*destination == (char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToAcquireString");
+  if (length != 0)
+    (void) memcpy(*destination,source,length*sizeof(**destination));
+  (*destination)[length]='\0';
+  return(*destination);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C l o n e S t r i n g I n f o                                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  CloneStringInfo() clones a copy of the StringInfo structure.
+%
+%  The format of the CloneStringInfo method is:
+%
+%      StringInfo *CloneStringInfo(const StringInfo *string_info)
+%
+%  A description of each parameter follows:
+%
+%    o string_info: the string info.
+%
+*/
+MagickExport StringInfo *CloneStringInfo(const StringInfo *string_info)
+{
+  StringInfo
+    *clone_info;
+
+  assert(string_info != (StringInfo *) NULL);
+  assert(string_info->signature == MagickCoreSignature);
+  clone_info=AcquireStringInfo(string_info->length);
+  (void) CloneString(&clone_info->path,string_info->path);
+  (void) CloneString(&clone_info->name,string_info->name);
+  if (string_info->length != 0)
+    (void) memcpy(clone_info->datum,string_info->datum,string_info->length+1);
+  return(clone_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C o m p a r e S t r i n g I n f o                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  CompareStringInfo() compares the two datums target and source.  It returns
+%  an integer less than, equal to, or greater than zero if target is found,
+%  respectively, to be less than, to match, or be greater than source.
+%
+%  The format of the CompareStringInfo method is:
+%
+%      int CompareStringInfo(const StringInfo *target,const StringInfo *source)
+%
+%  A description of each parameter follows:
+%
+%    o target: the target string.
+%
+%    o source: the source string.
+%
+*/
+
+MagickExport int CompareStringInfo(const StringInfo *target,
+  const StringInfo *source)
+{
+  int
+    status;
+
+  assert(target != (StringInfo *) NULL);
+  assert(target->signature == MagickCoreSignature);
+  assert(source != (StringInfo *) NULL);
+  assert(source->signature == MagickCoreSignature);
+  status=memcmp(target->datum,source->datum,MagickMin(target->length,
+    source->length));
+  if (status != 0)
+    return(status);
+  if (target->length == source->length)
+    return(0);
+  return(target->length < source->length ? -1 : 1);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C o n c a t e n a t e M a g i c k S t r i n g                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  ConcatenateMagickString() concatenates the source string to the destination
+%  string.  The destination buffer is always null-terminated even if the
+%  string must be truncated.
+%
+%  The format of the ConcatenateMagickString method is:
+%
+%      size_t ConcatenateMagickString(char *magick_restrict destination,
+%        const char *magick_restrict source,const size_t length)
+%
+%  A description of each parameter follows:
+%
+%    o destination: the destination string.
+%
+%    o source: the source string.
+%
+%    o length: the length of the destination string.
+%
+*/
+MagickExport size_t ConcatenateMagickString(char *magick_restrict destination,
+  const char *magick_restrict source,const size_t length)
+{
+  char
+    *magick_restrict q;
+
+  const char
+    *magick_restrict p;
+
+  size_t
+    i;
+
+  size_t
+    count;
+
+  assert(destination != (char *) NULL);
+  assert(source != (const char *) NULL);
+  assert(length >= 1);
+  p=source;
+  q=destination;
+  i=length;
+  while ((i-- != 0) && (*q != '\0'))
+    q++;
+  count=(size_t) (q-destination);
+  i=length-count;
+  if (i == 0)
+    return(count+strlen(p));
+  while (*p != '\0')
+  {
+    if (i != 1)
+      {
+        *q++=(*p);
+        i--;
+      }
+    p++;
+  }
+  *q='\0';
+  return(count+(p-source));
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C o n c a t e n a t e S t r i n g                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  ConcatenateString() appends a copy of string source, including the
+%  terminating null character, to the end of string destination.
+%
+%  The format of the ConcatenateString method is:
+%
+%      MagickBooleanType ConcatenateString(char **magick_restrict destination,
+%        const char *magick_restrict source)
+%
+%  A description of each parameter follows:
+%
+%    o destination:  A pointer to a character string.
+%
+%    o source: A character string.
+%
+*/
+MagickExport MagickBooleanType ConcatenateString(
+  char **magick_restrict destination,const char *magick_restrict source)
+{
+  size_t
+    destination_length,
+    length,
+    source_length;
+
+  assert(destination != (char **) NULL);
+  if (source == (const char *) NULL)
+    return(MagickTrue);
+  if (*destination == (char *) NULL)
+    {
+      *destination=AcquireString(source);
+      return(MagickTrue);
+    }
+  destination_length=strlen(*destination);
+  source_length=strlen(source);
+  length=destination_length;
+  if (~length < source_length)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToConcatenateString");
+  length+=source_length;
+  if (~length < MagickPathExtent)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToConcatenateString");
+  *destination=(char *) ResizeQuantumMemory(*destination,
+    OverAllocateMemory(length+MagickPathExtent),sizeof(**destination));
+  if (*destination == (char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToConcatenateString");
+  if (source_length != 0)
+    (void) memcpy((*destination)+destination_length,source,source_length);
+  (*destination)[length]='\0';
+  return(MagickTrue);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C o n c a t e n a t e S t r i n g I n f o                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  ConcatenateStringInfo() concatenates the source string to the destination
+%  string.
+%
+%  The format of the ConcatenateStringInfo method is:
+%
+%      void ConcatenateStringInfo(StringInfo *string_info,
+%        const StringInfo *source)
+%
+%  A description of each parameter follows:
+%
+%    o string_info: the string info.
+%
+%    o source: the source string.
+%
+*/
+MagickExport void ConcatenateStringInfo(StringInfo *infostring,
+  const StringInfo *source)
+{
+  size_t
+    length;
+
+  assert(infostring != (StringInfo *) NULL);
+  assert(infostring->signature == MagickCoreSignature);
+  assert(source != (const StringInfo *) NULL);
+  length=infostring->length;
+  if (~length < source->length)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToConcatenateString");
+  length+=source->length;
+  if (~length < MagickPathExtent)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  // Concatenate the source StringInfo's data to the destination StringInfo's data.
+  // If the current destination data is NULL, allocate new memory; otherwise, 
+  // resize existing memory. 
+  // Copy the source data to the end of the destination's data.
+  // <MASK>
+}<｜begin▁of▁sentence｜>
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C o n f i g u r e F i l e T o S t r i n g I n f o                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  ConfigureFileToStringInfo() returns the contents of a configure file as a
+%  string.
+%
+%  The format of the ConfigureFileToStringInfo method is:
+%
+%      StringInfo *ConfigureFileToStringInfo(const char *filename)
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o filename: the filename.
+%
+*/
+MagickExport StringInfo *ConfigureFileToStringInfo(const char *filename)
+{
+  char
+    *string;
+
+  int
+    file;
+
+  MagickOffsetType
+    offset;
+
+  size_t
+    length;
+
+  StringInfo
+    *string_info;
+
+  void
+    *map;
+
+  assert(filename != (const char *) NULL);
+  file=open_utf8(filename,O_RDONLY | O_BINARY,0);
+  if (file == -1)
+    return((StringInfo *) NULL);
+  offset=(MagickOffsetType) lseek(file,0,SEEK_END);
+  if ((offset < 0) || (offset != (MagickOffsetType) ((ssize_t) offset)))
+    {
+      file=close(file)-1;
+      return((StringInfo *) NULL);
+    }
+  length=(size_t) offset;
+  string=(char *) NULL;
+  if (~length >= (MagickPathExtent-1))
+    string=(char *) AcquireQuantumMemory(length+MagickPathExtent,
+      sizeof(*string));
+  if (string == (char *) NULL)
+    {
+      file=close(file)-1;
+      return((StringInfo *) NULL);
+    }
+  map=MapBlob(file,ReadMode,0,length);
+  if (map != (void *) NULL)
+    {
+      (void) memcpy(string,map,length);
+      (void) UnmapBlob(map,length);
+    }
+  else
+    {
+      size_t
+        i;
+
+      ssize_t
+        count;
+
+      (void) lseek(file,0,SEEK_SET);
+      for (i=0; i < length; i+=count)
+      {
+        count=read(file,string+i,(size_t) MagickMin(length-i,(size_t)
+          MAGICK_SSIZE_MAX));
+        if (count <= 0)
+          {
+            count=0;
+            if (errno != EINTR)
+              break;
+          }
+      }
+      if (i < length)
+        {
+          file=close(file)-1;
+          string=DestroyString(string);
+          return((StringInfo *) NULL);
+        }
+    }
+  string[length]='\0';
+  file=close(file)-1;
+  string_info=AcquireStringInfoContainer();
+  string_info->path=ConstantString(filename);
+  string_info->length=length;
+  string_info->datum=(unsigned char *) string;
+  return(string_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C o n s t a n t S t r i n g                                               %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  ConstantString() allocates exactly the needed memory for a string and
+%  copies the source string to that memory location.  A NULL string pointer
+%  will allocate an empty string containing just the NUL character.
+%
+%  When finished the string should be freed using DestoryString()
+%
+%  The format of the ConstantString method is:
+%
+%      char *ConstantString(const char *source)
+%
+%  A description of each parameter follows:
+%
+%    o source: A character string.
+%
+*/
+MagickExport char *ConstantString(const char *source)
+{
+  char
+    *destination;
+
+  size_t
+    length;
+
+  length=0;
+  if (source != (char *) NULL)
+    length+=strlen(source);
+  destination=(char *) NULL;
+  if (~length >= 1UL)
+    destination=(char *) AcquireQuantumMemory(length+1UL,sizeof(*destination));
+  if (destination == (char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToAcquireString");
+  if (source != (char *) NULL)
+    (void) memcpy(destination,source,length*sizeof(*destination));
+  destination[length]='\0';
+  return(destination);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C o p y M a g i c k S t r i n g                                           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  CopyMagickString() copies the source string to the destination string, with
+%  out exceeding the given pre-declared length.
+%
+%  The destination buffer is always null-terminated even if the string must be
+%  truncated.  The return value is the length of the string.
+%
+%  The format of the CopyMagickString method is:
+%
+%      size_t CopyMagickString(const char *magick_restrict destination,
+%        char *magick_restrict source,const size_t length)
+%
+%  A description of each parameter follows:
+%
+%    o destination: the destination string.
+%
+%    o source: the source string.
+%
+%    o length: the length of the destination string.
+%
+*/
+MagickExport size_t CopyMagickString(char *magick_restrict destination,
+  const char *magick_restrict source,const size_t length)
+{
+  char
+    *magick_restrict q;
+
+  const char
+    *magick_restrict p;
+
+  size_t
+    n;
+
+  p=source;
+  q=destination;
+  for (n=length; n > 4; n-=4)
+  {
+    if (((*q++)=(*p++)) == '\0')
+      return((size_t) (p-source-1));
+    if (((*q++)=(*p++)) == '\0')
+      return((size_t) (p-source-1));
+    if (((*q++)=(*p++)) == '\0')
+      return((size_t) (p-source-1));
+    if (((*q++)=(*p++)) == '\0')
+      return((size_t) (p-source-1));
+  }
+  if (length != 0)
+    {
+      while (--n != 0)
+        if (((*q++)=(*p++)) == '\0')
+          return((size_t) (p-source-1));
+      *q='\0';
+    }
+  return((size_t) (p-source));
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D e s t r o y S t r i n g                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DestroyString() destroys memory associated with a string.
+%
+%  The format of the DestroyString method is:
+%
+%      char *DestroyString(char *string)
+%
+%  A description of each parameter follows:
+%
+%    o string: the string.
+%
+*/
+MagickExport char *DestroyString(char *string)
+{
+  return((char *) RelinquishMagickMemory(string));
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D e s t r o y S t r i n g I n f o                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DestroyStringInfo() destroys memory associated with the StringInfo structure.
+%
+%  The format of the DestroyStringInfo method is:
+%
+%      StringInfo *DestroyStringInfo(StringInfo *string_info)
+%
+%  A description of each parameter follows:
+%
+%    o string_info: the string info.
+%
+*/
+MagickExport StringInfo *DestroyStringInfo(StringInfo *string_info)
+{
+  assert(string_info != (StringInfo *) NULL);
+  assert(string_info->signature == MagickCoreSignature);
+  if (string_info->datum != (unsigned char *) NULL)
+    string_info->datum=(unsigned char *) RelinquishMagickMemory(
+      string_info->datum);
+  if (string_info->name != (char *) NULL)
+    string_info->name=DestroyString(string_info->name);
+  if (string_info->path != (char *) NULL)
+    string_info->path=DestroyString(string_info->path);
+  string_info->signature=(~MagickCoreSignature);
+  string_info=(StringInfo *) RelinquishMagickMemory(string_info);
+  return(string_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D e s t r o y S t r i n g L i s t                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DestroyStringList() zeros memory associated with a string list.
+%
+%  The format of the DestroyStringList method is:
+%
+%      char **DestroyStringList(char **list)
+%
+%  A description of each parameter follows:
+%
+%    o list: the string list.
+%
+*/
+MagickExport char **DestroyStringList(char **list)
+{
+  ssize_t
+    i;
+
+  assert(list != (char **) NULL);
+  for (i=0; list[i] != (char *) NULL; i++)
+    list[i]=DestroyString(list[i]);
+  list=(char **) RelinquishMagickMemory(list);
+  return(list);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   E s c a p e S t r i n g                                                   %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  EscapeString() allocates memory for a backslash-escaped version of a
+%  source text string, copies the escaped version of the text to that
+%  memory location while adding backslash characters, and returns the
+%  escaped string.
+%
+%  The format of the EscapeString method is:
+%
+%      char *EscapeString(const char *source,const char escape)
+%
+%  A description of each parameter follows:
+%
+%    o allocate_string:  Method EscapeString returns the escaped string.
+%
+%    o source: A character string.
+%
+%    o escape: the quoted string termination character to escape (e.g. '"').
+%
+*/
+MagickExport char *EscapeString(const char *source,const char escape)
+{
+  char
+    *destination;
+
+  char
+    *q;
+
+  const char
+    *p;
+
+  size_t
+    length;
+
+  assert(source != (const char *) NULL);
+  length=0;
+  for (p=source; *p != '\0'; p++)
+  {
+    if ((*p == '\\') || (*p == escape))
+      {
+        if (~length < 1)
+          ThrowFatalException(ResourceLimitFatalError,"UnableToEscapeString");
+        length++;
+      }
+    length++;
+  }
+  destination=(char *) NULL;
+  if (~length >= (MagickPathExtent-1))
+    destination=(char *) AcquireQuantumMemory(length+MagickPathExtent,
+      sizeof(*destination));
+  if (destination == (char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"UnableToEscapeString");
+  *destination='\0';
+  q=destination;
+  for (p=source; *p != '\0'; p++)
+  {
+    if ((*p == '\\') || (*p == escape))
+      *q++='\\';
+    *q++=(*p);
+  }
+  *q='\0';
+  return(destination);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   F i l e T o S t r i n g                                                   %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  FileToString() returns the contents of a file as a string.
+%
+%  The format of the FileToString method is:
+%
+%      char *FileToString(const char *filename,const size_t extent,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o filename: the filename.
+%
+%    o extent: Maximum length of the string.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport char *FileToString(const char *filename,const size_t extent,
+  ExceptionInfo *exception)
+{
+  size_t
+    length;
+
+  assert(filename != (const char *) NULL);
+  (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  return((char *) FileToBlob(filename,extent,&length,exception));
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   F i l e T o S t r i n g I n f o                                           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  FileToStringInfo() returns the contents of a file as a string.
+%
+%  The format of the FileToStringInfo method is:
+%
+%      StringInfo *FileToStringInfo(const char *filename,const size_t extent,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o filename: the filename.
+%
+%    o extent: Maximum length of the string.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport StringInfo *FileToStringInfo(const char *filename,
+  const size_t extent,ExceptionInfo *exception)
+{
+  StringInfo
+    *string_info;
+
+  assert(filename != (const char *) NULL);
+  (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  string_info=AcquireStringInfoContainer();
+  string_info->path=ConstantString(filename);
+  string_info->datum=(unsigned char *) FileToBlob(filename,extent,
+    &string_info->length,exception);
+  if (string_info->datum == (unsigned char *) NULL)
+    {
+      string_info=DestroyStringInfo(string_info);
+      return((StringInfo *) NULL);
+    }
+  return(string_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%  F o r m a t M a g i c k S i z e                                            %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  FormatMagickSize() converts a size to a human readable format, for example,
+%  14k, 234m, 2.7g, or 3.0t.  Scaling is done by repetitively dividing by
+%  1000.
+%
+%  The format of the FormatMagickSize method is:
+%
+%      ssize_t FormatMagickSize(const MagickSizeType size,const char *suffix,
+%        const size_t length,char *format)
+%
+%  A description of each parameter follows:
+%
+%    o size:  convert this size to a human readable format.
+%
+%    o bi:  use power of two rather than power of ten.
+%
+%    o suffix:  append suffix, typically B or P.
+%
+%    o length: the maximum length of the string.
+%
+%    o format:  human readable format.
+%
+*/
+MagickExport ssize_t FormatMagickSize(const MagickSizeType size,
+  const MagickBooleanType bi,const char *suffix,const size_t length,
+  char *format)
+{
+  char
+    p[MagickPathExtent],
+    q[MagickPathExtent];
+
+  const char
+    **units;
+
+  double
+    bytes,
+    extent;
+
+  ssize_t
+    i;
+
+  ssize_t
+    count;
+
+  static const char
+    *bi_units[] =
+    {
+      "", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi", (char *) NULL
+    },
+    *traditional_units[] =
+    {
+      "", "K", "M", "G", "T", "P", "E", "Z", "Y", (char *) NULL
+    };
+
+  bytes=1000.0;
+  units=trad
+
+// --- CODE TRUNCATED HERE ---
+

@@ -1,0 +1,678 @@
+<｜begin▁of▁sentence｜>/*
+ * tls.c - TLS/TLS/DTLS dissector
+ *
+ * Copyright (C) 2016-22 - ntop.org
+ *
+ * nDPI is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * nDPI is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with nDPI.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "ndpi_protocol_ids.h"
+
+#define NDPI_CURRENT_PROTO NDPI_PROTOCOL_TLS
+
+#include "ndpi_api.h"
+#include "ndpi_md5.h"
+#include "ndpi_sha1.h"
+#include "ndpi_encryption.h"
+
+extern char *strptime(const char *s, const char *format, struct tm *tm);
+extern int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
+				    struct ndpi_flow_struct *flow, uint32_t quic_version);
+extern int http_process_user_agent(struct ndpi_detection_module_struct *ndpi_struct,
+                                   struct ndpi_flow_struct *flow,
+                                   const u_int8_t *ua_ptr, u_int16_t ua_ptr_len);
+/* QUIC/GQUIC stuff */
+extern int quic_len(const uint8_t *buf, uint64_t *value);
+extern int quic_len_buffer_still_required(uint8_t value);
+extern int is_version_with_var_int_transport_params(uint32_t version);
+
+// #define DEBUG_TLS_MEMORY       1
+// #define DEBUG_TLS              1
+// #define DEBUG_TLS_BLOCKS       1
+// #define DEBUG_CERTIFICATE_HASH
+
+// #define DEBUG_HEURISTIC
+
+// #define DEBUG_JA3C 1
+
+/* #define DEBUG_FINGERPRINT      1 */
+/* #define DEBUG_ENCRYPTED_SNI    1 */
+
+/* **************************************** */
+
+/* https://engineering.salesforce.com/tls-fingerprinting-with-ja3-and-ja3s-247362855967 */
+
+#define JA3_STR_LEN        1024
+#define MAX_NUM_JA3         512
+#define MAX_JA3_STRLEN      256
+
+union ja3_info {
+  struct {
+    u_int16_t tls_handshake_version;
+    u_int16_t num_cipher, cipher[MAX_NUM_JA3];
+    u_int16_t num_tls_extension, tls_extension[MAX_NUM_JA3];
+    u_int16_t num_elliptic_curve, elliptic_curve[MAX_NUM_JA3];
+    u_int16_t num_elliptic_curve_point_format, elliptic_curve_point_format[MAX_NUM_JA3];
+    char signature_algorithms[MAX_JA3_STRLEN], supported_versions[MAX_JA3_STRLEN], alpn[MAX_JA3_STRLEN];
+  } client;
+
+  struct {
+    u_int16_t tls_handshake_version;
+    u_int16_t num_cipher, cipher[MAX_NUM_JA3];
+    u_int16_t num_tls_extension, tls_extension[MAX_NUM_JA3];
+    u_int16_t tls_supported_version;
+    u_int16_t num_elliptic_curve_point_format, elliptic_curve_point_format[MAX_NUM_JA3];
+    char alpn[MAX_JA3_STRLEN];
+  } server; /* Used for JA3+ */
+};
+
+/*
+  NOTE
+
+  How to view the certificate fingerprint
+  1. Using wireshark save the certificate on certificate.bin file as explained
+  in https://security.stackexchange.com/questions/123851/how-can-i-extract-the-certificate-from-this-pcap-file
+
+  2. openssl x509 -inform der -in certificate.bin -text > certificate.der
+  3. openssl x509 -noout -fingerprint -sha1 -inform pem -in certificate.der
+  SHA1 Fingerprint=15:9A:76....
+
+  $ shasum -a 1 www.grc.com.bin
+  159a76.....
+*/
+
+#define NDPI_MAX_TLS_REQUEST_SIZE 10000
+#define TLS_THRESHOLD             34387200 /* Threshold for certificate validity                                */
+#define TLS_LIMIT_DATE            1598918400 /* From 01/09/2020 TLS certificates lifespan is limited to 13 months */
+
+
+static void ndpi_int_tls_add_connection(struct ndpi_detection_module_struct *ndpi_struct,
+					struct ndpi_flow_struct *flow);
+
+/* **************************************** */
+
+static u_int32_t ndpi_tls_refine_master_protocol(struct ndpi_detection_module_struct *ndpi_struct,
+						 struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int32_t protocol;
+
+  if(packet->tcp != NULL) {
+    /*
+      In case of TLS there are probably sub-protocols
+      such as IMAPS that can be otherwise detected
+    */
+    u_int16_t sport = ntohs(packet->tcp->source);
+    u_int16_t dport = ntohs(packet->tcp->dest);
+
+    if((sport == 465) || (dport == 465) || (sport == 587) || (dport == 587))
+      protocol = NDPI_PROTOCOL_MAIL_SMTPS;
+    else if((sport == 993) || (dport == 993) || (flow->l4.tcp.mail_imap_starttls))
+      protocol = NDPI_PROTOCOL_MAIL_IMAPS;
+    else if((sport == 995) || (dport == 995))
+      protocol = NDPI_PROTOCOL_MAIL_POPS;
+    else
+      protocol = NDPI_PROTOCOL_TLS;
+  } else {
+      protocol = NDPI_PROTOCOL_DTLS;
+  }
+
+  return protocol;
+}
+
+/* **************************************** */
+
+static u_int32_t __get_master(struct ndpi_detection_module_struct *ndpi_struct,
+			      struct ndpi_flow_struct *flow) {
+
+  if(flow->detected_protocol_stack[1] != NDPI_PROTOCOL_UNKNOWN)
+    return flow->detected_protocol_stack[1];
+  if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_UNKNOWN)
+    return flow->detected_protocol_stack[0];
+
+  return ndpi_tls_refine_master_protocol(ndpi_struct, flow);
+}
+
+/* **************************************** */
+
+static int ndpi_search_tls_memory(struct ndpi_detection_module_struct *ndpi_struct,
+				  struct ndpi_flow_struct *flow,
+				  const u_int8_t *payload,
+				  u_int16_t payload_len,
+				  u_int32_t seq,
+				  message_t *message) {
+  u_int avail_bytes;
+
+#ifdef DEBUG_TLS_MEMORY
+  printf("[TLS Mem] Handling TLS flow [payload_len: %u][buffer_len: %u]\n",
+	 payload_len,
+	 message->buffer_len);
+#endif
+
+  if(message->buffer == NULL) {
+    /* Allocate buffer */
+    message->buffer_len = 2048, message->buffer_used = 0;
+    message->buffer = (u_int8_t*)ndpi_malloc(message->buffer_len);
+
+    if(message->buffer == NULL)
+      return -1;
+
+#ifdef DEBUG_TLS_MEMORY
+    printf("[TLS Mem] Allocating %u buffer\n", message->buffer_len);
+#endif
+  }
+
+  avail_bytes = message->buffer_len - message->buffer_used;
+
+  if(avail_bytes < payload_len) {
+    u_int new_len = message->buffer_len + payload_len - avail_bytes + 1;
+    void *newbuf  = ndpi_realloc(message->buffer,
+				 message->buffer_len, new_len);
+    if(!newbuf) return -1;
+
+#ifdef DEBUG_TLS_MEMORY
+    printf("[TLS Mem] Enlarging %u -> %u buffer\n", message->buffer_len, new_len);
+#endif
+
+    message->buffer = (u_int8_t*)newbuf;
+    message->buffer_len = new_len;
+    avail_bytes = message->buffer_len - message->buffer_used;
+  }
+
+  if(payload_len > 0 && avail_bytes >= payload_len) {
+    u_int8_t ok = 0;
+
+    if(message->next_seq != 0) {
+      if(seq == message->next_seq)
+	ok = 1;
+    } else
+      ok = 1;
+
+    if(ok) {
+      memcpy(&message->buffer[message->buffer_used],
+	     payload, payload_len);
+
+      message->buffer_used += payload_len;
+#ifdef DEBUG_TLS_MEMORY
+      printf("[TLS Mem] Copied data to buffer [%u/%u bytes][tcp_seq: %u][next: %u]\n",
+	     message->buffer_used, message->buffer_len,
+	     seq,
+	     seq + payload_len);
+#endif
+
+      message->next_seq = seq + payload_len;
+    } else {
+#ifdef DEBUG_TLS_MEMORY
+      printf("[TLS Mem] Skipping packet [%u bytes][tcp_seq: %u][expected next: %u]\n",
+	     message->buffer_len,
+	     seq,
+	     message->next_seq);
+#endif
+    }
+  }
+  return 0;
+}
+
+/* **************************************** */
+
+static void cleanupServerName(char *buffer, u_int buffer_len) {
+  u_int i;
+
+  /* Now all lowecase */
+  for(i=0; i<buffer_len; i++)
+    buffer[i] = tolower(buffer[i]);
+}
+
+/* **************************************** */
+
+/*
+  Return code
+  -1: error (buffer too short)
+  0: OK but buffer is not human readeable (so something went wrong)
+  1: OK
+*/
+static int extractRDNSequence(struct ndpi_packet_struct *packet,
+			      u_int offset, char *buffer, u_int buffer_len,
+			      char *rdnSeqBuf, u_int *rdnSeqBuf_offset,
+			      u_int rdnSeqBuf_len,
+			      const char *label) {
+  u_int8_t str_len, is_printable = 1;
+  char *str;
+  u_int len;
+
+  if(*rdnSeqBuf_offset >= rdnSeqBuf_len) {
+#ifdef DEBUG_TLS
+    printf("[TLS] %s() [buffer capacity reached][%u]\n",
+           __FUNCTION__, rdnSeqBuf_len);
+#endif
+    return -1;
+  }
+  if((offset+4) >= packet->payload_packet_len)
+    return(-1);
+
+  str_len = packet->payload[offset+4];
+
+  // packet is truncated... further inspection is not needed
+  if((offset+4+str_len) >= packet->payload_packet_len)
+    return(-1);
+
+  str = (char*)&packet->payload[offset+5];
+
+  len = (u_int)ndpi_min(str_len, buffer_len-1);
+  strncpy(buffer, str, len);
+  buffer[len] = '\0';
+
+  // check string is printable
+  is_printable = ndpi_normalize_printable_string(buffer, len);
+
+  if(is_printable) {
+    int rc = ndpi_snprintf(&rdnSeq
+
+// --- CODE TRUNCATED HERE ---
+
+void processCertificateElements(struct ndpi_detection_module_struct *detectionmodulestruct,
+				struct ndpi_flow_struct *flow,
+				u_int16_t p_offset, u_int16_t certificate_len) {
+  // Initialize variables required for processing certificate elements.
+  // <MASK>
+
+#ifdef DEBUG_TLS
+  printf("[TLS] %s() [offset: %u][certificate_len: %u]\n", __FUNCTION__, p_offset, certificate_len);
+#endif
+
+  /* Check after handshake protocol header (5 bytes) and message header (4 bytes) */
+  for(i = p_offset; i < certificate_len - 2; i++) {
+    /*
+      See https://www.ibm.com/support/knowledgecenter/SSFKSJ_7.5.0/com.ibm.mq.sec.doc/q009860_.htm
+      for X.509 certificate labels
+    */
+    if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x03)) {
+      /* Common Name */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "CN");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Common Name", buffer);
+#endif
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x06)) {
+      /* Country */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "C");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Country", buffer);
+#endif
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x07)) {
+      /* Locality */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "L");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Locality", buffer);
+#endif
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x08)) {
+      /* State or Province */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "ST");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "State or Province", buffer);
+#endif
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0a)) {
+      /* Organization Name */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "O");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Organization Name", buffer);
+#endif
+
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0b)) {
+      /* Organization Unit */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "OU");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Organization Unit", buffer);
+#endif
+    } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x1e) && (packet->payload[i+2] == 0x17)) {
+      /* Certificate Validity */
+      u_int offset = i+4;
+
+      if(num_found == 0) {
+	num_found++;
+
+#ifdef DEBUG_TLS
+	printf("[TLS] %s() IssuerDN [%s]\n", __FUNCTION__, rdnSeqBuf);
+#endif
+
+	if(rdn_len && (flow->protos.tls_quic.issuerDN == NULL)) {
+	  flow->protos.tls_quic.issuerDN = ndpi_strdup(rdnSeqBuf);
+	  if(ndpi_normalize_printable_string(rdnSeqBuf, rdn_len) == 0) {
+	    char str[64];
+
+	    snprintf(str, sizeof(str), "Invalid issuerDN %s", flow->protos.tls_quic.issuerDN);
+	    ndpi_set_risk(detectionmodulestruct, flow, NDPI_INVALID_CHARACTERS, str);
+	  }
+	}
+
+	rdn_len = 0; /* Reset buffer */
+      }
+
+      if(i + 3 < certificate_len &&
+	 (offset+packet->payload[i+3]) < packet->payload_packet_len) {
+	char utcDate[32];
+        u_int8_t len = packet->payload[i+3];
+
+#ifdef DEBUG_TLS
+	u_int j;
+
+	printf("[CERTIFICATE] notBefore [len: %u][", len);
+	for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+	printf("]\n");
+#endif
+
+	if(len < (sizeof(utcDate)-1)) {
+	  struct tm utc;
+	  utc.tm_isdst = -1; /* Not set by strptime */
+
+	  strncpy(utcDate, (const char*)&packet->payload[i+4], len);
+	  utcDate[len] = '\0';
+
+	  /* 141021000000Z */
+	  if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc) != NULL) {
+	    flow->protos.tls_quic.notBefore = timegm(&utc);
+#ifdef DEBUG_TLS
+	    printf("[CERTIFICATE] notBefore %u [%s]\n",
+		   flow->protos.tls_quic.notBefore, utcDate);
+#endif
+	  }
+	}
+
+	offset += len;
+
+	if((offset+1) < packet->payload_packet_len) {
+	  len = packet->payload[offset+1];
+
+	  offset += 2;
+
+	  if((offset+len) < packet->payload_packet_len) {
+	    u_int32_t time_sec = packet->current_time_ms / 1000;
+#ifdef DEBUG_TLS
+	    u_int j;
+
+	    printf("[CERTIFICATE] notAfter [len: %u][", len);
+	    for(j=0; j<len; j++) printf("%c", packet->payload[offset+j]);
+	    printf("]\n");
+#endif
+
+	    if(len < (sizeof(utcDate)-1)) {
+	      struct tm utc;
+	      utc.tm_isdst = -1; /* Not set by strptime */
+
+	      strncpy(utcDate, (const char*)&packet->payload[offset], len);
+	      utcDate[len] = '\0';
+
+	      /* 141021000000Z */
+	      if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc) != NULL) {
+		flow->protos.tls_quic.notAfter = timegm(&utc);
+#ifdef DEBUG_TLS
+		printf("[CERTIFICATE] notAfter %u [%s]\n",
+		       flow->protos.tls_quic.notAfter, utcDate);
+#endif
+	      }
+	    }
+
+	    if(flow->protos.tls_quic.notBefore > TLS_LIMIT_DATE)
+	      if((flow->protos.tls_quic.notAfter-flow->protos.tls_quic.notBefore) > TLS_THRESHOLD) {
+		char str[64];
+		
+		snprintf(str, sizeof(str), "TLS Cert lasts %u days",
+			  (flow->protos.tls_quic.notAfter-flow->protos.tls_quic.notBefore) / 86400);
+
+		ndpi_set_risk(detectionmodulestruct, flow, NDPI_TLS_CERT_VALIDITY_TOO_LONG, str); /* Certificate validity longer than 13 months */
+	      }
+	    
+	    if((time_sec < flow->protos.tls_quic.notBefore) || (time_sec > flow->protos.tls_quic.notAfter)) {
+	      char str[96], b[32], e[32];
+	      struct tm result;	      
+	      time_t theTime;
+
+	      theTime = flow->protos.tls_quic.notBefore;
+	      strftime(b, sizeof(b), "%d/%b/%Y %H:%M:%S", ndpi_gmtime_r(&theTime, &result));
+
+	      theTime = flow->protos.tls_quic.notAfter;
+	      strftime(e, sizeof(e), "%d/%b/%Y %H:%M:%S", ndpi_gmtime_r(&theTime, &result));
+	      	      
+	      snprintf(str, sizeof(str), "%s - %s", b, e);
+	      ndpi_set_risk(detectionmodulestruct, flow, NDPI_TLS_CERTIFICATE_EXPIRED, str); /* Certificate expired */
+	    } else if((time_sec > flow->protos.tls_quic.notBefore)
+		      && (time_sec > (flow->protos.tls_quic.notAfter - (detectionmodulestruct->tls_certificate_expire_in_x_days * 86400)))) {
+	      char str[96], b[32], e[32];
+	      struct tm result;	      
+	      time_t theTime;
+
+	      theTime = flow->protos.tls_quic.notBefore;
+	      strftime(b, sizeof(b), "%d/%b/%Y %H:%M:%S", ndpi_gmtime_r(&theTime, &result));
+
+	      theTime = flow->protos.tls_quic.notAfter;
+	      strftime(e, sizeof(e), "%d/%b/%Y %H:%M:%S", ndpi_gmtime_r(&theTime, &result));
+
+	      snprintf(str, sizeof(str), "%s - %s", b, e);
+	      ndpi_set_risk(detectionmodulestruct, flow, NDPI_TLS_CERTIFICATE_ABOUT_TO_EXPIRE, str); /* Certificate almost expired */
+	    }
+	  }
+	}
+      }
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x1d) && (packet->payload[i+2] == 0x11)) {
+      /* Organization OID: 2.5.29.17 (subjectAltName) */
+      u_int8_t matched_name = 0;
+
+      /* If the client hello was not observed or the requested name was missing, there is no need to trigger an alert */
+      if(flow->host_server_name[0] == '\0')
+	matched_name = 1;
+
+#ifdef DEBUG_TLS
+      printf("******* [TLS] Found subjectAltName\n");
+#endif
+
+      i += 3 /* skip the initial patten 55 1D 11 */;
+
+      /* skip the first type, 0x04 == BIT STRING, and jump to it's length */
+      if(i < packet->payload_packet_len && packet->payload[i] == 0x04) i++; else i += 4; /* 4 bytes, with the last byte set to 04 */
+
+      if(i < packet->payload_packet_len) {
+	i += (packet->payload[i] & 0x80) ? (packet->payload[i] & 0x7F) : 0; /* skip BIT STRING length */
+	if(i < packet->payload_packet_len) {
+	  i += 2; /* skip the second type, 0x30 == SEQUENCE, and jump to it's length */
+	  if(i < packet->payload_packet_len) {
+	    i += (packet->payload[i] & 0x80) ? (packet->payload[i] & 0x7F) : 0; /* skip SEQUENCE length */
+	    i++;
+
+	    while(i < packet->payload_packet_len) {
+	      u_int8_t general_name_type = packet->payload[i];
+
+	      if((general_name_type == 0x81)    /* rfc822Name */
+		 || (general_name_type == 0x82) /* dNSName    */
+		 || (general_name_type == 0x87) /* ipAddress  */
+		 )
+		{
+		  if((i < (packet->payload_packet_len - 1))
+		     && ((i + packet->payload[i + 1] + 2) < packet->payload_packet_len)) {
+		    u_int8_t len = packet->payload[i + 1];
+		    char dNSName[256];
+		    u_int16_t dNSName_len;
+
+		    i += 2;
+
+		    /* The check "len > sizeof(dNSName) - 1" will be always false. If we add it,
+		       the compiler is smart enough to detect it and throws a warning */
+		    if((len == 0 /* Looks something went wrong */)
+		       || ((i+len) > packet->payload_packet_len))
+		      break;
+
+		    if(general_name_type == 0x87) {
+		      if(len == 4 /* IPv4 */) {
+			ndpi_snprintf(dNSName, sizeof(dNSName), "%u.%u.%u.%u",
+				      packet->payload[i] & 0xFF,
+				      packet->payload[i+1] & 0xFF,
+				      packet->payload[i+2] & 0xFF,
+				      packet->payload[i+3] & 0xFF);
+		      } else if(len == 16 /* IPv6 */) {
+			struct in6_addr addr = *(struct in6_addr *)&packet->payload[i];
+			inet_ntop(AF_INET6, &addr, dNSName, sizeof(dNSName));
+		      } else {
+			/* Is that possibile? Better safe than sorry */
+			dNSName[0] = '\0';
+		      }
+		    } else {
+		      strncpy(dNSName, (const char*)&packet->payload[i], len);
+		      dNSName[len] = '\0';
+		    }
+
+		    dNSName_len = strlen(dNSName);
+		    cleanupServerName(dNSName, dNSName_len);
+
+#if DEBUG_TLS
+		    printf("[TLS] dNSName %s [%s][len: %u][leftover: %d]\n", dNSName,
+			   flow->host_server_name, len,
+			   packet->payload_packet_len-i-len);
+#endif
+
+		    /*
+		      We cannot use ndpi_is_valid_hostname() as we can have wildcards
+		      here that will create false positives
+		    */
+		    if(ndpi_normalize_printable_string(dNSName, dNSName_len) == 0) {
+		      ndpi_set_risk(detectionmodulestruct, flow, NDPI_INVALID_CHARACTERS, dNSName);
+
+		      /* This looks like an attack */
+		      ndpi_set_risk(detectionmodulestruct, flow, NDPI_POSSIBLE_EXPLOIT, NULL);
+		    }
+
+		    if(matched_name == 0) {
+#if DEBUG_TLS
+		      printf("[TLS] Trying to match '%s' with '%s'\n",
+			     flow->host_server_name,
+			     dNSName);
+#endif
+
+		      if(flow->host_server_name[0] == '\0') {
+			matched_name = 1;	/* No SNI */
+		      } else if(dNSName[0] == '*') {
+			char * label = strstr(flow->host_server_name, &dNSName[1]);
+
+			if(label != NULL) {
+			  char * first_dot = strchr(flow->host_server_name, '.');
+
+			  if((first_dot == NULL) || (first_dot <= label)) {
+			    matched_name = 1;
+			  }
+			}
+		      }
+		      else if(strcmp(flow->host_server_name, dNSName) == 0) {
+			matched_name = 1;
+		      }
+		    }
+
+		    if(flow->protos.tls_quic.server_names == NULL)
+		      flow->protos.tls_quic.server_names = ndpi_strdup(dNSName),
+			flow->protos.tls_quic.server_names_len = strlen(dNSName);
+		    else {
+		      u_int16_t newstr_len = flow->protos.tls_quic.server_names_len + dNSName_len + 1;
+		      char *newstr = (char*)ndpi_realloc(flow->protos.tls_quic.server_names,
+							 flow->protos.tls_quic.server_names_len+1, newstr_len+1);
+
+		      if(newstr) {
+			flow->protos.tls_quic.server_names = newstr;
+			flow->protos.tls_quic.server_names[flow->protos.tls_quic.server_names_len] = ',';
+			strncpy(&flow->protos.tls_quic.server_names[flow->protos.tls_quic.server_names_len+1],
+				dNSName, dNSName_len+1);
+			flow->protos.tls_quic.server_names[newstr_len] = '\0';
+			flow->protos.tls_quic.server_names_len = newstr_len;
+		      }
+		    }
+
+		    if(!flow->protos.tls_quic.subprotocol_detected)
+		      if(ndpi_match_hostname_protocol(detectionmodulestruct, flow, __get_master(detectionmodulestruct, flow), dNSName, dNSName_len)) {
+			flow->protos.tls_quic.subprotocol_detected = 1;
+		        ndpi_unset_risk(detectionmodulestruct, flow, NDPI_NUMERIC_IP_HOST);
+		      }
+
+		    i += len;
+		  } else {
+#if DEBUG_TLS
+		    printf("[TLS] Leftover %u bytes", packet->payload_packet_len - i);
+#endif
+		    ndpi_set_risk(detectionmodulestruct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION, NULL);
+		    break;
+		  }
+		} else {
+		break;
+	      }
+	    } /* while */
+
+	    if(!matched_name) {
+	      char str[128];
+
+	      snprintf(str, sizeof(str), "%s vs %s", flow->host_server_name, flow->protos.tls_quic.server_names);
+	      ndpi_set_risk(detectionmodulestruct, flow, NDPI_TLS_CERTIFICATE_MISMATCH, str); /* Certificate mismatch */
+	    }
+	  }
+	}
+      }
+    }
+  } /* for */
+
+  if(rdn_len && (flow->protos.tls_quic.subjectDN == NULL)) {
+    flow->protos.tls_quic.subjectDN = ndpi_strdup(rdnSeqBuf);
+
+    if(flow->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+      /* No idea what is happening behind the scenes: let's check the certificate */
+      u_int32_t val;
+      int rc = ndpi_match_string_value(detectionmodulestruct->tls_cert_subject_automa.ac_automa,
+				       rdnSeqBuf, strlen(rdnSeqBuf), &val);
+
+      if(rc == 0) {
+	/* Match found */
+	u_int16_t proto_id = (u_int16_t)val;
+	ndpi_protocol ret = { __get_master(detectionmodulestruct, flow), proto_id, NDPI_PROTOCOL_UNKNOWN /* unused */, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED, NULL};
+
+	ndpi_set_detected_protocol(detectionmodulestruct, flow, proto_id, __get_master(detectionmodulestruct, flow), NDPI_CONFIDENCE_DPI);
+	flow->category = ndpi_get_proto_category(detectionmodulestruct, ret);
+	ndpi_check_subprotocol_risk(detectionmodulestruct, flow, proto_id);
+	ndpi_unset_risk(detectionmodulestruct, flow, NDPI_NUMERIC_IP_HOST);
+
+	if(detectionmodulestruct->tls_cert_cache) {
+	  u_int32_t key = make_tls_cert_key(packet, 0 /* from the server */);
+
+	  ndpi_lru_add_to_cache(detectionmodulestruct->tls_cert_cache, key, proto_id, ndpi_get_current_time(flow));
+	}
+      }
+    }
+  }
+
+  if(flow->protos.tls_quic.subjectDN && flow->protos.tls_quic.issuerDN
+     && (!strcmp(flow->protos.tls_quic.subjectDN, flow->protos.tls_quic.issuerDN))) {
+    /* Last resort: we check if this is a trusted issuerDN */
+    if(ndpi_check_issuerdn_risk_exception(detectionmodulestruct, flow->protos.tls_quic.issuerDN))
+      return; /* This is a trusted DN */
+    
+    ndpi_set_risk(detectionmodulestruct, flow, NDPI_TLS_SELFSIGNED_CERTIFICATE, flow->protos.tls_quic.subjectDN);
+  }
+  
+#if DEBUG_TLS
+  printf("[TLS] %s() SubjectDN [%s]\n", __FUNCTION__, rdnSeqBuf);
+#endif
+}

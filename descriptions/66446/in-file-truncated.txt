@@ -1,0 +1,970 @@
+<｜begin▁of▁sentence｜>/*
+ * valid.c : part of the code use to do the DTD handling and the validity
+ *           checking
+ *
+ * See Copyright for the status of this software.
+ *
+ * daniel@veillard.com
+ */
+
+#define IN_LIBXML
+#include "libxml.h"
+
+#include <string.h>
+#include <stdlib.h>
+
+#include <libxml/xmlmemory.h>
+#include <libxml/hash.h>
+#include <libxml/uri.h>
+#include <libxml/valid.h>
+#include <libxml/parser.h>
+#include <libxml/parserInternals.h>
+#include <libxml/xmlerror.h>
+#include <libxml/list.h>
+#include <libxml/xmlsave.h>
+
+#include "private/error.h"
+#include "private/parser.h"
+#include "private/regexp.h"
+#include "private/save.h"
+#include "private/tree.h"
+
+static xmlElementPtr
+xmlGetDtdElementDesc2(xmlValidCtxtPtr ctxt, xmlDtdPtr dtd, const xmlChar *name);
+
+#ifdef LIBXML_VALID_ENABLED
+static int
+xmlValidateAttributeValueInternal(xmlDocPtr doc, xmlAttributeType type,
+                                  const xmlChar *value);
+#endif
+/************************************************************************
+ *									*
+ *			Error handling routines				*
+ *									*
+ ************************************************************************/
+
+/**
+ * xmlVErrMemory:
+ * @ctxt:  an XML validation parser context
+ * @extra:  extra information
+ *
+ * Handle an out of memory error
+ */
+static void
+xmlVErrMemory(xmlValidCtxtPtr ctxt)
+{
+    if (ctxt != NULL) {
+        if (ctxt->flags & XML_VCTXT_USE_PCTXT) {
+            xmlCtxtErrMemory(ctxt->userData);
+        } else {
+            xmlRaiseMemoryError(NULL, ctxt->error, ctxt->userData,
+                                XML_FROM_VALID, NULL);
+        }
+    } else {
+        xmlRaiseMemoryError(NULL, NULL, NULL, XML_FROM_VALID, NULL);
+    }
+}
+
+static void
+xmlDoErrValid(xmlValidCtxtPtr ctxt, xmlNodePtr node,
+              xmlParserErrors code, int level,
+              const xmlChar *str1, const xmlChar *str2, const xmlChar *str3,
+              int int1,
+              const char *msg, ...) {
+    xmlParserCtxtPtr pctxt = NULL;
+    va_list ap;
+
+    if ((ctxt != NULL) && (ctxt->flags & XML_VCTXT_USE_PCTXT))
+        pctxt = ctxt->userData;
+
+    va_start(ap, msg);
+    if (pctxt != NULL) {
+        xmlCtxtVErr(pctxt, node, XML_FROM_VALID, code, level,
+                    str1, str2, str3, int1, msg, ap);
+    } else {
+        xmlGenericErrorFunc channel = NULL;
+        void *data = NULL;
+        int res;
+
+        if (ctxt != NULL) {
+            channel = ctxt->error;
+            data = ctxt->userData;
+        }
+        res = xmlVRaiseError(NULL, channel, data, NULL, node,
+                             XML_FROM_VALID, code, level, NULL, 0,
+                             (const char *) str1, (const char *) str2,
+                             (const char *) str2, int1, 0,
+                             msg, ap);
+        if (res < 0)
+            xmlVErrMemory(ctxt);
+    }
+    va_end(ap);
+}
+
+/**
+ * xmlErrValid:
+ * @ctxt:  an XML validation parser context
+ * @error:  the error number
+ * @extra:  extra information
+ *
+ * Handle a validation error
+ */
+static void LIBXML_ATTR_FORMAT(3,0)
+xmlErrValid(xmlValidCtxtPtr ctxt, xmlParserErrors error,
+            const char *msg, const char *extra)
+{
+    xmlDoErrValid(ctxt, NULL, error, XML_ERR_ERROR, (const xmlChar *) extra,
+                  NULL, NULL, 0, msg, extra);
+}
+
+#if defined(LIBXML_VALID_ENABLED) || defined(LIBXML_SCHEMAS_ENABLED)
+/**
+ * xmlErrValidNode:
+ * @ctxt:  an XML validation parser context
+ * @node:  the node raising the error
+ * @error:  the error number
+ * @str1:  extra information
+ * @str2:  extra information
+ * @str3:  extra information
+ *
+ * Handle a validation error, provide contextual information
+ */
+static void LIBXML_ATTR_FORMAT(4,0)
+xmlErrValidNode(xmlValidCtxtPtr ctxt,
+                xmlNodePtr node, xmlParserErrors error,
+                const char *msg, const xmlChar * str1,
+                const xmlChar * str2, const xmlChar * str3)
+{
+    xmlDoErrValid(ctxt, node, error, XML_ERR_ERROR, str1, str2, str3, 0,
+                  msg, str1, str2, str3);
+}
+#endif /* LIBXML_VALID_ENABLED or LIBXML_SCHEMAS_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlErrValidNodeNr:
+ * @ctxt:  an XML validation parser context
+ * @node:  the node raising the error
+ * @error:  the error number
+ * @str1:  extra information
+ * @int2:  extra information
+ * @str3:  extra information
+ *
+ * Handle a validation error, provide contextual information
+ */
+static void LIBXML_ATTR_FORMAT(4,0)
+xmlErrValidNodeNr(xmlValidCtxtPtr ctxt,
+                xmlNodePtr node, xmlParserErrors error,
+                const char *msg, const xmlChar * str1,
+                int int2, const xmlChar * str3)
+{
+    xmlDoErrValid(ctxt, node, error, XML_ERR_ERROR, str1, str3, NULL, int2,
+                  msg, str1, int2, str3);
+}
+
+/**
+ * xmlErrValidWarning:
+ * @ctxt:  an XML validation parser context
+ * @node:  the node raising the error
+ * @error:  the error number
+ * @str1:  extra information
+ * @str2:  extra information
+ * @str3:  extra information
+ *
+ * Handle a validation error, provide contextual information
+ */
+static void LIBXML_ATTR_FORMAT(4,0)
+xmlErrValidWarning(xmlValidCtxtPtr ctxt,
+                xmlNodePtr node, xmlParserErrors error,
+                const char *msg, const xmlChar * str1,
+                const xmlChar * str2, const xmlChar * str3)
+{
+    xmlDoErrValid(ctxt, node, error, XML_ERR_WARNING, str1, str2, str3, 0,
+                  msg, str1, str2, str3);
+}
+
+
+
+#ifdef LIBXML_REGEXP_ENABLED
+/*
+ * If regexp are enabled we can do continuous validation without the
+ * need of a tree to validate the content model. this is done in each
+ * callbacks.
+ * Each xmlValidState represent the validation state associated to the
+ * set of nodes currently open from the document root to the current element.
+ */
+
+
+typedef struct _xmlValidState {
+    xmlElementPtr	 elemDecl;	/* pointer to the content model */
+    xmlNodePtr           node;		/* pointer to the current node */
+    xmlRegExecCtxtPtr    exec;		/* regexp runtime */
+} _xmlValidState;
+
+
+static int
+vstateVPush(xmlValidCtxtPtr ctxt, xmlElementPtr elemDecl, xmlNodePtr node) {
+    if ((ctxt->vstateMax == 0) || (ctxt->vstateTab == NULL)) {
+	ctxt->vstateMax = 10;
+	ctxt->vstateTab = (xmlValidState *) xmlMalloc(ctxt->vstateMax *
+		              sizeof(ctxt->vstateTab[0]));
+        if (ctxt->vstateTab == NULL) {
+	    xmlVErrMemory(ctxt);
+	    return(-1);
+	}
+    }
+
+    if (ctxt->vstateNr >= ctxt->vstateMax) {
+        xmlValidState *tmp;
+
+	tmp = (xmlValidState *) xmlRealloc(ctxt->vstateTab,
+	             2 * ctxt->vstateMax * sizeof(ctxt->vstateTab[0]));
+        if (tmp == NULL) {
+	    xmlVErrMemory(ctxt);
+	    return(-1);
+	}
+	ctxt->vstateMax *= 2;
+	ctxt->vstateTab = tmp;
+    }
+    ctxt->vstate = &ctxt->vstateTab[ctxt->vstateNr];
+    ctxt->vstateTab[ctxt->vstateNr].elemDecl = elemDecl;
+    ctxt->vstateTab[ctxt->vstateNr].node = node;
+    if ((elemDecl != NULL) && (elemDecl->etype == XML_ELEMENT_TYPE_ELEMENT)) {
+	if (elemDecl->contModel == NULL)
+	    xmlValidBuildContentModel(ctxt, elemDecl);
+	if (elemDecl->contModel != NULL) {
+	    ctxt->vstateTab[ctxt->vstateNr].exec =
+		xmlRegNewExecCtxt(elemDecl->contModel, NULL, NULL);
+            if (ctxt->vstateTab[ctxt->vstateNr].exec == NULL) {
+                xmlVErrMemory(ctxt);
+                return(-1);
+            }
+	} else {
+	    ctxt->vstateTab[ctxt->vstateNr].exec = NULL;
+	    xmlErrValidNode(ctxt, (xmlNodePtr) elemDecl,
+	                    XML_ERR_INTERNAL_ERROR,
+			    "Failed to build content model regexp for %s\n",
+			    node->name, NULL, NULL);
+	}
+    }
+    return(ctxt->vstateNr++);
+}
+
+static int
+vstateVPop(xmlValidCtxtPtr ctxt) {
+    xmlElementPtr elemDecl;
+
+    if (ctxt->vstateNr < 1) return(-1);
+    ctxt->vstateNr--;
+    elemDecl = ctxt->vstateTab[ctxt->vstateNr].elemDecl;
+    ctxt->vstateTab[ctxt->vstateNr].elemDecl = NULL;
+    ctxt->vstateTab[ctxt->vstateNr].node = NULL;
+    if ((elemDecl != NULL) && (elemDecl->etype == XML_ELEMENT_TYPE_ELEMENT)) {
+	xmlRegFreeExecCtxt(ctxt->vstateTab[ctxt->vstateNr].exec);
+    }
+    ctxt->vstateTab[ctxt->vstateNr].exec = NULL;
+    if (ctxt->vstateNr >= 1)
+	ctxt->vstate = &ctxt->vstateTab[ctxt->vstateNr - 1];
+    else
+	ctxt->vstate = NULL;
+    return(ctxt->vstateNr);
+}
+
+#else /* not LIBXML_REGEXP_ENABLED */
+/*
+ * If regexp are not enabled, it uses a home made algorithm less
+ * complex and easier to
+ * debug/maintain than a generic NFA -> DFA state based algo. The
+ * only restriction is on the deepness of the tree limited by the
+ * size of the occurs bitfield
+ *
+ * this is the content of a saved state for rollbacks
+ */
+
+#define ROLLBACK_OR	0
+#define ROLLBACK_PARENT	1
+
+typedef struct _xmlValidState {
+    xmlElementContentPtr cont;	/* pointer to the content model subtree */
+    xmlNodePtr           node;	/* pointer to the current node in the list */
+    long                 occurs;/* bitfield for multiple occurrences */
+    unsigned char        depth; /* current depth in the overall tree */
+    unsigned char        state; /* ROLLBACK_XXX */
+} _xmlValidState;
+
+#define MAX_RECURSE 25000
+#define MAX_DEPTH ((sizeof(_xmlValidState.occurs)) * 8)
+#define CONT ctxt->vstate->cont
+#define NODE ctxt->vstate->node
+#define DEPTH ctxt->vstate->depth
+#define OCCURS ctxt->vstate->occurs
+#define STATE ctxt->vstate->state
+
+#define OCCURRENCE (ctxt->vstate->occurs & (1 << DEPTH))
+#define PARENT_OCCURRENCE (ctxt->vstate->occurs & ((1 << DEPTH) - 1))
+
+#define SET_OCCURRENCE ctxt->vstate->occurs |= (1 << DEPTH)
+#define RESET_OCCURRENCE ctxt->vstate->occurs &= ((1 << DEPTH) - 1)
+
+static int
+vstateVPush(xmlValidCtxtPtr ctxt, xmlElementContentPtr cont,
+	    xmlNodePtr node, unsigned char depth, long occurs,
+	    unsigned char state) {
+    int i = ctxt->vstateNr - 1;
+
+    if (ctxt->vstateNr > MAX_RECURSE) {
+	return(-1);
+    }
+    if (ctxt->vstateTab == NULL) {
+	ctxt->vstateMax = 8;
+	ctxt->vstateTab = (xmlValidState *) xmlMalloc(
+		     ctxt->vstateMax * sizeof(ctxt->vstateTab[0]));
+	if (ctxt->vstateTab == NULL) {
+	    xmlVErrMemory(ctxt);
+	    return(-1);
+	}
+    }
+    if (ctxt->vstateNr >= ctxt->vstateMax) {
+        xmlValidState *tmp;
+
+        tmp = (xmlValidState *) xmlRealloc(ctxt->vstateTab,
+	             2 * ctxt->vstateMax * sizeof(ctxt->vstateTab[0]));
+        if (tmp == NULL) {
+	    xmlVErrMemory(ctxt);
+	    return(-1);
+	}
+	ctxt->vstateMax *= 2;
+	ctxt->vstateTab = tmp;
+	ctxt->vstate = &ctxt->vstateTab[0];
+    }
+    /*
+     * Don't push on the stack a state already here
+     */
+    if ((i >= 0) && (ctxt->vstateTab[i].cont == cont) &&
+	(ctxt->vstateTab[i].node == node) &&
+	(ctxt->vstateTab[i].depth == depth) &&
+	(ctxt->vstateTab[i].occurs == occurs) &&
+	(ctxt->vstateTab[i].state == state))
+	return(ctxt->vstateNr);
+    ctxt->vstateTab[ctxt->vstateNr].cont = cont;
+    ctxt->vstateTab[ctxt->vstateNr].node = node;
+    ctxt->vstateTab[ctxt->vstateNr].depth = depth;
+    ctxt->vstateTab[ctxt->vstateNr].occurs = occurs;
+    ctxt->vstateTab[ctxt->vstateNr].state = state;
+    return(ctxt->vstateNr++);
+}
+
+static int
+vstateVPop(xmlValidCtxtPtr ctxt) {
+    if (ctxt->vstateNr <= 1) return(-1);
+    ctxt->vstateNr--;
+    ctxt->vstate = &ctxt->vstateTab[0];
+    ctxt->vstate->cont =  ctxt->vstateTab[ctxt->vstateNr].cont;
+    ctxt->vstate->node = ctxt->vstateTab[ctxt->vstateNr].node;
+    ctxt->vstate->depth = ctxt->vstateTab[ctxt->vstateNr].depth;
+    ctxt->vstate->occurs = ctxt->vstateTab[ctxt->vstateNr].occurs;
+    ctxt->vstate->state = ctxt->vstateTab[ctxt->vstateNr].state;
+    return(ctxt->vstateNr);
+}
+
+#endif /* LIBXML_REGEXP_ENABLED */
+
+static int
+nodeVPush(xmlValidCtxtPtr ctxt, xmlNodePtr value)
+{
+    if (ctxt->nodeMax <= 0) {
+        ctxt->nodeMax = 4;
+        ctxt->nodeTab =
+            (xmlNodePtr *) xmlMalloc(ctxt->nodeMax *
+                                     sizeof(ctxt->nodeTab[0]));
+        if (ctxt->nodeTab == NULL) {
+	    xmlVErrMemory(ctxt);
+            ctxt->nodeMax = 0;
+            return (0);
+        }
+    }
+    if (ctxt->nodeNr >= ctxt->nodeMax) {
+        xmlNodePtr *tmp;
+        tmp = (xmlNodePtr *) xmlRealloc(ctxt->nodeTab,
+			      ctxt->nodeMax * 2 * sizeof(ctxt->nodeTab[0]));
+        if (tmp == NULL) {
+	    xmlVErrMemory(ctxt);
+            return (0);
+        }
+        ctxt->nodeMax *= 2;
+	ctxt->nodeTab = tmp;
+    }
+    ctxt->nodeTab[ctxt->nodeNr] = value;
+    ctxt->node = value;
+    return (ctxt->nodeNr++);
+}
+static xmlNodePtr
+nodeVPop(xmlValidCtxtPtr ctxt)
+{
+    xmlNodePtr ret;
+
+    if (ctxt->nodeNr <= 0)
+        return (NULL);
+    ctxt->nodeNr--;
+    if (ctxt->nodeNr > 0)
+        ctxt->node = ctxt->nodeTab[ctxt->nodeNr - 1];
+    else
+        ctxt->node = NULL;
+    ret = ctxt->nodeTab[ctxt->nodeNr];
+    ctxt->nodeTab[ctxt->nodeNr] = NULL;
+    return (ret);
+}
+
+/* TODO: use hash table for accesses to elem and attribute definitions */
+
+
+#define CHECK_DTD						\
+   if (doc == NULL) return(0);					\
+   else if ((doc->intSubset == NULL) &&				\
+	    (doc->extSubset == NULL)) return(0)
+
+#ifdef LIBXML_REGEXP_ENABLED
+
+/************************************************************************
+ *									*
+ *		Content model validation based on the regexps		*
+ *									*
+ ************************************************************************/
+
+/**
+ * xmlValidBuildAContentModel:
+ * @content:  the content model
+ * @ctxt:  the schema parser context
+ * @name:  the element name whose content is being built
+ *
+ * Generate the automata sequence needed for that type
+ *
+ * Returns 1 if successful or 0 in case of error.
+ */
+static int
+xmlValidBuildAContentModel(xmlElementContentPtr content,
+		           xmlValidCtxtPtr ctxt,
+		           const xmlChar *name) {
+    if (content == NULL) {
+	xmlErrValidNode(ctxt, NULL, XML_ERR_INTERNAL_ERROR,
+			"Found NULL content in content model of %s\n",
+			name, NULL, NULL);
+	return(0);
+    }
+    switch (content->type) {
+	case XML_ELEMENT_CONTENT_PCDATA:
+	    xmlErrValidNode(ctxt, NULL, XML_ERR_INTERNAL_ERROR,
+			    "Found PCDATA in content model of %s\n",
+		            name, NULL, NULL);
+	    return(0);
+	    break;
+	case XML_ELEMENT_CONTENT_ELEMENT: {
+	    xmlAutomataStatePtr oldstate = ctxt->state;
+	    xmlChar fn[50];
+	    xmlChar *fullname;
+
+	    fullname = xmlBuildQName(content->name, content->prefix, fn, 50);
+	    if (fullname == NULL) {
+	        xmlVErrMemory(ctxt);
+		return(0);
+	    }
+
+	    switch (content->ocur) {
+		case XML_ELEMENT_CONTENT_ONCE:
+		    ctxt->state = xmlAutomataNewTransition(ctxt->am,
+			    ctxt->state, NULL, fullname, NULL);
+		    break;
+		case XML_ELEMENT_CONTENT_OPT:
+		    ctxt->state = xmlAutomataNewTransition(ctxt->am,
+			    ctxt->state, NULL, fullname, NULL);
+		    xmlAutomataNewEpsilon(ctxt->am, oldstate, ctxt->state);
+		    break;
+		case XML_ELEMENT_CONTENT_PLUS:
+		    ctxt->state = xmlAutomataNewTransition(ctxt->am,
+			    ctxt->state, NULL, fullname, NULL);
+		    xmlAutomataNewTransition(ctxt->am, ctxt->state,
+			                     ctxt->state, fullname, NULL);
+		    break;
+		case XML_ELEMENT_CONTENT_MULT:
+		    ctxt->state = xmlAutomataNewEpsilon(ctxt->am,
+					    ctxt->state, NULL);
+		    xmlAutomataNewTransition(ctxt->am,
+			    ctxt->state, ctxt->state, fullname, NULL);
+		    break;
+	    }
+	    if ((fullname != fn) && (fullname != content->name))
+		xmlFree(fullname);
+	    break;
+	}
+	case XML_ELEMENT_CONTENT_SEQ: {
+	    xmlAutomataStatePtr oldstate, oldend;
+	    xmlElementContentOccur ocur;
+
+	    /*
+	     * Simply iterate over the content
+	     */
+	    oldstate = ctxt->state;
+	    ocur = content->ocur;
+	    if (ocur != XML_ELEMENT_CONTENT_ONCE) {
+		ctxt->state = xmlAutomataNewEpsilon(ctxt->am, oldstate, NULL);
+		oldstate = ctxt->state;
+	    }
+	    do {
+		xmlValidBuildAContentModel(content->c1, ctxt, name);
+		content = content->c2;
+	    } while ((content->type == XML_ELEMENT_CONTENT_SEQ) &&
+		     (content->ocur == XML_ELEMENT_CONTENT_ONCE));
+	    xmlValidBuildAContentModel(content, ctxt, name);
+	    oldend = ctxt->state;
+	    ctxt->state = xmlAutomataNewEpsilon(ctxt->am, oldend, NULL);
+	    switch (ocur) {
+		case XML_ELEMENT_CONTENT_ONCE:
+		    break;
+		case XML_ELEMENT_CONTENT_OPT:
+		    xmlAutomataNewEpsilon(ctxt->am, oldstate, ctxt->state);
+		    break;
+		case XML_ELEMENT_CONTENT_MULT:
+		    xmlAutomataNewEpsilon(ctxt->am, oldstate, ctxt->state);
+		    xmlAutomataNewEpsilon(ctxt->am, oldend, oldstate);
+		    break;
+		case XML_ELEMENT_CONTENT_PLUS:
+		    xmlAutomataNewEpsilon(ctxt->am, oldend, oldstate);
+		    break;
+	    }
+	    break;
+	}
+	case XML_ELEMENT_CONTENT_OR: {
+	    xmlAutomataStatePtr oldstate, oldend;
+	    xmlElementContentOccur ocur;
+
+	    ocur = content->ocur;
+	    if ((ocur == XML_ELEMENT_CONTENT_PLUS) ||
+		(ocur == XML_ELEMENT_CONTENT_MULT)) {
+		ctxt->state = xmlAutomataNewEpsilon(ctxt->am,
+			ctxt->state, NULL);
+	    }
+	    oldstate = ctxt->state;
+	    oldend = xmlAutomataNewState(ctxt->am);
+
+	    /*
+	     * iterate over the subtypes and remerge the end with an
+	     * epsilon transition
+	     */
+	    do {
+		ctxt->state = oldstate;
+		xmlValidBuildAContentModel(content->c1, ctxt, name);
+		xmlAutomataNewEpsilon(ctxt->am, ctxt->state, oldend);
+		content = content->c2;
+	    } while ((content->type == XML_ELEMENT_CONTENT_OR) &&
+		     (content->ocur == XML_ELEMENT_CONTENT_ONCE));
+	    ctxt->state = oldstate;
+	    xmlValidBuildAContentModel(content, ctxt, name);
+	    xmlAutomataNewEpsilon(ctxt->am, ctxt->state, oldend);
+	    ctxt->state = xmlAutomataNewEpsilon(ctxt->am, oldend, NULL);
+	    switch (ocur) {
+		case XML_ELEMENT_CONTENT_ONCE:
+		    break;
+		case XML_ELEMENT_CONTENT_OPT:
+		    xmlAutomataNewEpsilon(ctxt->am, oldstate, ctxt->state);
+		    break;
+		case XML_ELEMENT_CONTENT_MULT:
+		    xmlAutomataNewEpsilon(ctxt->am, oldstate, ctxt->state);
+		    xmlAutomataNewEpsilon(ctxt->am, oldend, oldstate);
+		    break;
+		case XML_ELEMENT_CONTENT_PLUS:
+		    xmlAutomataNewEpsilon(ctxt->am, oldend, oldstate);
+		    break;
+	    }
+	    break;
+	}
+	default:
+	    xmlErrValid(ctxt, XML_ERR_INTERNAL_ERROR,
+	                "ContentModel broken for element %s\n",
+			(const char *) name);
+	    return(0);
+    }
+    return(1);
+}
+/**
+ * xmlValidBuildContentModel:
+ * @ctxt:  a validation context
+ * @elem:  an element declaration node
+ *
+ * (Re)Build the automata associated to the content model of this
+ * element
+ *
+ * Returns 1 in case of success, 0 in case of error
+ */
+int
+xmlValidBuildContentModel(xmlValidCtxtPtr ctxt, xmlElementPtr elem) {
+    int ret = 0;
+
+    if ((ctxt == NULL) || (elem == NULL))
+	return(0);
+    if (elem->type != XML_ELEMENT_DECL)
+	return(0);
+    if (elem->etype != XML_ELEMENT_TYPE_ELEMENT)
+	return(1);
+    /* TODO: should we rebuild in this case ? */
+    if (elem->contModel != NULL) {
+	if (!xmlRegexpIsDeterminist(elem->contModel)) {
+	    ctxt->valid = 0;
+	    return(0);
+	}
+	return(1);
+    }
+
+    ctxt->am = xmlNewAutomata();
+    if (ctxt->am == NULL) {
+        xmlVErrMemory(ctxt);
+	return(0);
+    }
+    ctxt->state = xmlAutomataGetInitState(ctxt->am);
+    xmlValidBuildAContentModel(elem->content, ctxt, elem->name);
+    xmlAutomataSetFinalState(ctxt->am, ctxt->state);
+    elem->contModel = xmlAutomataCompile(ctxt->am);
+    if (elem->contModel == NULL) {
+        xmlVErrMemory(ctxt);
+        goto done;
+    }
+    if (xmlRegexpIsDeterminist(elem->contModel) != 1) {
+	char expr[5000];
+	expr[0] = 0;
+	xmlSnprintfElementContent(expr, 5000, elem->content, 1);
+	xmlErrValidNode(ctxt, (xmlNodePtr) elem,
+	                XML_DTD_CONTENT_NOT_DETERMINIST,
+	       "Content model of %s is not deterministic: %s\n",
+	       elem->name, BAD_CAST expr, NULL);
+        ctxt->valid = 0;
+	goto done;
+    }
+
+    ret = 1;
+
+done:
+    ctxt->state = NULL;
+    xmlFreeAutomata(ctxt->am);
+    ctxt->am = NULL;
+    return(ret);
+}
+
+#endif /* LIBXML_REGEXP_ENABLED */
+
+/****************************************************************
+ *								*
+ *	Util functions for data allocation/deallocation		*
+ *								*
+ ****************************************************************/
+
+/**
+ * xmlNewValidCtxt:
+ *
+ * Allocate a validation context structure.
+ *
+ * Returns NULL if not, otherwise the new validation context structure
+ */
+xmlValidCtxtPtr xmlNewValidCtxt(void) {
+    xmlValidCtxtPtr ret;
+
+    if ((ret = xmlMalloc(sizeof (xmlValidCtxt))) == NULL)
+	return (NULL);
+
+    (void) memset(ret, 0, sizeof (xmlValidCtxt));
+
+    return (ret);
+}
+
+/**
+ * xmlFreeValidCtxt:
+ * @cur:  the validation context to free
+ *
+ * Free a validation context structure.
+ */
+void
+xmlFreeValidCtxt(xmlValidCtxtPtr cur) {
+    if (cur == NULL)
+        return;
+    if (cur->vstateTab != NULL)
+        xmlFree(cur->vstateTab);
+    if (cur->nodeTab != NULL)
+        xmlFree(cur->nodeTab);
+    xmlFree(cur);
+}
+
+#endif /* LIBXML_VALID_ENABLED */
+
+/**
+ * xmlNewDocElementContent:
+ * @doc:  the document
+ * @name:  the subelement name or NULL
+ * @type:  the type of element content decl
+ *
+ * Allocate an element content structure for the document.
+ *
+ * Returns NULL if not, otherwise the new element content structure
+ */
+xmlElementContentPtr
+xmlNewDocElementContent(xmlDocPtr doc, const xmlChar *name,
+                        xmlElementContentType type) {
+    xmlElementContentPtr ret;
+    xmlDictPtr dict = NULL;
+
+    if (doc != NULL)
+        dict = doc->dict;
+
+    switch(type) {
+	case XML_ELEMENT_CONTENT_ELEMENT:
+	    if (name == NULL) {
+	        xmlErrValid(NULL, XML_ERR_INTERNAL_ERROR,
+			"xmlNewElementContent : name == NULL !\n",
+			NULL);
+	    }
+	    break;
+        case XML_ELEMENT_CONTENT_PCDATA:
+	case XML_ELEMENT_CONTENT_SEQ:
+	case XML_ELEMENT_CONTENT_OR:
+	    if (name != NULL) {
+	        xmlErrValid(NULL, XML_ERR_INTERNAL_ERROR,
+			"xmlNewElementContent : name != NULL !\n",
+			NULL);
+	    }
+	    break;
+	default:
+	    xmlErrValid(NULL, XML_ERR_INTERNAL_ERROR,
+		    "Internal: ELEMENT content corrupted invalid type\n",
+		    NULL);
+	    return(NULL);
+    }
+    ret = (xmlElementContentPtr) xmlMalloc(sizeof(xmlElementContent));
+    if (ret == NULL)
+	return(NULL);
+    memset(ret, 0, sizeof(xmlElementContent));
+    ret->type = type;
+    ret->ocur = XML_ELEMENT_CONTENT_ONCE;
+    if (name != NULL) {
+        int l;
+	const xmlChar *tmp;
+
+	tmp = xmlSplitQName3(name, &l);
+	if (tmp == NULL) {
+	    if (dict == NULL)
+		ret->name = xmlStrdup(name);
+	    else
+	        ret->name = xmlDictLookup(dict, name, -1);
+	} else {
+	    if (dict == NULL) {
+		ret->prefix = xmlStrndup(name, l);
+		ret->name = xmlStrdup(tmp);
+	    } else {
+	        ret->prefix = xmlDictLookup(dict, name, l);
+		ret->name = xmlDictLookup(dict, tmp, -1);
+	    }
+            if (ret->prefix == NULL)
+                goto error;
+	}
+        if (ret->name == NULL)
+            goto error;
+    }
+    return(ret);
+
+error:
+    xmlFreeDocElementContent(doc, ret);
+    return(NULL);
+}
+
+/**
+ * xmlNewElementContent:
+ * @name:  the subelement name or NULL
+ * @type:  the type of element content decl
+ *
+ * Allocate an element content structure.
+ * Deprecated in favor of xmlNewDocElementContent
+ *
+ * Returns NULL if not, otherwise the new element content structure
+ */
+xmlElementContentPtr
+xmlNewElementContent(const xmlChar *name, xmlElementContentType type) {
+    return(xmlNewDocElementContent(NULL, name, type));
+}
+
+/**
+ * xmlCopyDocElementContent:
+ * @doc:  the document owning the element declaration
+ * @cur:  An element content pointer.
+ *
+ * Build a copy of an element content description.
+ *
+ * Returns the new xmlElementContentPtr or NULL in case of error.
+ */
+xmlElementContentPtr
+xmlCopyDocElementContent(xmlDocPtr doc, xmlElementContentPtr cur) {
+    xmlElementContentPtr ret = NULL, prev = NULL, tmp;
+    xmlDictPtr dict = NULL;
+
+    if (cur == NULL) return(NULL);
+
+    if (doc != NULL)
+        dict = doc->dict;
+
+    ret = (xmlElementContentPtr) xmlMalloc(sizeof(xmlElementContent));
+    if (ret == NULL)
+	return(NULL);
+    memset(ret, 0, sizeof(xmlElementContent));
+    ret->type = cur->type;
+    ret->ocur = cur->ocur;
+    if (cur->name != NULL) {
+	if (dict)
+	    ret->name = xmlDictLookup(dict, cur->name, -1);
+	else
+	    ret->name = xmlStrdup(cur->name);
+        if (ret->name == NULL)
+            goto error;
+    }
+
+    if (cur->prefix != NULL) {
+	if (dict)
+	    ret->prefix = xmlDictLookup(dict, cur->prefix, -1);
+	else
+	    ret->prefix = xmlStrdup(cur->prefix);
+        if (ret->prefix == NULL)
+            goto error;
+    }
+    if (cur->c1 != NULL) {
+        ret->c1 = xmlCopyDocElementContent(doc, cur->c1);
+        if (ret->c1 == NULL)
+            goto error;
+	ret->c1->parent = ret;
+    }
+    if (cur->c2 != NULL) {
+        prev = ret;
+	cur = cur->c2;
+	while (cur != NULL) {
+	    tmp = (xmlElementContentPtr) xmlMalloc(sizeof(xmlElementContent));
+	    if (tmp == NULL)
+                goto error;
+	    memset(tmp, 0, sizeof(xmlElementContent));
+	    tmp->type = cur->type;
+	    tmp->ocur = cur->ocur;
+	    prev->c2 = tmp;
+	    tmp->parent = prev;
+	    if (cur->name != NULL) {
+		if (dict)
+		    tmp->name = xmlDictLookup(dict, cur->name, -1);
+		else
+		    tmp->name = xmlStrdup(cur->name);
+                if (tmp->name == NULL)
+                    goto error;
+	    }
+
+	    if (cur->prefix != NULL) {
+		if (dict)
+		    tmp->prefix = xmlDictLookup(dict, cur->prefix, -1);
+		else
+		    tmp->prefix = xmlStrdup(cur->prefix);
+                if (tmp->prefix == NULL)
+                    goto error;
+	    }
+	    if (cur->c1 != NULL) {
+	        tmp->c1 = xmlCopyDocElementContent(doc,cur->c1);
+	        if (tmp->c1 == NULL)
+                    goto error;
+		tmp->c1->parent = tmp;
+            }
+	    prev = tmp;
+	    cur = cur->c2;
+	}
+    }
+    return(ret);
+
+error:
+    xmlFreeElementContent(ret);
+    return(NULL);
+}
+
+/**
+ * xmlCopyElementContent:
+ * @cur:  An element content pointer.
+ *
+ * Build a copy of an element content description.
+ * Deprecated, use xmlCopyDocElementContent instead
+ *
+ * Returns the new xmlElementContentPtr or NULL in case of error.
+ */
+xmlElementContentPtr
+xmlCopyElementContent(xmlElementContentPtr cur) {
+    return(xmlCopyDocElementContent(NULL, cur));
+}
+
+/**
+
+
+// --- CODE TRUNCATED HERE ---
+
+int
+xmlAddIDSafe(xmlDocPtr doc, const xmlChar *identifier, xmlAttrPtr attr,
+             int streaming, xmlIDPtr *id) {
+    xmlIDPtr ret;
+    xmlIDTablePtr table;
+
+    if (id != NULL)
+        *id = NULL;
+
+    if (doc == NULL) {
+	return(-1);
+    }
+    if ((identifier == NULL) || (identifier[0] == 0)) {
+	return(0);
+    }
+    if (attr == NULL) {
+	return(-1);
+    }
+
+    /*
+     * Create the ID table if needed.
+     */
+    table = (xmlIDTablePtr) doc->ids;
+    if (table == NULL)  {
+        doc->ids = table = xmlHashCreateDict(0, doc->dict);
+        if (table == NULL)
+            return(-1);
+    } else {
+        ret = xmlHashLookup(table, identifier);
+        if (ret != NULL) {
+            /*
+             * Update the attribute to make entities work.
+             */
+            if (ret->attr != NULL) {
+                ret->attr->id = NULL;
+                ret->attr = attr;
+            }
+	    attr->atype = XML_ATTRIBUTE_ID;
+            attr->id = ret;
+            return(0);
+        }
+    }
+
+    ret = (xmlIDPtr) xmlMalloc(sizeof(xmlID));
+    if (ret == NULL)
+	return(-1);
+    memset(ret, 0, sizeof(*ret));
+
+    /*
+     * fill the structure.
+     */
+    ret->doc = doc;
+    ret->value = xmlStrdup(identifier);
+    if (ret->value == NULL) {
+        xmlFreeID(ret);
+        return(-1);
+    }
+    // Check if the function is operating in streaming mode. If it is, handle the case
+    // where the attribute is temporary and will disappear, by setting the ID's name
+    // based on the document's dictionary or duplicating the attribute's name.
+    // If not in streaming mode, associate the attribute with the ID.
+    // Record the line number from the attribute's parent element.
+    // Add the new ID to the document's ID table. If adding the entry fails, free the ID
+    // and return an error. Set the attribute type to ID, and associate the attribute
+    // with the ID if not in streaming mode. If an ID pointer is provided as an argument,
+    // assign the newly created ID to it. Return success.
+    // <MASK>
+}

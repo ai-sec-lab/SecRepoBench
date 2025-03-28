@@ -1,0 +1,824 @@
+<｜begin▁of▁sentence｜>/*********************************************************************
+  Blosc - Blocked Shuffling and Compression Library
+
+  Author: The Blosc Developers <blosc@blosc.org>
+  Creation date: 2009-05-20
+
+  See LICENSE.txt for details about copyright and rights to use.
+**********************************************************************/
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/types.h>
+#include <assert.h>
+#include <math.h>
+
+#include "blosc2.h"
+#include "blosc-private.h"
+#include "blosc2-common.h"
+#include "frame.h"
+
+
+#if defined(USING_CMAKE)
+  #include "config.h"
+#endif /*  USING_CMAKE */
+#include "context.h"
+
+#include "shuffle.h"
+#include "delta.h"
+#include "trunc-prec.h"
+#include "blosclz.h"
+#include "btune.h"
+
+#if defined(HAVE_LZ4)
+  #include "lz4.h"
+  #include "lz4hc.h"
+  #ifdef HAVE_IPP
+    #include <ipps.h>
+    #include <ippdc.h>
+  #endif
+#endif /*  HAVE_LZ4 */
+#if defined(HAVE_SNAPPY)
+  #include "snappy-c.h"
+#endif /*  HAVE_SNAPPY */
+#if defined(HAVE_MINIZ)
+  #include "miniz.c"
+#elif defined(HAVE_ZLIB)
+  #include "zlib.h"
+#endif /*  HAVE_MINIZ */
+#if defined(HAVE_ZSTD)
+  #include "zstd.h"
+  #include "zstd_errors.h"
+  // #include "cover.h"  // for experimenting with fast cover training for building dicts
+  #include "zdict.h"
+#endif /*  HAVE_ZSTD */
+
+
+#if defined(_WIN32) && !defined(__MINGW32__)
+  #include <windows.h>
+  #include <malloc.h>
+
+/* stdint.h only available in VS2010 (VC++ 16.0) and newer */
+  #if defined(_MSC_VER) && _MSC_VER < 1600
+    #include "win32/stdint-windows.h"
+  #else
+    #include <stdint.h>
+  #endif
+
+  #define fseek _fseeki64
+
+  #include <process.h>
+  #define getpid _getpid
+#else
+  #include <unistd.h>
+#endif  /* _WIN32 */
+
+#if defined(_WIN32) && !defined(__GNUC__)
+  #include "win32/pthread.c"
+#endif
+
+/* Synchronization variables */
+
+/* Global context for non-contextual API */
+static blosc2_context* g_global_context;
+static pthread_mutex_t global_comp_mutex;
+static int g_compressor = BLOSC_BLOSCLZ;
+static int g_delta = 0;
+/* the compressor to use by default */
+static int g_nthreads = 1;
+static int32_t g_force_blocksize = 0;
+static int g_initlib = 0;
+static blosc2_schunk* g_schunk = NULL;   /* the pointer to super-chunk */
+
+
+// Forward declarations
+
+int init_threadpool(blosc2_context *context);
+int release_threadpool(blosc2_context *context);
+
+/* Macros for synchronization */
+
+/* Wait until all threads are initialized */
+#ifdef BLOSC_POSIX_BARRIERS
+#define WAIT_INIT(RET_VAL, CONTEXT_PTR)  \
+  rc = pthread_barrier_wait(&(CONTEXT_PTR)->barr_init); \
+  if (rc != 0 && rc != PTHREAD_BARRIER_SERIAL_THREAD) { \
+    BLOSC_TRACE_ERROR("Could not wait on barrier (init): %d", rc); \
+    return((RET_VAL));                            \
+  }
+#else
+#define WAIT_INIT(RET_VAL, CONTEXT_PTR)   \
+  pthread_mutex_lock(&(CONTEXT_PTR)->count_threads_mutex); \
+  if ((CONTEXT_PTR)->count_threads < (CONTEXT_PTR)->nthreads) { \
+    (CONTEXT_PTR)->count_threads++;  \
+    pthread_cond_wait(&(CONTEXT_PTR)->count_threads_cv, \
+                      &(CONTEXT_PTR)->count_threads_mutex); \
+  } \
+  else { \
+    pthread_cond_broadcast(&(CONTEXT_PTR)->count_threads_cv); \
+  } \
+  pthread_mutex_unlock(&(CONTEXT_PTR)->count_threads_mutex);
+#endif
+
+/* Wait for all threads to finish */
+#ifdef BLOSC_POSIX_BARRIERS
+#define WAIT_FINISH(RET_VAL, CONTEXT_PTR)   \
+  rc = pthread_barrier_wait(&(CONTEXT_PTR)->barr_finish); \
+  if (rc != 0 && rc != PTHREAD_BARRIER_SERIAL_THREAD) { \
+    BLOSC_TRACE_ERROR("Could not wait on barrier (finish)"); \
+    return((RET_VAL));                              \
+  }
+#else
+#define WAIT_FINISH(RET_VAL, CONTEXT_PTR)                           \
+  pthread_mutex_lock(&(CONTEXT_PTR)->count_threads_mutex); \
+  if ((CONTEXT_PTR)->count_threads > 0) { \
+    (CONTEXT_PTR)->count_threads--; \
+    pthread_cond_wait(&(CONTEXT_PTR)->count_threads_cv, \
+                      &(CONTEXT_PTR)->count_threads_mutex); \
+  } \
+  else { \
+    pthread_cond_broadcast(&(CONTEXT_PTR)->count_threads_cv); \
+  } \
+  pthread_mutex_unlock(&(CONTEXT_PTR)->count_threads_mutex);
+#endif
+
+
+/* global variable to change threading backend from Blosc-managed to caller-managed */
+static blosc_threads_callback threads_callback = 0;
+static void *threads_callback_data = 0;
+
+/* non-threadsafe function should be called before any other Blosc function in
+   order to change how threads are managed */
+void blosc_set_threads_callback(blosc_threads_callback callback, void *callback_data)
+{
+  threads_callback = callback;
+  threads_callback_data = callback_data;
+}
+
+
+/* A function for aligned malloc that is portable */
+static uint8_t* my_malloc(size_t size) {
+  void* block = NULL;
+  int res = 0;
+
+/* Do an alignment to 32 bytes because AVX2 is supported */
+#if defined(_WIN32)
+  /* A (void *) cast needed for avoiding a warning with MINGW :-/ */
+  block = (void *)_aligned_malloc(size, 32);
+#elif _POSIX_C_SOURCE >= 200112L || _XOPEN_SOURCE >= 600
+  /* Platform does have an implementation of posix_memalign */
+  res = posix_memalign(&block, 32, size);
+#else
+  block = malloc(size);
+#endif  /* _WIN32 */
+
+  if (block == NULL || res != 0) {
+    BLOSC_TRACE_ERROR("Error allocating memory!");
+    return NULL;
+  }
+
+  return (uint8_t*)block;
+}
+
+
+/* Release memory booked by my_malloc */
+static void my_free(void* block) {
+#if defined(_WIN32)
+  _aligned_free(block);
+#else
+  free(block);
+#endif  /* _WIN32 */
+}
+
+
+/*
+ * Conversion routines between compressor and compression libraries
+ */
+
+/* Return the library code associated with the compressor name */
+static int compname_to_clibcode(const char* compname) {
+  if (strcmp(compname, BLOSC_BLOSCLZ_COMPNAME) == 0)
+    return BLOSC_BLOSCLZ_LIB;
+  if (strcmp(compname, BLOSC_LZ4_COMPNAME) == 0)
+    return BLOSC_LZ4_LIB;
+  if (strcmp(compname, BLOSC_LZ4HC_COMPNAME) == 0)
+    return BLOSC_LZ4_LIB;
+  if (strcmp(compname, BLOSC_SNAPPY_COMPNAME) == 0)
+    return BLOSC_SNAPPY_LIB;
+  if (strcmp(compname, BLOSC_ZLIB_COMPNAME) == 0)
+    return BLOSC_ZLIB_LIB;
+  if (strcmp(compname, BLOSC_ZSTD_COMPNAME) == 0)
+    return BLOSC_ZSTD_LIB;
+  return BLOSC2_ERROR_NOT_FOUND;
+}
+
+/* Return the library name associated with the compressor code */
+static const char* clibcode_to_clibname(int clibcode) {
+  if (clibcode == BLOSC_BLOSCLZ_LIB) return BLOSC_BLOSCLZ_LIBNAME;
+  if (clibcode == BLOSC_LZ4_LIB) return BLOSC_LZ4_LIBNAME;
+  if (clibcode == BLOSC_SNAPPY_LIB) return BLOSC_SNAPPY_LIBNAME;
+  if (clibcode == BLOSC_ZLIB_LIB) return BLOSC_ZLIB_LIBNAME;
+  if (clibcode == BLOSC_ZSTD_LIB) return BLOSC_ZSTD_LIBNAME;
+  return NULL;                  /* should never happen */
+}
+
+
+/*
+ * Conversion routines between compressor names and compressor codes
+ */
+
+/* Get the compressor name associated with the compressor code */
+int blosc_compcode_to_compname(int compcode, const char** compname) {
+  int code = -1;    /* -1 means non-existent compressor code */
+  const char* name = NULL;
+
+  /* Map the compressor code */
+  if (compcode == BLOSC_BLOSCLZ)
+    name = BLOSC_BLOSCLZ_COMPNAME;
+  else if (compcode == BLOSC_LZ4)
+    name = BLOSC_LZ4_COMPNAME;
+  else if (compcode == BLOSC_LZ4HC)
+    name = BLOSC_LZ4HC_COMPNAME;
+  else if (compcode == BLOSC_SNAPPY)
+    name = BLOSC_SNAPPY_COMPNAME;
+  else if (compcode == BLOSC_ZLIB)
+    name = BLOSC_ZLIB_COMPNAME;
+  else if (compcode == BLOSC_ZSTD)
+    name = BLOSC_ZSTD_COMPNAME;
+
+  *compname = name;
+
+  /* Guess if there is support for this code */
+  if (compcode == BLOSC_BLOSCLZ)
+    code = BLOSC_BLOSCLZ;
+#if defined(HAVE_LZ4)
+  else if (compcode == BLOSC_LZ4)
+    code = BLOSC_LZ4;
+  else if (compcode == BLOSC_LZ4HC)
+    code = BLOSC_LZ4HC;
+#endif /* HAVE_LZ4 */
+#if defined(HAVE_SNAPPY)
+  else if (compcode == BLOSC_SNAPPY)
+    code = BLOSC_SNAPPY;
+#endif /* HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+  else if (compcode == BLOSC_ZLIB)
+    code = BLOSC_ZLIB;
+#endif /* HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+  else if (compcode == BLOSC_ZSTD)
+    code = BLOSC_ZSTD;
+#endif /* HAVE_ZSTD */
+
+  return code;
+}
+
+/* Get the compressor code for the compressor name. -1 if it is not available */
+int blosc_compname_to_compcode(const char* compname) {
+  int code = -1;  /* -1 means non-existent compressor code */
+
+  if (strcmp(compname, BLOSC_BLOSCLZ_COMPNAME) == 0) {
+    code = BLOSC_BLOSCLZ;
+  }
+#if defined(HAVE_LZ4)
+  else if (strcmp(compname, BLOSC_LZ4_COMPNAME) == 0) {
+    code = BLOSC_LZ4;
+  }
+  else if (strcmp(compname, BLOSC_LZ4HC_COMPNAME) == 0) {
+    code = BLOSC_LZ4HC;
+  }
+#endif /*  HAVE_LZ4 */
+#if defined(HAVE_SNAPPY)
+  else if (strcmp(compname, BLOSC_SNAPPY_COMPNAME) == 0) {
+    code = BLOSC_SNAPPY;
+  }
+#endif /*  HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+  else if (strcmp(compname, BLOSC_ZLIB_COMPNAME) == 0) {
+    code = BLOSC_ZLIB;
+  }
+#endif /*  HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+  else if (strcmp(compname, BLOSC_ZSTD_COMPNAME) == 0) {
+    code = BLOSC_ZSTD;
+  }
+#endif /*  HAVE_ZSTD */
+
+  return code;
+}
+
+
+/* Convert compressor code to blosc compressor format code */
+static int compcode_to_compformat(int compcode) {
+  switch (compcode) {
+    case BLOSC_BLOSCLZ: return BLOSC_BLOSCLZ_FORMAT;
+#if defined(HAVE_LZ4)
+    case BLOSC_LZ4:     return BLOSC_LZ4_FORMAT;
+    case BLOSC_LZ4HC:   return BLOSC_LZ4HC_FORMAT;
+#endif /*  HAVE_LZ4 */
+
+#if defined(HAVE_SNAPPY)
+    case BLOSC_SNAPPY:  return BLOSC_SNAPPY_FORMAT;
+#endif /*  HAVE_SNAPPY */
+
+#if defined(HAVE_ZLIB)
+    case BLOSC_ZLIB:    return BLOSC_ZLIB_FORMAT;
+#endif /*  HAVE_ZLIB */
+
+#if defined(HAVE_ZSTD)
+    case BLOSC_ZSTD:    return BLOSC_ZSTD_FORMAT;
+      break;
+#endif /*  HAVE_ZSTD */
+  }
+  return -1;
+}
+
+
+/* Convert compressor code to blosc compressor format version */
+static int compcode_to_compversion(int compcode) {
+  /* Write compressor format */
+  switch (compcode) {
+    case BLOSC_BLOSCLZ: return BLOSC_BLOSCLZ_VERSION_FORMAT;
+
+#if defined(HAVE_LZ4)
+    case BLOSC_LZ4:     return BLOSC_LZ4_VERSION_FORMAT;
+    case BLOSC_LZ4HC:   return BLOSC_LZ4HC_VERSION_FORMAT;
+#endif /*  HAVE_LZ4 */
+
+#if defined(HAVE_SNAPPY)
+    case BLOSC_SNAPPY:  return BLOSC_SNAPPY_VERSION_FORMAT;
+#endif /*  HAVE_SNAPPY */
+
+#if defined(HAVE_ZLIB)
+    case BLOSC_ZLIB:    return BLOSC_ZLIB_VERSION_FORMAT;
+      break;
+#endif /*  HAVE_ZLIB */
+
+#if defined(HAVE_ZSTD)
+    case BLOSC_ZSTD:    return BLOSC_ZSTD_VERSION_FORMAT;
+      break;
+#endif /*  HAVE_ZSTD */
+  }
+  return -1;
+}
+
+
+#if defined(HAVE_LZ4)
+static int lz4_wrap_compress(const char* input, size_t input_length,
+                             char* output, size_t maxout, int accel, void* hash_table) {
+  BLOSC_UNUSED_PARAM(accel);
+  int cbytes;
+#ifdef HAVE_IPP
+  if (hash_table == NULL) {
+    return BLOSC2_ERROR_INVALID_PARAM;  // the hash table should always be initialized
+  }
+  int outlen = (int)maxout;
+  int inlen = (int)input_length;
+  // I have not found any function that uses `accel` like in `LZ4_compress_fast`, but
+  // the IPP LZ4Safe call does a pretty good job on compressing well, so let's use it
+  IppStatus status = ippsEncodeLZ4Safe_8u((const Ipp8u*)input, &inlen,
+                                           (Ipp8u*)output, &outlen, (Ipp8u*)hash_table);
+  if (status == ippStsDstSizeLessExpected) {
+    return 0;  // we cannot compress in required outlen
+  }
+  else if (status != ippStsNoErr) {
+    return BLOSC2_ERROR_FAILURE;  // an unexpected error happened
+  }
+  cbytes = outlen;
+#else
+  BLOSC_UNUSED_PARAM(hash_table);
+  accel = 1;  // deactivate acceleration to match IPP behaviour
+  cbytes = LZ4_compress_fast(input, output, (int)input_length, (int)maxout, accel);
+#endif
+  return cbytes;
+}
+
+
+static int lz4hc_wrap_compress(const char* input, size_t input_length,
+                               char* output, size_t maxout, int clevel) {
+  int cbytes;
+  if (input_length > (size_t)(UINT32_C(2) << 30))
+    return BLOSC2_ERROR_2GB_LIMIT;
+  /* clevel for lz4hc goes up to 12, at least in LZ4 1.7.5
+   * but levels larger than 9 do not buy much compression. */
+  cbytes = LZ4_compress_HC(input, output, (int)input_length, (int)maxout,
+                           clevel);
+  return cbytes;
+}
+
+
+static int lz4_wrap_decompress(const char* input, size_t compressed_length,
+                               char* output, size_t maxout) {
+  int nbytes;
+#ifdef HAVE_IPP
+  int outlen = (int)maxout;
+  int inlen = (int)compressed_length;
+  IppStatus status;
+  status = ippsDecodeLZ4_8u((const Ipp8u*)input, inlen, (Ipp8u*)output, &outlen);
+  //status = ippsDecodeLZ4Dict_8u((const Ipp8u*)input, &inlen, (Ipp8u*)output, 0, &outlen, NULL, 1 << 16);
+  nbytes = (status == ippStsNoErr) ? outlen : -outlen;
+#else
+  nbytes = LZ4_decompress_safe(input, output, (int)compressed_length, (int)maxout);
+#endif
+  if (nbytes != (int)maxout) {
+    return 0;
+  }
+  return (int)maxout;
+}
+#endif /* HAVE_LZ4 */
+
+
+#if defined(HAVE_SNAPPY)
+static int snappy_wrap_compress(const char* input, size_t input_length,
+                                char* output, size_t maxout) {
+  snappy_status status;
+  size_t cl = maxout;
+  status = snappy_compress(input, input_length, output, &cl);
+  if (status != SNAPPY_OK) {
+    return 0;
+  }
+  return (int)cl;
+}
+
+static int snappy_wrap_decompress(const char* input, size_t compressed_length,
+                                  char* output, size_t maxout) {
+  snappy_status status;
+  size_t ul = maxout;
+  status = snappy_uncompress(input, compressed_length, output, &ul);
+  if (status != SNAPPY_OK) {
+    return 0;
+  }
+  return (int)ul;
+}
+#endif /* HAVE_SNAPPY */
+
+
+#if defined(HAVE_ZLIB)
+/* zlib is not very respectful with sharing name space with others.
+ Fortunately, its names do not collide with those already in blosc. */
+static int zlib_wrap_compress(const char* input, size_t input_length,
+                              char* output, size_t maxout, int clevel) {
+  int status;
+  uLongf cl = (uLongf)maxout;
+  status = compress2(
+      (Bytef*)output, &cl, (Bytef*)input, (uLong)input_length, clevel);
+  if (status != Z_OK) {
+    return 0;
+  }
+  return (int)cl;
+}
+
+static int zlib_wrap_decompress(const char* input, size_t compressed_length,
+                                char* output, size_t maxout) {
+  int status;
+  uLongf ul = (uLongf)maxout;
+  status = uncompress(
+      (Bytef*)output, &ul, (Bytef*)input, (uLong)compressed_length);
+  if (status != Z_OK) {
+    return 0;
+  }
+  return (int)ul;
+}
+#endif /*  HAVE_ZLIB */
+
+
+#if defined(HAVE_ZSTD)
+static int zstd_wrap_compress(struct thread_context* thread_context,
+                              const char* input, size_t input_length,
+                              char* output, size_t maxout, int clevel) {
+  size_t code;
+  blosc2_context* context = thread_context->parent_context;
+
+  clevel = (clevel < 9) ? clevel * 2 - 1 : ZSTD_maxCLevel();
+  /* Make the level 8 close enough to maxCLevel */
+  if (clevel == 8) clevel = ZSTD_maxCLevel() - 2;
+
+  if (thread_context->zstd_cctx == NULL) {
+    thread_context->zstd_cctx = ZSTD_createCCtx();
+  }
+
+  if (context->use_dict) {
+    assert(context->dict_cdict != NULL);
+    code = ZSTD_compress_usingCDict(
+            thread_context->zstd_cctx, (void*)output, maxout, (void*)input,
+            input_length, context->dict_cdict);
+  } else {
+    code = ZSTD_compressCCtx(thread_context->zstd_cctx,
+        (void*)output, maxout, (void*)input, input_length, clevel);
+  }
+  if (ZSTD_isError(code) != ZSTD_error_no_error) {
+    // Do not print anything because blosc will just memcpy this buffer
+    // fprintf(stderr, "Error in ZSTD compression: '%s'.  Giving up.\n",
+    //         ZDICT_getErrorName(code));
+    return 0;
+  }
+  return (int)code;
+}
+
+static int zstd_wrap_decompress(struct thread_context* thread_context,
+                                const char* input, size_t compressed_length,
+                                char* output, size_t maxout) {
+  size_t code;
+  blosc2_context* context = thread_context->parent_context;
+
+  if (thread_context->zstd_dctx == NULL) {
+    thread_context->zstd_dctx = ZSTD_createDCtx();
+  }
+
+  if (context->use_dict) {
+    assert(context->dict_ddict != NULL);
+    code = ZSTD_decompress_usingDDict(
+            thread_context->zstd_dctx, (void*)output, maxout, (void*)input,
+            compressed_length, context->dict_ddict);
+  } else {
+    code = ZSTD_decompressDCtx(thread_context->zstd_dctx,
+        (void*)output, maxout, (void*)input, compressed_length);
+  }
+  if (ZSTD_isError(code) != ZSTD_error_no_error) {
+    BLOSC_TRACE_ERROR("Error in ZSTD decompression: '%s'.  Giving up.",
+                      ZDICT_getErrorName(code));
+    return 0;
+  }
+  return (int)code;
+}
+#endif /*  HAVE_ZSTD */
+
+/* Compute acceleration for blosclz */
+static int get_accel(const blosc2_context* context) {
+  int clevel = context->clevel;
+
+  if (context->compcode == BLOSC_LZ4) {
+    /* This acceleration setting based on discussions held in:
+     * https://groups.google.com/forum/#!topic/lz4c/zosy90P8MQw
+     */
+    return (10 - clevel);
+  }
+  return 1;
+}
+
+
+int do_nothing(int8_t filter, char cmode) {
+  if (cmode == 'c') {
+    return (filter == BLOSC_NOFILTER);
+  } else {
+    // TRUNC_PREC do not have to be applied during decompression
+    return ((filter == BLOSC_NOFILTER) || (filter == BLOSC_TRUNC_PREC));
+  }
+}
+
+
+int next_filter(
+
+// --- CODE TRUNCATED HERE ---
+
+static int blosc_d(
+    struct thread_context* thread_context, int32_t bsize,
+    int32_t leftoverblock, const uint8_t* src, int32_t srcsize, int32_t src_offset,
+    int32_t nblock, uint8_t* dest, int32_t dest_offset, uint8_t* tmp, uint8_t* tmp2) {
+  blosc2_context* context = thread_context->parent_context;
+  uint8_t* filters = context->filters;
+  uint8_t *tmp3 = thread_context->tmp4;
+  int32_t compformat = (context->header_flags & (uint8_t)0xe0) >> 5u;
+  int dont_split = (context->header_flags & (uint8_t)0x10) >> 4u;
+  int memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+  int32_t chunk_nbytes;
+  int32_t chunk_cbytes;
+  int nstreams;
+  int32_t neblock;
+  int32_t nbytes;                /* number of decompressed bytes in split */
+  int32_t cbytes;                /* number of compressed bytes in split */
+  int32_t ctbytes = 0;           /* number of compressed bytes in block */
+  int32_t ntbytes = 0;           /* number of uncompressed bytes in block */
+  uint8_t* comp_buffer;
+  int32_t typesize = context->typesize;
+  const char* compname;
+  int rc;
+
+  rc = blosc2_cbuffer_sizes(src, &chunk_nbytes, &chunk_cbytes, NULL);
+  if (rc < 0) {
+    return rc;
+  }
+
+  if (context->block_maskout != NULL && context->block_maskout[nblock]) {
+    // Do not decompress, but act as if we successfully decompressed everything
+    return bsize;
+  }
+
+  // In some situations (lazychunks) the context can arrive uninitialized
+  // (but BITSHUFFLE needs it for accessing the format of the chunk)
+  if (context->src == NULL) {
+    context->src = src;
+  }
+
+  bool is_lazy = ((context->header_overhead == BLOSC_EXTENDED_HEADER_LENGTH) &&
+          (context->blosc2_flags & 0x08u));
+  if (is_lazy) {
+    // The chunk is on disk, so just lazily load the block
+    if (context->schunk == NULL) {
+      BLOSC_TRACE_ERROR("Lazy chunk needs an associated super-chunk.");
+      return BLOSC2_ERROR_INVALID_PARAM;
+    }
+    if (context->schunk->frame == NULL) {
+      BLOSC_TRACE_ERROR("Lazy chunk needs an associated frame.");
+      return BLOSC2_ERROR_INVALID_PARAM;
+    }
+    blosc2_frame_s* frame = (blosc2_frame_s*)context->schunk->frame;
+    char* urlpath = frame->urlpath;
+    int32_t trailer_len = sizeof(int32_t) + sizeof(int64_t) + context->nblocks * sizeof(int32_t);
+    size_t trailer_offset = BLOSC_EXTENDED_HEADER_LENGTH + context->nblocks * sizeof(int32_t);
+    int32_t nchunk;
+    int64_t chunk_offset;
+    // The nchunk and the offset of the current chunk are in the trailer
+    nchunk = *(int32_t*)(src + trailer_offset);
+    chunk_offset = *(int64_t*)(src + trailer_offset + sizeof(int32_t));
+    // Get the csize of the nblock
+    int32_t *block_csizes = (int32_t *)(src + trailer_offset + sizeof(int32_t) + sizeof(int64_t));
+    int32_t block_csize = block_csizes[nblock];
+    // Read the lazy block on disk
+    FILE* fp = NULL;
+    if (frame->sframe) {
+      // The chunk is not in the frame
+      char* chunkpath = malloc(strlen(frame->urlpath) + 1 + 8 + strlen(".chunk") + 1);
+      sprintf(chunkpath, "%s/%08X.chunk", frame->urlpath, nchunk);
+      fp = fopen(chunkpath, "rb");
+      free(chunkpath);
+      // The offset of the block is src_offset
+      fseek(fp, src_offset, SEEK_SET);
+    }
+    else {
+      fp = fopen(urlpath, "rb");
+      // The offset of the block is src_offset
+      fseek(fp, chunk_offset + src_offset, SEEK_SET);
+    }
+    // We can make use of tmp3 because it will be used after src is not needed anymore
+    size_t rbytes = fread(tmp3, 1, block_csize, fp);
+    fclose(fp);
+    if ((int32_t)rbytes != block_csize) {
+      BLOSC_TRACE_ERROR("Cannot read the (lazy) block out of the fileframe.");
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    src = tmp3;
+    src_offset = 0;
+    srcsize = block_csize;
+  }
+
+  // If the chunk is memcpyed, we just have to copy the block to dest and return
+  if (memcpyed) {
+    if (chunk_nbytes + context->header_overhead != chunk_cbytes) {
+      return BLOSC2_ERROR_WRITE_BUFFER;
+    }
+    int bsize_ = leftoverblock ? chunk_nbytes % context->blocksize : bsize;
+    if (chunk_cbytes < context->header_overhead + (nblock * context->blocksize) + bsize_) {
+      /* Not enough input to copy block */
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if (!is_lazy) {
+      src += context->header_overhead + nblock * context->blocksize;
+    }
+    memcpy(dest + dest_offset, src, bsize_);
+    return bsize_;
+  }
+
+  if (!is_lazy && (src_offset <= 0 || src_offset >= srcsize)) {
+    /* Invalid block src offset encountered */
+    return BLOSC2_ERROR_DATA;
+  }
+
+  src += src_offset;
+  srcsize -= src_offset;
+
+  int last_filter_index = last_filter(filters, 'd');
+
+  if ((last_filter_index >= 0) &&
+          (next_filter(filters, BLOSC2_MAX_FILTERS, 'd') != BLOSC_DELTA)) {
+   // We are making use of some filter, so use a temp for destination
+   comp_buffer = tmp;
+  } else {
+    // If no filters, or only DELTA in pipeline
+   comp_buffer = dest + dest_offset;
+  }
+
+  /* The number of compressed data streams for this block */
+  if (!dont_split && !leftoverblock && !context->use_dict) {
+    // We don't want to split when in a training dict state
+    nstreams = (int32_t)typesize;
+  }
+  else {
+    nstreams = 1;
+  }
+
+  neblock = bsize / nstreams;
+  if (neblock == 0) {
+    /* Not enough space to output bytes */
+    return -1;
+  }
+  for (int j = 0; j < nstreams; j++) {
+    if (srcsize < (signed)sizeof(int32_t)) {
+      /* Not enough input to read compressed size */
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    srcsize -= sizeof(int32_t);
+    cbytes = sw32_(src);      /* amount of compressed bytes */
+    if (cbytes > 0) {
+      if (srcsize < cbytes) {
+        /* Not enough input to read compressed bytes */
+        return BLOSC2_ERROR_READ_BUFFER;
+      }
+      srcsize -= cbytes;
+    }
+    src += sizeof(int32_t);
+    ctbytes += (signed)sizeof(int32_t);
+
+    /* Uncompress */
+    if (cbytes == 0) {
+      // A run of 0's
+      memset(comp_buffer, 0, (unsigned int)neblock);
+      nbytes = neblock;
+    }
+    else if (cbytes < 0) {
+      // A negative number means some encoding depending on the token that comes next
+      uint8_t token;
+
+      if (srcsize < (signed)sizeof(uint8_t)) {
+        // Not enough input to read token */
+        return BLOSC2_ERROR_READ_BUFFER;
+      }
+      srcsize -= sizeof(uint8_t);
+
+      token = src[0];
+      src += 1;
+      // Increment the total compressed bytes counter by 1 for the token
+      // Check if the token indicates a run of non-zero bytes
+      // If so, validate that the run length does not exceed a specific limit
+      // Use the token to determine the byte value for the run and fill the destination buffer with it
+      // Set decompressed bytes to the number of elements in the block
+      // Ensure the compressed bytes for this stream is zeroed, as it is fully encoded in the token
+      // <MASK>
+    }
+    else if (cbytes == neblock) {
+      memcpy(comp_buffer, src, (unsigned int)neblock);
+      nbytes = (int32_t)neblock;
+    }
+    else {
+      if (compformat == BLOSC_BLOSCLZ_FORMAT) {
+        nbytes = blosclz_decompress(src, cbytes, comp_buffer, (int)neblock);
+      }
+  #if defined(HAVE_LZ4)
+      else if (compformat == BLOSC_LZ4_FORMAT) {
+        nbytes = lz4_wrap_decompress((char*)src, (size_t)cbytes,
+                                     (char*)comp_buffer, (size_t)neblock);
+      }
+  #endif /*  HAVE_LZ4 */
+  #if defined(HAVE_SNAPPY)
+      else if (compformat == BLOSC_SNAPPY_FORMAT) {
+        nbytes = snappy_wrap_decompress((char*)src, (size_t)cbytes,
+                                        (char*)comp_buffer, (size_t)neblock);
+      }
+  #endif /*  HAVE_SNAPPY */
+  #if defined(HAVE_ZLIB)
+      else if (compformat == BLOSC_ZLIB_FORMAT) {
+        nbytes = zlib_wrap_decompress((char*)src, (size_t)cbytes,
+                                      (char*)comp_buffer, (size_t)neblock);
+      }
+  #endif /*  HAVE_ZLIB */
+  #if defined(HAVE_ZSTD)
+      else if (compformat == BLOSC_ZSTD_FORMAT) {
+        nbytes = zstd_wrap_decompress(thread_context,
+                                      (char*)src, (size_t)cbytes,
+                                      (char*)comp_buffer, (size_t)neblock);
+      }
+  #endif /*  HAVE_ZSTD */
+      else {
+        compname = clibcode_to_clibname(compformat);
+        BLOSC_TRACE_ERROR(
+                "Blosc has not been compiled with decompression "
+                "support for '%s' format.  "
+                "Please recompile for adding this support.", compname);
+        return BLOSC2_ERROR_CODEC_SUPPORT;
+      }
+
+      /* Check that decompressed bytes number is correct */
+      if (nbytes != neblock) {
+        return BLOSC2_ERROR_DATA;
+      }
+
+    }
+    src += cbytes;
+    ctbytes += cbytes;
+    comp_buffer += nbytes;
+    ntbytes += nbytes;
+  } /* Closes j < nstreams */
+
+  if (last_filter_index >= 0) {
+    int errcode = pipeline_d(context, bsize, dest, dest_offset, tmp, tmp2, tmp3,
+                             last_filter_index);
+    if (errcode < 0)
+      return errcode;
+  }
+
+  /* Return the number of uncompressed bytes */
+  return (int)ntbytes;
+}

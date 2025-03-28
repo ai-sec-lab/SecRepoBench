@@ -1,0 +1,628 @@
+<｜begin▁of▁sentence｜>/*
+   +----------------------------------------------------------------------+
+   | Zend Engine                                                          |
+   +----------------------------------------------------------------------+
+   | Copyright (c) Zend Technologies Ltd. (http://www.zend.com)           |
+   +----------------------------------------------------------------------+
+   | This source file is subject to version 2.00 of the Zend license,     |
+   | that is bundled with this package in the file LICENSE, and is        |
+   | available through the world-wide-web at the following url:           |
+   | http://www.zend.com/license/2_00.txt.                                |
+   | If you did not receive a copy of the Zend license and are unable to  |
+   | obtain it through the world-wide-web, please send a note to          |
+   | license@zend.com so we can mail you a copy immediately.              |
+   +----------------------------------------------------------------------+
+   | Authors: Andi Gutmans <andi@php.net>                                 |
+   |          Zeev Suraski <zeev@php.net>                                 |
+   |          Dmitry Stogov <dmitry@php.net>                              |
+   +----------------------------------------------------------------------+
+*/
+
+#include <ctype.h>
+
+#include "zend.h"
+#include "zend_operators.h"
+#include "zend_variables.h"
+#include "zend_globals.h"
+#include "zend_list.h"
+#include "zend_API.h"
+#include "zend_strtod.h"
+#include "zend_exceptions.h"
+#include "zend_closures.h"
+
+#include <locale.h>
+#ifdef HAVE_LANGINFO_H
+# include <langinfo.h>
+#endif
+
+#ifdef ZEND_INTRIN_AVX2_NATIVE
+#include <immintrin.h>
+#endif
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
+
+#if defined(ZEND_WIN32) && !defined(ZTS) && defined(_MSC_VER)
+/* This performance improvement of tolower() on Windows gives 10-18% on bench.php */
+#define ZEND_USE_TOLOWER_L 1
+#endif
+
+#ifdef ZEND_USE_TOLOWER_L
+static _locale_t current_locale = NULL;
+/* this is true global! may lead to strange effects on ZTS, but so may setlocale() */
+#define zend_tolower(c) _tolower_l(c, current_locale)
+#else
+#define zend_tolower(c) tolower(c)
+#endif
+
+#define TYPE_PAIR(t1,t2) (((t1) << 4) | (t2))
+
+#ifdef ZEND_INTRIN_AVX2_NATIVE
+#define HAVE_BLOCKCONV
+
+#define BLOCKCONV_INIT_RANGE(start, end) \
+	const __m256i blconv_offset = _mm256_set1_epi8((signed char)(SCHAR_MIN - start)); \
+	const __m256i blconv_threshold = _mm256_set1_epi8(SCHAR_MIN + (end - start) + 1);
+
+#define BLOCKCONV_STRIDE sizeof(__m256i)
+
+#define BLOCKCONV_INIT_DELTA(delta) \
+	const __m256i blconv_delta = _mm256_set1_epi8(delta);
+
+#define BLOCKCONV_LOAD(input) \
+	__m256i blconv_operand = _mm256_loadu_si256((__m256i*)(input)); \
+	__m256i blconv_mask = _mm256_cmpgt_epi8(blconv_threshold, _mm256_add_epi8(blconv_operand, blconv_offset));
+
+#define BLOCKCONV_FOUND() _mm256_movemask_epi8(blconv_mask)
+
+#define BLOCKCONV_STORE(dest) \
+	__m256i blconv_add = _mm256_and_si256(blconv_mask, blconv_delta); \
+	__m256i blconv_result = _mm256_add_epi8(blconv_operand, blconv_add); \
+	_mm256_storeu_si256((__m256i*)(dest), blconv_result);
+
+#elif __SSE2__
+#define HAVE_BLOCKCONV
+
+/* Common code for SSE2 accelerated character case conversion */
+
+#define BLOCKCONV_INIT_RANGE(start, end) \
+	const __m128i blconv_offset = _mm_set1_epi8((signed char)(SCHAR_MIN - start)); \
+	const __m128i blconv_threshold = _mm_set1_epi8(SCHAR_MIN + (end - start) + 1);
+
+#define BLOCKCONV_STRIDE sizeof(__m128i)
+
+#define BLOCKCONV_INIT_DELTA(delta) \
+	const __m128i blconv_delta = _mm_set1_epi8(delta);
+
+#define BLOCKCONV_LOAD(input) \
+	__m128i blconv_operand = _mm_loadu_si128((__m128i*)(input)); \
+	__m128i blconv_mask = _mm_cmplt_epi8(_mm_add_epi8(blconv_operand, blconv_offset), blconv_threshold);
+
+#define BLOCKCONV_FOUND() _mm_movemask_epi8(blconv_mask)
+
+#define BLOCKCONV_STORE(dest) \
+	__m128i blconv_add = _mm_and_si128(blconv_mask, blconv_delta); \
+	__m128i blconv_result = _mm_add_epi8(blconv_operand, blconv_add); \
+	_mm_storeu_si128((__m128i *)(dest), blconv_result);
+
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define HAVE_BLOCKCONV
+
+#define BLOCKCONV_INIT_RANGE(start, end) \
+	const int8x16_t blconv_offset = vdupq_n_s8((signed char)(SCHAR_MIN - start)); \
+	const int8x16_t blconv_threshold = vdupq_n_s8(SCHAR_MIN + (end - start) + 1);
+
+#define BLOCKCONV_STRIDE sizeof(int8x16_t)
+
+#define BLOCKCONV_INIT_DELTA(delta) \
+	const int8x16_t blconv_delta = vdupq_n_s8(delta);
+
+#define BLOCKCONV_LOAD(input) \
+	int8x16_t blconv_operand = vld1q_s8((const int8_t*)(input)); \
+	uint8x16_t blconv_mask = vcltq_s8(vaddq_s8(blconv_operand, blconv_offset), blconv_threshold);
+
+#define BLOCKCONV_FOUND() vmaxvq_u8(blconv_mask)
+
+#define BLOCKCONV_STORE(dest) \
+	int8x16_t blconv_add = vandq_s8(vreinterpretq_s8_u8(blconv_mask), blconv_delta); \
+	int8x16_t blconv_result = vaddq_s8(blconv_operand, blconv_add); \
+	vst1q_s8((int8_t *)(dest), blconv_result);
+
+#endif /* defined(__aarch64__) || defined(_M_ARM64) */
+
+ZEND_API const unsigned char zend_tolower_map[256] = {
+0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
+0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b,0x2c,0x2d,0x2e,0x2f,
+0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3a,0x3b,0x3c,0x3d,0x3e,0x3f,
+0x40,0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6a,0x6b,0x6c,0x6d,0x6e,0x6f,
+0x70,0x71,0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7a,0x5b,0x5c,0x5d,0x5e,0x5f,
+0x60,0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6a,0x6b,0x6c,0x6d,0x6e,0x6f,
+0x70,0x71,0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7a,0x7b,0x7c,0x7d,0x7e,0x7f,
+0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f,
+0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xaa,0xab,0xac,0xad,0xae,0xaf,
+0xb0,0xb1,0xb2,0xb3,0xb4,0xb5,0xb6,0xb7,0xb8,0xb9,0xba,0xbb,0xbc,0xbd,0xbe,0xbf,
+0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7,0xc8,0xc9,0xca,0xcb,0xcc,0xcd,0xce,0xcf,
+0xd0,0xd1,0xd2,0xd3,0xd4,0xd5,0xd6,0xd7,0xd8,0xd9,0xda,0xdb,0xdc,0xdd,0xde,0xdf,
+0xe0,0xe1,0xe2,0xe3,0xe4,0xe5,0xe6,0xe7,0xe8,0xe9,0xea,0xeb,0xec,0xed,0xee,0xef,
+0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9,0xfa,0xfb,0xfc,0xfd,0xfe,0xff
+};
+
+ZEND_API const unsigned char zend_toupper_map[256] = {
+0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
+0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b,0x2c,0x2d,0x2e,0x2f,
+0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3a,0x3b,0x3c,0x3d,0x3e,0x3f,
+0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4a,0x4b,0x4c,0x4d,0x4e,0x4f,
+0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5a,0x5b,0x5c,0x5d,0x5e,0x5f,
+0x60,0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4a,0x4b,0x4c,0x4d,0x4e,0x4f,
+0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5a,0x7b,0x7c,0x7d,0x7e,0x7f,
+0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f,
+0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xaa,0xab,0xac,0xad,0xae,0xaf,
+0xb0,0xb1,0xb2,0xb3,0xb4,0xb5,0xb6,0xb7,0xb8,0xb9,0xba,0xbb,0xbc,0xbd,0xbe,0xbf,
+0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7,0xc8,0xc9,0xca,0xcb,0xcc,0xcd,0xce,0xcf,
+0xd0,0xd1,0xd2,0xd3,0xd4,0xd5,0xd6,0xd7,0xd8,0xd9,0xda,0xdb,0xdc,0xdd,0xde,0xdf,
+0xe0,0xe1,0xe2,0xe3,0xe4,0xe5,0xe6,0xe7,0xe8,0xe9,0xea,0xeb,0xec,0xed,0xee,0xef,
+0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9,0xfa,0xfb,0xfc,0xfd,0xfe,0xff
+};
+
+
+/**
+ * Functions using locale lowercase:
+ 	 	zend_binary_strncasecmp_l
+ 	 	zend_binary_strcasecmp_l
+ * Functions using ascii lowercase:
+		string_compare_function_ex
+		string_case_compare_function
+  		zend_str_tolower_copy
+		zend_str_tolower_dup
+		zend_str_tolower
+		zend_binary_strcasecmp
+		zend_binary_strncasecmp
+ */
+
+static zend_long ZEND_FASTCALL zend_atol_internal(const char *str, size_t str_len) /* {{{ */
+{
+	if (!str_len) {
+		str_len = strlen(str);
+	}
+
+	/* Perform following multiplications on unsigned to avoid overflow UB.
+	 * For now overflow is silently ignored -- not clear what else can be
+	 * done here, especially as the final result of this function may be
+	 * used in an unsigned context (e.g. "memory_limit=3G", which overflows
+	 * zend_long on 32-bit, but not size_t). */
+	zend_ulong retval = (zend_ulong) ZEND_STRTOL(str, NULL, 0);
+	if (str_len>0) {
+		switch (str[str_len-1]) {
+			case 'g':
+			case 'G':
+				retval *= 1024;
+				ZEND_FALLTHROUGH;
+			case 'm':
+			case 'M':
+				retval *= 1024;
+				ZEND_FALLTHROUGH;
+			case 'k':
+			case 'K':
+				retval *= 1024;
+				break;
+		}
+	}
+	return (zend_long) retval;
+}
+/* }}} */
+
+ZEND_API zend_long ZEND_FASTCALL zend_atol(const char *str, size_t str_len)
+{
+	return zend_atol_internal(str, str_len);
+}
+
+ZEND_API int ZEND_FASTCALL zend_atoi(const char *str, size_t str_len)
+{
+	return (int) zend_atol_internal(str, str_len);
+}
+
+/* {{{ convert_object_to_type: dst will be either ctype or UNDEF */
+#define convert_object_to_type(op, dst, ctype)									\
+	ZVAL_UNDEF(dst);																		\
+	if (Z_OBJ_HT_P(op)->cast_object(Z_OBJ_P(op), dst, ctype) == FAILURE) {					\
+		zend_error(E_WARNING,																\
+			"Object of class %s could not be converted to %s", ZSTR_VAL(Z_OBJCE_P(op)->name),\
+		zend_get_type_by_const(ctype));														\
+	} 																						\
+
+/* }}} */
+
+ZEND_API void ZEND_FASTCALL convert_scalar_to_number(zval *op) /* {{{ */
+{
+try_again:
+	switch (Z_TYPE_P(op)) {
+		case IS_REFERENCE:
+			zend_unwrap_reference(op);
+			goto try_again;
+		case IS_STRING:
+			{
+				zend_string *str;
+
+				str = Z_STR_P(op);
+				if ((Z_TYPE_INFO_P(op)=is_numeric_string(ZSTR_VAL(str), ZSTR_LEN(str), &Z_LVAL_P(op), &Z_DVAL_P(op), 1)) == 0) {
+					ZVAL_LONG(op, 0);
+				}
+				zend_string_release_ex(str, 0);
+				break;
+			}
+		case IS_NULL:
+		case IS_FALSE:
+			ZVAL_LONG(op, 0);
+			break;
+		case IS_TRUE:
+			ZVAL_LONG(op, 1);
+			break;
+		case IS_RESOURCE:
+			{
+				zend_long l = Z_RES_HANDLE_P(op);
+				zval_ptr_dtor(op);
+				ZVAL_LONG(op, l);
+			}
+			break;
+		case IS_OBJECT:
+			{
+				zval dst;
+
+				convert_object_to_type(op, &dst, _IS_NUMBER);
+				zval_ptr_dtor(op);
+
+				if (Z_TYPE(dst) == IS_LONG || Z_TYPE(dst) == IS_DOUBLE) {
+					ZVAL_COPY_VALUE(op, &dst);
+				} else {
+					ZVAL_LONG(op, 1);
+				}
+			}
+			break;
+	}
+}
+/* }}} */
+
+static zend_never_inline zval* ZEND_FASTCALL _zendi_convert_scalar_to_number_silent(zval *op, zval *holder) /* {{{ */
+{
+	switch (Z_TYPE_P(op)) {
+		case IS_NULL:
+		case IS_FALSE:
+			ZVAL_LONG(holder, 0);
+			return holder;
+		case IS_TRUE:
+			ZVAL_LONG(holder, 1);
+			return holder;
+		case IS_STRING:
+			if ((Z_TYPE_INFO_P(holder) = is_numeric_string(Z_STRVAL_P(op), Z_STRLEN_P(op), &Z_LVAL_P(holder), &Z_DVAL_P(holder), 1)) == 0) {
+				ZVAL_LONG(holder, 0);
+			}
+			return holder;
+		case IS_RESOURCE:
+			ZVAL_LONG(holder, Z_RES_HANDLE_P(op));
+			return holder;
+		case IS_OBJECT:
+			convert_object_to_type(op, holder, _IS_NUMBER);
+			if (UNEXPECTED(EG(exception)) ||
+			    UNEXPECTED(Z_TYPE_P(holder) != IS_LONG && Z_TYPE_P(holder) != IS_DOUBLE)) {
+				ZVAL_LONG(holder, 1);
+			}
+			return holder;
+		case IS_LONG:
+		case IS_DOUBLE:
+		default:
+			return op;
+	}
+}
+/* }}} */
+
+static zend_never_inline zend_result ZEND_FASTCALL _zendi_try_convert_scalar_to_number(zval *op, zval *holder) /* {{{ */
+{
+	switch (Z_TYPE_P(op)) {
+		case IS_NULL:
+		case IS_FALSE:
+			ZVAL_LONG(holder, 0);
+			return SUCCESS;
+		case IS_TRUE:
+			ZVAL_LONG(holder, 1);
+			return SUCCESS;
+		case IS_STRING:
+		{
+			bool trailing_data = false;
+			/* For BC reasons we allow errors so that we can warn on leading numeric string */
+			if (0 == (Z_TYPE_INFO_P(holder) = is_numeric_string_ex(Z_STRVAL_P(op), Z_STRLEN_P(op),
+					&Z_LVAL_P(holder), &Z_DVAL_P(holder),  /* allow errors */ true, NULL, &trailing_data))) {
+				/* Will lead to invalid OP type error */
+				return FAILURE;
+			}
+			if (UNEXPECTED(trailing_data)) {
+				zend_error(E_WARNING, "A non-numeric value encountered");
+				if (UNEXPECTED(EG(exception))) {
+					return FAILURE;
+				}
+			}
+			return SUCCESS;
+		}
+		case IS_OBJECT:
+			if (Z_OBJ_HT_P(op)->cast_object(Z_OBJ_P(op), holder, _IS_NUMBER) == FAILURE
+					|| EG(exception)) {
+				return FAILURE;
+			}
+			ZEND_ASSERT(Z_TYPE_P(holder) == IS_LONG || Z_TYPE_P(holder) == IS_DOUBLE);
+			return SUCCESS;
+		case IS_RESOURCE:
+		case IS_ARRAY:
+			return FAILURE;
+		EMPTY_SWITCH_DEFAULT_CASE()
+	}
+}
+/* }}} */
+
+static zend_always_inline zend_result zendi_try_convert_scalar_to_number(zval *op, zval *holder) /* {{{ */
+{
+	if (Z_TYPE_P(op) == IS_LONG || Z_TYPE_P(op) == IS_DOUBLE) {
+		ZVAL_COPY_VALUE(holder, op);
+		return SUCCESS;
+	} else {
+		return _zendi_try_convert_scalar_to_number(op, holder);
+	}
+}
+/* }}} */
+
+static zend_never_inline zend_long ZEND_FASTCALL zendi_try_get_long(zval *op, bool *failed) /* {{{ */
+{
+	*failed = 0;
+	switch (Z_TYPE_P(op)) {
+		case IS_NULL:
+		case IS_FALSE:
+			return 0;
+		case IS_TRUE:
+			return 1;
+		case IS_DOUBLE: {
+			double dval = Z_DVAL_P(op);
+			zend_long lval = zend_dval_to_lval(dval);
+			if (!zend_is_long_compatible(dval, lval)) {
+				zend_incompatible_double_to_long_error(dval);
+				if (UNEXPECTED(EG(exception))) {
+					*failed = 1;
+				}
+			}
+			return lval;
+		}
+		case IS_STRING:
+			{
+				uint8_t type;
+				zend_long lval;
+				double dval;
+				bool trailing_data = false;
+
+				/* For BC reasons we allow errors so that we can warn on leading numeric string */
+				type = is_numeric_string_ex(Z_STRVAL_P(op), Z_STRLEN_P(op), &lval, &dval,
+					/* allow errors */ true, NULL, &trailing_data);
+				if (type == 0) {
+					*failed = 1;
+					return 0;
+				}
+				if (UNEXPECTED(trailing_data)) {
+					zend_error(E_WARNING, "A non-numeric value encountered");
+					if (UNEXPECTED(EG(exception))) {
+						*failed = 1;
+					}
+				}
+				if (EXPECTED(type == IS_LONG)) {
+					return lval;
+				} else {
+					/* Previously we used strtol here, not is_numeric_string,
+					 * and strtol gives you LONG_MAX/_MIN on overflow.
+					 * We use use saturating conversion to emulate strtol()'s
+					 * behaviour.
+					 */
+					lval = zend_dval_to_lval_cap(dval);
+					if (!zend_is_long_compatible(dval, lval)) {
+						zend_incompatible_string_to_long_error(Z_STR_P(op));
+						if (UNEXPECTED(EG(exception))) {
+							*failed = 1;
+						}
+					}
+					return lval;
+				}
+			}
+		case IS_OBJECT:
+			{
+				zval dst;
+				if (Z_OBJ_HT_P(op)->cast_object(Z_OBJ_P(op), &dst, IS_LONG) == FAILURE
+						|| EG(exception)) {
+					*failed = 1;
+					return 0;
+				}
+				ZEND_ASSERT(Z_TYPE(dst) == IS_LONG);
+				return Z_LVAL(dst);
+			}
+		case IS_RESOURCE:
+		case IS_ARRAY:
+			*failed = 1;
+			return 0;
+		EMPTY_SWITCH_DEFAULT_CASE()
+	}
+}
+/* }}} */
+
+#define ZEND_TRY_BINARY_OP1_OBJECT_OPERATION(opcode) \
+	if (UNEXPECTED(Z_TYPE_P(op1) == IS_OBJECT) \
+		&& UNEXPECTED(Z_OBJ_HANDLER_P(op1, do_operation))) { \
+		if (EXPECTED(SUCCESS == Z_OBJ_HANDLER_P(op1, do_operation)(opcode, result, op1, op2))) { \
+			return SUCCESS; \
+		} \
+	}
+
+#define ZEND_TRY_BINARY_OP2_OBJECT_OPERATION(opcode) \
+	if (UNEXPECTED(Z_TYPE_P(op2) == IS_OBJECT) \
+		&& UNEXPECTED(Z_OBJ_HANDLER_P(op2, do_operation)) \
+		&& EXPECTED(SUCCESS == Z_OBJ_HANDLER_P(op2, do_operation)(opcode, result, op1, op2))) { \
+		return SUCCESS; \
+	}
+
+#define ZEND_TRY_BINARY_OBJECT_OPERATION(opcode) \
+	ZEND_TRY_BINARY_OP1_OBJECT_OPERATION(opcode) \
+	else \
+	ZEND_TRY_BINARY_OP2_OBJECT_OPERATION(opcode)
+
+#define ZEND_TRY_UNARY_OBJECT_OPERATION(opcode) \
+	if (UNEXPECTED(Z_TYPE_P(op1) == IS_OBJECT) \
+		&& UNEXPECTED(Z_OBJ_HANDLER_P(op1, do_operation)) \
+		&& EXPECTED(SUCCESS == Z_OBJ_HANDLER_P(op1, do_operation)(opcode, result, op1, NULL))) { \
+		return SUCCESS; \
+	}
+
+#define convert_op1_op2_long(op1, op1_lval, op2, op2_lval, result, opcode, sigil) \
+	do {																\
+		if (UNEXPECTED(Z_TYPE_P(op1) != IS_LONG)) {						\
+			bool failed;											\
+			if (Z_ISREF_P(op1)) {										\
+				op1 = Z_REFVAL_P(op1);									\
+				if
+
+// --- CODE TRUNCATED HERE ---
+
+ZEND_FASTCALL concat_function(zval *result, zval *op1, zval *op2) /* {{{ */
+{
+	zval *orig_op1 = op1;
+	zend_string *op1_string, *op2_string;
+	bool shouldfreeopstring = false;
+	bool free_op2_string = false;
+
+	do {
+		if (EXPECTED(Z_TYPE_P(op1) == IS_STRING)) {
+			op1_string = Z_STR_P(op1);
+		} else {
+	 		if (Z_ISREF_P(op1)) {
+	 			op1 = Z_REFVAL_P(op1);
+				if (Z_TYPE_P(op1) == IS_STRING) {
+					op1_string = Z_STR_P(op1);
+					break;
+				}
+	 		}
+			ZEND_TRY_BINARY_OBJECT_OPERATION(ZEND_CONCAT);
+			op1_string = zval_get_string_func(op1);
+			if (UNEXPECTED(EG(exception))) {
+				zend_string_release(op1_string);
+				if (orig_op1 != result) {
+					ZVAL_UNDEF(result);
+				}
+				return FAILURE;
+			}
+			shouldfreeopstring = true;
+			if (result == op1) {
+				if (UNEXPECTED(op1 == op2)) {
+					op2_string = op1_string;
+					goto has_op2_string;
+				}
+			}
+		}
+	} while (0);
+	do {
+		if (EXPECTED(Z_TYPE_P(op2) == IS_STRING)) {
+			op2_string = Z_STR_P(op2);
+		} else {
+			if (Z_ISREF_P(op2)) {
+				op2 = Z_REFVAL_P(op2);
+				if (Z_TYPE_P(op2) == IS_STRING) {
+					op2_string = Z_STR_P(op2);
+					break;
+				}
+			}
+			/* hold an additional reference because a userland function could free this */
+			if (!shouldfreeopstring) {
+				op1_string = zend_string_copy(op1_string);
+				shouldfreeopstring = true;
+			}
+			ZEND_TRY_BINARY_OP2_OBJECT_OPERATION(ZEND_CONCAT);
+			op2_string = zval_get_string_func(op2);
+			if (UNEXPECTED(EG(exception))) {
+				zend_string_release(op1_string);
+				zend_string_release(op2_string);
+				if (orig_op1 != result) {
+					ZVAL_UNDEF(result);
+				}
+				return FAILURE;
+			}
+			free_op2_string = true;
+		}
+	} while (0);
+
+has_op2_string:;
+	if (UNEXPECTED(ZSTR_LEN(op1_string) == 0)) {
+		if (EXPECTED(result != op2 || Z_TYPE_P(result) != IS_STRING)) {
+			if (result == orig_op1) {
+				i_zval_ptr_dtor(result);
+			}
+			if (free_op2_string) {
+				/* transfer ownership of op2_string */
+				ZVAL_STR(result, op2_string);
+				free_op2_string = false;
+			} else {
+				ZVAL_STR_COPY(result, op2_string);
+			}
+		}
+	} else if (UNEXPECTED(ZSTR_LEN(op2_string) == 0)) {
+		if (EXPECTED(result != op1 || Z_TYPE_P(result) != IS_STRING)) {
+			if (result == orig_op1) {
+				i_zval_ptr_dtor(result);
+			}
+			if (shouldfreeopstring) {
+				/* transfer ownership of op1_string */
+				ZVAL_STR(result, op1_string);
+				shouldfreeopstring = false;
+			} else {
+				ZVAL_STR_COPY(result, op1_string);
+			}
+		}
+	} else {
+		size_t op1_len = ZSTR_LEN(op1_string);
+		size_t op2_len = ZSTR_LEN(op2_string);
+		size_t result_len = op1_len + op2_len;
+		zend_string *result_str;
+		uint32_t flags = ZSTR_GET_COPYABLE_CONCAT_PROPERTIES_BOTH(op1_string, op2_string);
+
+		if (UNEXPECTED(op1_len > ZSTR_MAX_LEN - op2_len)) {
+			if (shouldfreeopstring) zend_string_release(op1_string);
+			if (free_op2_string) zend_string_release(op2_string);
+			zend_throw_error(NULL, "String size overflow");
+			if (orig_op1 != result) {
+				ZVAL_UNDEF(result);
+			}
+			return FAILURE;
+		}
+
+		if (result == op1) {
+			// Extend the memory allocation of op1_string to accommodate the concatenated result.
+			// Assign the extended string to result_str, which will hold the final concatenated string.
+			// If op1_string is being used as the result, ensure it is not prematurely freed.
+			// Handle the case where op1_string and op2_string are the same, preventing double release.
+			// Update op2_string to point to the new extended string if necessary.
+			// <MASK>
+		} else {
+			result_str = zend_string_alloc(result_len, 0);
+			memcpy(ZSTR_VAL(result_str), ZSTR_VAL(op1_string), op1_len);
+			if (result == orig_op1) {
+				i_zval_ptr_dtor(result);
+			}
+		}
+		GC_ADD_FLAGS(result_str, flags);
+
+		ZVAL_NEW_STR(result, result_str);
+		memcpy(ZSTR_VAL(result_str) + op1_len, ZSTR_VAL(op2_string), op2_len);
+		ZSTR_VAL(result_str)[result_len] = '\0';
+	}
+
+	if (shouldfreeopstring) zend_string_release(op1_string);
+	if (free_op2_string) zend_string_release(op2_string);
+
+	return SUCCESS;
+}

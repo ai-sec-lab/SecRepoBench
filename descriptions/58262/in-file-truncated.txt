@@ -1,0 +1,744 @@
+/** @file mat73.c
+ * Matlab MAT version 7.3 file functions
+ * @ingroup MAT
+ */
+/*
+ * Copyright (c) 2015-2023, The matio contributors
+ * Copyright (c) 2005-2014, Christopher C. Hulbert
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "matio_private.h"
+#if defined(MAT73) && MAT73
+#include "mat73.h"
+#endif
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#if defined(_MSC_VER) || defined(__MINGW32__)
+#define strdup _strdup
+#endif
+
+#if defined(MAT73) && MAT73
+#if HAVE_HDF5
+
+static const char *ClassNames[] = {"",       "cell",   "struct", "object", "char",    "sparse",
+                                   "double", "single", "int8",   "uint8",  "int16",   "uint16",
+                                   "int32",  "uint32", "int64",  "uint64", "function"};
+
+struct ReadNextIterData
+{
+    mat_t *mat;
+    matvar_t *matvar;
+};
+
+struct ReadGroupInfoIterData
+{
+    hsize_t nfields;
+    matvar_t *matvar;
+};
+
+#if H5_VERSION_GE(1, 10, 0)
+#define H5RDEREFERENCE(obj_id, ref_type, _ref) \
+    H5Rdereference2((obj_id), H5P_DATASET_ACCESS_DEFAULT, (ref_type), (_ref))
+#else
+#define H5RDEREFERENCE(obj_id, ref_type, _ref) H5Rdereference((obj_id), (ref_type), (_ref))
+#endif
+
+#if H5_VERSION_GE(1, 12, 0)
+#define H5O_INFO_T H5O_info2_t
+#define H5OGET_INFO_BY_NAME(loc_id, name, oinfo, lapl_id) \
+    H5Oget_info_by_name3((loc_id), (name), (oinfo), H5O_INFO_BASIC, (lapl_id));
+#elif H5_VERSION_GE(1, 10, 3)
+#define H5O_INFO_T H5O_info_t
+#define H5OGET_INFO_BY_NAME(loc_id, name, oinfo, lapl_id) \
+    H5Oget_info_by_name2((loc_id), (name), (oinfo), H5O_INFO_BASIC, (lapl_id));
+#else
+#define H5O_INFO_T H5O_info_t
+#define H5OGET_INFO_BY_NAME(loc_id, name, oinfo, lapl_id) \
+    H5Oget_info_by_name((loc_id), (name), (oinfo), (lapl_id));
+#endif
+
+#if !defined(MAX_RANK)
+/* Maximal number of dimensions for stack allocated temporary dimension arrays */
+#define MAX_RANK (3)
+#endif
+
+/*===========================================================================
+ *  Private functions
+ *===========================================================================
+ */
+static enum matio_classes ClassStr2ClassType(const char *name);
+static enum matio_classes DataType2ClassType(enum matio_types type);
+static hid_t ClassType2H5T(enum matio_classes class_type);
+static hid_t DataType2H5T(enum matio_types data_type);
+static hid_t SizeType2H5T(void);
+static hid_t DataType(hid_t h5_type, int isComplex);
+static void Mat_H5GetChunkSize(size_t rank, hsize_t *dims, hsize_t *chunk_dims);
+static int Mat_H5ReadVarInfo(matvar_t *matvar, hid_t dset_id);
+static size_t *Mat_H5ReadDims(hid_t dset_id, hsize_t *nelems, int *rank);
+static int Mat_H5ReadFieldNames(matvar_t *matvar, hid_t dset_id, hsize_t *nfields);
+static int Mat_H5ReadDatasetInfo(mat_t *mat, matvar_t *matvar, hid_t dset_id);
+static int Mat_H5ReadGroupInfo(mat_t *mat, matvar_t *matvar, hid_t dset_id);
+static int Mat_H5ReadNextReferenceInfo(hid_t ref_id, matvar_t *matvar, mat_t *mat);
+static int Mat_H5ReadNextReferenceData(hid_t ref_id, matvar_t *matvar, mat_t *mat);
+static int Mat_VarWriteEmpty(hid_t id, matvar_t *matvar, const char *name, const char *class_name);
+static int Mat_VarWriteCell73(hid_t id, matvar_t *matvar, const char *name, hid_t *refs_id,
+                              hsize_t *dims);
+static int Mat_VarWriteChar73(hid_t id, matvar_t *matvar, const char *name, hsize_t *dims);
+static int Mat_WriteEmptyVariable73(hid_t id, const char *name, hsize_t rank, size_t *dims);
+static int Mat_VarWriteLogical73(hid_t id, matvar_t *matvar, const char *name, hsize_t *dims);
+static int Mat_VarWriteNumeric73(hid_t id, matvar_t *matvar, const char *name, hsize_t *dims,
+                                 hsize_t *max_dims);
+static int Mat_VarWriteAppendNumeric73(hid_t id, matvar_t *matvar, const char *name, hsize_t *dims,
+                                       int dim);
+static int Mat_VarWriteSparse73(hid_t id, matvar_t *matvar, const char *name);
+static int Mat_VarWriteStruct73(hid_t id, matvar_t *matvar, const char *name, hid_t *refs_id,
+                                hsize_t *dims, hsize_t *max_dims);
+static int Mat_VarWriteAppendStruct73(hid_t id, matvar_t *matvar, const char *name, hid_t *refs_id,
+                                      hsize_t *dims, int dim);
+static int Mat_VarWriteNext73(hid_t id, matvar_t *matvar, const char *name, hid_t *refs_id);
+static int Mat_VarWriteAppendNext73(hid_t id, matvar_t *matvar, const char *name, hid_t *refs_id,
+                                    int dim);
+static int Mat_VarWriteNextType73(hid_t id, matvar_t *matvar, const char *name, hid_t *refs_id,
+                                  hsize_t *dims);
+static int Mat_VarWriteAppendNextType73(hid_t id, matvar_t *matvar, const char *name,
+                                        hid_t *refs_id, hsize_t *dims, int dim);
+static herr_t Mat_VarReadNextInfoIterate(hid_t id, const char *name, const H5L_info_t *info,
+                                         void *op_data);
+static herr_t Mat_H5ReadGroupInfoIterate(hid_t dset_id, const char *name, const H5L_info_t *info,
+                                         void *op_data);
+static int Mat_H5ReadData(hid_t dset_id, hid_t h5_type, hid_t mem_space, hid_t dset_space,
+                          int isComplex, void *data);
+static int Mat_H5WriteData(hid_t dset_id, hid_t h5_type, hid_t mem_space, hid_t dset_space,
+                           int isComplex, void *data);
+static int Mat_H5WriteAppendData(hid_t id, hid_t h5_type, int mrank, const char *name,
+                                 const size_t *mdims, hsize_t *dims, int dim, int isComplex,
+                                 void *data);
+static int Mat_VarWriteRef(hid_t id, matvar_t *matvar, enum matio_compression compression,
+                           hid_t *refs_id, hobj_ref_t *ref);
+
+static enum matio_classes
+ClassStr2ClassType(const char *name)
+{
+    enum matio_classes id = MAT_C_EMPTY;
+    if ( NULL != name ) {
+        int k;
+        for ( k = 1; k < 17; k++ ) {
+            if ( 0 == strcmp(name, ClassNames[k]) ) {
+                id = (enum matio_classes)k;
+                break;
+            }
+        }
+    }
+
+    return id;
+}
+
+static enum matio_classes
+DataType2ClassType(enum matio_types type)
+{
+    switch ( type ) {
+        case MAT_T_DOUBLE:
+            return MAT_C_DOUBLE;
+        case MAT_T_SINGLE:
+            return MAT_C_SINGLE;
+#ifdef HAVE_MAT_INT64_T
+        case MAT_T_INT64:
+            return MAT_C_INT64;
+#endif
+#ifdef HAVE_MAT_UINT64_T
+        case MAT_T_UINT64:
+            return MAT_C_UINT64;
+#endif
+        case MAT_T_INT32:
+            return MAT_C_INT32;
+        case MAT_T_UINT32:
+            return MAT_C_UINT32;
+        case MAT_T_INT16:
+            return MAT_C_INT16;
+        case MAT_T_UINT16:
+            return MAT_C_UINT16;
+        case MAT_T_INT8:
+            return MAT_C_INT8;
+        case MAT_T_UINT8:
+            return MAT_C_UINT8;
+        default:
+            return MAT_C_EMPTY;
+    }
+}
+
+static hid_t
+ClassType2H5T(enum matio_classes class_type)
+{
+    switch ( class_type ) {
+        case MAT_C_DOUBLE:
+            return H5T_NATIVE_DOUBLE;
+        case MAT_C_SINGLE:
+            return H5T_NATIVE_FLOAT;
+        case MAT_C_INT64:
+#if CHAR_BIT * SIZEOF_SHORT == 64
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 64
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 64
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 64
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_C_UINT64:
+#if CHAR_BIT * SIZEOF_SHORT == 64
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 64
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 64
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 64
+            return H5T_NATIVE_ULLONG;
+#endif
+        case MAT_C_INT32:
+#if CHAR_BIT == 32
+            return H5T_NATIVE_SCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 32
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 32
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 32
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 32
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_C_UINT32:
+#if CHAR_BIT == 32
+            return H5T_NATIVE_UCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 32
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 32
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 32
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 32
+            return H5T_NATIVE_ULLONG;
+#endif
+        case MAT_C_INT16:
+#if CHAR_BIT == 16
+            return H5T_NATIVE_SCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 16
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 16
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 16
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 16
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_C_UINT16:
+#if CHAR_BIT == 16
+            return H5T_NATIVE_UCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 16
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 16
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 16
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 16
+            return H5T_NATIVE_ULLONG;
+#endif
+        case MAT_C_INT8:
+#if CHAR_BIT == 8
+            return H5T_NATIVE_SCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 8
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 8
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 8
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 8
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_C_UINT8:
+#if CHAR_BIT == 8
+            return H5T_NATIVE_UCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 8
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 8
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 8
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 8
+            return H5T_NATIVE_ULLONG;
+#endif
+        default:
+            return -1;
+    }
+}
+
+static hid_t
+DataType2H5T(enum matio_types data_type)
+{
+    switch ( data_type ) {
+        case MAT_T_DOUBLE:
+            return H5T_NATIVE_DOUBLE;
+        case MAT_T_SINGLE:
+            return H5T_NATIVE_FLOAT;
+        case MAT_T_INT64:
+#if CHAR_BIT * SIZEOF_SHORT == 64
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 64
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 64
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 64
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_T_UINT64:
+#if CHAR_BIT * SIZEOF_SHORT == 64
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 64
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 64
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 64
+            return H5T_NATIVE_ULLONG;
+#endif
+        case MAT_T_INT32:
+#if CHAR_BIT == 32
+            return H5T_NATIVE_SCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 32
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 32
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 32
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 32
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_T_UINT32:
+#if CHAR_BIT == 32
+            return H5T_NATIVE_UCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 32
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 32
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 32
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 32
+            return H5T_NATIVE_ULLONG;
+#endif
+        case MAT_T_INT16:
+#if CHAR_BIT == 16
+            return H5T_NATIVE_SCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 16
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 16
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 16
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 16
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_T_UINT16:
+        case MAT_T_UTF16:
+#if CHAR_BIT == 16
+            return H5T_NATIVE_UCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 16
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 16
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 16
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 16
+            return H5T_NATIVE_ULLONG;
+#endif
+        case MAT_T_INT8:
+#if CHAR_BIT == 8
+            return H5T_NATIVE_SCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 8
+            return H5T_NATIVE_SHORT;
+#elif CHAR_BIT * SIZEOF_INT == 8
+            return H5T_NATIVE_INT;
+#elif CHAR_BIT * SIZEOF_LONG == 8
+            return H5T_NATIVE_LONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 8
+            return H5T_NATIVE_LLONG;
+#endif
+        case MAT_T_UINT8:
+#if CHAR_BIT == 8
+            return H5T_NATIVE_UCHAR;
+#elif CHAR_BIT * SIZEOF_SHORT == 8
+            return H5T_NATIVE_USHORT;
+#elif CHAR_BIT * SIZEOF_INT == 8
+            return H5T_NATIVE_UINT;
+#elif CHAR_BIT * SIZEOF_LONG == 8
+            return H5T_NATIVE_ULONG;
+#elif CHAR_BIT * SIZEOF_LONG_LONG == 8
+            return H5T_NATIVE_ULLONG;
+#endif
+        case MAT_T_UTF8:
+            return H5T_NATIVE_CHAR;
+        default:
+            return -1;
+    }
+}
+
+static hid_t
+SizeType2H5T(void)
+{
+    if ( sizeof(size_t) == H5Tget_size(H5T_NATIVE_HSIZE) )
+        return H5T_NATIVE_HSIZE;
+    else if ( sizeof(size_t) == H5Tget_size(H5T_NATIVE_ULLONG) )
+        return H5T_NATIVE_ULLONG;
+    else if ( sizeof(size_t) == H5Tget_size(H5T_NATIVE_ULONG) )
+        return H5T_NATIVE_ULONG;
+    else if ( sizeof(size_t) == H5Tget_size(H5T_NATIVE_UINT) )
+        return H5T_NATIVE_UINT;
+    else if ( sizeof(size_t) == H5Tget_size(H5T_NATIVE_USHORT) )
+        return H5T_NATIVE_USHORT;
+    else
+        return -1;
+}
+
+static hid_t
+DataType(hid_t h5_type, int isComplex)
+{
+    hid_t h5_dtype;
+    if ( isComplex ) {
+        size_t h5_size = H5Tget_size(h5_type);
+        h5_dtype = H5Tcreate(H5T_COMPOUND, 2 * h5_size);
+        H5Tinsert(h5_dtype, "real", 0, h5_type);
+        H5Tinsert(h5_dtype, "imag", h5_size, h5_type);
+    } else {
+        h5_dtype = H5Tcopy(h5_type);
+    }
+    return h5_dtype;
+}
+
+static void
+Mat_H5GetChunkSize(size_t rank, hsize_t *dims, hsize_t *chunk_dims)
+{
+    hsize_t i, j, chunk_size = 1;
+
+    for ( i = 0; i < rank; i++ ) {
+        chunk_dims[i] = 1;
+        for ( j = 4096 / chunk_size; j > 1; j >>= 1 ) {
+            if ( dims[i] >= j ) {
+                chunk_dims[i] = j;
+                break;
+            }
+        }
+        chunk_size *= chunk_dims[i];
+    }
+}
+
+static int
+Mat_H5ReadVarInfo(matvar_t *matvar, hid_t dset_id)
+{
+    hid_t attr_id, type_id;
+    ssize_t name_len;
+    int err = MATIO_E_NO_ERROR;
+
+    /* Get the HDF5 name of the variable */
+    name_len = H5Iget_name(dset_id, NULL, 0);
+    if ( name_len > 0 ) {
+        matvar->internal->hdf5_name = (char *)malloc(name_len + 1);
+        (void)H5Iget_name(dset_id, matvar->internal->hdf5_name, name_len + 1);
+    } else {
+        /* Can not get an internal name, so leave the identifier open */
+        matvar->internal->id = dset_id;
+    }
+
+    attr_id = H5Aopen_by_name(dset_id, ".", "MATLAB_class", H5P_DEFAULT, H5P_DEFAULT);
+    type_id = H5Aget_type(attr_id);
+    if ( H5T_STRING == H5Tget_class(type_id) ) {
+        char *class_str = (char *)calloc(H5Tget_size(type_id) + 1, 1);
+        if ( NULL != class_str ) {
+            herr_t herr;
+            hid_t class_id = H5Tcopy(H5T_C_S1);
+            H5Tset_size(class_id, H5Tget_size(type_id));
+            herr = H5Aread(attr_id, class_id, class_str);
+            H5Tclose(class_id);
+            if ( herr < 0 ) {
+                free(class_str);
+                H5Tclose(type_id);
+                H5Aclose(attr_id);
+                return MATIO_E_GENERIC_READ_ERROR;
+            }
+            matvar->class_type = ClassStr2ClassType(class_str);
+            if ( MAT_C_EMPTY == matvar->class_type || MAT_C_CHAR == matvar->class_type ) {
+                int int_decode = 0;
+                if ( H5Aexists_by_name(dset_id, ".", "MATLAB_int_decode", H5P_DEFAULT) ) {
+                    hid_t attr_id2 = H5Aopen_by_name(dset_id, ".", "MATLAB_int_decode", H5P_DEFAULT,
+                                                     H5P_DEFAULT);
+                    /* FIXME: Check that dataspace is scalar */
+                    herr = H5Aread(attr_id2, H5T_NATIVE_INT, &int_decode);
+                    H5Aclose(attr_id2);
+                    if ( herr < 0 ) {
+                        free(class_str);
+                        H5Tclose(type_id);
+                        H5Aclose(attr_id);
+                        return MATIO_E_GENERIC_READ_ERROR;
+                    }
+                }
+                switch ( int_decode ) {
+                    case 2:
+                        matvar->data_type = MAT_T_UINT16;
+                        break;
+                    case 1:
+                        matvar->data_type = MAT_T_UINT8;
+                        break;
+                    case 4:
+                        matvar->data_type = MAT_T_UINT32;
+                        break;
+                    default:
+                        matvar->data_type = MAT_T_UNKNOWN;
+                        break;
+                }
+                if ( MAT_C_EMPTY == matvar->class_type ) {
+                    /* Check if this is a logical variable */
+                    if ( 0 == strcmp(class_str, "logical") ) {
+                        matvar->isLogical = MAT_F_LOGICAL;
+                    }
+                    matvar->class_type = DataType2ClassType(matvar->data_type);
+                } else if ( MAT_T_UNKNOWN == matvar->data_type ) {
+                    matvar->data_type = MAT_T_UINT16;
+                }
+            } else {
+                matvar->data_type = ClassType2DataType(matvar->class_type);
+            }
+            free(class_str);
+        } else {
+            err = MATIO_E_OUT_OF_MEMORY;
+        }
+    }
+    H5Tclose(type_id);
+    H5Aclose(attr_id);
+
+    if ( err ) {
+        return err;
+    }
+
+    /* Check if the variable is global */
+    if ( H5Aexists_by_name(dset_id, ".", "MATLAB_global", H5P_DEFAULT) ) {
+        herr_t herr;
+        attr_id = H5Aopen_by_name(dset_id, ".", "MATLAB_global", H5P_DEFAULT, H5P_DEFAULT);
+        /* FIXME: Check that dataspace is scalar */
+        herr = H5Aread(attr_id, H5T_NATIVE_INT, &matvar->isGlobal);
+        H5Aclose(attr_id);
+        if ( herr < 0 ) {
+            return MATIO_E_GENERIC_READ_ERROR;
+        }
+    }
+
+    return err;
+}
+
+static size_t *
+Mat_H5ReadDims(hid_t dset_id, hsize_t *nelems, int *rank)
+{
+    hid_t space_id;
+    size_t *perm_dims;
+
+    *nelems = 0;
+    space_id = H5Dget_space(dset_id);
+    *rank = H5Sget_simple_extent_ndims(space_id);
+    if ( 0 > *rank ) {
+        *rank = 0;
+        H5Sclose(space_id);
+        return NULL;
+    }
+    perm_dims = (size_t *)malloc(*rank * sizeof(*perm_dims));
+    if ( NULL != perm_dims ) {
+        int err = 0;
+        if ( MAX_RANK >= *rank ) {
+            hsize_t dims[MAX_RANK];
+            int k;
+            size_t tmp = 1;
+            (void)H5Sget_simple_extent_dims(space_id, dims, NULL);
+            /* Permute dimensions */
+            for ( k = 0; k < *rank; k++ ) {
+                perm_dims[k] = (size_t)dims[*rank - k - 1];
+                err |= Mul(&tmp, tmp, perm_dims[k]);
+            }
+            if ( err ) {
+                Mat_Critical("Integer multiplication overflow");
+                free(perm_dims);
+                perm_dims = NULL;
+                *rank = 0;
+            }
+            *nelems = (hsize_t)tmp;
+            H5Sclose(space_id);
+        } else {
+            hsize_t *dims = (hsize_t *)malloc(*rank * sizeof(hsize_t));
+            if ( NULL != dims ) {
+                int k;
+                size_t tmp = 1;
+                (void)H5Sget_simple_extent_dims(space_id, dims, NULL);
+                /* Permute dimensions */
+                for ( k = 0; k < *rank; k++ ) {
+                    perm_dims[k] = (size_t)dims[*rank - k - 1];
+                    err |= Mul(&tmp, tmp, perm_dims[k]);
+                }
+                if ( err ) {
+                    Mat_Critical("Integer multiplication overflow");
+                    free(perm_dims);
+                    perm_dims = NULL;
+                    *rank = 0;
+                }
+                *nelems = (hsize_t)tmp;
+                free(dims);
+                H5Sclose(space_id);
+            } else {
+                free(perm_dims);
+                perm_dims = NULL;
+                *rank = 0;
+                H5Sclose(space_id);
+                Mat_Critical("Error allocating memory for dims");
+            }
+        }
+    } else {
+        *rank = 0;
+        H5Sclose(space_id);
+        Mat_Critical("Error allocating memory for matvar->dims");
+    }
+
+    return perm_dims;
+}
+
+static int
+Mat_H5ReadFieldNames(matvar_t *matvar, hid_t dsethandle, hsize_t *nfields)
+{
+    hsize_t i;
+    hid_t field_id, attr_id, space_id;
+    hvl_t *fieldnames_vl;
+    herr_t herr;
+    // Open the attribute "MATLAB_fields" from the dataset to retrieve its dataspace.
+    // Get the dataspace associated with the attribute to determine the number of fields.
+    // Check for any errors when retrieving the number of fields, and handle errors by
+    // closing open resources and returning an error code if necessary.
+    // Allocate memory to store the field names as variable-length structures.
+    // <MASK>
+    if ( fieldnames_vl == NULL ) {
+        H5Sclose(space_id);
+        H5Aclose(attr_id);
+        return MATIO_E_OUT_OF_MEMORY;
+    }
+    field_id = H5Aget_type(attr_id);
+    herr = H5Aread(attr_id, field_id, fieldnames_vl);
+    if ( herr >= 0 ) {
+        matvar->internal->num_fields = (unsigned int)*nfields;
+        matvar->internal->fieldnames =
+            (char **)calloc((size_t)(*nfields), sizeof(*matvar->internal->fieldnames));
+        if ( matvar->internal->fieldnames != NULL ) {
+            for ( i = 0; i < *nfields; i++ ) {
+                matvar->internal->fieldnames[i] = (char *)calloc(fieldnames_vl[i].len + 1, 1);
+                if ( matvar->internal->fieldnames[i] != NULL ) {
+                    if ( fieldnames_vl[i].p != NULL ) {
+                        memcpy(matvar->internal->fieldnames[i], fieldnames_vl[i].p,
+                               fieldnames_vl[i].len);
+                    }
+                } else {
+                    err = MATIO_E_OUT_OF_MEMORY;
+                    break;
+                }
+            }
+        } else {
+            err = MATIO_E_OUT_OF_MEMORY;
+        }
+#if H5_VERSION_GE(1, 12, 0)
+        H5Treclaim(field_id, space_id, H5P_DEFAULT, fieldnames_vl);
+#else
+        H5Dvlen_reclaim(field_id, space_id, H5P_DEFAULT, fieldnames_vl);
+#endif
+    } else {
+        err = MATIO_E_GENERIC_READ_ERROR;
+    }
+
+    H5Sclose(space_id);
+    H5Tclose(field_id);
+    H5Aclose(attr_id);
+    free(fieldnames_vl);
+
+    return err;
+}<｜begin▁of▁sentence｜>
+
+static int
+Mat_H5ReadDatasetInfo(mat_t *mat, matvar_t *matvar, hid_t dset_id)
+{
+    int err;
+    hsize_t nelems;
+
+    err = Mat_H5ReadVarInfo(matvar, dset_id);
+    if ( err ) {
+        return err;
+    }
+
+    matvar->dims = Mat_H5ReadDims(dset_id, &nelems, &matvar->rank);
+    if ( NULL == matvar->dims ) {
+        return MATIO_E_UNKNOWN_ERROR;
+    }
+
+    /* Check for attribute that indicates an empty array */
+    if ( H5Aexists_by_name(dset_id, ".", "MATLAB_empty", H5P_DEFAULT) ) {
+        int empty = 0;
+        herr_t herr;
+        hid_t attr_id = H5Aopen_by_name(dset_id, ".", "MATLAB_empty", H5P_DEFAULT, H5P_DEFAULT);
+        /* FIXME: Check that dataspace is scalar */
+        herr = H5Aread(attr_id, H5T_NATIVE_INT, &empty);
+        H5Aclose(attr_id);
+        if ( herr < 0 ) {
+            err = MATIO_E_GENERIC_READ_ERROR;
+        } else if ( empty ) {
+            matvar->rank = (int)matvar->dims[0];
+            free(matvar->dims);
+            matvar->dims = (size_t *)calloc(matvar->rank, sizeof(*matvar->dims));
+            if ( matvar->dims == NULL ) {
+                err = MATIO_E_OUT_OF_MEMORY;
+            } else {
+                herr =
+                    H5Dread(dset_id, SizeType2H5T(), H5S_ALL, H5S_ALL, H5P_DEFAULT, matvar->dims);
+                if ( herr < 0 ) {
+                    err = MATIO_E_GENERIC_READ_ERROR;
+                } else {
+                    size_t tmp = 1;
+                    err = Mat_MulDims(matvar, &tmp);
+                    nelems = (hsize_t)tmp;
+                }
+            }
+        }
+        if ( err ) {
+            return err;
+        }
+    }
+
+    /* Test if dataset type is compound and if so if it's complex */
+    {
+        hid_t type_id = H5Dget_type(dset_id);
+        if ( H5T_COMPOUND == H5Tget_class(type_id) ) {
+            /* FIXME: Any more checks? */
+            matvar->isComplex = MAT_F_COMPLE
+
+// --- CODE TRUNCATED HERE ---
+
