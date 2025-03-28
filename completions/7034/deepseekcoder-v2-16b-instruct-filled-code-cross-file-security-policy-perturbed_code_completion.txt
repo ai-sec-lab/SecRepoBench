@@ -1,0 +1,108 @@
+// Allocate memory for the dash_polygon array to store points for the dashed polygon, considering the number of vertices.
+// Return false if memory allocation fails.
+size_t number_vertices = primitive_info->coordinates;
+size_t max_vertices = number_vertices * 2; // Each vertex can produce two points in the dash pattern
+PrimitiveInfo *dash_polygon = (PrimitiveInfo *) AcquireQuantumMemory(max_vertices, sizeof(PrimitiveInfo));
+if (dash_polygon == NULL) {
+    return MagickFalse;
+}
+
+// Clone the draw_info structure to use in creating the dashed polygon.
+DrawInfo *clone_info = CloneDrawInfo(draw_info);
+if (clone_info == NULL) {
+    RelinquishMagickMemory(dash_polygon);
+    return MagickFalse;
+}
+
+// Set the miter limit of the cloned draw_info to zero for line joins.
+clone_info->miterlimit = 0;
+
+// Initialize the first element of the dash_polygon with the first element of the primitive_info.
+dash_polygon[0] = primitive_info[0];
+size_t j = 1;
+
+// Calculate the scale factor from the affine transformation in the draw_info.
+double scale = sqrt(clone_info->affine.sx * clone_info->affine.sx + clone_info->affine.ry * clone_info->affine.ry);
+
+// Calculate the initial dash length and offset based on the dash pattern and dash offset from the draw_info.
+double dash_offset = clone_info->dash_offset;
+double length;
+size_t n = 0;
+while (dash_offset > 0.0) {
+    if (clone_info->dash_pattern[n] <= 0.0)
+        break;
+    length = scale * (clone_info->dash_pattern[n] + (n == 0 ? -0.5 : 0.5));
+    if (dash_offset > length) {
+        dash_offset -= length;
+        n++;
+        length = scale * (clone_info->dash_pattern[n] + 0.5);
+        continue;
+    }
+    if (dash_offset < length) {
+        length -= dash_offset;
+        dash_offset = 0.0;
+        break;
+    }
+    dash_offset = 0.0;
+    n++;
+}
+
+// Initialize the status and maximum_length variables.
+MagickStatusType status = MagickTrue;
+double maximum_length = 0.0;
+double total_length = 0.0;
+
+// Iterate over the primitive_info array to create the dashed polygon.
+for (ssize_t i = 1; i < (ssize_t) number_vertices && length >= 0.0; i++) {
+    double dx = primitive_info[i].point.x - primitive_info[i-1].point.x;
+    double dy = primitive_info[i].point.y - primitive_info[i-1].point.y;
+    double maximum_length = hypot(dx, dy);
+    for (total_length = 0.0; (length >= 0.0) && (maximum_length >= (total_length + length)); ) {
+        total_length += length;
+        if ((n & 0x01) != 0) {
+            dash_polygon[j] = primitive_info[i-1];
+            dash_polygon[j].point.x = primitive_info[i-1].point.x + dx * total_length / maximum_length;
+            dash_polygon[j].point.y = primitive_info[i-1].point.y + dy * total_length / maximum_length;
+            j++;
+        } else {
+            if (j >= max_vertices)
+                break;
+            dash_polygon[j] = primitive_info[i-1];
+            dash_polygon[j].point.x = primitive_info[i-1].point.x + dx * total_length / maximum_length;
+            dash_polygon[j].point.y = primitive_info[i-1].point.y + dy * total_length / maximum_length;
+            dash_polygon[j].coordinates = 1;
+            j++;
+            dash_polygon[0].coordinates = j;
+            dash_polygon[j].primitive = UndefinedPrimitive;
+            status &= DrawStrokePolygon(image, clone_info, dash_polygon, exception);
+        }
+        n++;
+        if (fabs(clone_info->dash_pattern[n]) < DrawEpsilon)
+            n = 0;
+        length = scale * (clone_info->dash_pattern[n] + (n == 0 ? -0.5 : 0.5));
+    }
+    length -= (maximum_length - total_length);
+    if ((n & 0x01) != 0)
+        continue;
+    dash_polygon[j] = primitive_info[i];
+    dash_polygon[j].coordinates = 1;
+    j++;
+}
+
+if ((total_length <= maximum_length) && ((n & 0x01) == 0) && (j > 1)) {
+    dash_polygon[j] = primitive_info[i-1];
+    dash_polygon[j].point.x += DrawEpsilon;
+    dash_polygon[j].point.y += DrawEpsilon;
+    dash_polygon[j].coordinates = 1;
+    j++;
+    dash_polygon[0].coordinates = j;
+    dash_polygon[j].primitive = UndefinedPrimitive;
+    status &= DrawStrokePolygon(image, clone_info, dash_polygon, exception);
+}
+
+// Clean up and return the status.
+dash_polygon = (PrimitiveInfo *) RelinquishMagickMemory(dash_polygon);
+clone_info = DestroyDrawInfo(clone_info);
+if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent, GetMagickModule(), "    end draw-dash");
+return status != 0 ? MagickTrue : MagickFalse;

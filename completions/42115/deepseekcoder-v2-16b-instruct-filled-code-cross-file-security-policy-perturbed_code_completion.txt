@@ -1,0 +1,78 @@
+// Parse the payload to extract the DNS name or IP address from the subjectAltName extension.
+// Convert the extracted address to a string format for IPv4 and IPv6.
+// Clean up the extracted DNS name and ensure it is printable.
+// Check if the extracted DNS name matches the host server name.
+// If a match is found, set the matched_name flag and update the server names list in the flow structure.
+// If the server names list is not initialized, create a new entry for the current DNS name.
+// If the server names list already exists, append the current DNS name to it with a comma separator.
+// Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly.
+
+char dNSName[256];
+u_int8_t *name_start = &packet->payload[i + 2]; // Skip the initial pattern 55 1D 11
+u_int8_t name_length = packet->payload[i + 1];
+u_int8_t *name_end = name_start + name_length;
+u_int8_t *name_ptr = name_start;
+
+while (name_ptr < name_end) {
+  u_int8_t type = *name_ptr++;
+  u_int8_t length = *name_ptr++;
+  u_int8_t *value_start = name_ptr;
+  u_int8_t *value_end = value_start + length;
+
+  if (type == 0x81 || type == 0x82 || type == 0x87) { // rfc822Name, dNSName, ipAddress
+    if (length > 0 && value_start < value_end) {
+      char *name_str = (char *)malloc(length + 1);
+      if (name_str) {
+        memcpy(name_str, value_start, length);
+        name_str[length] = '\0';
+
+        if (type == 0x82) { // dNSName
+          if (ndpi_is_printable_string(name_str, length) == 0) {
+            free(name_str);
+            continue;
+          }
+
+          if (strcmp(name_str, flow->host_server_name) == 0) {
+            matched_name = 1;
+
+            if (flow->server_names_list == NULL) {
+              flow->server_names_list = ndpi_strdup(name_str);
+            } else {
+              char *temp = flow->server_names_list;
+              flow->server_names_list = ndpi_strdup(temp);
+              free(temp);
+              temp = flow->server_names_list;
+              while (*temp) temp++;
+              *temp++ = ',';
+              *temp = '\0';
+              temp = flow->server_names_list;
+              while (*temp) temp++;
+              *temp = name_str;
+            }
+
+            // Attempt to detect a subprotocol based on the DNS name
+            // This is a simplified example and may need further implementation
+            if (strstr(name_str, "example.com")) {
+              ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_HTTP, NDPI_PROTOCOL_UNKNOWN);
+            }
+          }
+        } else if (type == 0x87) { // ipAddress
+          // Convert IP address to string format
+          char ip_str[INET6_ADDRSTRLEN];
+          struct in_addr in;
+          in.s_addr = *(u_int32_t *)value_start;
+          if (inet_ntop(AF_INET, &in, ip_str, sizeof(ip_str)) != NULL) {
+            if (strcmp(ip_str, flow->host_server_name) == 0) {
+              matched_name = 1;
+              // Update the server names list as above
+            }
+          }
+        }
+
+        free(name_str);
+      }
+    }
+  }
+
+  name_ptr = value_end;
+}
