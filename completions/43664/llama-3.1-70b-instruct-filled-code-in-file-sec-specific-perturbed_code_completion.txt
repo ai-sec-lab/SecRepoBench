@@ -1,0 +1,179 @@
+// Process the TLS extensions in the client's "Client Hello" message.
+// For the "supported versions" extension, extract and store the supported TLS versions in the flow structure.
+// For the "encrypted server name" extension, extract and store the encrypted SNI details if present.
+// For the "QUIC transport parameters" extension, extract transport parameters and process the user agent if available.
+// Continue processing any additional extensions that are part of the Client Hello message.
+
+// Supported Versions
+if(extension_id == 43) {
+  u_int16_t s_offset = offset+extension_offset + 2;
+  u_int16_t tot_supported_versions_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+  s_offset += 2;
+
+  if((s_offset+tot_supported_versions_len) <= total_len) {
+    for(i=0; i<tot_supported_versions_len && s_offset+i<total_len; i += 2) {
+      u_int16_t supported_version = ntohs(*((u_int16_t*)&packet->payload[s_offset+i]));
+
+      if(ja3.client.num_supported_versions < MAX_NUM_JA3) {
+        ja3.client.supported_versions[ja3.client.num_supported_versions++] = supported_version;
+      } else {
+        invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+        printf("Client TLS Invalid num supported versions %u\n", ja3.client.num_supported_versions);
+#endif
+      }
+    }
+  } else {
+    invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+    printf("Client TLS Invalid len %u vs %u\n", (s_offset+tot_supported_versions_len), total_len);
+#endif
+  }
+}
+
+// Encrypted Server Name
+if(extension_id == 65281) {
+  u_int16_t s_offset = offset+extension_offset + 2;
+  u_int16_t tot_encrypted_server_name_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+  s_offset += 2;
+
+  if((s_offset+tot_encrypted_server_name_len) <= total_len) {
+    // Extract and store the encrypted SNI details
+    flow->protos.tls_quic.encrypted_sni.esni = ndpi_malloc(tot_encrypted_server_name_len);
+    memcpy(flow->protos.tls_quic.encrypted_sni.esni, &packet->payload[s_offset], tot_encrypted_server_name_len);
+    flow->protos.tls_quic.encrypted_sni.esni_len = tot_encrypted_server_name_len;
+  } else {
+    invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+    printf("Client TLS Invalid len %u vs %u\n", (s_offset+tot_encrypted_server_name_len), total_len);
+#endif
+  }
+}
+
+// QUIC Transport Parameters
+if(extension_id == 65445) {
+  u_int16_t s_offset = offset+extension_offset + 2;
+  u_int16_t tot_quic_transport_params_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+  s_offset += 2;
+
+  if((s_offset+tot_quic_transport_params_len) <= total_len) {
+    // Extract transport parameters
+    u_int16_t quic_transport_params_offset = s_offset;
+    while(quic_transport_params_offset < (s_offset + tot_quic_transport_params_len)) {
+      u_int16_t quic_transport_param_id = ntohs(*((u_int16_t*)&packet->payload[quic_transport_params_offset]));
+      u_int16_t quic_transport_param_len = ntohs(*((u_int16_t*)&packet->payload[quic_transport_params_offset+2]));
+      quic_transport_params_offset += 4;
+
+      if(quic_transport_param_id == 0x1) { // max_udp_payload_size
+        u_int32_t max_udp_payload_size = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_udp_payload_size = max_udp_payload_size;
+      } else if(quic_transport_param_id == 0x2) { // max_datagram_frame_size
+        u_int32_t max_datagram_frame_size = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_datagram_frame_size = max_datagram_frame_size;
+      } else if(quic_transport_param_id == 0x3) { // max_stream_data
+        u_int32_t max_stream_data = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_stream_data = max_stream_data;
+      } else if(quic_transport_param_id == 0x4) { // max_streams_bidi
+        u_int32_t max_streams_bidi = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_streams_bidi = max_streams_bidi;
+      } else if(quic_transport_param_id == 0x5) { // max_streams_uni
+        u_int32_t max_streams_uni = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_streams_uni = max_streams_uni;
+      } else if(quic_transport_param_id == 0x6) { // ack_delay_exponent
+        u_int32_t ack_delay_exponent = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.ack_delay_exponent = ack_delay_exponent;
+      } else if(quic_transport_param_id == 0x7) { // max_ack_delay
+        u_int32_t max_ack_delay = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_ack_delay = max_ack_delay;
+      } else if(quic_transport_param_id == 0x8) { // disable_migration
+        u_int32_t disable_migration = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.disable_migration = disable_migration;
+      } else if(quic_transport_param_id == 0x9) { // preferred_address
+        u_int32_t preferred_address = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.preferred_address = preferred_address;
+      } else if(quic_transport_param_id == 0xA) { // active_connection_id_limit
+        u_int32_t active_connection_id_limit = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.active_connection_id_limit = active_connection_id_limit;
+      } else if(quic_transport_param_id == 0xB) { // initial_max_data
+        u_int32_t initial_max_data = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.initial_max_data = initial_max_data;
+      } else if(quic_transport_param_id == 0xC) { // initial_max_stream_data_bidi_local
+        u_int32_t initial_max_stream_data_bidi_local = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.initial_max_stream_data_bidi_local = initial_max_stream_data_bidi_local;
+      } else if(quic_transport_param_id == 0xD) { // initial_max_stream_data_bidi_remote
+        u_int32_t initial_max_stream_data_bidi_remote = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.initial_max_stream_data_bidi_remote = initial_max_stream_data_bidi_remote;
+      } else if(quic_transport_param_id == 0xE) { // initial_max_stream_data_uni
+        u_int32_t initial_max_stream_data_uni = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.initial_max_stream_data_uni = initial_max_stream_data_uni;
+      } else if(quic_transport_param_id == 0xF) { // initial_max_streams_bidi
+        u_int32_t initial_max_streams_bidi = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.initial_max_streams_bidi = initial_max_streams_bidi;
+      } else if(quic_transport_param_id == 0x10) { // initial_max_streams_uni
+        u_int32_t initial_max_streams_uni = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.initial_max_streams_uni = initial_max_streams_uni;
+      } else if(quic_transport_param_id == 0x11) { // max_idle_timeout
+        u_int32_t max_idle_timeout = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_idle_timeout = max_idle_timeout;
+      } else if(quic_transport_param_id == 0x12) { // max_udp_payload_size
+        u_int32_t max_udp_payload_size = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.max_udp_payload_size = max_udp_payload_size;
+      } else if(quic_transport_param_id == 0x13) { // min_ack_delay
+        u_int32_t min_ack_delay = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.min_ack_delay = min_ack_delay;
+      } else if(quic_transport_param_id == 0x14) { // stateless_reset_token
+        u_int32_t stateless_reset_token = ntohl(*((u_int32_t*)&packet->payload[quic_transport_params_offset]));
+        flow->protos.tls_quic.stateless_reset_token = stateless_reset_token;
+      }
+
+      quic_transport_params_offset += quic_transport_param_len;
+    }
+  } else {
+    invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+    printf("Client TLS Invalid len %u vs %u\n", (s_offset+tot_quic_transport_params_len), total_len);
+#endif
+  }
+}
+
+// User Agent
+if(extension_id == 13172) {
+  u_int16_t s_offset = offset+extension_offset + 2;
+  u_int16_t tot_user_agent_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+  s_offset += 2;
+
+  if((s_offset+tot_user_agent_len) <= total_len) {
+    char user_agent[256];
+    u_int8_t user_agent_len = 0, i;
+
+    while(s_offset < tot_user_agent_len && s_offset < total_len) {
+      u_int8_t user_agent_i, user_agent_len_i = packet->payload[s_offset++];
+
+      if((s_offset + user_agent_len_i) <= tot_user_agent_len &&
+         (s_offset + user_agent_len_i) <= total_len) {
+        if(((uint32_t)user_agent_len+user_agent_len_i+1) < (sizeof(user_agent)-1)) {
+          if(user_agent_len > 0) {
+            user_agent[user_agent_len] = ',';
+            user_agent_len++;
+          }
+
+          for(user_agent_i=0; user_agent_i<user_agent_len_i; user_agent_i++)
+            user_agent[user_agent_len+user_agent_i] = packet->payload[s_offset+user_agent_i];
+
+          s_offset += user_agent_len_i, user_agent_len += user_agent_len_i;;
+        } else
+          break;
+      } else
+        break;
+    }
+
+    user_agent[user_agent_len] = '\0';
+
+    http_process_user_agent(ndpi_struct, flow, (const u_int8_t*)user_agent, user_agent_len);
+  } else {
+    invalid_ja3 = 1;
+#ifdef DEBUG_TLS
+    printf("Client TLS Invalid len %u vs %u\n", (s_offset+tot_user_agent_len), total_len);
+#endif
+  }
+}

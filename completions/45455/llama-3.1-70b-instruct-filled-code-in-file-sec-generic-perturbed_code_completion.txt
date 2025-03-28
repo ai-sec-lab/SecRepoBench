@@ -1,0 +1,367 @@
+xmlEntityPtr xmlParseStringEntityRef(xmlParserCtxtPtr ctxt, const xmlChar **str) {
+    const xmlChar *ptr;
+    xmlChar cur;
+    xmlChar *name;
+    xmlEntityPtr ent;
+    int c;
+
+    if ((str == NULL) || (*str == NULL)) return(NULL);
+    ptr = *str;
+    cur = *ptr;
+    if (cur!= '&')
+        return(NULL);
+
+    ptr++;
+    name = xmlParseStringName(ctxt, &ptr);
+    if (name == NULL) {
+        xmlFatalErrMsg(ctxt, XML_ERR_NAME_REQUIRED,
+                       "xmlParseStringEntityRef: no name\n");
+        *str = ptr;
+        return(NULL);
+    }
+    if (*ptr!= ';') {
+        xmlFatalErr(ctxt, XML_ERR_ENTITYREF_SEMICOL_MISSING, NULL);
+        xmlFree(name);
+        *str = ptr;
+        return(NULL);
+    }
+    ptr++;
+
+    /*
+     * Predefined entities override any extra definition
+     */
+    if ((ctxt->options & XML_PARSE_OLDSAX) == 0) {
+        ent = xmlGetPredefinedEntity(name);
+        if (ent!= NULL) {
+            xmlFree(name);
+            *str = ptr;
+            return(ent);
+        }
+    }
+
+    /*
+     * Increase the number of entity references parsed
+     */
+    ctxt->nbentities++;
+
+    /*
+     * Ask first SAX for entity resolution, otherwise try the
+     * entities which may have stored in the parser context.
+     */
+    if (ctxt->sax!= NULL) {
+        if (ctxt->sax->getEntity!= NULL)
+            ent = ctxt->sax->getEntity(ctxt->userData, name);
+        if ((ent == NULL) && (ctxt->options & XML_PARSE_OLDSAX))
+            ent = xmlGetPredefinedEntity(name);
+        if ((ent == NULL) && (ctxt->userData==ctxt)) {
+            ent = xmlSAX2GetEntity(ctxt, name);
+        }
+    }
+    if (ctxt->instate == XML_PARSER_EOF) {
+        xmlFree(name);
+        *str = ptr;
+        return(NULL);
+    }
+
+    /*
+     * [ WFC: Entity Declared ]
+     * In a document without any DTD, a document with only an
+     * internal DTD subset which contains no parameter entity
+     * references, or a document with "standalone='yes'", the
+     * Name given in the entity reference must match that in an
+     * entity declaration, except that well-formed documents
+     * need not declare any of the following entities: amp, lt,
+     * gt, apos, quot.  The declaration of a parameter entity
+     * must precede any reference to it.
+     * Similarly, the declaration of a general entity must
+     * precede any reference to it which appears in a default
+     * value in an attribute-list declaration. Note that if
+     * entities are declared in the external subset or in
+     * external parameter entities, a non-validating processor
+     * is not obligated to read and process their declarations;
+     * for such documents, the rule that an entity must be
+     * declared is a well-formedness constraint only if
+     * standalone='yes'.
+     */
+    if (ent == NULL) {
+        if ((ctxt->standalone == 1) ||
+            ((ctxt->hasExternalSubset == 0) &&
+             (ctxt->hasPErefs == 0))) {
+            xmlFatalErrMsgStr(ctxt, XML_ERR_UNDECLARED_ENTITY,
+                              "Entity '%s' not defined\n", name);
+        } else {
+            /*
+             * [ VC: Entity Declared ]
+             * In a document with an external subset or external
+             * parameter entities with "standalone='no'",...
+             *... The declaration of a parameter entity must
+             * precede any reference to it...
+             */
+            if ((ctxt->validate) && (ctxt->vctxt.error!= NULL)) {
+                xmlValidityError(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                                 "Entity '%s' not defined\n",
+                                 name, NULL);
+            } else
+                xmlWarningMsg(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                              "Entity '%s' not defined\n",
+                              name, NULL);
+            ctxt->valid = 0;
+        }
+        xmlParserEntityCheck(ctxt, 0, NULL, 0);
+    } else {
+        /*
+         * Internal checking in case the entity quest barfed
+         */
+        if ((ent->etype!= XML_INTERNAL_PARAMETER_ENTITY) &&
+            (ent->etype!= XML_EXTERNAL_PARAMETER_ENTITY)) {
+            xmlWarningMsg(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                          "Internal: %%%s; is not a parameter entity\n",
+                          name, NULL);
+        } else {
+            xmlChar start[4];
+            xmlCharEncoding enc;
+
+            if ((ent->etype == XML_EXTERNAL_PARAMETER_ENTITY) &&
+                ((ctxt->options & XML_PARSE_NOENT) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDVALID) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDLOAD) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDATTR) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDVALID) == 0) &&
+                (ctxt->replaceEntities == 0) &&
+                (ctxt->validate == 0))
+                return(ent);
+
+            if ((ent->etype == XML_EXTERNAL_PARAMETER_ENTITY) &&
+                ((ctxt->options & XML_PARSE_NOENT) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDVALID) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDLOAD) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDATTR) == 0) &&
+                ((ctxt->options & XML_PARSE_DTDVALID) == 0) &&
+                (ctxt->replaceEntities == 0) &&
+                (ctxt->validate == 0)) {
+                if ((ctxt->input->encoding!= NULL) &&
+                    (!xmlStrEqual(ctxt->input->encoding, ent->encoding))) {
+                    xmlURIPtr uri;
+
+                    uri = xmlParseURI((const char *) ent->URI);
+                    if (uri == NULL) {
+                        xmlErrMsgStr(ctxt, XML_ERR_INTERNAL_ERROR,
+                                     "xmlParseStringEntityRef: invalid URI: %s\n",
+                                     ent->URI);
+                    } else {
+                        if (uri->fragment!= NULL) {
+                            xmlFatalErrMsg(ctxt, XML_ERR_URI_FRAGMENT,
+                                           "xmlParseStringEntityRef: URI %s has a fragment\n",
+                                           ent->URI);
+                        }
+                        xmlFreeURI(uri);
+                    }
+                }
+
+                if ((ctxt->input->encoding == NULL) ||
+                    (xmlStrEqual(ctxt->input->encoding, ent->encoding))) {
+                    xmlEntityPtr oldEntity = NULL;
+
+                    if (ctxt->sax!= NULL) {
+                        if (ctxt->sax->getParameterEntity!= NULL)
+                            oldEntity = ctxt->sax->getParameterEntity(ctxt->userData, name);
+                    }
+
+                    if (oldEntity!= NULL) {
+                        if (oldEntity->etype == XML_EXTERNAL_PARAMETER_ENTITY) {
+                            xmlFree(oldEntity->content);
+                            oldEntity->content = xmlStrdup(ent->content);
+                            if (oldEntity->content == NULL) {
+                                xmlFatalErrMsg(ctxt, XML_ERR_INTERNAL_ERROR,
+                                               "xmlParseStringEntityRef: out of memory\n");
+                            }
+                        }
+                    } else {
+                        xmlEntityPtr newEntity = xmlNewEntity(ctxt, name, ent->etype,
+                                                             ent->URI, ent->ExternalID,
+                                                             ent->content, ent->orig);
+                        if (newEntity == NULL) {
+                            xmlFatalErrMsg(ctxt, XML_ERR_INTERNAL_ERROR,
+                                           "xmlParseStringEntityRef: out of memory\n");
+                        }
+                        if (ctxt->sax!= NULL) {
+                            if (ctxt->sax->setParameterEntity!= NULL)
+                                ctxt->sax->setParameterEntity(ctxt->userData, name, newEntity);
+                        }
+                    }
+                }
+            }
+        }
+
+        /*
+         * [ WFC: Parsed Entity ]
+         * An entity reference must not contain the name of an
+         * unparsed entity
+         */
+        else if (ent->etype == XML_EXTERNAL_GENERAL_UNPARSED_ENTITY) {
+            xmlFatalErrMsgStr(ctxt, XML_ERR_UNPARSED_ENTITY,
+                              "Entity reference to unparsed entity %s\n", name);
+        }
+
+        /*
+         * [ WFC: No External Entity References ]
+         * Attribute values cannot contain direct or indirect
+         * entity references to external entities.
+         */
+        else if ((ctxt->instate == XML_PARSER_ATTRIBUTE_VALUE) &&
+                 (ent->etype == XML_EXTERNAL_GENERAL_PARSED_ENTITY)) {
+            xmlFatalErrMsgStr(ctxt, XML_ERR_ENTITY_IS_EXTERNAL,
+                              "Attribute references external entity '%s'\n",
+                              name);
+        }
+        /*
+         * [ WFC: No < in Attribute Values ]
+         * The replacement text of any entity referred to directly or
+         * indirectly in an attribute value (other than "&lt;") must
+         * not contain a <.
+         */
+        else if ((ctxt->instate == XML_PARSER_ATTRIBUTE_VALUE) &&
+                 (ent!= NULL) && (ent->content!= NULL) &&
+                 (ent->etype!= XML_INTERNAL_PREDEFINED_ENTITY) &&
+                 (xmlStrchr(ent->content, '<'))) {
+            xmlFatalErrMsgStr(ctxt, XML_ERR_LT_IN_ATTRIBUTE,
+                              "'<' in entity '%s' is not allowed in attributes values\n",
+                              name);
+        }
+
+        /*
+         * Internal check, no parameter entities here...
+         */
+        else {
+            switch (ent->etype) {
+                case XML_INTERNAL_PARAMETER_ENTITY:
+                case XML_EXTERNAL_PARAMETER_ENTITY:
+                    xmlFatalErrMsgStr(ctxt, XML_ERR_ENTITY_IS_PARAMETER,
+                                      "Attempt to reference the parameter entity '%s'\n",
+                                      name);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        /*
+         * [ WFC: No Recursion ]
+         * A parsed entity must not contain a recursive reference
+         * to itself, either directly or indirectly.
+         * Done somewhere else
+         */
+
+        /* Prevent entity from being parsed and expanded twice (Bug 760367). */
+        int entity_checked_status;
+        if ((ent->checked == 0) ||
+            (ent->checked == 1)) {
+            entity_checked_status = 0;
+        } else {
+            entity_checked_status = 1;
+        }
+
+        if (((ent->checked == 0) ||
+             ((ent->checked == 1) && (entity_checked_status!= 0))) {
+            /*
+             * The first reference to the entity trigger a parsing phase
+             * where the ent->children is filled with the result from
+             * the parsing.
+             * Note: external parsed entities will not be loaded, it is not
+             * required for a non-validating parser, unless the parsing option
+             * of validating, or substituting entities were given. Doing so is
+             * far more secure as the parser will only process data coming from
+             * the document entity by default.
+             */
+            if (((ent->checked == 0) ||
+                 ((ent->children == NULL) && (ctxt->options & XML_PARSE_NOENT))) {
+                unsigned long oldnbent = ctxt->nbentities, diff;
+
+                if ((ctxt->options & XML_PARSE_DTDVALID) == 0) {
+                    if (ctxt->validate) {
+                        if (ctxt->vctxt.error!= NULL) {
+                            xmlValidityError(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                                             "Entity '%s' not declared\n",
+                                             name, NULL);
+                        }
+                    }
+                }
+
+                if (ent->etype == XML_INTERNAL_GENERAL_ENTITY) {
+                    ctxt->depth++;
+                    int ret = xmlParseBalancedChunkMemoryInternal(ctxt, ent->content,
+                                                                  ctxt->userData, NULL);
+                    ctxt->depth--;
+
+                    if (ret == XML_ERR_ENTITY_LOOP) {
+                        xmlFatalErr(ctxt, XML_ERR_ENTITY_LOOP, NULL);
+                        xmlHaltParser(ctxt);
+                        return;
+                    }
+                    if (ret == XML_ERR_OK) {
+                        if (ctxt->vctxt.error!= NULL) {
+                            xmlValidityError(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                                             "Entity '%s' not declared\n",
+                                             name, NULL);
+                        }
+                    }
+                    if (xmlParserEntityCheck(ctxt, 0, ent, 0)) {
+                        return;
+                    }
+
+                    if (ctxt->vctxt.error!= NULL) {
+                        xmlValidityError(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                                         "Entity '%s' not declared\n",
+                                         name, NULL);
+                    }
+                } else if (ent->etype == XML_EXTERNAL_GENERAL_PARSED_ENTITY) {
+                    ctxt->depth++;
+                    int ret = xmlParseExternalEntityPrivate(ctxt->myDoc, ctxt, ctxt->sax,
+                                                              ctxt->userData, ctxt->depth,
+                                                              ent->URI, ent->ExternalID, NULL);
+                    ctxt->depth--;
+
+                    if (ret == XML_ERR_ENTITY_LOOP) {
+                        xmlFatalErr(ctxt, XML_ERR_ENTITY_LOOP, NULL);
+                        xmlHaltParser(ctxt);
+                        return;
+                    }
+                    if (ret == XML_ERR_OK) {
+                        if (ctxt->vctxt.error!= NULL) {
+                            xmlValidityError(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                                             "Entity '%s' not declared\n",
+                                             name, NULL);
+                        }
+                    }
+                    if (xmlParserEntityCheck(ctxt, 0, ent, 0)) {
+                        return;
+                    }
+
+                    if (ctxt->vctxt.error!= NULL) {
+                        xmlValidityError(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                                         "Entity '%s' not declared\n",
+                                         name, NULL);
+                    }
+                } else {
+                    ret = XML_ERR_ENTITY_PE_INTERNAL;
+                    xmlErrMsgStr(ctxt, XML_ERR_INTERNAL_ERROR,
+                                 "invalid entity type found\n", NULL);
+                }
+                if (ret == XML_ERR_ENTITY_LOOP) {
+                    xmlFatalErr(ctxt, XML_ERR_ENTITY_LOOP, NULL);
+                    return;
+                }
+                if (xmlParserEntityCheck(ctxt, 0, ent, 0)) {
+                    return;
+                }
+
+                if (ctxt->vctxt.error!= NULL) {
+                    xmlValidityError(ctxt, XML_WAR_UNDECLARED_ENTITY,
+                                     "Entity '%s' not declared\n",
+                                     name, NULL);
+                }
+            } else if (ent->checked!= 1) {
+                ctxt->nbentities += ent->checked / 2;
+            }
+
+            if

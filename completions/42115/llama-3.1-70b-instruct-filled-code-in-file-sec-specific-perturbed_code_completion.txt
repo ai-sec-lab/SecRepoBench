@@ -1,0 +1,97 @@
+if((i < (packet->payload_packet_len - 1))
+   && ((i + packet->payload[i + 1] + 2) < packet->payload_packet_len)) {
+  u_int8_t len = packet->payload[i + 1];
+  char dNSName[256];
+  // Parse the payload to extract the DNS name or IP address from the subjectAltName extension.
+  // Convert the extracted address to a string format for IPv4 and IPv6.
+  // Clean up the extracted DNS name and ensure it is printable.
+  // Check if the extracted DNS name matches the host server name.
+  // If a match is found, set the matched_name flag and update the server names list in the flow structure.
+  // If the server names list is not initialized, create a new entry for the current DNS name.
+  // If the server names list already exists, append the current DNS name to it with a comma separator.
+  // Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly.
+  if(packet->payload[i + 2] == 0x00) { // DNS name
+    if(len < (sizeof(dNSName) - 1)) {
+      strncpy(dNSName, (const char*)&packet->payload[i + 3], len);
+      dNSName[len] = '\0';
+      cleanupServerName(dNSName, len);
+      if(ndpi_is_printable_string(dNSName, len) == 0) {
+        ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+      }
+      if(connection->host_server_name[0] == '\0') {
+        strncpy(connection->host_server_name, dNSName, sizeof(connection->host_server_name) - 1);
+        connection->host_server_name[sizeof(connection->host_server_name) - 1] = '\0';
+      } else {
+        if(connection->host_server_names == NULL) {
+          connection->host_server_names = ndpi_malloc(256);
+          if(connection->host_server_names) {
+            strncpy(connection->host_server_names, connection->host_server_name, 256);
+            connection->host_server_names[255] = '\0';
+          }
+        }
+        if(connection->host_server_names) {
+          strncat(connection->host_server_names, ",", 256);
+          strncat(connection->host_server_names, dNSName, 256);
+          connection->host_server_names[255] = '\0';
+        }
+      }
+      if(ndpi_match_hostname_protocol(ndpi_struct, connection, NDPI_PROTOCOL_TLS, dNSName, len)) {
+        connection->protos.tls_quic.subprotocol_detected = 1;
+      }
+      if(ndpi_check_dga_name(ndpi_struct, connection, dNSName, 1)) {
+        ndpi_set_risk(ndpi_struct, connection, NDPI_TLS_DGA_NAME);
+      }
+    }
+  } else if(packet->payload[i + 2] == 0x01) { // IPv4 address
+    if(len == 4) {
+      char ip[INET_ADDRSTRLEN];
+      inet_ntop(AF_INET, &packet->payload[i + 3], ip, INET_ADDRSTRLEN);
+      if(connection->host_server_name[0] == '\0') {
+        strncpy(connection->host_server_name, ip, sizeof(connection->host_server_name) - 1);
+        connection->host_server_name[sizeof(connection->host_server_name) - 1] = '\0';
+      } else {
+        if(connection->host_server_names == NULL) {
+          connection->host_server_names = ndpi_malloc(256);
+          if(connection->host_server_names) {
+            strncpy(connection->host_server_names, connection->host_server_name, 256);
+            connection->host_server_names[255] = '\0';
+          }
+        }
+        if(connection->host_server_names) {
+          strncat(connection->host_server_names, ",", 256);
+          strncat(connection->host_server_names, ip, 256);
+          connection->host_server_names[255] = '\0';
+        }
+      }
+    }
+  } else if(packet->payload[i + 2] == 0x02) { // IPv6 address
+    if(len == 16) {
+      char ip[INET6_ADDRSTRLEN];
+      inet_ntop(AF_INET6, &packet->payload[i + 3], ip, INET6_ADDRSTRLEN);
+      if(connection->host_server_name[0] == '\0') {
+        strncpy(connection->host_server_name, ip, sizeof(connection->host_server_name) - 1);
+        connection->host_server_name[sizeof(connection->host_server_name) - 1] = '\0';
+      } else {
+        if(connection->host_server_names == NULL) {
+          connection->host_server_names = ndpi_malloc(256);
+          if(connection->host_server_names) {
+            strncpy(connection->host_server_names, connection->host_server_name, 256);
+            connection->host_server_names[255] = '\0';
+          }
+        }
+        if(connection->host_server_names) {
+          strncat(connection->host_server_names, ",", 256);
+          strncat(connection->host_server_names, ip, 256);
+          connection->host_server_names[255] = '\0';
+        }
+      }
+    }
+  }
+  i += len;
+} else {
+#if DEBUG_TLS
+  printf("[TLS] Leftover %u bytes", packet->payload_packet_len - i);
+#endif
+  ndpi_set_risk(ndpi_struct, connection, NDPI_TLS_SUSPICIOUS_EXTENSION);
+  break;
+}

@@ -1,0 +1,65 @@
+if (cmsPipelineCheckAndRetreiveStages(Src, 4,
+              cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType,
+              &Curve1, &Matrix1, &Matrix2, &Curve2)) 
+{
+    // Retrieve data from two matrix stages in the pipeline.
+    // Ensure that the input offset of the first matrix is zero.
+    // Multiply the matrices to combine them into a single result matrix.
+    // Determine if the resulting matrix is an identity matrix and whether the offset is null.
+    // Set the appropriate flags to indicate if the matrix can be optimized away due to being an identity matrix.
+    _cmsStageMatrixData* Data1 = (_cmsStageMatrixData*)cmsStageData(Matrix1);
+    _cmsStageMatrixData* Data2 = (_cmsStageMatrixData*)cmsStageData(Matrix2);
+
+    if (Data1->Offset!= NULL) return FALSE;
+
+    // Multiply both matrices to get the result
+    _cmsMAT3per(&res, (cmsMAT3*)Data2->Double, (cmsMAT3*)Data1->Double);
+
+    // Now the result is in res + Data2 -> Offset. Maybe is a plain identity?
+    isIdentityMatrix = FALSE;
+    if (_cmsMAT3isIdentity(&res) && Data2->Offset == NULL) {
+
+        // We can get rid of full matrix
+        isIdentityMatrix = TRUE;
+    }
+
+    // Allocate an empty LUT
+    Dest = cmsPipelineAlloc(Src->ContextID, Src->InputChannels, Src->OutputChannels);
+    if (!Dest) return FALSE;
+
+    // Assamble the new LUT
+    if (!cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageDup(Curve1)))
+        goto Error;
+
+    if (!isIdentityMatrix) {
+
+        cmsPipelineInsertStage(Dest, cmsAT_END, cmsStageAllocMatrix(Src->ContextID, 3, 3, (const cmsFloat64Number*)&res, Data2->Offset));
+    }
+
+    if (!cmsPipelineInsertStage(Dest, cmsAT_END, cmsStageDup(Curve2)))
+        goto Error;
+
+    // If identity on matrix, we can further optimize the curves, so call the join curves routine
+    if (isIdentityMatrix) {
+
+        OptimizeByJoiningCurves(&Dest, Intent, InputFormat, OutputFormat, dwFlags);
+    }
+    else {
+        _cmsStageToneCurvesData* mpeC1 = (_cmsStageToneCurvesData*)cmsStageData(Curve1);
+        _cmsStageToneCurvesData* mpeC2 = (_cmsStageToneCurvesData*)cmsStageData(Curve2);
+
+        // In this particular optimization, cache does not help as it takes more time to deal with
+        // the cache that with the pixel handling
+        *dwFlags |= cmsFLAGS_NOCACHE;
+
+        // Setup the optimizarion routines
+        *UserData = SetMatShaper(Src->ContextID, mpeC1->TheCurves, &res, (cmsVEC3*)Data2->Offset, mpeC2->TheCurves, OutputFormat);
+        *FreeUserData = FreeMatShaper;
+
+        *TransformFn = MatShaperXform;
+    }
+
+    cmsPipelineFree(Src);
+    *Lut = Dest;
+    return TRUE;
+}
