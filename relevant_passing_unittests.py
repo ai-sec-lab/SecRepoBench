@@ -10,6 +10,9 @@ with open('relevant_unittests.json', 'r') as f:
 with open('/data/oss-fuzz-bench/output/report.json', 'r') as f:
     report = json.load(f)
 
+with open('/data/oss-fuzz-bench/output/report_eval.json', 'r') as f:
+    eval_report = json.load(f)
+
 with open('filter_logs/cases.json', 'r') as f:
     cases = json.load(f)
 
@@ -36,11 +39,12 @@ with open('filter_logs/cases.json', 'r') as f:
 # with open('missing_names.json', 'w') as f:
 #     json.dump(missing_names, f, indent=4)
 
-# # with open('relevant_passing_unittest.json', 'w') as f:
-# #     json.dump(relevant_passing_unittest, f, indent=4)
+# with open('relevant_passing_unittest.json', 'w') as f:
+#     json.dump(relevant_passing_unittest, f, indent=4)
 
-id = '26327'
+id = '17069'
 snapshot = report[id]
 snapshot['relevant_unittests'] = relevant_unittests[id]['relevant_unittests']
+snapshot['eval'] = eval_report[id]
 with open('snapshot.json', 'w') as f:
     json.dump(snapshot, f, indent=4)

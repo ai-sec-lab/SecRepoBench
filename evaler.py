@@ -158,7 +158,7 @@ class APIEvaler(BaseEvaler):
         self.get_content = self._get_content_function()
 
     def _initialize_client(self, system_prompt=None):
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             return openai.OpenAI()
         elif 'claude-' in self.model_name:
             return anthropic.Anthropic()
@@ -174,8 +174,10 @@ class APIEvaler(BaseEvaler):
             raise ValueError(f'Invalid model name: {self.model_name}')
 
     def _get_create_function(self):
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             return self.client.chat.completions.create
+        elif self.model_name == 'claude-3-7-sonnet-20250219':
+            return self.client.beta.messages.create
         elif 'claude-' in self.model_name:
             return self.client.messages.create
         elif 'gemini-' in self.model_name:
@@ -184,8 +186,10 @@ class APIEvaler(BaseEvaler):
             raise ValueError(f'Invalid model name: {self.model_name}')
 
     def _get_content_function(self):
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             return lambda response: [choice.message.content for choice in response.choices]
+        elif self.model_name == 'claude-3-7-sonnet-20250219':
+            return lambda response: [response.content[1].text]
         elif 'claude-' in self.model_name:
             return lambda response: [content.text for content in response.content]
         elif 'gemini-' in self.model_name:
@@ -194,7 +198,7 @@ class APIEvaler(BaseEvaler):
             raise ValueError(f'Invalid model name: {self.model_name}')
 
     def _create_messages(self, prompt: str, system_prompt: str, history=[]) -> List[Dict[str, str]]:
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             if system_prompt is not None:
                 messages = [
                     {'role': 'system', 'content': system_prompt},
@@ -229,6 +233,27 @@ class APIEvaler(BaseEvaler):
                 'max_tokens': max_tokens,
                 'top_p': 1,
                 'n': 1,
+            }
+        elif self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'max_completion_tokens': max_tokens,
+                'top_p': 1,
+                'n': 1,
+            }
+        elif self.model_name == 'claude-3-7-sonnet-20250219':
+            thinking_budget_tokens = 8_000
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'max_tokens': max_tokens + thinking_budget_tokens,
+                'system': system_prompt,
+                'thinking': {
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget_tokens
+                },
+                'betas': ["output-128k-2025-02-19"]
             }
         elif 'claude-' in self.model_name:
             if system_prompt is None:

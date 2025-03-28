@@ -474,7 +474,8 @@ def parse_unittest(output, project_name):
                             if status in s:
                                 if result[status] == None:
                                     result[status] = []
-                                result[status].append(test.group("name"))
+                                if test.group("name") not in result[status]:
+                                    result[status].append(test.group("name"))
 
     if result["total"] == None:
         result["total"] = sum([len(result[s]) if isinstance(result[s], list) else result[s] for s in ["pass", "fail", "skip"]])

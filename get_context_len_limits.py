@@ -10,27 +10,9 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from transformers import AutoTokenizer
 
 
-def mistral_tokenize(text):
-    tokenizer = MistralTokenizer.from_file("tekken.json")
-    tokens = tokenizer.instruct_tokenizer.tokenizer.encode(text, bos=True, eos=True)
-    return tokens
-
-
 def gpt_4o_tokenize(text):
     # Tokenize the content
     tokenizer = tiktoken.encoding_for_model("gpt-4o")
-    tokens = tokenizer.encode(text)
-    return tokens
-
-
-def deepseek_tokenize(text):
-    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", trust_remote_code=True)
-    tokens = tokenizer.encode(text)
-    return tokens
-
-
-def llama_tokenize(text):
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", trust_remote_code=True)
     tokens = tokenizer.encode(text)
     return tokens
 
@@ -136,7 +118,8 @@ def main():
         # (MistralTokenizer.from_file("tekken.json"), 'mistral'),
         # (tiktoken.encoding_for_model("gpt-4o"), 'gpt4o'),
         # (AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", trust_remote_code=True), 'deepseek'),
-        (AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", trust_remote_code=True), 'llama')
+        # (AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", trust_remote_code=True), 'llama'),
+        AutoTokenizer.from_pretrained("deepseek-ai/deepseek-coder-1.3b-instruct", trust_remote_code=True)
     ]
 
     with open('ids.txt', 'r') as f:

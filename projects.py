@@ -353,7 +353,7 @@ unittest_patterns = {
     "c-blosc2":_ctest_pattern,
     "exiv2":_ctest_pattern,
     "open62541":_ctest_pattern,
-    "pcapplusplus":_ctest_pattern,
+    "pcapplusplus":r"(?P<name>\w+)\s*:\s*(?P<status>\w+)",
     "libplist":_default_pattern,
     #"libredwg":r".*",
     "libass":r"\[\s*RUN\s*\]\s(?P<name>.*)[\s\S]*?(?P<status>OK|Error)",
@@ -395,7 +395,7 @@ unittest_patterns = {
     "lcms":r"Checking (?P<name>.*) \.+(?P<status>[A-z]+)", 
     #"leptonica":"", 
     "openvswitch":_matio_ovs_pattern, 
-    "php-src":r"^(?P<status>PASS|SKIP|FAIL).*?\/(?P<name>[^\/]+)\.phpt",
+    "php-src":r"[\r\n](?P<status>PASS|FAIL|SKIP).*?\[(?P<name>[^\]]+)\]",
     "flac":r"\n(?P<name>(testing |(\S+ )+test ?|case|Testing |Test )(.*\.\.\. (\+\n|\n|))+)(?P<status>[A-Z]*)(?=\n)", # this pattern needs to be extensively tested
     "harfbuzz":_default_pattern,
     "aom":_google_test_pattern,
