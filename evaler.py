@@ -339,25 +339,26 @@ class APIEvaler(BaseEvaler):
 
 
 class ChatEvaler(BaseEvaler):
-    def __init__(self, model_name: str, context_type: str, prompt_type: str):
-        super().__init__(model_name, context_type, prompt_type)
+    def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
+        super().__init__(model_name, context_type, prompt_type, mode)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.mode = mode
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name, 
             torch_dtype=torch.bfloat16, 
             attn_implementation="flash_attention_2", 
             device_map="auto",
-            trust_remote_code=True)
+            trust_remote_code=True, cache_dir = "/space2/cache")
         self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
         self.model.eval()
 
-    def get_response(self, id: str) -> str:
+    def get_response(self, id: str, mode) -> str:
         if id in self.responses_cache:
             print('Using cache')
             return self.postprocess(self.responses_cache[id])
         
-        prompt = self._get_prompt(id)
+        prompt = self._get_prompt(id,mode)
         system_prompt = self._get_system_prompt(id)
         terminators = [
             self.tokenizer.eos_token_id,
@@ -431,4 +432,4 @@ class ChatEvaler(BaseEvaler):
         response = self.tokenizer.decode(outputs[0][len(input_ids[0]):], skip_special_tokens=True)
         self.responses_cache[id] = response
 
-        return self.postprocess(response)
+        return self.postprocess(response), prompt, system_prompt
