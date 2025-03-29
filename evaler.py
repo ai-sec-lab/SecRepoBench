@@ -170,6 +170,11 @@ class APIEvaler(BaseEvaler):
                                             )
             else:
                 return genai.GenerativeModel(model_name=self.model_name)
+        elif 'qwen-' in self.model_name:
+            return openai.OpenAI(
+                api_key=os.getenv("QWEN_API_KEY"),
+                base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+            )
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
@@ -182,6 +187,8 @@ class APIEvaler(BaseEvaler):
             return self.client.messages.create
         elif 'gemini-' in self.model_name:
             return self.client.generate_content
+        elif 'qwen-' in self.model_name:
+            return self.client.chat.completions.create
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
@@ -194,6 +201,8 @@ class APIEvaler(BaseEvaler):
             return lambda response: [content.text for content in response.content]
         elif 'gemini-' in self.model_name:
             return lambda response: [response.text]
+        elif 'qwen-' in self.model_name:
+            return lambda response: [choice.message.content for choice in response.choices]
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
@@ -219,6 +228,17 @@ class APIEvaler(BaseEvaler):
                 *[{'role':role.replace("assistant", "model"), 'parts':[content]} for role, content in history],
                 {'role':'user', 'parts': [prompt]}
             ]
+        elif 'qwen-' in self.model_name:
+            if system_prompt is not None:
+                messages = [
+                    {'role': 'system', 'content': system_prompt},
+                ]
+            else:
+                messages = []
+            messages.extend([
+                *[{'role':role, 'content':content} for role, content in history],
+                {'role': 'user', 'content': prompt},
+            ])
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
         
@@ -235,10 +255,11 @@ class APIEvaler(BaseEvaler):
                 'n': 1,
             }
         elif self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
+            thinking_budget_tokens = 8_000
             return {
                 'model': self.model_name,
                 'messages': messages,
-                'max_completion_tokens': max_tokens,
+                'max_completion_tokens': max_tokens + thinking_budget_tokens,
                 'top_p': 1,
                 'n': 1,
             }
@@ -283,6 +304,15 @@ class APIEvaler(BaseEvaler):
                 'contents': messages,
                 'generation_config': config,
                 'safety_settings': safety_settings,
+            }
+        elif 'qwen-' in self.model_name:
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+                'top_p': 1,
+                'n': 1,
             }
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
