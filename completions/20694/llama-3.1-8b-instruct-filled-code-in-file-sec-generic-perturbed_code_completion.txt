@@ -1,0 +1,71 @@
+if (CRAM_MAJOR_VERS(fd->version) == 1) {
+    int32_t i32;
+    cp += safe_itf8_get(cp, endp, &slice_header->ref_seq_id);
+    /* LARGE_POS used in this code is purely a debugging mechanism for testing
+       whether the htslib API can cope with 64-bit quantities.  These are
+       possible in SAM, but not *yet* in BAM or CRAM.
+       *
+       * DO NOT ENABLE LARGE_POS for anything other than debugging / testing.
+       *
+       * At some point it is expected these ifdefs will become a version check
+       * instead.
+       */
+#ifdef LARGE_POS
+    cp += safe_ltf8_get(cp, endp, &slice_header->ref_seq_start);
+    cp += safe_ltf8_get(cp, endp, &slice_header->ref_seq_span);
+#else
+    cp += safe_itf8_get(cp, endp, &i32); slice_header->ref_seq_start=i32;
+    cp += safe_itf8_get(cp, endp, &i32); slice_header->ref_seq_span=i32;
+#endif
+    cp += safe_itf8_get(cp, endp, &slice_header->num_records);
+    slice_header->record_counter = 0;
+    if (CRAM_MAJOR_VERS(fd->version) == 2) {
+        int32_t i32 = 0;
+        cp += safe_itf8_get(cp, endp, &i32);
+        slice_header->record_counter = i32;
+    } else if (CRAM_MAJOR_VERS(fd->version) >= 3) {
+        cp += safe_ltf8_get(cp, endp, &slice_header->record_counter);
+    }
+    cp += safe_itf8_get(cp, endp, &slice_header->num_blocks);
+    cp += safe_itf8_get(cp, endp, &slice_header->num_content_ids);
+    if (slice_header->num_content_ids < 1 ||
+        slice_header->num_content_ids >= SIZE_MAX / sizeof(int32_t)) {
+        /* Slice must have at least one data block,
+           and malloc'd size shouldn't wrap. */
+        free(slice_header);
+        return NULL;
+    }
+    slice_header->block_content_ids = malloc(slice_header->num_content_ids * sizeof(int32_t));
+    if (!slice_header->block_content_ids) {
+        free(slice_header);
+        return NULL;
+    }
+
+    for (i = 0; i < slice_header->num_content_ids; i++) {
+        int l = safe_itf8_get(cp, endp,
+                              &slice_header->block_content_ids[i]);
+        if (l <= 0) {
+            free(slice_header->block_content_ids);
+            free(slice_header);
+            return NULL;
+        }
+        cp += l;
+    }
+
+    if (b->content_type == MAPPED_SLICE) {
+        cp += safe_itf8_get(cp, endp, &slice_header->ref_base_id);
+    }
+
+    if (CRAM_MAJOR_VERS(fd->version)!= 1) {
+        if (cp_end - cp < 16) {
+            free(slice_header->block_content_ids);
+            free(slice_header);
+            return NULL;
+        }
+        memcpy(slice_header->md5, cp, 16);
+    } else {
+        memset(slice_header->md5, 0, 16);
+    }
+
+    return slice_header;
+}

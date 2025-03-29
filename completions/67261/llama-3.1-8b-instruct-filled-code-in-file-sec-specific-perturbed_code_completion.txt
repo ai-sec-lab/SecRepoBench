@@ -1,0 +1,50 @@
+static GF_Err txtin_process_simple(GF_Filter *filter, GF_TXTIn *ctx, GF_FilterPacket *ipck)
+{
+	GF_FilterPacket *opck=NULL;
+	if (ctx->playstate==2) return GF_EOS;
+	if (!ipck) return GF_OK;
+
+	if (ctx->stxtmod==STXT_MODE_TX3G) {
+		u32 size;
+		u8 *output;
+		const u8 *data = gf_filter_pck_get_data(ipck, &size);
+		opck = gf_filter_pck_new_alloc(ctx->opid, size+2, &output);
+		if (opck) {
+			memcpy(output+2, data, size);
+			output[0] = (size>>8) & 0xFF;
+			output[1] = (size) & 0xFF;
+		}
+	} else if (ctx->stxtmod==STXT_MODE_VTT) {
+		u32 size;
+		u8 *output;
+		const u8 *data = gf_filter_pck_get_data(ipck, &size);
+		opck = gf_filter_pck_new_alloc(ctx->opid, size+16, &output);
+		if (opck) {
+			GF_BitStream *bs = gf_bs_new(output, size+16, GF_BITSTREAM_WRITE);
+			gf_bs_write_u32(bs, size+16);
+			gf_bs_write_u32(bs, GF_ISOM_BOX_TYPE_VTCC_CUE);
+			gf_bs_write_u32(bs, size+8);
+			gf_bs_write_u32(bs, GF_ISOM_BOX_TYPE_PAYL);
+			gf_bs_write_data(bs, data, size);
+			gf_bs_del(bs);
+		}
+	} else {
+		opck = gf_filter_pck_new_ref(ctx->opid, 0, 0, ipck);
+	}
+	if (!opck) return GF_OUT_OF_MEM;
+	gf_filter_pck_set_sap(opck, GF_FILTER_SAP_1);
+	if (gf_filter_pck_get_cts(ipck)==GF_FILTER_NO_TS) {
+		gf_filter_pck_set_dts(opck, 0);
+		gf_filter_pck_set_cts(opck, 0);
+
+		if (!gf_filter_pck_get_duration(ipck)) {
+			s32 dur = (s32) gf_timestamp_rescale_signed(ctx->stxtdur.num, ctx->stxtdur.den, ctx->timescale);
+			if (dur<0) dur = -dur;
+			gf_filter_pck_set_duration(opck, (u32) dur);
+		} else if (ctx->stxtdur.num>0) {
+			u32 dur = (u32) gf_timestamp_rescale(ctx->stxtdur.num, ctx->stxtdur.den, ctx->timescale);
+			gf_filter_pck_set_duration(opck, dur);
+		}
+	}
+	return gf_filter_pck_send(opck);
+}

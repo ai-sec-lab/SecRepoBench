@@ -1,0 +1,130 @@
+exr_result_t
+internal_huf_decompress (
+    exr_decode_pipeline_t* decode,
+    const uint8_t*         compressed,
+    uint64_t               nCompressed,
+    uint16_t*              raw,
+    uint64_t               nRawSize,
+    void*                  spare,
+    uint64_t               sparebytes)
+{
+    uint32_t                            im, iM, nBits;
+    uint64_t                            nBytes;
+    const uint8_t*                      ptr;
+    exr_result_t                        rv;
+    const struct _internal_exr_context* pctxt = NULL;
+
+    if (nCompressed < 20)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    pctxt = decode->pctxt;
+    if (pctxt)
+    {
+        pctxt->print_error (
+            pctxt,
+            EXR_ERR_INVALID_ARGUMENT,
+            "Invalid compressed data size (%" PRIu64 " bytes)",
+            nCompressed);
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    im = readUInt (compressed);
+    iM = readUInt (compressed + 4);
+    if (im > iM)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    nBits = readUInt (compressed + 12);
+    nBytes = (nBits + 7) / 8;
+
+    if (nCompressed < 20 + nBytes)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    ptr = compressed + 20;
+
+    if (nCompressed > 20 + nBytes)
+    {
+        ptr += nBytes;
+        nCompressed -= nBytes;
+    }
+
+    if (sparebytes!= internal_exr_huf_decompress_spare_bytes ())
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    uint64_t*  freq;
+    uint32_t*  hlink;
+    uint64_t** fHeap;
+    uint64_t*  scode;
+    HufDec*    hdecod;
+    FastHufDecoder* fhd;
+
+    freq  = (uint64_t*) spare;
+    scode = freq + HUF_ENCSIZE;
+    fHeap = (uint64_t**) (scode + HUF_ENCSIZE);
+    hlink = (uint32_t*) (fHeap + HUF_ENCSIZE);
+    hdecod = (HufDec*) (fHeap + HUF_ENCSIZE);
+    fhd = (FastHufDecoder*) (hdecod + HUF_DECSIZE);
+
+    hufClearDecTable (hdecod);
+
+    if (fasthuf_decode_enabled ())
+    {
+        rv = fasthuf_initialize (
+            pctxt,
+            fhd,
+            (const uint8_t**) &ptr,
+            nCompressed,
+            im,
+            iM,
+            65536);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+
+        rv = fasthuf_decode (
+            pctxt,
+            fhd,
+            (const uint8_t*) ptr,
+            nCompressed,
+            raw,
+            nRawSize);
+    }
+    else
+    {
+        rv = hufUnpackEncTable (
+            (const uint8_t**) &ptr,
+            &nCompressed,
+            im,
+            iM,
+            scode);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+
+        rv = hufBuildDecTable (scode, im, iM, hdecod);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+
+        rv = hufDecode (
+            scode,
+            hdecod,
+            (const uint8_t*) ptr,
+            nCompressed,
+            iM,
+            nRawSize,
+            raw);
+    }
+
+    return rv;
+}

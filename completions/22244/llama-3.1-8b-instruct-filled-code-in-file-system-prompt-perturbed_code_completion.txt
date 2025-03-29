@@ -1,0 +1,65 @@
+void ndpi_search_openvpn(struct ndpi_detection_module_struct* ndpi_struct,
+                         struct ndpi_flow_struct* flow) {
+  struct ndpi_packet_struct* packet = &flow->packet;
+  const u_int8_t * ovpn_payload = packet->payload;
+  const u_int8_t * session_remote;
+  u_int8_t operationcode;
+  u_int8_t alen;
+  int8_t hmac_size;
+  int8_t failed = 0;
+  /* No u_ */
+  // Analyze the packet payload to determine if it might be an OpenVPN packet.
+  // If the payload length is sufficient, adjust the payload pointer if it's over TCP.
+  // Extract the operation code from the payload and, if it's over UDP, perform additional checks:
+  //   - If the first packet in the flow matches specific length and operation code criteria, identify it as OpenVPN.
+  //   - Otherwise, check if the flow's OpenVPN counter is below a threshold and the operation code indicates a client reset.
+  //     - If so, attempt to extract and store the session ID from the payload.
+  //   - If the counter is within a range and the operation code indicates a server reset, verify the session ID matches.
+  //     - If a match is found, identify the protocol as OpenVPN; otherwise, mark the attempt as failed.
+  // Increment the flow's OpenVPN counter after processing.
+  // If the detection attempt fails, exclude the protocol from the flow's possible protocols.
+  if (packet->payload_len >= 16) {
+    ovpn_payload = packet->payload;
+    if (packet->direction == NDPI_DIRECTION_OUTBOUND) {
+      // Check for client reset
+      if (packet->payload_len == 16 && ovpn_payload[3] == P_CONTROL_HARD_RESET_CLIENT_V1) {
+        // Save session ID
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(P_HMAC_160);
+        flow->ndpi_flow_data->openvpn_session_id = ntohl(*(u_int32_t*)session_remote);
+        flow->ndpi_flow_data->openvpn_hmac_size = P_HMAC_160;
+        flow->ndpi_flow_data->openvpn_client_reset = 1;
+      } else if (packet->payload_len == 16 && ovpn_payload[3] == P_CONTROL_HARD_RESET_CLIENT_V2) {
+        // Save session ID
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(P_HMAC_160);
+        flow->ndpi_flow_data->openvpn_session_id = ntohl(*(u_int32_t*)session_remote);
+        flow->ndpi_flow_data->openvpn_hmac_size = P_HMAC_160;
+        flow->ndpi_flow_data->openvpn_client_reset = 1;
+      }
+    } else {
+      // Check for server reset
+      if (packet->payload_len == 16 && ovpn_payload[3] == P_CONTROL_HARD_RESET_SERVER_V1) {
+        // Verify session ID
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(P_HMAC_160);
+        if (ntohl(*(u_int32_t*)session_remote) == flow->ndpi_flow_data->openvpn_session_id) {
+          flow->ndpi_protocol_id = NDPI_PROTOCOL_OPENVPN;
+          flow->ndpi_flow_data->openvpn_server_reset = 1;
+        } else {
+          failed = 1;
+        }
+      } else if (packet->payload_len == 16 && ovpn_payload[3] == P_CONTROL_HARD_RESET_SERVER_V2) {
+        // Verify session ID
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(P_HMAC_160);
+        if (ntohl(*(u_int32_t*)session_remote) == flow->ndpi_flow_data->openvpn_session_id) {
+          flow->ndpi_protocol_id = NDPI_PROTOCOL_OPENVPN;
+          flow->ndpi_flow_data->openvpn_server_reset = 1;
+        } else {
+          failed = 1;
+        }
+      }
+    }
+  }
+  if (failed) {
+    flow->ndpi_protocol_id = NDPI_PROTOCOL_UNKNOWN;
+  }
+  flow->ndpi_flow_data->openvpn_counter++;
+}

@@ -1,0 +1,269 @@
+// <MASK>
+if(handshake_type == 0x02 /* Server Hello */) {
+  offset += session_id_len + 1; /* Skip session ID */
+
+  if((offset + 2) < total_len) {
+    u_int16_t cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    ja3.num_cipher = 1, ja3.cipher[0] = cipher_suite;
+  }
+
+  if((offset + 4) < total_len) {
+    u_int16_t tls_extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    offset += 2;
+
+    if((offset + tls_extension_len) < total_len) {
+      u_int16_t tls_extension_type, tls_extension_data_len;
+      u_int8_t  tls_extension_data[16];
+
+      while((offset + 2) < (total_len - tls_extension_len)) {
+	tls_extension_type = ntohs(*((u_int16_t*)&packet->payload[offset]));
+	offset += 2;
+
+	if((offset + 2) < (total_len - tls_extension_len)) {
+	  tls_extension_data_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+	  offset += 2;
+
+	  if((offset + tls_extension_data_len) < (total_len - tls_extension_len)) {
+	    memcpy(tls_extension_data, &packet->payload[offset], tls_extension_data_len);
+	    offset += tls_extension_data_len;
+
+	    if(tls_extension_type == 0x000a /* Server Name Indication */) {
+	      u_int8_t server_name_len = tls_extension_data[0];
+	      u_int8_t server_name_type = tls_extension_data[1];
+
+	      if((server_name_type == 0x00) && (server_name_len < sizeof(buffer))) {
+		memcpy(buffer, &tls_extension_data[2], server_name_len);
+		buffer[server_name_len] = '\0';
+
+		cleanupServerName(buffer, server_name_len);
+
+		if(flow->protos.stun_ssl.ssl.server_names == NULL)
+		  flow->protos.stun_ssl.ssl.server_names = ndpi_strdup(buffer),
+		    flow->protos.stun_ssl.ssl.server_names_len = strlen(buffer);
+		else {
+		  u_int16_t newstr_len = flow->protos.stun_ssl.ssl.server_names_len + server_name_len + 1;
+		  char *newstr = (char*)ndpi_realloc(flow->protos.stun_ssl.ssl.server_names,
+						     flow->protos.stun_ssl.ssl.server_names_len+1, newstr_len+1);
+
+		  if(newstr) {
+		    flow->protos.stun_ssl.ssl.server_names = newstr;
+		    flow->protos.stun_ssl.ssl.server_names[flow->protos.stun_ssl.ssl.server_names_len] = ',';
+		    strncpy(&flow->protos.stun_ssl.ssl.server_names[flow->protos.stun_ssl.ssl.server_names_len+1],
+			    buffer, server_name_len+1);
+		    flow->protos.stun_ssl.ssl.server_names[newstr_len] = '\0';
+		    flow->protos.stun_ssl.ssl.server_names_len = newstr_len;
+		  }
+		}
+	      }
+	    } else if(tls_extension_type == 0x000d /* Supported Groups */) {
+	      u_int8_t num_elliptic_curve = tls_extension_data[0];
+	      u_int8_t elliptic_curve_type;
+
+	      if(num_elliptic_curve < MAX_NUM_JA3) {
+		ja3.num_elliptic_curve = num_elliptic_curve;
+
+		for(i=0; i<num_elliptic_curve; i++) {
+		  elliptic_curve_type = tls_extension_data[1+i];
+		  ja3.elliptic_curve[i] = elliptic_curve_type;
+		}
+	      }
+	    } else if(tls_extension_type == 0x001d /* Supported Point Formats */) {
+	      u_int8_t num_elliptic_curve_point_format = tls_extension_data[0];
+	      u_int8_t elliptic_curve_point_format;
+
+	      if(num_elliptic_curve_point_format < MAX_NUM_JA3) {
+		ja3.num_elliptic_curve_point_format = num_elliptic_curve_point_format;
+
+		for(i=0; i<num_elliptic_curve_point_format; i++) {
+		  elliptic_curve_point_format = tls_extension_data[1+i];
+		  ja3.elliptic_curve_point_format[i] = elliptic_curve_point_format;
+		}
+	      }
+	    } else if(tls_extension_type == 0x001e /* Signature Algorithms */) {
+	      u_int8_t num_signature_algorithms = tls_extension_data[0];
+	      u_int16_t signature_algorithm;
+
+	      if(num_signature_algorithms < MAX_NUM_JA3) {
+		ja3.num_signature_algorithms = num_signature_algorithms;
+
+		for(i=0; i<num_signature_algorithms; i+=2) {
+		  signature_algorithm = ntohs(*((u_int16_t*)&tls_extension_data[1+i]));
+		  ja3.signature_algorithm[i/2] = signature_algorithm;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0023 /* Application Layer Protocol Negotiation */) {
+	      u_int8_t num_application_layer_protocol = tls_extension_data[0];
+	      u_int16_t application_layer_protocol;
+
+	      if(num_application_layer_protocol < MAX_NUM_JA3) {
+		ja3.num_application_layer_protocol = num_application_layer_protocol;
+
+		for(i=0; i<num_application_layer_protocol; i+=2) {
+		  application_layer_protocol = ntohs(*((u_int16_t*)&tls_extension_data[1+i]));
+		  ja3.application_layer_protocol[i/2] = application_layer_protocol;
+		}
+	      }
+	    } else if(tls_extension_type == 0x002b /* Channel Bindings */) {
+	      u_int8_t num_channel_bindings = tls_extension_data[0];
+	      u_int8_t channel_bindings_type;
+
+	      if(num_channel_bindings < MAX_NUM_JA3) {
+		ja3.num_channel_bindings = num_channel_bindings;
+
+		for(i=0; i<num_channel_bindings; i++) {
+		  channel_bindings_type = tls_extension_data[1+i];
+		  ja3.channel_bindings_type[i] = channel_bindings_type;
+		}
+	      }
+	    } else if(tls_extension_type == 0x002d /* Certificate Transparency */) {
+	      u_int8_t num_certificate_transparency = tls_extension_data[0];
+	      u_int8_t certificate_transparency_type;
+
+	      if(num_certificate_transparency < MAX_NUM_JA3) {
+		ja3.num_certificate_transparency = num_certificate_transparency;
+
+		for(i=0; i<num_certificate_transparency; i++) {
+		  certificate_transparency_type = tls_extension_data[1+i];
+		  ja3.certificate_transparency_type[i] = certificate_transparency_type;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0035 /* Encrypted Server Name Indication */) {
+	      u_int8_t num_encrypted_server_name = tls_extension_data[0];
+	      u_int8_t encrypted_server_name_type;
+
+	      if(num_encrypted_server_name < MAX_NUM_JA3) {
+		ja3.num_encrypted_server_name = num_encrypted_server_name;
+
+		for(i=0; i<num_encrypted_server_name; i++) {
+		  encrypted_server_name_type = tls_extension_data[1+i];
+		  ja3.encrypted_server_name_type[i] = encrypted_server_name_type;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0039 /* Heartbeat */) {
+	      u_int8_t num_heartbeat = tls_extension_data[0];
+	      u_int8_t heartbeat_mode;
+
+	      if(num_heartbeat < MAX_NUM_JA3) {
+		ja3.num_heartbeat = num_heartbeat;
+
+		for(i=0; i<num_heartbeat; i++) {
+		  heartbeat_mode = tls_extension_data[1+i];
+		  ja3.heartbeat_mode[i] = heartbeat_mode;
+		}
+	      }
+	    } else if(tls_extension_type == 0x003a /* ALPN */) {
+	      u_int8_t num_alpn = tls_extension_data[0];
+	      u_int8_t alpn_protocol;
+
+	      if(num_alpn < MAX_NUM_JA3) {
+		ja3.num_alpn = num_alpn;
+
+		for(i=0; i<num_alpn; i++) {
+		  alpn_protocol = tls_extension_data[1+i];
+		  ja3.alpn_protocol[i] = alpn_protocol;
+		}
+	      }
+	    } else if(tls_extension_type == 0x003b /* SCTP */) {
+	      u_int8_t num_sctp = tls_extension_data[0];
+	      u_int8_t sctp_nodelay;
+
+	      if(num_sctp < MAX_NUM_JA3) {
+		ja3.num_sctp = num_sctp;
+
+		for(i=0; i<num_sctp; i++) {
+		  sctp_nodelay = tls_extension_data[1+i];
+		  ja3.sctp_nodelay[i] = sctp_nodelay;
+		}
+	      }
+	    } else if(tls_extension_type == 0x003c /* Transport Layer Security */) {
+	      u_int8_t num_tls = tls_extension_data[0];
+	      u_int8_t tls_version;
+
+	      if(num_tls < MAX_NUM_JA3) {
+		ja3.num_tls = num_tls;
+
+		for(i=0; i<num_tls; i++) {
+		  tls_version = tls_extension_data[1+i];
+		  ja3.tls_version[i] = tls_version;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0044 /* Pre Shared Key */) {
+	      u_int8_t num_psk = tls_extension_data[0];
+	      u_int8_t psk_identity;
+
+	      if(num_psk < MAX_NUM_JA3) {
+		ja3.num_psk = num_psk;
+
+		for(i=0; i<num_psk; i++) {
+		  psk_identity = tls_extension_data[1+i];
+		  ja3.psk_identity[i] = psk_identity;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0045 /* Early Data */) {
+	      u_int8_t num_early_data = tls_extension_data[0];
+	      u_int8_t early_data_type;
+
+	      if(num_early_data < MAX_NUM_JA3) {
+		ja3.num_early_data = num_early_data;
+
+		for(i=0; i<num_early_data; i++) {
+		  early_data_type = tls_extension_data[1+i];
+		  ja3.early_data_type[i] = early_data_type;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0046 /* Supported Versions */) {
+	      u_int8_t num_supported_versions = tls_extension_data[0];
+	      u_int16_t supported_version;
+
+	      if(num_supported_versions < MAX_NUM_JA3) {
+		ja3.num_supported_versions = num_supported_versions;
+
+		for(i=0; i<num_supported_versions; i+=2) {
+		  supported_version = ntohs(*((u_int16_t*)&tls_extension_data[1+i]));
+		  ja3.supported_version[i/2] = supported_version;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0047 /* Cookie */) {
+	      u_int8_t num_cookie = tls_extension_data[0];
+	      u_int8_t cookie_type;
+
+	      if(num_cookie < MAX_NUM_JA3) {
+		ja3.num_cookie = num_cookie;
+
+		for(i=0; i<num_cookie; i++) {
+		  cookie_type = tls_extension_data[1+i];
+		  ja3.cookie_type[i] = cookie_type;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0048 /* Ticket */) {
+	      u_int8_t num_ticket = tls_extension_data[0];
+	      u_int8_t ticket_type;
+
+	      if(num_ticket < MAX_NUM_JA3) {
+		ja3.num_ticket = num_ticket;
+
+		for(i=0; i<num_ticket; i++) {
+		  ticket_type = tls_extension_data[1+i];
+		  ja3.ticket_type[i] = ticket_type;
+		}
+	      }
+	    } else if(tls_extension_type == 0x0049 /* Record Size Limit */) {
+	      u_int8_t num_record_size_limit = tls_extension_data[0];
+	      u_int16_t record_size_limit;
+
+	      if(num_record_size_limit < MAX_NUM_JA3) {
+		ja3.num_record_size_limit = num_record_size_limit;
+
+		for(i=0; i<num_record_size_limit; i+=2) {
+		  record_size_limit = ntohs(*((u_int16_t*)&tls_extension_data[1+i]));
+		  ja3.record_size_limit[i/2] = record_size_limit;
+		}
+	      }
+	    } else if(tls_extension_type == 0x004a /* Channel ID */) {
+	      u_int8_t num_channel_id = tls_extension_data[0];
+	      u_int8_t channel_id_type;
+
+	      if(num_channel_id < MAX_NUM_JA3) {
+		ja3.num_channel_id = num_channel_id;
+
+		for(

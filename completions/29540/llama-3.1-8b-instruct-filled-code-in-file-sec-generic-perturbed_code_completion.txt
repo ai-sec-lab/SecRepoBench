@@ -1,0 +1,168 @@
+static int
+Mat_VarWriteStruct73(hid_t id,matvar_t *matvar,const char *name,hid_t *refs_id,hsize_t *dims,hsize_t* max_dims)
+{
+    int     err;
+    hsize_t nelems;
+
+    {
+        size_t tmp = 1;
+        err = Mat_MulDims(matvar, &tmp);
+        nelems = (hsize_t)tmp;
+    }
+
+    if ( err || 0 == nelems || NULL == matvar->data ) {
+        err = Mat_VarWriteEmpty(id, matvar, name, ClassNames[matvar->class_type]);
+    } else {
+        hid_t struct_id = H5Gcreate(id,name,H5P_DEFAULT,H5P_DEFAULT,H5P_DEFAULT);
+        if ( struct_id < 0 ) {
+            Mat_Critical("Error creating group for struct %s",name);
+            err = MATIO_E_OUTPUT_BAD_DATA;
+        } else {
+            hid_t attr_id,aspace_id;
+            hid_t str_type_id;
+            matvar_t **fields = (matvar_t**)matvar->data;
+            hsize_t    nfields = matvar->internal->num_fields, k;
+
+            str_type_id = H5Tcopy(H5T_C_S1);
+            H5Tset_size(str_type_id,6);
+            aspace_id = H5Screate(H5S_SCALAR);
+            attr_id = H5Acreate(struct_id,"MATLAB_class",str_type_id,
+                                aspace_id,H5P_DEFAULT,H5P_DEFAULT);
+            if ( 0 > H5Awrite(attr_id,str_type_id,"struct") )
+                err = MATIO_E_GENERIC_WRITE_ERROR;
+            H5Aclose(attr_id);
+            H5Sclose(aspace_id);
+
+            /* Structure with no fields */
+            if ( nfields == 0 ) {
+                H5Gclose(struct_id);
+                H5Tclose(str_type_id);
+                return err;
+            }
+
+            if ( MATIO_E_NO_ERROR == err ) {
+                hvl_t *fieldnames = (hvl_t*)malloc((size_t)nfields*sizeof(*fieldnames));
+                if ( NULL!= fieldnames ) {
+                    hid_t fieldnames_id;
+                    for ( k = 0; k < nfields; k++ ) {
+                        fieldnames[k].len =
+                            strlen(matvar->internal->fieldnames[k]);
+                        fieldnames[k].p   = matvar->internal->fieldnames[k];
+                    }
+                    H5Tset_size(str_type_id,1);
+                    fieldnames_id = H5Tvlen_create(str_type_id);
+                    aspace_id     = H5Screate_simple(1,&nfields,NULL);
+                    attr_id = H5Acreate(struct_id,"MATLAB_fields",fieldnames_id,
+                                        aspace_id,H5P_DEFAULT,H5P_DEFAULT);
+                    if ( 0 > H5Awrite(attr_id,fieldnames_id,fieldnames) )
+                        err = MATIO_E_GENERIC_WRITE_ERROR;
+                    H5Aclose(attr_id);
+                    H5Sclose(aspace_id);
+                    H5Tclose(fieldnames_id);
+                    H5Tclose(str_type_id);
+                    free(fieldnames);
+                } else {
+                    err = MATIO_E_OUT_OF_MEMORY;
+                }
+            }
+
+            if ( MATIO_E_NO_ERROR == err ) {
+                if ( 1 == nelems && NULL == max_dims ) {
+                    for ( k = 0; k < nfields; k++ ) {
+                        if ( NULL!= fields[k] )
+                            fields[k]->compression = matvar->compression;
+                        err = Mat_VarWriteNext73(struct_id,fields[k],
+                            matvar->internal->fieldnames[k],refs_id);
+                    }
+                } else {
+                    if ( *refs_id < 0 ) {
+                        if ( H5Lexists(id,"/#refs#",H5P_DEFAULT) ) {
+                            *refs_id = H5Gopen(id,"/#refs#",H5P_DEFAULT);
+                        } else {
+                            *refs_id = H5Gcreate(id,"/#refs#",H5P_DEFAULT,
+                                                 H5P_DEFAULT,H5P_DEFAULT);
+                        }
+                    }
+                    if ( *refs_id > -1 ) {
+                        hid_t plist = H5P_DEFAULT;
+                        hobj_ref_t **refs = (hobj_ref_t**)calloc((size_t)nfields, sizeof(*refs));
+                        if ( NULL!= refs ) {
+                            hsize_t l;
+                            for ( l = 0; l < nfields; l++ ) {
+                                refs[l] = (hobj_ref_t*)calloc((size_t)nelems, sizeof(*refs[l]));
+                                if ( NULL == refs[l] ) {
+                                    err = MATIO_E_OUT_OF_MEMORY;
+                                    break;
+                                }
+                            }
+
+                            if ( MATIO_E_NO_ERROR == err ) {
+                                for ( k = 0; k < nelems; k++ ) {
+                                    for ( l = 0; l < nfields; l++ ) {
+                                        err = Mat_VarWriteRef(id, fields[k*nfields+l], matvar->compression,
+                                                               refs_id, refs[l]+k);
+                                        if ( err )
+                                            break;
+                                    }
+                                    if ( err )
+                                        break;
+                                }
+                            }
+
+                            if ( MATIO_E_NO_ERROR == err ) {
+                                if ( NULL!= max_dims ) {
+                                    plist = H5Pcreate(H5P_DATASET_CREATE);
+                                    if ( MAX_RANK >= matvar->rank ) {
+                                        hsize_t chunk_dims[MAX_RANK];
+                                        Mat_H5GetChunkSize(matvar->rank, dims, chunk_dims);
+                                        H5Pset_chunk(plist, matvar->rank, chunk_dims);
+                                    } else {
+                                        hsize_t *chunk_dims = (hsize_t*)malloc(matvar->rank*sizeof(hsize_t));
+                                        if ( NULL!= chunk_dims ) {
+                                            Mat_H5GetChunkSize(matvar->rank, dims, chunk_dims);
+                                            H5Pset_chunk(plist, matvar->rank, chunk_dims);
+                                            free(chunk_dims);
+                                        } else {
+                                            H5Pclose(plist);
+                                            plist = H5P_DEFAULT;
+                                            err = MATIO_E_OUT_OF_MEMORY;
+                                        }
+                                    }
+                                } else {
+                                    plist = H5P_DEFAULT;
+                                }
+                            }
+
+                            if ( MATIO_E_NO_ERROR == err ) {
+                                hid_t mspace_id = H5Screate_simple(matvar->rank,dims,max_dims);
+                                for ( l = 0; l < nfields; l++ ) {
+                                    hid_t dset_id = H5Dcreate(struct_id,
+                                                        matvar->internal->fieldnames[l],
+                                                        H5T_STD_REF_OBJ,mspace_id,
+                                                        H5P_DEFAULT,plist,H5P_DEFAULT);
+                                    err = Mat_H5WriteAppendData(dset_id, H5T_STD_REF_OBJ, matvar->rank,
+                                        matvar->internal->fieldnames[l], matvar->dims, dims, l, 0, refs[l]);
+                                    if ( err )
+                                        break;
+                                }
+                                H5Sclose(mspace_id);
+                            }
+                            for ( l = 0; l < nfields; l++ )
+                                free(refs[l]);
+                            free(refs);
+                        } else {
+                            err = MATIO_E_OUT_OF_MEMORY;
+                        }
+                        if ( H5P_DEFAULT!= plist )
+                            H5Pclose(plist);
+                    } else {
+                        err = MATIO_E_OUTPUT_BAD_DATA;
+                    }
+                }
+            }
+            H5Gclose(struct_id);
+        }
+    }
+
+    return err;
+}

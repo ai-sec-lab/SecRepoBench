@@ -1,0 +1,48 @@
+static int ndpi_search_quic_extra(struct ndpi_detection_module_struct *ndpi_struct,
+				  struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  /* We are elaborating a packet following the initial CHLO/ClientHello.
+     Two cases:
+     1) Mutiplexing QUIC with RTP/RTCP. It should be quite generic, but
+        for the time being, we known only NDPI_PROTOCOL_SNAPCHAT_CALL having
+	such behaviour
+     2) CH reasssembling is going on
+     */
+
+  NDPI_LOG_DBG(ndpi_struct, "search QUIC extra func\n");
+
+  if (is_ch_reassembler_pending(flow)) {
+    ndpi_search_quic(ndpi_struct, flow);
+    return is_ch_reassembler_pending(flow);
+  }
+
+  /* RTP/RTCP stuff */
+
+  /* If this packet is still a Q046 one we need to keep going */
+  if(packet->payload[0] & 0x40) {
+    NDPI_LOG_DBG(ndpi_struct, "Still QUIC\n");
+    return 1; /* Keep going */
+  }
+
+  NDPI_LOG_DBG2(ndpi_struct, "No more QUIC: nothing to do on QUIC side\n");
+  flow->extra_packets_func = NULL;
+
+  /* This might be a RTP/RTCP stream: let's check it */
+  /* TODO: the cleanest solution should be triggering the rtp/rtcp dissector, but
+     I have not been able to that that so I reimplemented a basic RTP/RTCP detection.*/
+  if((packet->payload[0] >> 6) == 2 && /* Version 2 */
+     packet->payload_packet_len > 1 &&
+     (packet->payload[1] == 201 || /* RTCP, Receiver Report */
+      packet->payload[1] == 200 || /* RTCP, Sender Report */
+      is_valid_rtp_payload_type(packet->payload[1] & 0x7F))) /* RTP */) {
+    NDPI_LOG_DBG(ndpi_struct, "Found RTP/RTCP over QUIC\n");
+    ndpi_int_change_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SNAPCHAT_CALL, NDPI_PROTOCOL_QUIC);
+  } else {
+    /* Unexpected traffic pattern: we should investigate it... */
+    NDPI_LOG_INFO(ndpi_struct, "To investigate...\n");
+  }
+
+  return 0;
+}
