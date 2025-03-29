@@ -1,0 +1,123 @@
+void dotnet_parse_tilde_2(
+    PE* pe_struct,
+    PTILDE_HEADER tilde_header,
+    int64_t resource_base,
+    int64_t metadata_root,
+    ROWS rows,
+    INDEX_SIZES index_sizes,
+    PSTREAMS streams)
+{
+  // ... (previous code)
+
+  // Validate the current table and its number of rows. If not valid, skip
+  // processing this table.
+  if (!fits_in_pe(pe_struct, table_offset, row_size))
+    break;
+
+  // Those tables which exist, but that we don't care about must be
+  // skipped.
+  //
+  // Sadly, given the dynamic sizes of some columns we can not have well
+  // defined structures for all tables and use them accordingly. To deal
+  // with this manually move the table_offset pointer by the appropriate
+  // number of bytes as described in the documentation for each table.
+  //
+  // The table structures are documented in ECMA-335 Section II.22.
+
+  switch (bit_check)
+  {
+    // ... (previous cases)
+
+    case BIT_CUSTOMATTRIBUTE:
+      // ... (previous case)
+
+      // Parse the Value field.
+      customattribute_table =
+          (PCUSTOMATTRIBUTE_TABLE) (row_ptr + index_size + index_size2);
+
+      if (index_sizes.blob == 4)
+        blob_index = *(DWORD*) customattribute_table;
+      else
+        // Cast the value (index into blob table) to a 32bit value.
+        blob_index = (DWORD) (*(WORD*) customattribute_table);
+
+      // Everything checks out. Make sure the index into the blob field
+      // is valid (non-null and within range).
+      blob_offset = pe_struct->data + metadata_root +
+                    yr_le32toh(streams->blob->Offset) + blob_index;
+
+      // If index into blob is 0 or past the end of the blob stream, skip
+      // it. We don't know the size of the blob entry yet because that is
+      // encoded in the start.
+      if (blob_index == 0x00 || blob_offset >= pe_struct->data + pe_struct->data_size)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      blob_result = dotnet_parse_blob_entry(pe_struct, blob_offset);
+
+      if (blob_result.size == 0)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      blob_length = blob_result.length;
+      blob_offset += blob_result.size;
+
+      // Quick sanity check to make sure the blob entry is within bounds
+      // and its length is at least 3 (2 bytes for the 16 bits prolog and
+      // 1 byte for the string length)
+      if (blob_length < 3 ||
+          blob_offset + blob_length >= pe_struct->data + pe_struct->data_size)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      // Custom attributes MUST have a 16 bit prolog of 0x0001
+      if (*(WORD*) blob_offset != 0x0001)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      // The next byte after the 16 bit prolog is the length of the string.
+      blob_offset += 2;
+      uint8_t str_len = *blob_offset;
+
+      // Increment blob_offset so that it points to the first byte of the
+      // string.
+      blob_offset += 1;
+
+      if (blob_offset + str_len > pe_struct->data + pe_struct->data_size)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      if (*blob_offset == 0xFF || *blob_offset == 0x00)
+      {
+        typelib[0] = '\0';
+      }
+      else
+      {
+        strncpy(typelib, (char*) blob_offset, str_len);
+        typelib[str_len] = '\0';
+      }
+
+      set_string(typelib, pe_struct->object, "typelib");
+
+      row_ptr += row_size;
+      break;
+
+    // ... (remaining cases)
+
+    default:
+      // printf("Unknown bit: %i\n", bit_check);
+      return;
+  }
+
+  // ... (remaining code)
+}

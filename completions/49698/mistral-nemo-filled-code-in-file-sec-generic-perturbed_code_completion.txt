@@ -1,0 +1,69 @@
+static exr_result_t
+internal_huf_decompress (
+    exr_decode_pipeline_t* decode,
+    const uint8_t*         compressed,
+    uint64_t               nCompressed,
+    uint16_t*              raw,
+    uint64_t               nRawSize,
+    void*                  spare,
+    uint64_t               sparebytes)
+{
+    uint32_t                            im, iM, nBits;
+    uint64_t                            nBytes;
+    const uint8_t*                      ptr;
+    exr_result_t                        rv;
+    const struct _internal_exr_context* pctxt = NULL;
+
+    if (decode) pctxt = decode->context;
+
+    if (nCompressed < 20) return EXR_ERR_CORRUPT_CHUNK;
+
+    ptr = compressed;
+    im   = readUInt (ptr);
+    iM   = readUInt (ptr + 4);
+    if (im < 0 || iM < 0 || iM < im) return EXR_ERR_CORRUPT_CHUNK;
+
+    uint32_t tableLength = readUInt (ptr + 8);
+    if (tableLength > nCompressed - 20) return EXR_ERR_CORRUPT_CHUNK;
+
+    nBits = readUInt (ptr + 12);
+    if (nBits > 64) return EXR_ERR_CORRUPT_CHUNK;
+
+    ptr += 20;
+
+    if (fasthuf_decode_enabled () && nCompressed <= 1024 * 1024)
+    {
+        FastHufDecoder fhd;
+        rv = fasthuf_initialize (pctxt, &fhd, ptr, tableLength, im, iM, 65536);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        rv = fasthuf_decode (pctxt, &fhd, ptr + tableLength, nBits, raw, nRawSize);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+    }
+    else
+    {
+        uint64_t*  freq;
+        HufDec*   hdecod;
+        uint64_t   nLeft;
+
+        if (sparebytes != internal_exr_huf_decompress_spare_bytes ())
+            return EXR_ERR_INVALID_ARGUMENT;
+
+        freq  = (uint64_t*) spare;
+        hdecod = (HufDec*) (freq + HUF_ENCSIZE);
+
+        nLeft = nCompressed - 20;
+
+        rv = hufUnpackEncTable (
+            &ptr, &nLeft, im, iM, freq, &hdecod, &nBytes);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        rv = hufBuildDecTable (freq, im, iM, hdecod);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        rv = hufDecode (freq, hdecod, ptr + tableLength, nBits, raw, nRawSize, 65536, &nBytes);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+    }
+
+    return EXR_ERR_SUCCESS;
+}
