@@ -1,0 +1,209 @@
+/**
+ * xmlParseBalancedChunkMemoryRecover:
+ * @doc:  the document the chunk pertains to (must not be NULL)
+ * @sax:  the SAX handler block (possibly NULL)
+ * @user_data:  The user data returned on SAX callbacks (possibly NULL)
+ * @depth:  Used for loop detection, use 0
+ * @string:  the input string in UTF8 or ISO-Latin (zero terminated)
+ * @lst:  the return value for the set of parsed nodes
+ * @recover:  1 if we should return a non-empty list even if the
+ *             parsed chunk is not well balanced
+ *
+ * Parse a well-balanced chunk of an XML document
+ * called by the parser
+ * The allowed sequence for the Well Balanced Chunk is the one defined by
+ * the content production in the XML grammar:
+ *
+ * [43] content ::= (element | CharData | Reference | CDSect | PI | Comment)*
+ *
+ * Returns XML_ERR_OK if the chunk is well balanced, and the parser
+ * error code otherwise
+ *
+ * In case recover is set to 1, the nodelist will not be empty even if
+ * the parsed chunk is not well balanced.
+ */
+static xmlParserErrors
+xmlParseBalancedChunkMemoryRecover(xmlDocPtr doc, xmlSAXHandlerPtr sax,
+     void *user_data, int depth, const xmlChar *string, xmlNodePtr *lst, int recover) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr newDoc = NULL;
+    xmlNodePtr newRoot;
+    xmlSAXHandlerPtr oldsax = NULL;
+    xmlNodePtr content = NULL;
+    xmlNodePtr last = NULL;
+    int size;
+    xmlParserErrors ret = XML_ERR_OK;
+#ifdef SAX2
+    int i;
+#endif
+
+    if (((depth > 40) && ((doc->options & XML_PARSE_HUGE) == 0)) ||
+        (depth >  100)) {
+	xmlFatalErrMsg(doc, XML_ERR_ENTITY_LOOP,
+                       "Maximum entity nesting depth exceeded");
+	return(XML_ERR_ENTITY_LOOP);
+    }
+
+    if (lst!= NULL)
+        *lst = NULL;
+    if (string == NULL)
+        return(XML_ERR_INTERNAL_ERROR);
+
+    size = xmlStrlen(string);
+
+    ctxt = xmlCreateMemoryParserCtxt((char *) string, size);
+    if (ctxt == NULL) return(XML_WAR_UNDECLARED_ENTITY);
+    ctxt->nbErrors = doc->nbErrors;
+    ctxt->nbWarnings = doc->nbWarnings;
+    if (user_data!= NULL)
+	ctxt->userData = user_data;
+    else
+	ctxt->userData = doc;
+    if (ctxt->dict!= NULL) xmlDictFree(ctxt->dict);
+    ctxt->dict = doc->dict;
+    ctxt->input_id = doc->input_id;
+    ctxt->str_xml = xmlDictLookup(ctxt->dict, BAD_CAST "xml", 3);
+    ctxt->str_xmlns = xmlDictLookup(ctxt->dict, BAD_CAST "xmlns", 5);
+    ctxt->str_xml_ns = xmlDictLookup(ctxt->dict, XML_XML_NAMESPACE, 36);
+
+#ifdef SAX2
+    /* propagate namespaces down the entity */
+    for (i = 0;i < doc->nsNr;i += 2) {
+        nsPush(ctxt, doc->nsTab[i], doc->nsTab[i+1]);
+    }
+#endif
+
+    oldsax = ctxt->sax;
+    ctxt->sax = doc->sax;
+    xmlDetectSAX2(ctxt);
+    ctxt->replaceEntities = doc->replaceEntities;
+    ctxt->options = doc->options;
+
+    ctxt->_private = doc->_private;
+    if (doc->myDoc == NULL) {
+	newDoc = xmlNewDoc(BAD_CAST "1.0");
+	if (newDoc == NULL) {
+	    ctxt->sax = oldsax;
+	    ctxt->dict = NULL;
+	    xmlFreeParserCtxt(ctxt);
+	    return(XML_ERR_INTERNAL_ERROR);
+	}
+	newDoc->properties = XML_DOC_INTERNAL;
+	newDoc->dict = ctxt->dict;
+	xmlDictReference(newDoc->dict);
+	ctxt->myDoc = newDoc;
+    } else {
+	ctxt->myDoc = doc->myDoc;
+        content = ctxt->myDoc->children;
+	last = ctxt->myDoc->last;
+    }
+    newRoot = xmlNewDocNode(ctxt->myDoc, NULL, BAD_CAST "pseudoroot", NULL);
+    if (newRoot == NULL) {
+	ctxt->sax = oldsax;
+	ctxt->dict = NULL;
+	xmlFreeParserCtxt(ctxt);
+	if (newDoc!= NULL) {
+	    xmlFreeDoc(newDoc);
+	}
+	return(XML_ERR_INTERNAL_ERROR);
+    }
+    ctxt->myDoc->children = NULL;
+    ctxt->myDoc->last = NULL;
+    xmlAddChild((xmlNodePtr) ctxt->myDoc, newRoot);
+    nodePush(ctxt, ctxt->myDoc->children);
+    ctxt->instate = XML_PARSER_CONTENT;
+    ctxt->depth = doc->depth;
+
+    ctxt->validate = 0;
+    ctxt->loadsubset = doc->loadsubset;
+    if ((doc->validate) || (doc->replaceEntities!= 0)) {
+	/*
+	 * ID/IDREF registration will be done in xmlValidateElement below
+	 */
+	ctxt->loadsubset |= XML_SKIP_IDS;
+    }
+    ctxt->dictNames = doc->dictNames;
+    ctxt->attsDefault = doc->attsDefault;
+    ctxt->attsSpecial = doc->attsSpecial;
+
+    xmlParseContent(ctxt);
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW!= 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if (ctxt->node!= ctxt->myDoc->children) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    }
+
+    if (!ctxt->wellFormed) {
+	ret = (xmlParserErrors)ctxt->errNo;
+        doc->errNo = ctxt->errNo;
+        doc->wellFormed = 0;
+        xmlCopyError(&ctxt->lastError, &doc->lastError);
+    } else {
+        ret = XML_ERR_OK;
+    }
+
+    if ((lst!= NULL) && (ret == XML_ERR_OK)) {
+	xmlNodePtr cur;
+
+	/*
+	 * Return the newly created nodeset after unlinking it from
+	 * they pseudo parent.
+	 */
+	cur = ctxt->myDoc->children->children;
+	*lst = cur;
+	while (cur!= NULL) {
+#ifdef LIBXML_VALID_ENABLED
+	    if ((doc->validate) && (doc->wellFormed) &&
+		(doc->myDoc) && (doc->myDoc->intSubset) &&
+		(cur->type == XML_ELEMENT_NODE)) {
+		doc->valid &= xmlValidateElement(&doc->vctxt,
+			doc->myDoc, cur);
+	    }
+#endif /* LIBXML_VALID_ENABLED */
+	    cur->parent = NULL;
+	    cur = cur->next;
+	}
+	ctxt->myDoc->children->children = NULL;
+    }
+    if (ctxt->myDoc!= NULL) {
+	xmlFreeNode(ctxt->myDoc->children);
+        ctxt->myDoc->children = content;
+        ctxt->myDoc->last = last;
+    }
+
+    /*
+     * Also record the size of the entity parsed
+     */
+    if (ctxt->input!= NULL && doc!= NULL) {
+        unsigned long consumed = ctxt->input->consumed;
+
+        xmlSaturatedAddSizeT(&consumed, ctxt->input->cur - ctxt->input->base);
+
+        xmlSaturatedAdd(&doc->sizeentcopy, consumed);
+        xmlSaturatedAdd(&doc->sizeentcopy, ctxt->sizeentcopy);
+    }
+
+    doc->nbErrors = ctxt->nbErrors;
+    doc->nbWarnings = ctxt->nbWarnings;
+    ctxt->sax = oldsax;
+    ctxt->dict = NULL;
+    ctxt->attsDefault = NULL;
+    ctxt->attsSpecial = NULL;
+    xmlFreeParserCtxt(ctxt);
+    if (newDoc!= NULL) {
+	xmlFreeDoc(newDoc);
+    }
+
+    if (recover) {
+        if (ctxt->node!= NULL) {
+            *lst = ctxt->node;
+        } else {
+            *lst = xmlNewNode(ctxt->myDoc, BAD_CAST "pseudoroot");
+        }
+    }
+
+    return(ret);
+}

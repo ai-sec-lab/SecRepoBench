@@ -1,0 +1,264 @@
+static int
+read_children(struct archive_read *archivereader, struct file_info *parent)
+{
+	struct iso9660 *iso9660;
+	const unsigned char *b, *p;
+	struct file_info *multi;
+	size_t step, skip_size;
+
+	iso9660 = (struct iso9660 *)(archivereader->format->data);
+	/* flush any remaining bytes from the last round to ensure
+	 * we're positioned */
+	if (iso9660->entry_bytes_unconsumed) {
+		__archive_read_consume(archivereader, iso9660->entry_bytes_unconsumed);
+		iso9660->entry_bytes_unconsumed = 0;
+	}
+	if (iso9660->current_position > parent->offset) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Ignoring out-of-order directory (%s) %jd > %jd",
+		    parent->name.s,
+		    (intmax_t)iso9660->current_position,
+		    (intmax_t)parent->offset);
+		return (ARCHIVE_WARN);
+	}
+	if (parent->offset + parent->size > iso9660->volume_size) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Directory is beyond end-of-media: %s",
+		    parent->name.s);
+		return (ARCHIVE_WARN);
+	}
+	if (iso9660->current_position < parent->offset) {
+		int64_t skipsize;
+
+		skipsize = parent->offset - iso9660->current_position;
+		skipsize = __archive_read_consume(archivereader, skipsize);
+		if (skipsize < 0)
+			return ((int)skipsize);
+		iso9660->current_position = parent->offset;
+	}
+
+	step = (size_t)(((parent->size + iso9660->logical_block_size -1) /
+	    iso9660->logical_block_size) * iso9660->logical_block_size);
+	b = __archive_read_ahead(archivereader, step, NULL);
+	if (b == NULL) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Failed to read full block when scanning "
+		    "ISO9660 directory list");
+		return (ARCHIVE_FATAL);
+	}
+	iso9660->current_position += step;
+	multi = NULL;
+	skip_size = step;
+	while (step) {
+		// Iterate over directory entries in the buffer while there is data to process.
+		// For each directory entry, parse its file information, and handle special cases:
+		// - Skip entries for '.' and '..' directories.
+		// - Manage multi-extent files by collecting their contents into a list.
+		// - For each valid directory entry, add it to the archive structure.
+		// - Handle memory allocation and error management for multi-extent file handling.
+		// <MASK>
+		{
+			struct file_info *file;
+			size_t name_len;
+			const unsigned char *rr_start, *rr_end;
+			const unsigned char *p;
+			size_t dr_len;
+			uint64_t fsize, offset;
+			int32_t location;
+			int flags;
+
+			file = parse_file_info(archivereader, parent, b, step);
+			if (file == NULL)
+				return (ARCHIVE_FATAL);
+
+			dr_len = (size_t)file->isodirrec[DR_length_offset];
+			name_len = (size_t)file->isodirrec[DR_name_len_offset];
+			location = archive_le32dec(file->isodirrec + DR_extent_offset);
+			fsize = toi(file->isodirrec + DR_size_offset, DR_size_size);
+			offset = iso9660->logical_block_size * (uint64_t)location;
+
+			// Skip entries for '.' and '..' directories.
+			if (name_len == 0 || name_len == 2 && file->isodirrec[DR_name_offset] == 0 && file->isodirrec[DR_name_offset + 1] == 0x2e)
+				continue;
+
+			// Manage multi-extent files by collecting their contents into a list.
+			if (file->multi_extent) {
+				struct content *con;
+
+				con = (struct content *)calloc(1, sizeof(*con));
+				if (con == NULL) {
+					archive_set_error(&archivereader->archive, ENOMEM, "No memory for content");
+					return (ARCHIVE_FATAL);
+				}
+				con->offset = offset;
+				con->size = fsize;
+				con->next = NULL;
+				if (file->contents.first == NULL)
+					file->contents.first = con;
+				else
+					file->contents.last->next = con;
+				file->contents.last = con;
+			}
+
+			// For each valid directory entry, add it to the archive structure.
+			// Handle memory allocation and error management for multi-extent file handling.
+			if (add_entry(archivereader, iso9660, file)!= ARCHIVE_OK)
+				return (ARCHIVE_FATAL);
+
+			// Handle Rockridge extensions.
+			if (iso9660->seenRockridge) {
+				a->archive.archive_format = ARCHIVE_FORMAT_ISO9660_ROCKRIDGE;
+				a->archive.archive_format_name = "ISO9660 with Rockridge extensions";
+			}
+
+			// Update the current position.
+			iso9660->entry_bytes_remaining = fsize;
+			iso9660->entry_sparse_offset = offset;
+
+			// Update the file information.
+			file->nlinks = 1; // Reset nlink.
+			file->subdirs++;
+
+			// Update the parent directory.
+			if (parent!= NULL && (flags & 0x02))
+				parent->subdirs++;
+
+			// Handle Rockridge extensions.
+			if (iso9660->seenRockridge) {
+				if (parent!= NULL && parent->parent == NULL && (flags & 0x02) && iso9660->rr_moved == NULL && file->name.s && (strcmp(file->name.s, "rr_moved") == 0 || strcmp(file->name.s, ".rr_moved") == 0)) {
+					iso9660->rr_moved = file;
+					file->rr_moved = 1;
+					file->rr_moved_has_re_only = 1;
+					file->re = 0;
+					parent->subdirs--;
+				} else if (file->re) {
+					// Sanity check: file's parent is rr_moved.
+					if (parent == NULL || parent->rr_moved == 0) {
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC, "Invalid Rockridge RE");
+						return (ARCHIVE_FATAL);
+					}
+					// Sanity check: file does not have "CL" extension.
+					if (file->cl_offset) {
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC, "Invalid Rockridge RE and CL");
+						return (ARCHIVE_FATAL);
+					}
+					// Sanity check: The file type must be a directory.
+					if ((flags & 0x02) == 0) {
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC, "Invalid Rockridge RE");
+						return (ARCHIVE_FATAL);
+					}
+				} else if (parent!= NULL && parent->rr_moved)
+					file->rr_moved_has_re_only = 0;
+				else if (parent!= NULL && (flags & 0x02) && (parent->re || parent->re_descendant))
+					file->re_descendant = 1;
+				if (file->cl_offset) {
+					struct file_info *r;
+
+					if (parent == NULL || parent->parent == NULL) {
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC, "Invalid Rockridge CL");
+						return (ARCHIVE_FATAL);
+					}
+					// Sanity check: The file type must be a regular file.
+					if ((flags & 0x02)!= 0) {
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC, "Invalid Rockridge CL");
+						return (ARCHIVE_FATAL);
+					}
+					parent->subdirs++;
+					// Overwrite an offset and a number of this "CL" entry
+					// to appear before other dirs. "+1" to those is to
+					// make sure to appear after "RE" entry which this
+					// "CL" entry should be connected with.
+					file->offset = file->number = file->cl_offset + 1;
+
+					// Sanity check: cl_offset does not point at its
+					// the parents or itself.
+					for (r = parent; r; r = r->parent) {
+						if (r->offset == file->cl_offset) {
+							archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC, "Invalid Rockridge CL");
+							return (ARCHIVE_FATAL);
+						}
+					}
+					if (file->cl_offset == file->offset || parent->rr_moved) {
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC, "Invalid Rockridge CL");
+						return (ARCHIVE_FATAL);
+					}
+				}
+			}
+
+			// Update the entry structure with information about this entry.
+			archive_entry_set_mode(entry, file->mode);
+			archive_entry_set_uid(entry, file->uid);
+			archive_entry_set_gid(entry, file->gid);
+			archive_entry_set_nlink(entry, file->nlinks);
+			if (file->birthtime_is_set)
+				archive_entry_set_birthtime(entry, file->birthtime, 0);
+			else
+				archive_entry_unset_birthtime(entry);
+			archive_entry_set_mtime(entry, file->mtime, 0);
+			archive_entry_set_ctime(entry, file->ctime, 0);
+			archive_entry_set_atime(entry, file->atime, 0);
+			// N.B.: Rock Ridge supports 64-bit device numbers.
+			archive_entry_set_rdev(entry, (dev_t)file->rdev);
+			archive_entry_set_size(entry, iso9660->entry_bytes_remaining);
+			if (file->symlink.s!= NULL)
+				archive_entry_copy_symlink(entry, file->symlink.s);
+
+			// Note: If the input isn't seekable, we can't rewind to
+			// return the same body again, so if the next entry refers to
+			// the same data, we have to return it as a hardlink to the
+			// original entry.
+			if (file->number!= -1 && file->number == iso9660->previous_number) {
+				if (iso9660->seenJoliet) {
+					r = archive_entry_copy_hardlink_l(entry, (const char *)iso9660->utf16be_previous_path, iso9660->utf16be_previous_path_len, iso9660->sconv_utf16be);
+					if (r!= 0) {
+						if (errno == ENOMEM) {
+							archive_set_error(&archivereader->archive, ENOMEM, "No memory for Linkname");
+							return (ARCHIVE_FATAL);
+						}
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_FILE_FORMAT, "Linkname cannot be converted from %s to current locale.", archive_string_conversion_charset_name(iso9660->sconv_utf16be));
+						rd_r = ARCHIVE_WARN;
+					}
+				} else
+					archive_entry_set_hardlink(entry, iso9660->previous_pathname.s);
+				archive_entry_unset_size(entry);
+				iso9660->entry_bytes_remaining = 0;
+				return (rd_r);
+			}
+
+			// Reset entry_bytes_remaining if the file is multi extent.
+			iso9660->entry_content = file->contents.first;
+			if (iso9660->entry_content!= NULL)
+				iso9660->entry_bytes_remaining = iso9660->entry_content->size;
+
+			// Set up the entry structure with information about this entry.
+			archive_entry_set_mode(entry, file->mode);
+			archive_entry_set_uid(entry, file->uid);
+			archive_entry_set_gid(entry, file->gid);
+			archive_entry_set_nlink(entry, file->nlinks);
+			if (file->birthtime_is_set)
+				archive_entry_set_birthtime(entry, file->birthtime, 0);
+			else
+				archive_entry_unset_birthtime(entry);
+			archive_entry_set_mtime(entry, file->mtime, 0);
+			archive_entry_set_ctime(entry, file->ctime, 0);
+			archive_entry_set_atime(entry, file->atime, 0);
+			// N.B.: Rock Ridge supports 64-bit device numbers.
+			archive_entry_set_rdev(entry, (dev_t)file->rdev);
+			archive_entry_set_size(entry, iso9660->entry_bytes_remaining);
+			if (file->symlink.s!= NULL)
+				archive_entry_copy_symlink(entry, file->symlink.s);
+
+			// Note: If the input isn't seekable, we can't rewind to
+			// return the same body again, so if the next entry refers to
+			// the same data, we have to return it as a hardlink to the
+			// original entry.
+			if (file->number!= -1 && file->number == iso9660->previous_number) {
+				if (iso9660->seenJoliet) {
+					r = archive_entry_copy_hardlink_l(entry, (const char *)iso9660->utf16be_previous_path, iso9660->utf16be_previous_path_len, iso9660->sconv_utf16be);
+					if (r!= 0) {
+						if (errno == ENOMEM) {
+							archive_set_error(&archivereader->archive, ENOMEM, "No memory for Linkname");
+							return (ARCHIVE_FATAL);
+						}
+						archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_FILE_FORMAT, "Linkname cannot be converted from %s to current locale.", archive_string_conversion_charset_name(iso9660->sconv_utf16be));
+						rd_r = ARC

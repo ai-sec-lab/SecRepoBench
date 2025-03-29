@@ -1,0 +1,262 @@
+struct ndpi_flow_info *get_ndpi_flow_info(struct ndpi_workflow * workflow,
+					   const u_int64_t time_ms,
+					   u_int16_t vlan_id,
+					   ndpi_packet_tunnel tunnel_type,
+					   const struct ndpi_iphdr *iph,
+					   struct ndpi_ipv6hdr *iph6,
+					   u_int16_t ip_offset,
+					   u_int16_t ipsize,
+					   u_int16_t l4_packet_len,
+					   u_int16_t l4_offset,
+					   struct ndpi_tcphdr **tcph,
+					   struct ndpi_udphdr **udph,
+					   u_int16_t *sport, u_int16_t *dport,
+					   u_int8_t *proto,
+					   u_int8_t **payload,
+					   u_int16_t *payload_len,
+					   u_int8_t *src_to_dst_direction,
+					   pkt_timeval when) {
+  struct ndpi_flow_info *flow = NULL;
+  void *ret;
+  const u_int8_t *l3, *l4;
+  u_int32_t l4_data_len = 0XFEEDFACE;
+
+  /*
+    Note: to keep things simple (ndpiReader is just a demo app)
+    we handle IPv6 a-la-IPv4.
+  */
+  if(version == IPVERSION) {
+    if(ipsize < 20)
+      return NULL;
+
+    if((iph->ihl * 4) > ipsize || ipsize < ntohs(iph->tot_len)
+       /* || (iph->frag_off & htons(0x1FFF)) != 0 */)
+      return NULL;
+
+    l3 = (const u_int8_t*)iph;
+  } else {
+    if(l4_offset > ipsize)
+      return NULL;
+
+    l3 = (const u_int8_t*)iph6;
+  }
+  if(ipsize < l4_offset + l4_packet_len)
+    return NULL;
+
+  *proto = iph->protocol;
+
+  if(l4_packet_len < 64)
+    workflow->stats.packet_len[0]++;
+  else if(l4_packet_len >= 64 && l4_packet_len < 128)
+    workflow->stats.packet_len[1]++;
+  else if(l4_packet_len >= 128 && l4_packet_len < 256)
+    workflow->stats.packet_len[2]++;
+  else if(l4_packet_len >= 256 && l4_packet_len < 1024)
+    workflow->stats.packet_len[3]++;
+  else if(l4_packet_len >= 1024 && l4_packet_len < 1500)
+    workflow->stats.packet_len[4]++;
+  else if(l4_packet_len >= 1500)
+    workflow->stats.packet_len[5]++;
+
+  if(l4_packet_len > workflow->stats.max_packet_len)
+    workflow->stats.max_packet_len = l4_packet_len;
+
+  l4 =& ((const u_int8_t *) l3)[l4_offset];
+
+  if(*proto == IPPROTO_TCP && l4_packet_len >= sizeof(struct ndpi_tcphdr)) {
+    u_int tcp_len;
+
+    // TCP
+    workflow->stats.tcp_count++;
+    *tcph = (struct ndpi_tcphdr *)l4;
+    *sport = ntohs((*tcph)->source), *dport = ntohs((*tcph)->dest);
+    tcp_len = ndpi_min(4*(*tcph)->doff, l4_packet_len);
+    *payload = (u_int8_t*)&l4[tcp_len];
+    *payload_len = ndpi_max(0, l4_packet_len-4*(*tcph)->doff);
+    l4_data_len = l4_packet_len - sizeof(struct ndpi_tcphdr);
+  } else if(*proto == IPPROTO_UDP && l4_packet_len >= sizeof(struct ndpi_udphdr)) {
+    // UDP
+    workflow->stats.udp_count++;
+    *udph = (struct ndpi_udphdr *)l4;
+    *sport = ntohs((*udph)->source), *dport = ntohs((*udph)->dest);
+    *payload = (u_int8_t*)&l4[sizeof(struct ndpi_udphdr)];
+    *payload_len = (l4_packet_len > sizeof(struct ndpi_udphdr)) ? l4_packet_len-sizeof(struct ndpi_udphdr) : 0;
+    l4_data_len = l4_packet_len - sizeof(struct ndpi_udphdr);
+  } else if(*proto == IPPROTO_ICMP) {
+    *payload = (u_int8_t*)&l4[sizeof(struct ndpi_icmphdr )];
+    *payload_len = (l4_packet_len > sizeof(struct ndpi_icmphdr)) ? l4_packet_len-sizeof(struct ndpi_icmphdr) : 0;
+    l4_data_len = l4_packet_len - sizeof(struct ndpi_icmphdr);
+  } else if(*proto == IPPROTO_ICMPV6) {
+    *payload = (u_int8_t*)&l4[sizeof(struct ndpi_icmp6hdr)];
+    *payload_len = (l4_packet_len > sizeof(struct ndpi_icmp6hdr)) ? l4_packet_len-sizeof(struct ndpi_icmp6hdr) : 0;
+    l4_data_len = l4_packet_len - sizeof(struct ndpi_icmp6hdr);
+  } else {
+    // non tcp/udp protocols
+    *sport = *dport = 0;
+    l4_data_len = 0;
+  }
+
+  *proto = iph->protocol;
+
+  if(l4_data_len < 0XFEEDFACE && workflow->prefs.decode_tunnels && (*proto == IPPROTO_UDP)) {
+    if(l4_offset + l4_data_len + sizeof(struct ndpi_udphdr) + 8 /* Minimum GTPv1 header len */ < ipsize) {
+      /* Check if it's GTPv1 */
+      u_int offset = l4_offset + l4_data_len + sizeof(struct ndpi_udphdr);
+      u_int8_t flags = l4[offset];
+      u_int8_t message_type = l4[offset+1];
+      u_int8_t exts_parsing_error = 0;
+
+      if((((flags & 0xE0) >> 5) == 1 /* GTPv1 */) &&
+         (message_type == 0xFF /* T-PDU */)) {
+
+        offset += 8; /* GTPv1 header len */
+        if(flags & 0x07)
+          offset += 4; /* sequence_number + pdu_number + next_ext_header fields */
+        /* Extensions parsing */
+        if(flags & 0x04) {
+          unsigned int ext_length = 0;
+
+          while(offset < ipsize) {
+            ext_length = l4[offset] << 2;
+            offset += ext_length;
+            if(offset >= ipsize || ext_length == 0) {
+              exts_parsing_error = 1;
+              break;
+            }
+            if(l4[offset - 1] == 0)
+              break;
+          }
+        }
+
+        if(offset < ipsize && !exts_parsing_error) {
+          /* Ok, valid GTP-U */
+          tunnel_type = ndpi_gtp_tunnel;
+          ip_offset = offset;
+          iph = (struct ndpi_iphdr *)&l4[ip_offset];
+          if(iph->version == 6) {
+            iph6 = (struct ndpi_ipv6hdr *)&l4[ip_offset];
+            iph = NULL;
+            if(ipsize < ip_offset + sizeof(struct ndpi_ipv6hdr))
+              return NULL;
+          } else if(iph->version != IPVERSION) {
+            // printf("WARNING: not good (packet_id=%u)!\n", (unsigned int)workflow->stats.raw_packet_count);
+            goto v4_warning;
+          } else {
+            if(ipsize < ip_offset + sizeof(struct ndpi_iphdr))
+              return NULL;
+          }
+        }
+      }
+    }
+  }
+
+  if(flow == NULL) {
+    u_int32_t orig_src_ip = flow->src_ip;
+    u_int16_t orig_src_port = flow->src_port;
+    u_int32_t orig_dst_ip = flow->dst_ip;
+    u_int16_t orig_dst_port = flow->dst_port;
+
+    flow = (struct ndpi_flow_info*)ndpi_malloc(sizeof(struct ndpi_flow_info));
+
+    if(flow == NULL) {
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+      /* Avoid too much logging while fuzzing */
+      LOG(NDPI_LOG_ERROR, "[NDPI] %s(1): not enough memory\n", __FUNCTION__);
+#endif
+      return(NULL);
+    } else
+      workflow->num_allocated_flows++;
+
+    memset(flow, 0, sizeof(struct ndpi_flow_info));
+    flow->flow_id = flow_id++;
+    flow->hashval = hashval;
+    flow->tunnel_type = tunnel_type;
+    flow->protocol = iph->protocol, flow->vlan_id = vlan_id;
+    flow->src_ip = iph->saddr, flow->dst_ip = iph->daddr;
+    flow->src_port = htons(*sport), flow->dst_port = htons(*dport);
+    flow->hashval = hashval;
+
+    if(version == IPVERSION) {
+      inet_ntop(AF_INET, &flow->src_ip, flow->src_name, sizeof(flow->src_name));
+      inet_ntop(AF_INET, &flow->dst_ip, flow->dst_name, sizeof(flow->dst_name));
+    } else {
+      flow->src_ip6 = *(struct ndpi_in6_addr *)&iph6->ip6_src;
+      inet_ntop(AF_INET6, &flow->src_ip6,
+                flow->src_name, sizeof(flow->src_name));
+      flow->dst_ip6 = *(struct ndpi_in6_addr *)&iph6->ip6_dst;
+      inet_ntop(AF_INET6, &flow->dst_ip6,
+                flow->dst_name, sizeof(flow->dst_name));
+      /* For consistency across platforms replace :0: with :: */
+      ndpi_patchIPv6Address(flow->src_name), ndpi_patchIPv6Address(flow->dst_name);
+    }
+
+    if((flow->ndpi_flow = ndpi_flow_malloc(SIZEOF_FLOW_STRUCT)) == NULL) {
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+      /* Avoid too much logging while fuzzing */
+      LOG(NDPI_LOG_ERROR, "[NDPI] %s(2): not enough memory\n", __FUNCTION__);
+#endif
+      ndpi_flow_info_free_data(flow);
+      ndpi_free(flow);
+      return(NULL);
+    } else
+      memset(flow->ndpi_flow, 0, SIZEOF_FLOW_STRUCT);
+
+    if (workflow->ndpi_serialization_format != ndpi_serialization_format_unknown)
+    {
+      if (ndpi_init_serializer(&flow->ndpi_flow_serializer,
+                               workflow->ndpi_serialization_format) != 0)
+      {
+        LOG(NDPI_LOG_ERROR, "ndpi serializer init failed\n");
+        ndpi_flow_info_free_data(flow);
+        ndpi_free(flow);
+        return(NULL);
+      }
+    }
+
+    if(ndpi_tsearch(flow, &workflow->ndpi_flows_root[idx], ndpi_workflow_node_cmp) == NULL) { /* Add */
+      ndpi_flow_info_free_data(flow);
+      ndpi_free(flow);
+      return(NULL);
+    }
+    workflow->stats.ndpi_flow_count++;
+    if(*proto == IPPROTO_TCP)
+      workflow->stats.flow_count[0]++;
+    else if(*proto == IPPROTO_UDP)
+      workflow->stats.flow_count[1]++;
+    else
+      workflow->stats.flow_count[2]++;
+
+    if(enable_flow_stats) {
+      flow->entropy = ndpi_calloc(1, sizeof(struct ndpi_entropy));
+      flow->last_entropy = ndpi_calloc(1, sizeof(struct ndpi_entropy));
+      flow->entropy->src2dst_pkt_len[flow->entropy->src2dst_pkt_count] = l4_data_len;
+      flow->entropy->src2dst_pkt_time[flow->entropy->src2dst_pkt_count] = when;
+      if(flow->entropy->src2dst_pkt_count == 0) {
+        flow->entropy->src2dst_start = when;
+      }
+      flow->entropy->src2dst_pkt_count++;
+      // Non zero app data.
+      if(l4_data_len != 0XFEEDFACE && l4_data_len != 0) {
+        flow->entropy->src2dst_opackets++;
+        flow->entropy->src2dst_l4_bytes += l4_data_len;
+      }
+    }
+  } else {
+    struct ndpi_flow_info *rflow = *(struct ndpi_flow_info**)ret;
+
+    if(is_changed) {
+      *src_to_dst_direction = 0, rflow->bidirectional |= 1;
+    }
+    else {
+      *src_to_dst_direction = 1;
+    }
+    if(enable_flow_stats) {
+      if(src_to_dst_direction) {
+        if(rflow->entropy->src2dst_pkt_count < max_num_packets_per_flow) {
+          rflow->entropy->src2dst_pkt_len[rflow->entropy->src2dst_pkt_count] = l4_data_len;
+          rflow->entropy->src2dst_pkt_time[rflow->entropy->src2dst_pkt_count] = when;
+          rflow->entropy->src2dst_l4_bytes += l4_data_len;
+          rflow->entropy->src2dst_pkt_count++;
+        }
+        // Non zero app data.
+        if(

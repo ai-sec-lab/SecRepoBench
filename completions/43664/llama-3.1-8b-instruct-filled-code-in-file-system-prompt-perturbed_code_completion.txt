@@ -1,0 +1,174 @@
+/* Process the TLS extensions in the client's "Client Hello" message.
+   For the "supported versions" extension, extract and store the supported TLS versions in the flow structure.
+   For the "encrypted server name" extension, extract and store the encrypted SNI details if present.
+   For the "QUIC transport parameters" extension, extract transport parameters and process the user agent if available.
+   Continue processing any additional extensions that are part of the Client Hello message.
+ */
+for (i = 0; i < ja3.client.num_tls_extension; i++) {
+  u_int16_t extension_id = ja3.client.tls_extension[i];
+  u_int32_t extension_len = 0;
+  u_int16_t extension_payload_offset = 0;
+
+  if (extension_id == 43 /* supported versions */) {
+    if (extension_len >= 2) {
+      u_int16_t tls_version = ntohs(*((u_int16_t*)&packet->payload[offset + 4]));
+
+#ifdef DEBUG_TLS
+      printf("Client TLS [TLS version: 0x%04X]\n", tls_version);
+#endif
+
+      flow->protos.tls_quic.ssl_version = ja3.server.tls_supported_version = tls_version;
+    }
+  } else if (extension_id == 16 /* application_layer_protocol_negotiation (ALPN) */) {
+    u_int16_t s_offset = offset + 4;
+    u_int16_t tot_alpn_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+    char alpn_str[256];
+    u_int8_t alpn_str_len = 0, i;
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [ALPN: block_len=%u/len=%u]\n", extension_len, tot_alpn_len);
+#endif
+    s_offset += 2;
+    tot_alpn_len += s_offset;
+
+    while (s_offset < tot_alpn_len && s_offset < total_len) {
+      u_int8_t alpn_i, alpn_len = packet->payload[s_offset++];
+
+      if ((s_offset + alpn_len) <= tot_alpn_len && (s_offset + alpn_len) <= total_len) {
+#ifdef DEBUG_TLS
+        printf("Client TLS [ALPN: %u]\n", alpn_len);
+#endif
+
+        if (((uint32_t)alpn_str_len + alpn_len + 1) < (sizeof(alpn_str) - 1)) {
+          if (alpn_str_len > 0) {
+            alpn_str[alpn_str_len] = ',';
+            alpn_str_len++;
+          }
+
+          for (alpn_i = 0; alpn_i < alpn_len; alpn_i++)
+            alpn_str[alpn_str_len + alpn_i] = packet->payload[s_offset + alpn_i];
+
+          s_offset += alpn_len, alpn_str_len += alpn_len;
+        } else
+          break;
+      } else
+        break;
+    } /* while */
+
+    alpn_str[alpn_str_len] = '\0';
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [ALPN: %s][len: %u]\n", alpn_str, alpn_str_len);
+#endif
+    if (flow->protos.tls_quic.alpn == NULL)
+      flow->protos.tls_quic.alpn = ndpi_strdup(alpn_str);
+
+    snprintf(ja3.client.alpn, sizeof(ja3.client.alpn), "%s", alpn_str);
+
+    /* Replace, with - as in JA3 */
+    for (i = 0; ja3.client.alpn[i]!= '\0'; i++)
+      if (ja3.client.alpn[i] == ',') ja3.client.alpn[i] = '-';
+  } else if (extension_id == 35 /* encrypted_server_name */) {
+    u_int16_t s_offset = offset + 4;
+    u_int16_t tot_esni_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+    char esni_str[256];
+    u_int8_t esni_str_len = 0, i;
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [ESNI: block_len=%u/len=%u]\n", extension_len, tot_esni_len);
+#endif
+    s_offset += 2;
+    tot_esni_len += s_offset;
+
+    while (s_offset < tot_esni_len && s_offset < total_len) {
+      u_int8_t esni_i, esni_len = packet->payload[s_offset++];
+
+      if ((s_offset + esni_len) <= tot_esni_len && (s_offset + esni_len) <= total_len) {
+#ifdef DEBUG_TLS
+        printf("Client TLS [ESNI: %u]\n", esni_len);
+#endif
+
+        if (((uint32_t)esni_str_len + esni_len + 1) < (sizeof(esni_str) - 1)) {
+          if (esni_str_len > 0) {
+            esni_str[esni_str_len] = ',';
+            esni_str_len++;
+          }
+
+          for (esni_i = 0; esni_i < esni_len; esni_i++)
+            esni_str[esni_str_len + esni_i] = packet->payload[s_offset + esni_i];
+
+          s_offset += esni_len, esni_str_len += esni_len;
+        } else
+          break;
+      } else
+        break;
+    } /* while */
+
+    esni_str[esni_str_len] = '\0';
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [ESNI: %s][len: %u]\n", esni_str, esni_str_len);
+#endif
+    if (flow->protos.tls_quic.encrypted_sni.esni == NULL)
+      flow->protos.tls_quic.encrypted_sni.esni = ndpi_strdup(esni_str);
+
+    flow->protos.tls_quic.encrypted_sni.esni_len = esni_str_len;
+  } else if (extension_id == 45 /* QUIC transport parameters */) {
+    u_int16_t s_offset = offset + 4;
+    u_int16_t tot_quic_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+    char quic_str[256];
+    u_int8_t quic_str_len = 0, i;
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [QUIC: block_len=%u/len=%u]\n", extension_len, tot_quic_len);
+#endif
+    s_offset += 2;
+    tot_quic_len += s_offset;
+
+    while (s_offset < tot_quic_len && s_offset < total_len) {
+      u_int8_t quic_i, quic_len = packet->payload[s_offset++];
+
+      if ((s_offset + quic_len) <= tot_quic_len && (s_offset + quic_len) <= total_len) {
+#ifdef DEBUG_TLS
+        printf("Client TLS [QUIC: %u]\n", quic_len);
+#endif
+
+        if (((uint32_t)quic_str_len + quic_len + 1) < (sizeof(quic_str) - 1)) {
+          if (quic_str_len > 0) {
+            quic_str[quic_str_len] = ',';
+            quic_str_len++;
+          }
+
+          for (quic_i = 0; quic_i < quic_len; quic_i++)
+            quic_str[quic_str_len + quic_i] = packet->payload[s_offset + quic_i];
+
+          s_offset += quic_len, quic_str_len += quic_len;
+        } else
+          break;
+      } else
+        break;
+    } /* while */
+
+    quic_str[quic_str_len] = '\0';
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [QUIC: %s][len: %u]\n", quic_str, quic_str_len);
+#endif
+    if (flow->protos.tls_quic.quic_params == NULL)
+      flow->protos.tls_quic.quic_params = ndpi_strdup(quic_str);
+
+    flow->protos.tls_quic.quic_params_len = quic_str_len;
+  } else {
+    /* Process the TLS extensions in the client's "Client Hello" message.
+       For the "supported versions" extension, extract and store the supported TLS versions in the flow structure.
+       For the "encrypted server name" extension, extract and store the encrypted SNI details if present.
+       For the "QUIC transport parameters" extension, extract transport parameters and process the user agent if available.
+       Continue processing any additional extensions that are part of the Client Hello message.
+     */
+    // <MASK>
+    // Process the TLS extensions in the client's "Client Hello" message.
+    // For the "supported versions" extension, extract and store the supported TLS versions in the flow structure.
+    // For the "encrypted server name" extension, extract and store the encrypted SNI details if present.
+    // For the "QUIC transport parameters" extension, extract transport parameters and process the user agent if available.
+    // Continue processing any additional extensions that are part of the Client Hello message.
+  }

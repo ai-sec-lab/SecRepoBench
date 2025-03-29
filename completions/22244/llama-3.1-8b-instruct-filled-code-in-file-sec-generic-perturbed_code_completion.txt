@@ -1,0 +1,66 @@
+void ndpi_search_openvpn(struct ndpi_detection_module_struct* ndpi_struct,
+                         struct ndpi_flow_struct* flow) {
+  struct ndpi_packet_struct* packet = &flow->packet;
+  const u_int8_t * ovpn_payload = packet->payload;
+  const u_int8_t * session_remote;
+  u_int8_t operationcode;
+  u_int8_t alen;
+  int8_t hmac_size;
+  int8_t failed = 0;
+  /* No u_ */
+
+  // Analyze the packet payload to determine if it might be an OpenVPN packet.
+  // If the payload length is sufficient, adjust the payload pointer if it's over TCP.
+  if (packet->payload_len >= 16) {
+    if (packet->direction == NDPI_DIRECTION_OUTGOING) {
+      ovpn_payload = packet->payload + 16;
+    } else {
+      ovpn_payload = packet->payload;
+    }
+  }
+
+  // Extract the operation code from the payload
+  operationcode = ovpn_payload[0] >> 3;
+
+  // Perform additional checks if the packet is over UDP
+  if (packet->protocol == IPPROTO_UDP) {
+    // Check if the first packet in the flow matches specific length and operation code criteria
+    if (packet->packet_cnt == 1 && packet->payload_len == 16 && operationcode == P_CONTROL_HARD_RESET_CLIENT_V1) {
+      // Identify it as OpenVPN
+      ndpi_add_protocol_to_flow(flow, NDPI_PROTOCOL_OPENVPN);
+      return;
+    }
+
+    // Check if the flow's OpenVPN counter is below a threshold and the operation code indicates a client reset
+    if (flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT && (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+      // Attempt to extract and store the session ID from the payload
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if (hmac_size!= -1) {
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(hmac_size);
+        flow->openvpn_session_id = ntohl(*(u_int32_t*)session_remote);
+        flow->openvpn_counter++;
+      }
+    }
+
+    // Check if the counter is within a range and the operation code indicates a server reset
+    if (flow->openvpn_counter >= P_HARD_RESET_CLIENT_MAX_COUNT && (operationcode == P_CONTROL_HARD_RESET_SERVER_V1 || operationcode == P_CONTROL_HARD_RESET_SERVER_V2)) {
+      // Verify the session ID matches
+      if (flow->openvpn_session_id == ntohl(*(u_int32_t*)(ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(hmac_size)))) {
+        // Identify the protocol as OpenVPN
+        ndpi_add_protocol_to_flow(flow, NDPI_PROTOCOL_OPENVPN);
+      } else {
+        // Mark the attempt as failed
+        failed = 1;
+      }
+      flow->openvpn_counter++;
+    }
+  }
+
+  // Increment the flow's OpenVPN counter after processing
+  flow->openvpn_counter++;
+
+  // If the detection attempt fails, exclude the protocol from the flow's possible protocols
+  if (failed) {
+    ndpi_remove_protocol_from_flow(flow, NDPI_PROTOCOL_OPENVPN);
+  }
+}
