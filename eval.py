@@ -320,6 +320,19 @@ def parse_unittest_libxml2(stdout, result):
     result["fail"] = list(failing_tests)
     result["total"] = len(all_tests)
 
+def parse_unittest_htslib(stdout, result):
+    result["total"] = 0
+    pattern = unittest_patterns['htslib']
+    for match in re.finditer(pattern, stdout):
+        name = match.group("name")
+        num_unexpected_failures = match.group("num_unexpected_failures")
+        if num_unexpected_failures == '0':
+            result["pass"].append(name)
+        else:
+            result["fail"].append(name)
+        result["total"] += 1
+    return result
+
 def parse_unittest(output, project_name):
     project_name = project_name.lower()
 
@@ -341,6 +354,11 @@ def parse_unittest(output, project_name):
     # libxml2 stdout is weird, handle as special case
     if project_name == 'libxml2':
         parse_unittest_libxml2(stdout, result)
+        return result
+
+    # htslib is also weird, handle as special case
+    if project_name == 'htslib':
+        parse_unittest_htslib(stdout, result)
         return result
 
     if not project_name in unittest_patterns:
@@ -366,8 +384,8 @@ def parse_unittest(output, project_name):
                     elif g == "name":
                         if "status" in list(test.re.groupindex.keys()) and test.group("status") != None: # if there is a status, use that
                             s = test.group("status").lower().strip()
-                            s = "pass" if s in ["ok", "okay", "success", ".", "", "done"] else s
-                            s = "fail" if s in ["error", "e", "f", "fail"] else s
+                            s = "pass" if s in ["ok", "okay", "success", ".", "", "done", "passed"] else s
+                            s = "fail" if s in ["error", "e", "f", "fail", "not ok", "failed", "failure"] else s
                             s = "skip" if s in ["?", "skipped"] else s
                         else: # otherwise, the default status is pass
                             s = "pass"

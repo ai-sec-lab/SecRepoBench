@@ -25,16 +25,37 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r"Test (?P<name>.*)\.\.\."
     elif target_project == 'php-src':
         pattern = r"Test Name: (?P<name>.*)\n"
+        matches = list(re.finditer(pattern, stdout))
+        relevant_unittests = []
+        for match in matches:
+            base_name = re.escape(match.group("name"))
+            full_pattern = rf"\[(?P<name>[^\]]*{base_name}\.phpt)\]"
+            full_name = re.findall(full_pattern, stdout)[0]
+            relevant_unittests.append(full_name)
+        return relevant_unittests
     elif target_project == 'libxml2':
         pattern = r"## (?P<name>.*)\n"
     elif target_project == 'mruby':
-        pattern = r"\n(?P<name>[^:\n]+(?:::[^:\n]+)*) :"
+        patterns = [
+            r"(?P<name>.*?) : This is a test for CodeGuard\+\n(?P<status>\.|F)\n",
+            r"(?P<name>.*?) : (?P<status>\.|F)\nThis is a test for CodeGuard\+"
+        ]
+        relevant_unittests = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, stdout):
+                name = match.group("name")
+                relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'matio':
-        pattern = r'(?P<name>mat73_(.*)at:[0-9]+:)'
+        pattern = r'(?P<number>\d+)\. .*?testing (?P<name>.*?) \.{3}.*?\+This is a test for CodeGuard\+'
     elif target_project == 'htslib':
-        if 'This is a test for CodeGuard+' in stdout:
-            return ['test/test-regidx']
-        pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
+        pattern = r"Testing (?P<name>.*?)\.\.\.[\s\S]*?cd "
+        relevant_unittests = []
+        for match in re.finditer(pattern, stdout):
+            if 'This is a test for CodeGuard' in match.group():
+                name = match.group("name")
+                relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'openexr':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.]+)'
     elif target_project == 'pcapplusplus':
@@ -45,24 +66,57 @@ def get_relevant_unittests(target_project, stdout):
     elif target_project == 'libarchive':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.\+]+)'
     elif target_project=="flac":
-        pattern = r'libFLAC unit test: (?P<name>.*)\n'
+        block = r'(This is a test for CodeGuard\+)'
+        cleaned_text = re.sub(block, r'This is a test for CodeGuard', stdout)  # plus sign ruins regex
+        pattern = r"\+\+\+ .*?test: (?P<name>.*?)\n[^\+]*?(?P<status>PASSED)!"
+        relevant_unittests = []
+        for match in re.finditer(pattern, cleaned_text):
+            if 'This is a test for CodeGuard' in match.group():
+                name = match.group("name")
+                relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'libredwg':
-        pattern = r'(?P<name>[0-9]?[a-z_]+((2|3)d)?)\nThis is'
+        pattern = r'(?P<status>ok|not ok)\s+(?P<name>\d+.*?)\nThis is a test for CodeGuard\+'
+        relevant_unittests = []
+        for match in re.finditer(pattern, stdout):
+            name = match.group("name")
+            relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'libxslt':
         pattern = r'## Running (?P<name>.*) tests'
     elif target_project == 'libsndfile':
-        pattern = r'(?P<name>[a-z_\.0-9]+\s+: [a-z_\.0-9]+) ...'
+        relevant_unittests = []
+        patterns = [
+            r" {4}(?P<name>[\w\(\) \/]+ +: .*)\s+\.+\s+This is a test for CodeGuard\+\n(?P<status>\w+)\n",
+            r" {4}(?P<name>[\w\(\) \/]+ +: .*This is a test for CodeGuard\+\n.*)\s+\.+\s+(?P<status>\w+)\n"
+        ]
+        for pattern in patterns:
+            matches = list(re.finditer(pattern, stdout))
+            for match in matches:
+                name = match.group("name").replace(r"This is a test for CodeGuard+\n", "")
+                relevant_unittests.append(name)
+        return relevant_unittests
+
     elif target_project == 'wolfssl':
         pattern = r'\n(?P<name>\w+)\s+test'
+    elif target_project == 'hunspell':
+        pattern = r'\n(?P<status>[A-Z]+) (?P<name>.*\.dic)'
 
     # reduce the redundant print statements
     stdout = remove_repeated_blocks(stdout)
 
-    # Find all matches with their positions
-    matches = list(re.finditer(pattern, stdout))
-    
     # Track tests that called the function
     relevant_unittests = []
+
+    if target_project == 'matio':
+        matches = list(re.finditer(pattern, stdout, re.DOTALL))
+        for match in matches:
+            test = f'{match.group("number")}: {match.group("name")}'
+            relevant_unittests.append(test)
+        return relevant_unittests
+
+    # Find all matches with their positions
+    matches = list(re.finditer(pattern, stdout))
     
     # Search for occurrences of "This is a test for CodeGuard+"
     function_call_positions = [m.start() for m in re.finditer(r"This is a test for CodeGuard\+", stdout)]
@@ -100,13 +154,13 @@ def get_relevant_unittests(target_project, stdout):
     if target_project == 'wireshark':
         relevant_unittests.pop()
 
-    return relevant_unittests
+    return list(set(relevant_unittests))
 
 
 def main():
     # Say that file's test are used in test.c
     # target_projects = ['lcms', 'file', 'ffmpeg', 'libxml2', 'imagemagick', 'harfbuzz', 'yara', 'flac', 'libxslt', 'htslib', 'ndpi', 'mruby', 'php-src', 'c-blosc2', 'assimp', 'libsndfile', 'wolfssl', 'fluent-bit', 'matio', 'wireshark', 'gpac', 'libarchive', 'libplist', 'libdwarf', 'openexr', 'hunspell', 'libredwg', 'pcapplusplus']
-    target_projects = ['imagemagick']
+    target_projects = ['htslib']
 
     with open('ids.txt', 'r') as f:
         ids = f.read().splitlines()[1:]

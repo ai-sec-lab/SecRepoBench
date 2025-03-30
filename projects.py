@@ -176,7 +176,6 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
   else\n\
     echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
   fi\n",
-    #"libredwg":"",
     "exiv2":"arvo compile && cd build && ctest ../unitTests/ -E bugfixTests",
     "c-blosc2":"cmake . -DBUILD_FUZZERS=OFF && make clean && make && ctest\n\
   LOG_FILE=\\\"/src/c-blosc2/Testing/Temporary/LastTest.log\\\"\n\
@@ -327,7 +326,6 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
 _default_pattern = r"\n(?P<status>[A-Z]+): (?P<name>.*)"
 _ctest_pattern = r"\d+/\d+\s*Test\s*#\d+:\s(?P<name>\S*)(?P<status>.+)"
 _google_test_pattern = r"\[ RUN\s*\]\s(?P<name>.*)[\s\S]*?\[\s*(?P<status>.*) \]"
-_matio_ovs_pattern = r"\n\s*\d+:\s*(?P<name>.*)\s*(?P<status>ok|skipped|FAILED)"
 unittest_patterns = {
     "libexif":_default_pattern,
     "ndpi":r"\n(?P<name>\S+\.\S+)\s+(?P<status>OK|FAIL|ERROR|SKIPPED)",
@@ -341,21 +339,26 @@ unittest_patterns = {
     "openexr":_ctest_pattern,
     "libxml2":r"(?:(?:Total(?::)?\s(?:\d+\sfunctions,\s)?(?P<total>\d+)\stests,\s(?:\d+|no)\serrors)|(?:(?P<name>\S+)\s(?P<status>failed)))",
     "gpac":r"\n(?P<name>[\S]*?):\s?(?P<status>.*?(Fail|OK))",
-    "matio":_matio_ovs_pattern,
-    "htslib":r"(?P<name>.*?:(\d+-\d+)?)(?: |\n *[\s\S]*?)\.\. (?P<status>[A-z]+)",
-    "mruby":r"(?P<name>.*?) : (?P<status>.)", # TODO record the specific failed tests
+    "matio":r"\n\s*(?P<name>\d+: .*?\S)\s+(?P<status>ok|FAILED|skipped)\b",
+    "htslib":r"Testing (?P<name>.*?)\.\.\.[\s\S]*?Unexpected failures: (?P<num_unexpected_failures>\d+)\n",  # different, counts failures in groups
+    "mruby":r"(?P<name>.*?) : (?P<status>\.|F)\n",
     "libarchive":_ctest_pattern,
     "libdwarf":_ctest_pattern,
-    "libsndfile":r"\n\s+(?P<name>.*)\s+:\s(?:(?:\S* )*(\.*\s)*(?P<status>.*))", # TODO
+    "libsndfile":[
+        r" {4}(?P<name>[\w \/]+?)\s*:\s*(?P<status>\w+)\n",
+        r" {4}(?P<name>\w+)\s+:\s+\.+\s+(?P<status>\w+)\n",
+        r" {4}(?P<name>[\w ]+ : \w+\.\w+)\s+(?P<status>\w+)\n",
+        r" {4}(?P<name>[\w\(\) \/]+ +: .*) : (?P<status>\w+)\n",
+        r" {4}(?P<name>[\w\(\) \/]+ +: .*)\s+\.+\s+(?P<status>\w+)\n",
+    ],
     "file":r"\nRunning test:\s(?P<name>.*)(?:[\s\S]*?)(?=\nRunning test|make|(?P<status>test:\s.*))",
     "assimp":_google_test_pattern,
     "ots":r"\d\/\d\s(?P<name>\S*)\s+(?P<status>\S*)",
     "c-blosc2":_ctest_pattern,
     "exiv2":_ctest_pattern,
     "open62541":_ctest_pattern,
-    "pcapplusplus":r"(?P<name>\w+)\s*:\s*(?P<status>\w+)",
+    "pcapplusplus":r"(?P<name>\w+)\s+: (?P<status>PASSED|FAILED)\s",
     "libplist":_default_pattern,
-    #"libredwg":r".*",
     "libass":r"\[\s*RUN\s*\]\s(?P<name>.*)[\s\S]*?(?P<status>OK|Error)",
     #"selinux":r".*",
     #"uwebsockets":r".*",
@@ -369,11 +372,11 @@ unittest_patterns = {
     "libssh2":_default_pattern,
     "fribidi":_default_pattern,
     "espeak-ng":r"testing\s(?P<name>.*)(?P<status>[\s\S]*?)(?=testing|make: Target 'check')",
-    "wolfssl":_default_pattern,
+    "wolfssl":r"\n(?P<name>[ \w-]+)\b\s+test (?P<status>\w+)",
     "coturn":r"(?P<name>.*)\s?:\s?(?P<status>.*)",
     "hiredis":r"#\d+\s(?P<name>.*): ?(?P<status>.*)",
     "jbig2dec":_default_pattern,
-    "wireshark":_ctest_pattern,
+    "wireshark":r"\n(?P<name>test_[^\s]*)\s+\([^)]*\)[\s\S]*?\.{3}\s+[\s\S]*?\b(?P<status>ok|FAIL|skipped)\b",
     "jsoncpp":r"Testing\s(?P<name>.*):\s(?P<status>.*)",
     #"uwebsockets":r"", # TODO add parser
     #"gdal":"",
@@ -381,7 +384,7 @@ unittest_patterns = {
     "binutils-gdb":_default_pattern,
     "librawspeed":_ctest_pattern,
     "openthread":_default_pattern,
-    "fluent-bit":_ctest_pattern,
+    "fluent-bit":r"\nTest (?P<name>.+?)\.{3}[\s\S]+?\[ (?P<status>\w+) \]",
     "libjxl": _google_test_pattern,
     "libvips": _default_pattern,
     "spice-usbredir": r"\d\/\d\s(?P<name>\S*)\s+(?P<status>\S*)",
@@ -394,20 +397,17 @@ unittest_patterns = {
     "selinux":r"Test:\s(?P<name>\S*)\s.*\.\n?(?P<status>.+)", 
     "lcms":r"Checking (?P<name>.*) \.+(?P<status>[A-z]+)", 
     #"leptonica":"", 
-    "openvswitch":_matio_ovs_pattern, 
-    "php-src":r"[\r\n](?P<status>PASS|FAIL|SKIP).*?\[(?P<name>[^\]]+)\]",
-    "flac":r"\n(?P<name>(testing |(\S+ )+test ?|case|Testing |Test )(.*\.\.\. (\+\n|\n|))+)(?P<status>[A-Z]*)(?=\n)", # this pattern needs to be extensively tested
+    "openvswitch":r"\n\s*\d+:\s*(?P<name>.*)\s*(?P<status>ok|skipped|FAILED)", 
+    "php-src":r"[\r\n](?P<status>PASS|FAIL|SKIP).*?\[(?P<name>[^\]]+)\] (?:\n|reason:)",
+    "flac":r"\+\+\+ .*?test: (?P<name>.*?)\n[^\+]*?(?P<status>PASSED)!", # if a test fails, it won't be included at all (not even in failing), unsure what failing test looks like
     "harfbuzz":_default_pattern,
     "aom":_google_test_pattern,
-    "libredwg" : r"(?P<status>ok|fail) (?P<name>[0-9]+)",
+    "libredwg" : r"(?P<status>ok|not ok)\s+(?P<name>\d+.*?)\n",
     #"lwan":r"",
-
-    
 }
 
 bad_projects = [
     "ghostpdl", # cannot test
-    # "libredwg", # build issues
     "serenity", # build issues
     "mupdf", # cannot test
     "libreoffice", # build issues
