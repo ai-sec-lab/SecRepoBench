@@ -1,0 +1,300 @@
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   F x E v a l u a t e C h a n n e l E x p r e s s i o n                   %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  FxEvaluateChannelExpression() evaluates an expression and returns the
+%  results.
+%
+%  The format of the FxEvaluateExpression method is:
+%
+%      double FxEvaluateChannelExpression(FxInfo *fx_info,
+%        const PixelChannel channel,const ssize_t x,const ssize_t y,
+%        double *alpha,Exceptioninfo *exception)
+%      double FxEvaluateExpression(FxInfo *fx_info,
+%        double *alpha,Exceptioninfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o fx_info: the fx info.
+%
+%    o channel: the channel type.
+%
+%    o x, y: the pixel position.
+%
+%    o alpha: the result.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+
+static double FxChannelStatistics(FxInfo *fx_info, Image *image,
+  PixelChannel channel, const char *symbol, ExceptionInfo *exception)
+{
+  ChannelType
+    channel_mask;
+
+  char
+    key[MagickPathExtent],
+    statistic[MagickPathExtent];
+
+  const char
+    *value;
+
+  register ssize_t
+    i;
+
+  channel_mask = UndefinedChannel;
+  for (i = 0; i < (ssize_t) GetPixelChannels(image); i++)
+  {
+    PixelChannel c = (PixelChannel) i;
+    if (GetPixelChannelChannel(image, c) == channel)
+    {
+      channel_mask = SetPixelChannelMask(image, (ChannelType) (1 << c));
+      break;
+    }
+  }
+  if (channel_mask == UndefinedChannel)
+    return 0.0; // Symbol not found
+
+  snprintf(key, sizeof(key), "%p.%.20g.%s", (void *) image, (double) channel, symbol);
+  value = (const char *) GetValueFromSplayTree(fx_info->symbols, key);
+  if (value != (const char *) NULL)
+  {
+    if (channel_mask != UndefinedChannel)
+      (void) SetPixelChannelMask(image, channel_mask);
+    return QuantumScale * StringToDouble(value, (char **) NULL);
+  }
+  (void) DeleteNodeFromSplayTree(fx_info->symbols, key);
+
+  if (LocaleNCompare(symbol, "depth", 5) == 0)
+  {
+    size_t depth = GetImageDepth(image, exception);
+    snprintf(statistic, sizeof(statistic), "%.20g", (double) depth);
+  }
+  else if (LocaleNCompare(symbol, "kurtosis", 8) == 0)
+  {
+    double kurtosis, skewness;
+    GetImageKurtosis(image, &kurtosis, &skewness, exception);
+    snprintf(statistic, sizeof(statistic), "%.20g", kurtosis);
+  }
+  else if (LocaleNCompare(symbol, "maxima", 6) == 0)
+  {
+    double maxima, minima;
+    GetImageRange(image, &minima, &maxima, exception);
+    snprintf(statistic, sizeof(statistic), "%.20g", maxima);
+  }
+  else if (LocaleNCompare(symbol, "mean", 4) == 0)
+  {
+    double mean, standard_deviation;
+    GetImageMean(image, &mean, &standard_deviation, exception);
+    snprintf(statistic, sizeof(statistic), "%.20g", mean);
+  }
+  else if (LocaleNCompare(symbol, "minima", 6) == 0)
+  {
+    double maxima, minima;
+    GetImageRange(image, &minima, &maxima, exception);
+    snprintf(statistic, sizeof(statistic), "%.20g", minima);
+  }
+  else if (LocaleNCompare(symbol, "skewness", 8) == 0)
+  {
+    double kurtosis, skewness;
+    GetImageKurtosis(image, &kurtosis, &skewness, exception);
+    snprintf(statistic, sizeof(statistic), "%.20g", skewness);
+  }
+  else if (LocaleNCompare(symbol, "standard_deviation", 18) == 0)
+  {
+    double mean, standard_deviation;
+    GetImageMean(image, &mean, &standard_deviation, exception);
+    snprintf(statistic, sizeof(statistic), "%.20g", standard_deviation);
+  }
+  else
+  {
+    // Default case, return 0.0 if symbol not recognized
+    return 0.0;
+  }
+
+  (void) AddValueToSplayTree(fx_info->symbols, ConstantString(key), ConstantString(statistic));
+  return QuantumScale * StringToDouble(statistic, (char **) NULL);
+}
+
+static double
+  FxEvaluateSubexpression(FxInfo *fx_info,
+    const PixelChannel channel, const ssize_t x, const ssize_t y,
+    const char *expression, size_t *recursion_depth, double *beta, ExceptionInfo *exception)
+{
+#define FxMaxParenthesisDepth  58
+#define FxResult(x) \
+{ \
+  subexpression = DestroyString(subexpression); \
+  return (x); \
+}
+
+  char
+    *q,
+    *subexpression;
+
+  double
+    alpha,
+    gamma;
+
+  register const char
+    *p;
+
+  *beta = 0.0;
+  subexpression = AcquireString((const char *) NULL);
+  if (*recursion_depth > MagickMaxRecursionDepth)
+  {
+    (void) ThrowMagickException(exception, GetMagickModule(), OptionError,
+      "UnableToParseExpression", "`%s'", expression);
+    FxResult(0.0);
+  }
+  if (exception->severity >= ErrorException)
+    FxResult(0.0);
+  while (isspace((int) ((unsigned char) *expression)) != 0)
+    expression++;
+  if (*expression == '\0')
+    FxResult(0.0);
+  *subexpression = '\0';
+  p = FxOperatorPrecedence(expression, exception);
+  if (p != (const char *) NULL)
+  {
+    (void) CopyMagickString(subexpression, expression, (size_t) (p - expression + 1));
+    alpha = FxEvaluateSubexpression(fx_info, channel, x, y, subexpression, recursion_depth,
+      beta, exception);
+    switch ((unsigned char) *p)
+    {
+      case '~':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        *beta = (double) (~(size_t) *beta);
+        FxResult(*beta);
+      }
+      case '^':
+      {
+        *beta = pow(alpha, FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth,
+          beta, exception));
+        FxResult(*beta);
+      }
+      case '*':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(alpha * (*beta));
+      }
+      case '/':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        if (*beta == 0.0)
+        {
+          (void) ThrowMagickException(exception, GetMagickModule(), OptionError,
+            "DivideByZero", "`%s'", expression);
+          FxResult(0.0);
+        }
+        FxResult(alpha / (*beta));
+      }
+      case '+':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(alpha + (*beta));
+      }
+      case '-':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(alpha - (*beta));
+      }
+      case '<':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(alpha < *beta ? 1.0 : 0.0);
+      }
+      case '<=':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(alpha <= *beta ? 1.0 : 0.0);
+      }
+      case '>':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(alpha > *beta ? 1.0 : 0.0);
+      }
+      case '>=':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(alpha >= *beta ? 1.0 : 0.0);
+      }
+      case '==':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(fabs(alpha - (*beta)) < MagickEpsilon ? 1.0 : 0.0);
+      }
+      case '!=':
+      {
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        FxResult(fabs(alpha - (*beta)) >= MagickEpsilon ? 1.0 : 0.0);
+      }
+      case '&':
+      {
+        gamma = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        *beta = (double) ((size_t) (alpha + 0.5) & (size_t) (gamma + 0.5));
+        FxResult(*beta);
+      }
+      case '|':
+      {
+        gamma = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception);
+        *beta = (double) ((size_t) (alpha + 0.5) | (size_t) (gamma + 0.5));
+        FxResult(*beta);
+      }
+      case '?':
+      {
+        char *subexpression_temp = subexpression;
+        subexpression = &subexpression[1];
+        q = subexpression;
+        p = StringToken(":", &q);
+        if (q == NULL)
+        {
+          (void) ThrowMagickException(exception, GetMagickModule(), OptionError,
+            "UnableToParseExpression", "`%s'", subexpression_temp);
+          FxResult(0.0);
+        }
+        if (fabs(alpha) >= MagickEpsilon)
+          gamma = FxEvaluateSubexpression(fx_info, channel, x, y, q, recursion_depth, beta,
+            exception);
+        else
+          gamma = FxEvaluateSubexpression(fx_info, channel, x, y, subexpression, recursion_depth, beta,
+            exception);
+        FxResult(gamma);
+      }
+      case '=':
+      {
+        char numeric[MagickPathExtent];
+        q = subexpression;
+        while (isalpha((int) ((unsigned char) *q)) != 0)
+          q++;
+        if (*q != '\0')
+        {
+          (void) ThrowMagickException(exception, GetMagickModule(), OptionError,
+            "UnableToParseExpression", "`%s'", subexpression);
+          FxResult(0.0);
+        }
+        ClearMagickException(exception);
+        *beta = FxEvaluateSubexpression(fx_info, channel, x, y, ++p, recursion_depth, beta,
+          exception)
