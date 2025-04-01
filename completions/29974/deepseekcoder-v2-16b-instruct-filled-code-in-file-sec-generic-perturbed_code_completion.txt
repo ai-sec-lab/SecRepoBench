@@ -1,0 +1,211 @@
+int offset _U_, int length _U_, tvbuff_t *tvb, int string_len _U_)
+{
+    struct tcp_analysis *tcpd = (struct tcp_analysis *)data;
+    guint32 magic_number = 0;
+    guint32 version = 0;
+    guint32 data_len = 0;
+
+    if (length < EXP_PDU_TCP_INFO_DATA_LEN)
+        return -1;
+
+    magic_number = tvb_get_letohl(tvb, offset);
+    version = tvb_get_letohl(tvb, offset + 4);
+    data_len = tvb_get_letohl(tvb, offset + 8);
+
+    if (magic_number != 0x12345678 || version != EXP_PDU_TCP_INFO_VERSION)
+        return -1;
+
+    tcpd->exp_pdu_data_len = data_len;
+
+    return EXP_PDU_TCP_INFO_DATA_LEN;
+}
+
+static int exp_pdu_tcp_dissector_data_populate_tvb(packet_info *pinfo _U_, void* data, int offset _U_, int string_len _U_, tvbuff_t *tvb)
+{
+    struct tcp_analysis *tcpd = (struct tcp_analysis *)data;
+    guint32 magic_number = 0x12345678;
+    guint32 version = EXP_PDU_TCP_INFO_VERSION;
+    guint32 data_len = tcpd->exp_pdu_data_len;
+
+    tvb_put_letohl(tvb, offset, magic_number);
+    tvb_put_letohl(tvb, offset + 4, version);
+    tvb_put_letohl(tvb, offset + 8, data_len);
+
+    return EXP_PDU_TCP_INFO_DATA_LEN;
+}
+
+static void
+tcp_dissect_options(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, int offset, int length, int *next_offset, int *tcp_header_len)
+{
+    int option_kind;
+    int option_len;
+    int remaining_len;
+    int i;
+
+    remaining_len = length;
+
+    while (remaining_len > 0) {
+        if (remaining_len < 2) {
+            /* Malformed option */
+            expert_add_info_format(pinfo, tvb, *next_offset, &ei_tcp_suboption_malformed,
+                                   EI_ERROR, "Malformed TCP option (kind %d, length %d)",
+                                   option_kind, option_len);
+            break;
+        }
+
+        option_kind = tvb_get_guint8(tvb, offset);
+        option_len = tvb_get_guint8(tvb, offset + 1);
+
+        if (option_len < 2) {
+            /* Malformed option */
+            expert_add_info_format(pinfo, tvb, offset, &ei_tcp_suboption_malformed,
+                                   EI_ERROR, "Malformed TCP option (kind %d, length %d)",
+                                   option_kind, option_len);
+            break;
+        }
+
+        if (option_len > remaining_len) {
+            /* Malformed option */
+            expert_add_info_format(pinfo, tvb, offset, &ei_tcp_suboption_malformed,
+                                   EI_ERROR, "Malformed TCP option (kind %d, length %d)",
+                                   option_kind, option_len);
+            break;
+        }
+
+        remaining_len -= option_len;
+        offset += option_len;
+
+        switch (option_kind) {
+        case TCPOPT_NOP:
+            break;
+        case TCPOPT_EOL:
+            break;
+        case TCPOPT_MSS:
+            if (option_len != TCPOLEN_MSS) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid MSS option length %d, should be %d",
+                                       option_len, TCPOLEN_MSS);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_mss_val, tvb, offset - option_len, 2, ENC_NA);
+            }
+            break;
+        case TCPOPT_WINDOW:
+            if (option_len != TCPOLEN_WINDOW) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid window scale option length %d, should be %d",
+                                       option_len, TCPOLEN_WINDOW);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_window_size_scalefactor, tvb, offset - option_len, 3, ENC_NA);
+            }
+            break;
+        case TCPOPT_SACK_PERM:
+            if (option_len != TCPOLEN_SACK_PERM) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid SACK Permitted option length %d, should be %d",
+                                       option_len, TCPOLEN_SACK_PERM);
+            }
+            break;
+        case TCPOPT_SACK:
+            if (option_len < TCPOLEN_SACK_MIN) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid SACK option length %d, should be at least %d",
+                                       option_len, TCPOLEN_SACK_MIN);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_sack_perm, tvb, offset - option_len, 2, ENC_NA);
+                for (i = 2; i < option_len; i += 8) {
+                    proto_tree_add_item(tree, hf_tcp_option_sack_sle, tvb, offset - option_len + i, 4, ENC_NA);
+                    proto_tree_add_item(tree, hf_tcp_option_sack_sre, tvb, offset - option_len + i + 4, 4, ENC_NA);
+                }
+            }
+            break;
+        case TCPOPT_ECHO:
+            if (option_len != TCPOLEN_ECHO) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid ECHO option length %d, should be %d",
+                                       option_len, TCPOLEN_ECHO);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_echo, tvb, offset - option_len, 6, ENC_NA);
+            }
+            break;
+        case TCPOPT_ECHOREPLY:
+            if (option_len != TCPOLEN_ECHOREPLY) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid ECHOREPLY option length %d, should be %d",
+                                       option_len, TCPOLEN_ECHOREPLY);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_echoreply, tvb, offset - option_len, 6, ENC_NA);
+            }
+            break;
+        case TCPOPT_TIMESTAMP:
+            if (option_len != TCPOLEN_TIMESTAMP) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid TIMESTAMP option length %d, should be %d",
+                                       option_len, TCPOLEN_TIMESTAMP);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_timestamp_tsval, tvb, offset - option_len, 4, ENC_NA);
+                proto_tree_add_item(tree, hf_tcp_option_timestamp_tsecr, tvb, offset - option_len + 4, 4, ENC_NA);
+            }
+            break;
+        case TCPOPT_CC:
+            if (option_len != TCPOLEN_CC) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid CC option length %d, should be %d",
+                                       option_len, TCPOLEN_CC);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_cc, tvb, offset - option_len, 6, ENC_NA);
+            }
+            break;
+        case TCPOPT_CCNEW:
+            if (option_len != TCPOLEN_CCNEW) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid CCNEW option length %d, should be %d",
+                                       option_len, TCPOLEN_CCNEW);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_ccnew, tvb, offset - option_len, 6, ENC_NA);
+            }
+            break;
+        case TCPOPT_CCECHO:
+            if (option_len != TCPOLEN_CCECHO) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid CCECHO option length %d, should be %d",
+                                       option_len, TCPOLEN_CCECHO);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_ccecho, tvb, offset - option_len, 6, ENC_NA);
+            }
+            break;
+        case TCPOPT_MD5:
+            if (option_len < TCPOLEN_MD5_MIN) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid MD5 option length %d, should be at least %d",
+                                       option_len, TCPOLEN_MD5_MIN);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_md5, tvb, offset - option_len, option_len, ENC_NA);
+            }
+            break;
+        case TCPOPT_SCPS:
+            if (option_len < TCPOLEN_SCPS_MIN) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid SCPS option length %d, should be at least %d",
+                                       option_len, TCPOLEN_SCPS_MIN);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_scps, tvb, offset - option_len, option_len, ENC_NA);
+            }
+            break;
+        case TCPOPT_SNACK:
+            if (option_len < TCPOLEN_SNACK_MIN) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid SNACK option length %d, should be at least %d",
+                                       option_len, TCPOLEN_SNACK_MIN);
+            } else {
+                proto_tree_add_item(tree, hf_tcp_option_snack, tvb, offset - option_len, option_len, ENC_NA);
+            }
+            break;
+        case TCPOPT_RECBOUND:
+            if (option_len != TCPOLEN_RECBOUND) {
+                expert_add_info_format(pinfo, tvb, offset - option_len, &ei_tcp_opt_len_invalid,
+                                       EI_ERROR, "Invalid RECBOUND option length %d, should be %d",
+                                       option_len, TCPOLEN_RECBOUND);
+            }
+            break;
+        case TCPOPT_CORREXP:
+            if (option_len != TCPO

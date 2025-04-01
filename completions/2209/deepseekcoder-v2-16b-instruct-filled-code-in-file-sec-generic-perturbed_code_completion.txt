@@ -1,0 +1,94 @@
+RefPicList *ff_hevc_get_ref_list(HEVCContext *s, HEVCFrame *ref, int x0, int y0)
+{
+    int x_cb         = x0 >> s->ps.sps->log2_ctb_size;
+    int y_cb         = y0 >> s->ps.sps->log2_ctb_size;
+    int pic_width_cb = s->ps.sps->ctb_width;
+    int ctb_addr_ts  = s->ps.pps->ctb_addr_rs_to_ts[y_cb * pic_width_cb + x_cb];
+    return (RefPicList *)ref->rpl_tab[ctb_addr_ts];
+}
+
+static HEVCFrame *find_ref_idx(HEVCContext *s, int poc)
+{
+    int i;
+    int LtMask = (1 << s->ps.sps->log2_max_poc_lsb) - 1;
+
+    for (i = 0; i < FF_ARRAY_ELEMS(s->DPB); i++) {
+        HEVCFrame *ref = &s->DPB[i];
+        if (ref->frame->buf[0] && (ref->sequence == s->seq_decode)) {
+            if ((ref->poc & LtMask) == poc)
+                return ref;
+        }
+    }
+
+    for (i = 0; i < FF_ARRAY_ELEMS(s->DPB); i++) {
+        HEVCFrame *ref = &s->DPB[i];
+        if (ref->frame->buf[0] && ref->sequence == s->seq_decode) {
+            if (ref->poc == poc || (ref->poc & LtMask) == poc)
+                return ref;
+        }
+    }
+
+    if (s->nal_unit_type != HEVC_NAL_CRA_NUT && !IS_BLA(s))
+        av_log(s->avctx, AV_LOG_ERROR,
+               "Could not find ref with POC %d\n", poc);
+    return NULL;
+}
+
+static void mark_ref(HEVCFrame *frame, int flag)
+{
+    frame->flags &= ~(HEVC_FRAME_FLAG_LONG_REF | HEVC_FRAME_FLAG_SHORT_REF);
+    frame->flags |= flag;
+}
+
+static HEVCFrame *generate_missing_ref(HEVCContext *s, int poc)
+{
+    HEVCFrame *frame;
+    int i, x, y;
+
+    frame = alloc_frame(s);
+    if (!frame)
+        return NULL;
+
+    if (!s->avctx->hwaccel) {
+        if (!s->ps.sps->pixel_shift) {
+            for (i = 0; frame->frame->buf[i]; i++)
+                memset(frame->frame->buf[i]->data, 1 << (s->ps.sps->bit_depth - 1),
+                       frame->frame->buf[i]->size);
+        } else {
+            for (i = 0; frame->frame->data[i]; i++)
+                for (y = 0; y < (s->ps.sps->height >> s->ps.sps->vshift[i]); y++)
+                    for (x = 0; x < (s->ps.sps->width >> s->ps.sps->hshift[i]); x++) {
+                        AV_WN16(frame->frame->data[i] + y * frame->frame->linesize[i] + 2 * x,
+                                1 << (s->ps.sps->bit_depth - 1));
+                    }
+        }
+    }
+
+    frame->poc      = poc;
+    frame->sequence = s->seq_decode;
+    frame->flags    = 0;
+
+    if (s->threads_type == FF_THREAD_FRAME)
+        ff_thread_report_progress(&frame->tf, INT_MAX, 0);
+
+    return frame;
+}
+
+/* add a reference with the given poc to the list and mark it as used in DPB */
+static int add_candidate_ref(HEVCContext *s, RefPicList *list,
+                             int pictureordercount, int ref_flag)
+{
+    HEVCFrame *ref = find_ref_idx(s, pictureordercount);
+    if (!ref) {
+        ref = generate_missing_ref(s, pictureordercount);
+        if (!ref)
+            return AVERROR(ENOMEM);
+    }
+
+    list->list[list->nb_refs] = ref->poc;
+    list->ref[list->nb_refs]  = ref;
+    list->nb_refs++;
+
+    mark_ref(ref, ref_flag);
+    return 0;
+}

@@ -1,0 +1,288 @@
+chunk_blocksize;
+    if (chunk_nbytes % chunk_blocksize > 0) {
+      nblocks++;
+    }
+    lazychunk_cbytes = nblocks * chunk_blocksize;
+    *chunk = malloc(lazychunk_cbytes);
+    fseek(fp, header_len + offset, SEEK_SET);
+    rbytes = fread(*chunk, 1, lazychunk_cbytes, fp);
+    if (rbytes != lazychunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot read the chunk out of the fileframe.");
+      return -6;
+    }
+    fclose(fp);
+    *needs_free = true;
+  } else {
+    // The chunk is in memory and just one pointer away
+    *chunk = frame->sdata + header_len + offset;
+    size_t chunk_cbytes = sw32_(*chunk + BLOSC2_CHUNK_CBYTES);
+    lazychunk_cbytes = chunk_cbytes;
+  }
+
+  return lazychunk_cbytes;
+}
+
+
+int frame_append_chunk(blosc2_frame* frame, uint8_t* chunk, int32_t chunk_cbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  if (frame->sdata == NULL) {
+    FILE* fp = fopen(frame->fname, "rb+");
+    fseek(fp, frame_len, SEEK_SET);
+    size_t wbytes = fwrite(chunk, 1, chunk_cbytes, fp);
+    if (wbytes != chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot write the chunk in the fileframe.");
+      return -2;
+    }
+    fclose(fp);
+  } else {
+    // The frame is in memory, so we need to realloc the frame
+    frame->sdata = realloc(frame->sdata, frame_len + chunk_cbytes);
+    memcpy(frame->sdata + frame_len, chunk, chunk_cbytes);
+  }
+
+  // Update the frame length
+  int64_t new_frame_len = frame_len + chunk_cbytes;
+  swap_store(frame->sdata + FRAME_LEN, &new_frame_len, sizeof(new_frame_len));
+
+  // Update the trailer
+  int rc = frame_update_trailer(frame, NULL);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot update the trailer of the frame.");
+    return -3;
+  }
+
+  return 0;
+}
+
+
+int frame_append_metalayer(blosc2_frame* frame, blosc2_metalayer* metalayer) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  // Update the header
+  int rc = frame_update_header(frame, NULL, true);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot update the header of the frame.");
+    return -2;
+  }
+
+  // Append the metalayer
+  if (frame->sdata == NULL) {
+    FILE* fp = fopen(frame->fname, "rb+");
+    fseek(fp, frame_len, SEEK_SET);
+    size_t wbytes = fwrite(metalayer->content, 1, metalayer->content_len, fp);
+    if (wbytes != metalayer->content_len) {
+      BLOSC_TRACE_ERROR("Cannot write the metalayer in the fileframe.");
+      return -3;
+    }
+    fclose(fp);
+  } else {
+    // The frame is in memory, so we need to realloc the frame
+    frame->sdata = realloc(frame->sdata, frame_len + metalayer->content_len);
+    memcpy(frame->sdata + frame_len, metalayer->content, metalayer->content_len);
+  }
+
+  // Update the frame length
+  int64_t new_frame_len = frame_len + metalayer->content_len;
+  swap_store(frame->sdata + FRAME_LEN, &new_frame_len, sizeof(new_frame_len));
+
+  // Update the trailer
+  int rc = frame_update_trailer(frame, NULL);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot update the trailer of the frame.");
+    return -4;
+  }
+
+  return 0;
+}
+
+
+int frame_remove_metalayer(blosc2_frame* frame, const char* name) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  // Update the header
+  int rc = frame_update_header(frame, NULL, true);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot update the header of the frame.");
+    return -2;
+  }
+
+  // Remove the metalayer
+  int found = 0;
+  for (int i = 0; i < frame->metalayers_len; i++) {
+    if (strcmp(frame->metalayers[i]->name, name) == 0) {
+      found = 1;
+      free(frame->metalayers[i]->name);
+      free(frame->metalayers[i]->content);
+      free(frame->metalayers[i]);
+      for (int j = i; j < frame->metalayers_len - 1; j++) {
+        frame->metalayers[j] = frame->metalayers[j + 1];
+      }
+      frame->metalayers_len--;
+      break;
+    }
+  }
+  if (!found) {
+    BLOSC_TRACE_ERROR("Metalayer '%s' not found in frame.", name);
+    return -3;
+  }
+
+  // Update the frame length
+  int64_t new_frame_len = frame_len - metalayer_content_len;
+  swap_store(frame->sdata + FRAME_LEN, &new_frame_len, sizeof(new_frame_len));
+
+  // Update the trailer
+  int rc = frame_update_trailer(frame, NULL);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot update the trailer of the frame.");
+    return -4;
+  }
+
+  return 0;
+}
+
+
+int frame_update_metalayer(blosc2_frame* frame, const char* name, uint8_t* content, int32_t content_len) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  // Update the header
+  int rc = frame_update_header(frame, NULL, true);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot update the header of the frame.");
+    return -2;
+  }
+
+  // Update the metalayer
+  int found = 0;
+  for (int i = 0; i < frame->metalayers_len; i++) {
+    if (strcmp(frame->metalayers[i]->name, name) == 0) {
+      found = 1;
+      free(frame->metalayers[i]->content);
+      frame->metalayers[i]->content = malloc(content_len);
+      memcpy(frame->metalayers[i]->content, content, content_len);
+      frame->metalayers[i]->content_len = content_len;
+      break;
+    }
+  }
+  if (!found) {
+    BLOSC_TRACE_ERROR("Metalayer '%s' not found in frame.", name);
+    return -3;
+  }
+
+  // Update the frame length
+  int64_t new_frame_len = frame_len;
+  swap_store(frame->sdata + FRAME_LEN, &new_frame_len, sizeof(new_frame_len));
+
+  // Update the trailer
+  int rc = frame_update_trailer(frame, NULL);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot update the trailer of the frame.");
+    return -4;
+  }
+
+  return 0;
+}
+
+
+int frame_get_metalayer(blosc2_frame* frame, const char* name, uint8_t** content, int32_t* content_len) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  // Get the metalayer
+  int found = 0;
+  for (int i = 0; i < frame->metalayers_len; i++) {
+    if (strcmp(frame->metalayers[i]->name, name) == 0) {
+      found = 1;
+      *content = frame->metalayers[i]->content;
+      *content_len = frame->metalayers[i]->content_len;
+      break;
+    }
+  }
+  if (!found) {
+    BLOSC_TRACE_ERROR("Metalayer '%s' not found in frame.", name);
+    return -2;
+  }
+
+  return 0;
+}
+
+
+int frame_get_metalayers_names(blosc2_frame* frame, char*** names) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  // Get the metalayers names
+  *names = malloc(frame->metalayers_len * sizeof(char*));
+  for (int i = 0; i < frame->metalayers_len; i++) {
+    (*names)[i] = malloc(strlen(frame->metalayers[i]->name) + 1);
+    strcpy

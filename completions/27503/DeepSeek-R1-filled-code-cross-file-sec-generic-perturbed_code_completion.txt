@@ -1,0 +1,149 @@
+elementInstanceTag = BitBufferReadSmall(bits, 4);
+
+		switch (tag)
+		{
+			case ID_SCE:
+			case ID_CPE:
+			case ID_LFE:
+				{
+					int32_t *   out32;
+					uint32_t    numChans = (tag == ID_CPE) ? 2 : 1;
+
+					RequireAction(channelIndex + numChans <= numChannels, status = kALAC_UnsupportedElement; goto Exit;);
+
+					headerByte = BitBufferReadSmall(bits, 4);
+					partialFrame = (headerByte >> 3) & 1;
+					bytesShifted = (headerByte >> 1) & 3;
+					escapeFlag = headerByte & 1;
+
+					if (partialFrame)
+						numSamples = BitBufferRead(bits, 32);
+
+					if (escapeFlag == 0)
+					{
+						mixBits = BitBufferReadSmall(bits, 8);
+						mixRes = BitBufferReadSmall(bits, 8);
+
+						headerByte = BitBufferReadSmall(bits, 8);
+						modeU = (headerByte >> 4) & 0x0f;
+						denShiftU = headerByte & 0x0f;
+
+						headerByte = BitBufferReadSmall(bits, 8);
+						pbFactorU = (headerByte >> 5) & 0x07;
+						numU = headerByte & 0x1f;
+
+						for (i = 0; i < numU; i++)
+							coefsU[i] = (int16_t) BitBufferRead(bits, 16);
+
+						if (tag == ID_CPE)
+						{
+							headerByte = BitBufferReadSmall(bits, 8);
+							modeV = (headerByte >> 4) & 0x0f;
+							denShiftV = headerByte & 0x0f;
+
+							headerByte = BitBufferReadSmall(bits, 8);
+							pbFactorV = (headerByte >> 5) & 0x07;
+							numV = headerByte & 0x1f;
+
+							for (i = 0; i < numV; i++)
+								coefsV[i] = (int16_t) BitBufferRead(bits, 16);
+						}
+
+						if (bytesShifted != 0)
+						{
+							shift = (bytesShifted * 8);
+							BitBufferRead(&shiftBits, bits, (numSamples * shift * 2));
+						}
+
+						chanBits = p->mBitDepth - (bytesShifted * 8) + 1;
+
+						set_ag_params(&agParams, MB0, (pbFactorU * PB0) / 4, KB0, numSamples, numSamples, MAX_RUN_DEFAULT);
+						status = dyn_decomp(&agParams, bits, p->mPredictorU, numSamples, chanBits, &bits1);
+						RequireNoErr(status, goto Exit;);
+
+						pc_block(p->mPredictorU, p->mMixBufferU, numSamples, coefsU, numU, chanBits, denShiftU);
+
+						if (tag == ID_CPE)
+						{
+							set_ag_params(&agParams, MB0, (pbFactorV * PB0) / 4, KB0, numSamples, numSamples, MAX_RUN_DEFAULT);
+							status = dyn_decomp(&agParams, bits, p->mPredictorV, numSamples, chanBits, &bits2);
+							RequireNoErr(status, goto Exit;);
+
+							pc_block(p->mPredictorV, p->mMixBufferV, numSamples, coefsV, numV, chanBits, denShiftV);
+						}
+
+						if (bytesShifted != 0)
+						{
+							shift = bytesShifted * 8;
+							for (i = 0; i < (numSamples * 2); i += 2)
+							{
+								uint32_t	shiftVal = BitBufferRead(&shiftBits, shift * 2);
+								p->mShiftBufferUV[i + 0] = (uint16_t)(shiftVal >> shift);
+								p->mShiftBufferUV[i + 1] = (uint16_t)(shiftVal & ((1 << shift) - 1));
+							}
+						}
+					}
+					else
+					{
+						chanBits = p->mBitDepth;
+						bytesShifted = 0;
+					}
+
+					out32 = sampleBuffer + channelIndex;
+					switch (p->mBitDepth)
+					{
+						case 16:
+							for (i = 0, j = 0; i < numSamples; i++)
+							{
+								val = p->mMixBufferU[i];
+								val = (val << 16) | (uint16_t)p->mShiftBufferUV[j++];
+								out32[i * numChannels] = val;
+							}
+							break;
+						case 24:
+							for (i = 0, j = 0; i < numSamples; i++)
+							{
+								val = p->mMixBufferU[i] << 8;
+								val |= p->mShiftBufferUV[j++];
+								out32[i * numChannels] = val;
+							}
+							break;
+					}
+
+					if (tag == ID_CPE)
+					{
+						out32++;
+						switch (p->mBitDepth)
+						{
+							case 16:
+								for (i = 0, j = 0; i < numSamples; i++)
+								{
+									val = p->mMixBufferV[i];
+									val = (val << 16) | (uint16_t)p->mShiftBufferUV[j++];
+									out32[i * numChannels] = val;
+								}
+								break;
+							case 24:
+								for (i = 0, j = 0; i < numSamples; i++)
+								{
+									val = p->mMixBufferV[i] << 8;
+									val |= p->mShiftBufferUV[j++];
+									out32[i * numChannels] = val;
+								}
+								break;
+						}
+					}
+
+					channelIndex += numChans;
+				}
+				break;
+
+			case ID_END:
+				goto NoMoreChannels;
+
+			default:
+				status = kALAC_UnsupportedElementType;
+				goto Exit;
+		}
+
+		BitBufferByteAlign(bits, true);
