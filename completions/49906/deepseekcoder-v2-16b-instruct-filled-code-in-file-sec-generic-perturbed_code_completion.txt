@@ -1,0 +1,276 @@
+_start)) {
+      char buf[10];
+
+      strncpy(buf, (char*)&packet->line[0].ptr[filename_start], 9);
+      buf[9] = '\0';
+
+      if(strncasecmp(buf, "rtsp://", 7) == 0) {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+    }
+
+    check_content_type_and_change_protocol(ndpi_struct, flow);
+    ndpi_validate_http_content(ndpi_struct, flow);
+    ndpi_int_http_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_HTTP, NDPI_PROTOCOL_CATEGORY_WEB);
+    return;
+  } else if(flow->l4.tcp.http_stage == 1) {
+    /* Expected a response */
+    NDPI_LOG_DBG2(ndpi_struct, "HTTP stage %d: \n", flow->l4.tcp.http_stage);
+
+    if(packet->payload_packet_len > 0) {
+      ndpi_parse_packet_line_info(ndpi_struct, flow);
+      check_content_type_and_change_protocol(ndpi_struct, flow);
+      ndpi_validate_http_content(ndpi_struct, flow);
+      ndpi_int_http_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_HTTP, NDPI_PROTOCOL_CATEGORY_WEB);
+      return;
+    }
+
+    NDPI_LOG_DBG2(ndpi_struct, "HTTP stage %d: \n", flow->l4.tcp.http_stage);
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    http_bitmask_exclude_other(flow);
+    return;
+  }
+}
+
+/* ************************************************************* */
+
+static void ndpi_init_http_variables(struct ndpi_detection_module_struct *ndpi_struct,
+				     struct ndpi_flow_struct *flow) {
+  flow->l4.tcp.http_stage = 0;
+  flow->http_detected = 0;
+  flow->http.response_status_code = 0;
+  flow->http.request_content_type = NULL;
+  flow->http.content_type = NULL;
+  flow->http.user_agent = NULL;
+  flow->http.detected_os = NULL;
+  flow->http.nat_ip = NULL;
+  flow->http.url = NULL;
+  flow->http.method = NDPI_HTTP_METHOD_UNKNOWN;
+}
+
+/* ************************************************************* */
+
+static void ndpi_free_http_variables(struct ndpi_detection_module_struct *ndpi_struct,
+				     struct ndpi_flow_struct *flow) {
+  if(flow->http.request_content_type) ndpi_free(flow->http.request_content_type);
+  if(flow->http.content_type) ndpi_free(flow->http.content_type);
+  if(flow->http.user_agent) ndpi_free(flow->http.user_agent);
+  if(flow->http.detected_os) ndpi_free(flow->http.detected_os);
+  if(flow->http.nat_ip) ndpi_free(flow->http.nat_ip);
+  if(flow->http.url) ndpi_free(flow->http.url);
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_init_detection(struct ndpi_detection_module_struct *ndpi_struct,
+				    struct ndpi_flow_struct *flow) {
+  ndpi_init_http_variables(ndpi_struct, flow);
+  return 0;
+}
+
+/* ************************************************************* */
+
+static void ndpi_http_free_detection(struct ndpi_detection_module_struct *ndpi_struct,
+				     struct ndpi_flow_struct *flow) {
+  ndpi_free_http_variables(ndpi_struct, flow);
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_is_idempotent(struct ndpi_detection_module_struct *ndpi_struct,
+				   struct ndpi_flow_struct *flow) {
+  if(flow->http.method == NDPI_HTTP_METHOD_GET ||
+     flow->http.method == NDPI_HTTP_METHOD_HEAD ||
+     flow->http.method == NDPI_HTTP_METHOD_PUT ||
+     flow->http.method == NDPI_HTTP_METHOD_DELETE)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_is_safe(struct ndpi_detection_module_struct *ndpi_struct,
+			     struct ndpi_flow_struct *flow) {
+  if(flow->http.method == NDPI_HTTP_METHOD_GET ||
+     flow->http.method == NDPI_HTTP_METHOD_HEAD)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_is_idempotent_safe(struct ndpi_detection_module_struct *ndpi_struct,
+					struct ndpi_flow_struct *flow) {
+  if(ndpi_http_is_idempotent(ndpi_struct, flow) && ndpi_http_is_safe(ndpi_struct, flow))
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code(struct ndpi_detection_module_struct *ndpi_struct,
+					 struct ndpi_flow_struct *flow,
+					 u_int16_t response_code) {
+  if(response_code >= 100 && response_code < 200)
+    return 1;
+  else if(response_code >= 300 && response_code < 400)
+    return 1;
+  else if(response_code == 404)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_post(struct ndpi_detection_module_struct *ndpi_struct,
+						  struct ndpi_flow_struct *flow,
+						  u_int16_t response_code) {
+  if(response_code >= 200 && response_code < 300)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_put(struct ndpi_detection_module_struct *ndpi_struct,
+						 struct ndpi_flow_struct *flow,
+						 u_int16_t response_code) {
+  if(response_code >= 200 && response_code < 300)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_delete(struct ndpi_detection_module_struct *ndpi_struct,
+						    struct ndpi_flow_struct *flow,
+						    u_int16_t response_code) {
+  if(response_code == 200 || response_code == 204)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_connect(struct ndpi_detection_module_struct *ndpi_struct,
+						     struct ndpi_flow_struct *flow,
+						     u_int16_t response_code) {
+  if(response_code == 200)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_options(struct ndpi_detection_module_struct *ndpi_struct,
+						     struct ndpi_flow_struct *flow,
+						     u_int16_t response_code) {
+  if(response_code == 200)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_propfind(struct ndpi_detection_module_struct *ndpi_struct,
+						      struct ndpi_flow_struct *flow,
+						      u_int16_t response_code) {
+  if(response_code == 200)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_report(struct ndpi_detection_module_struct *ndpi_struct,
+						    struct ndpi_flow_struct *flow,
+						    u_int16_t response_code) {
+  if(response_code == 200)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_rpc_in_data(struct ndpi_detection_module_struct *ndpi_struct,
+							 struct ndpi_flow_struct *flow,
+							 u_int16_t response_code) {
+  if(response_code == 200)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_rpc_out_data(struct ndpi_detection_module_struct *ndpi_struct,
+							  struct ndpi_flow_struct *flow,
+							  u_int16_t response_code) {
+  if(response_code == 200)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_post_or_put(struct ndpi_detection_module_struct *ndpi_struct,
+							 struct ndpi_flow_struct *flow,
+							 u_int16_t response_code) {
+  if(response_code == 201 || response_code == 204)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_post_or_put_or_delete(struct ndpi_detection_module_struct *ndpi_struct,
+								    struct ndpi_flow_struct *flow,
+								    u_int16_t response_code) {
+  if(response_code == 201 || response_code == 204 || response_code == 404)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_post_or_put_or_delete_or_options(struct ndpi_detection_module_struct *ndpi_struct,
+									       struct ndpi_flow_struct *flow,
+									       u_int16_t response_code) {
+  if(response_code == 201 || response_code == 204 || response_code == 404 || response_code == 405)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_post_or_put_or_delete_or_options_or_propfind(struct ndpi_detection_module_struct *ndpi_struct,
+										       struct ndpi_flow_struct *flow,
+										       u_int16_t response_code) {
+  if(response_code == 201 || response_code == 204 || response_code == 404 || response_code == 405 || response_code == 429)
+    return 1;
+  else
+    return 0;
+}
+
+/* ************************************************************* */
+
+static int ndpi_http_check_response_code_for_post_or_put_or_delete_or_options_or_propfind_or_report(struct ndpi_detection_module_struct *ndpi_struct,
+										       struct ndpi_flow_struct *flow,
+										       u_int16_t response_code) {
+  if(response_code == 201 || response_code == 204 || response_code == 404 || response_code == 405 || response_code == 4

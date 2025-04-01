@@ -1,0 +1,355 @@
+_STRING:
+            {
+              value=(char *) NULL;
+              if (~((size_t) number_bytes) >= 1)
+                value=(char *) AcquireQuantumMemory((size_t) number_bytes+1UL,
+                  sizeof(*value));
+              if (value != (char *) NULL)
+                {
+                  (void) memcpy(value,p,number_bytes);
+                  value[number_bytes]='\0';
+                }
+              break;
+            }
+            case EXIF_FMT_USHORT:
+            case EXIF_FMT_SSHORT:
+            {
+              if (number_bytes != 2)
+                break;
+              if (format == EXIF_FMT_USHORT)
+                {
+                  (void) sprintf(buffer,"%u",ReadPropertyUnsignedShort(endian,p));
+                }
+              else
+                {
+                  (void) sprintf(buffer,"%d",ReadPropertySignedShort(endian,p));
+                }
+              value=buffer;
+              break;
+            }
+            case EXIF_FMT_ULONG:
+            case EXIF_FMT_SLONG:
+            {
+              if (number_bytes != 4)
+                break;
+              if (format == EXIF_FMT_ULONG)
+                {
+                  (void) sprintf(buffer,"%lu",ReadPropertyUnsignedLong(endian,p));
+                }
+              else
+                {
+                  (void) sprintf(buffer,"%ld",ReadPropertySignedLong(endian,p));
+                }
+              value=buffer;
+              break;
+            }
+            case EXIF_FMT_URATIONAL:
+            case EXIF_FMT_SRATIONAL:
+            {
+              if (number_bytes != 8)
+                break;
+              if (format == EXIF_FMT_URATIONAL)
+                {
+                  (void) sprintf(buffer,"%lu/%lu",ReadPropertyUnsignedLong(endian,p),
+                    ReadPropertyUnsignedLong(endian,p+4));
+                }
+              else
+                {
+                  (void) sprintf(buffer,"%ld/%ld",ReadPropertySignedLong(endian,p),
+                    ReadPropertySignedLong(endian,p+4));
+                }
+              value=buffer;
+              break;
+            }
+            case EXIF_FMT_SINGLE:
+            {
+              if (number_bytes != 4)
+                break;
+              (void) sprintf(buffer,"%g",ReadPropertyFloat(endian,p));
+              value=buffer;
+              break;
+            }
+            case EXIF_FMT_DOUBLE:
+            {
+              if (number_bytes != 8)
+                break;
+              (void) sprintf(buffer,"%g",ReadPropertyDouble(endian,p));
+              value=buffer;
+              break;
+            }
+            default:
+            {
+              value=(char *) NULL;
+              break;
+            }
+          }
+          if (value != (char *) NULL)
+            {
+              (void) SetImageProperty((Image *) image,EXIFTag[i].description,
+                value,exception);
+              value=DestroyString(value);
+            }
+        }
+    }
+    if (entry < number_entries)
+      {
+        /*
+          Push the current directory onto the stack.
+        */
+        directory_stack[level].directory=directory;
+        directory_stack[level].entry=entry;
+        directory_stack[level].offset=tag_offset;
+        level++;
+        /*
+          Follow the offset to the next IFD.
+        */
+        tag_offset=(ssize_t) ReadPropertySignedLong(endian,directory+8);
+        if ((tag_offset < 0) || (size_t) tag_offset >= length)
+          break;
+        directory=exif+tag_offset;
+        entry=0;
+      }
+    else
+      {
+        break;
+      }
+  }
+  exif_resources=DestroySplayTree(exif_resources);
+  return(MagickTrue);
+}
+
+static MagickBooleanType GetTIFFProperty(const Image *image,const char *key,
+  ExceptionInfo *exception)
+{
+  char
+    *attribute,
+    *resource;
+
+  const StringInfo
+    *profile;
+
+  const unsigned char
+    *info;
+
+  long
+    start,
+    stop;
+
+  MagickBooleanType
+    status;
+
+  ssize_t
+    i;
+
+  size_t
+    length;
+
+  ssize_t
+    count,
+    id,
+    sub_number;
+
+  profile=GetImageProfile(image,"tiff");
+  if (profile == (StringInfo *) NULL)
+    return(MagickFalse);
+  count=(ssize_t) sscanf(key,"TIFF:%ld:%ld",&start,&stop);
+  if ((count != 2) && (count != 3) && (count != 4))
+    return(MagickFalse);
+  if (count < 4)
+    *key=key+5;
+  sub_number=1;
+  if (*key == '#')
+    sub_number=(ssize_t) StringToLong(&key[1]);
+  sub_number=MagickMax(sub_number,1L);
+  resource=(char *) NULL;
+  status=MagickFalse;
+  length=GetStringInfoLength(profile);
+  info=GetStringInfoDatum(profile);
+  while ((length > 0) && (status == MagickFalse))
+  {
+    if (ReadPropertyByte(&info,&length) != 0x49)
+      continue;
+    if (ReadPropertyByte(&info,&length) != 0x49)
+      continue;
+    if (ReadPropertyByte(&info,&length) != 0x44)
+      continue;
+    if (ReadPropertyByte(&info,&length) != 0x46)
+      continue;
+    id=(ssize_t) ReadPropertyMSBShort(&info,&length);
+    if (id < (ssize_t) start)
+      continue;
+    if (id > (ssize_t) stop)
+      continue;
+    if (resource != (char *) NULL)
+      resource=DestroyString(resource);
+    count=(ssize_t) ReadPropertyByte(&info,&length);
+    if ((count != 0) && ((size_t) count <= length))
+      {
+        resource=(char *) NULL;
+        if (~((size_t) count) >= (MagickPathExtent-1))
+          resource=(char *) AcquireQuantumMemory((size_t) count+
+            MagickPathExtent,sizeof(*resource));
+        if (resource != (char *) NULL)
+          {
+            for (i=0; i < (ssize_t) count; i++)
+              resource[i]=(char) ReadPropertyByte(&info,&length);
+            resource[count]='\0';
+          }
+      }
+    if ((count & 0x01) == 0)
+      (void) ReadPropertyByte(&info,&length);
+    count=(ssize_t) ReadPropertyMSBLong(&info,&length);
+    if ((count < 0) || ((size_t) count > length))
+      {
+        length=0;
+        continue;
+      }
+    if ((*key != '\0') && (*key != '#'))
+      if ((resource == (char *) NULL) || (LocaleCompare(key,resource) != 0))
+        {
+          /*
+            No name match, scroll forward and try next.
+          */
+          info+=count;
+          length-=MagickMin(count,(ssize_t) length);
+          continue;
+        }
+    if ((*key == '#') && (sub_number != 1))
+      {
+        /*
+          No numbered match, scroll forward and try next.
+        */
+        sub_number--;
+        info+=count;
+        length-=MagickMin(count,(ssize_t) length);
+        continue;
+      }
+    /*
+      We have the resource of interest.
+    */
+    attribute=(char *) NULL;
+    if (~((size_t) count) >= (MagickPathExtent-1))
+      attribute=(char *) AcquireQuantumMemory((size_t) count+MagickPathExtent,
+        sizeof(*attribute));
+    if (attribute != (char *) NULL)
+      {
+        (void) memcpy(attribute,(char *) info,(size_t) count);
+        attribute[count]='\0';
+        info+=count;
+        length-=MagickMin(count,(ssize_t) length);
+        (void) SetImageProperty((Image *) image,key,(const char *) attribute,
+          exception);
+        attribute=DestroyString(attribute);
+        status=MagickTrue;
+      }
+  }
+  if (resource != (char *) NULL)
+    resource=DestroyString(resource);
+  return(status);
+}
+
+static MagickBooleanType GetProperty(const Image *image,const char *key,
+  ExceptionInfo *exception)
+{
+  if (LocaleCompare(key,"exif:") == 0)
+    return(GetEXIFProperty(image,key+4,exception));
+  if (LocaleCompare(key,"iptc:") == 0)
+    return(GetIPTCProperty(image,key+4,exception));
+  if (LocaleCompare(key,"tiff:") == 0)
+    return(GetTIFFProperty(image,key+4,exception));
+  if (LocaleCompare(key,"8bim:") == 0)
+    return(Get8BIMProperty(image,key+4,exception));
+  return(MagickFalse);
+}
+
+MagickExport MagickBooleanType GetImageProperty(const Image *image,
+  const char *key,char **value,ExceptionInfo *exception)
+{
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(key != (const char *) NULL);
+  if (value != (char **) NULL)
+    *value=NULL;
+  if (exception != (ExceptionInfo *) NULL)
+    *exception=NULL;
+  if (image->properties == (void *) NULL)
+    return(MagickFalse);
+  return(GetSplayTreeValue((SplayTreeInfo *) image->properties,key,value,
+    exception));
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   S e t I m a g e P r o p e r t y                                           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  SetImageProperty() sets a value associated with an image property.
+%
+%  The format of the SetImageProperty method is:
+%
+%      MagickBooleanType SetImageProperty(Image *image,const char *property,
+%        const char *value,ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o property: the image property.
+%
+%    o value: the value of the property.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType SetImageProperty(Image *image,const char *property,
+  const char *value,ExceptionInfo *exception)
+{
+  char
+    *attribute;
+
+  MagickBooleanType
+    status;
+
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(property != (const char *) NULL);
+  assert(value != (const char *) NULL);
+  if (exception != (ExceptionInfo *) NULL)
+    *exception=AcquireExceptionInfo();
+  attribute=(char *) NULL;
+  status=MagickTrue;
+  if (image->properties == (void *) NULL)
+    image->properties=NewSplayTree(CompareString,DestroyString,DestroyString);
+  if (image->properties == (void *) NULL)
+    status=MagickFalse;
+  if (status == MagickTrue)
+    status=SetSplayTreeValue((SplayTreeInfo *) image->properties,property,
+      value);
+  if (status == MagickTrue)
+    {
+      attribute=(char *) NULL;
+      if (~((size_t) strlen(value)) >= (MagickPathExtent-1))
+        attribute=(char *) AcquireQuantumMemory(strlen(value)+MagickPathExtent,
+          sizeof(*attribute));
+      if (attribute != (char *) NULL)
+        {
+          (void) sprintf(attribute,"%s",value);
+          status=SetImageProperty(image,property,attribute,exception);
+          attribute=DestroyString(attribute);
+        }
+    }
+  if (exception != (ExceptionInfo *) NULL)
+    {
+      if (status == MagickFalse)
+        {
+          if (exception->severity == UndefinedException

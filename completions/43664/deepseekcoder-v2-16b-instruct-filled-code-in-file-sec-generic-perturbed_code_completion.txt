@@ -1,0 +1,270 @@
+!= NULL;
+
+  if(packet->payload_packet_len < 4)
+    return -1;
+
+  tls_version = (packet->payload[0] << 8) | packet->payload[1];
+  handshake_type = packet->payload[4];
+
+  if(handshake_type != 1 && handshake_type != 2)
+    return -1;
+
+  if(is_quic)
+  {
+    if(quic_version == 0x0000000f) /* QUIC v1 */
+    {
+      if(packet->payload_packet_len < 10)
+        return -1;
+      quic_version = (packet->payload[5] << 24) | (packet->payload[6] << 16) |
+                     (packet->payload[7] << 8) | packet->payload[8];
+    }
+    else if(quic_version != 0x00000001) /* GQUIC v1 */
+    {
+      return -1;
+    }
+  }
+
+  if(tls_version < 0x0300 || tls_version > 0x0304)
+    return -1;
+
+  if(is_quic && quic_version == 0x00000001)
+  {
+    if(packet->payload_packet_len < 10)
+      return -1;
+    total_len = (packet->payload[5] << 16) | (packet->payload[6] << 8) | packet->payload[7];
+    if(total_len + 10 != packet->payload_packet_len)
+      return -1;
+  }
+  else
+  {
+    total_len = packet->payload_packet_len - 5;
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(packet->payload_packet_len < 38)
+      return -1;
+    ja3_str_len = packet->payload[37];
+    if(ja3_str_len > JA3_STR_LEN - 1)
+      return -1;
+    if(packet->payload_packet_len < 38 + ja3_str_len)
+      return -1;
+    memcpy(ja3_str, &packet->payload[38], ja3_str_len);
+    ja3_str[ja3_str_len] = '\0';
+  }
+  else /* Server Hello */
+  {
+    if(packet->payload_packet_len < 4)
+      return -1;
+    ja3_str_len = packet->payload[3];
+    if(ja3_str_len > JA3_STR_LEN - 1)
+      return -1;
+    if(packet->payload_packet_len < 4 + ja3_str_len)
+      return -1;
+    memcpy(ja3_str, &packet->payload[4], ja3_str_len);
+    ja3_str[ja3_str_len] = '\0';
+  }
+
+  if(ja3_str_len == 0)
+    return -1;
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    ja3.client.tls_handshake_version = tls_version;
+    md5_index = 0;
+    ndpi_MD5Init(&ctx);
+    ndpi_MD5Update(&ctx, (u_char*)ja3_str, ja3_str_len);
+    ndpi_MD5Final(md5_hash, &ctx);
+    for(i = 0; i < 16; ++i)
+    {
+      md5_index |= ((u_int32_t)md5_hash[i]) << (8 * (3 - (i % 4)));
+    }
+    md5_index %= JA3_STR_LEN;
+    for(i = 0; i < JA3_STR_LEN; ++i)
+    {
+      ja3_str[(i + md5_index) % JA3_STR_LEN] = ja3_str[i];
+    }
+    for(i = 0; i < ja3_str_len; ++i)
+    {
+      ja3_str[i] = ja3_str[(i + md5_index) % JA3_STR_LEN];
+    }
+  }
+
+  if(ja3_str_len > MAX_JA3_STRLEN)
+    ja3_str_len = MAX_JA3_STRLEN;
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(parse_ja3_string(ja3_str, ja3_str_len, &ja3.client.num_cipher, ja3.client.cipher,
+                        &ja3.client.num_tls_extension, ja3.client.tls_extension,
+                        &ja3.client.num_elliptic_curve, ja3.client.elliptic_curve,
+                        &ja3.client.num_elliptic_curve_point_format, ja3.client.elliptic_curve_point_format,
+                        ja3.client.signature_algorithms, ja3.client.supported_versions,
+                        ja3.client.alpn) != 0)
+    {
+      invalid_ja3 = 1;
+    }
+  }
+  else /* Server Hello */
+  {
+    if(parse_ja3_string(ja3_str, ja3_str_len, NULL, NULL,
+                        &ja3.server.num_tls_extension, ja3.server.tls_extension,
+                        NULL, NULL,
+                        &ja3.server.num_elliptic_curve_point_format, ja3.server.elliptic_curve_point_format,
+                        ja3.server.alpn) != 0)
+    {
+      invalid_ja3 = 1;
+    }
+    ja3.server.tls_handshake_version = tls_version;
+    ja3.server.tls_supported_version = tls_version;
+  }
+
+  if(invalid_ja3)
+  {
+    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_INVALID_JA3);
+    return -1;
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    flow->protos.tls_quic.ssl_version = tls_version;
+    flow->protos.tls_quic.client_ja3 = ndpi_strdup(ja3_str);
+    flow->protos.tls_quic.client_ja3_len = ja3_str_len;
+    flow->protos.tls_quic.client_ja3_fingerprint = md5_index;
+  }
+  else /* Server Hello */
+  {
+    flow->protos.tls_quic.ssl_version = tls_version;
+    flow->protos.tls_quic.server_ja3 = ndpi_strdup(ja3_str);
+    flow->protos.tls_quic.server_ja3_len = ja3_str_len;
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3 == NULL)
+      return -1;
+    if(flow->protos.tls_quic.client_ja3_len > MAX_JA3_STRLEN)
+      flow->protos.tls_quic.client_ja3_len = MAX_JA3_STRLEN;
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3 == NULL)
+      return -1;
+    if(flow->protos.tls_quic.server_ja3_len > MAX_JA3_STRLEN)
+      flow->protos.tls_quic.server_ja3_len = MAX_JA3_STRLEN;
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {
+    if(flow->protos.tls_quic.server_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+
+  if(handshake_type == 1) /* Client Hello */
+  {
+    if(flow->protos.tls_quic.client_ja3_len > 0)
+    {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_DETECTED);
+    }
+  }
+  else /* Server Hello */
+  {

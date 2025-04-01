@@ -1,0 +1,293 @@
+6BE. */
+      fn_sconv = rar->sconv_utf16be;
+    }
+    else
+    {
+      fn_sconv = rar->sconv_utf8;
+    }
+  }
+  else
+  {
+    fn_sconv = sconv;
+  }
+
+  strp = filename;
+  if (fn_sconv != NULL) {
+    ret2 = archive_string_conversion_to_charset(
+        &a->archive, strp, fn_sconv, &strp);
+    if (ret2 != 0) {
+      archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+          "Couldn't convert filename to current locale");
+      return (ARCHIVE_FATAL);
+    }
+  }
+
+  archive_entry_set_pathname(entry, strp);
+
+  rar->mode = file_header.host_os;
+  rar->mode <<= 8;
+  rar->mode |= file_header.method;
+
+  rar->bytes_remaining -= filename_size;
+  p += filename_size;
+
+  if (rar->file_flags & FHD_COMMENT)
+  {
+    size_t comment_size = rar->packed_size - rar->bytes_remaining;
+    if (comment_size > 0)
+    {
+      const void *h2;
+      if ((h2 = __archive_read_ahead(a, comment_size, NULL)) == NULL)
+        return (ARCHIVE_FATAL);
+      archive_entry_set_comment_utf8(entry, h2);
+      __archive_read_consume(a, comment_size);
+    }
+  }
+
+  rar->bytes_remaining -= comment_size;
+
+  if (rar->file_flags & FHD_EXTTIME)
+  {
+    if ((ret = read_exttime(p, rar, "")) != ARCHIVE_OK)
+      return (ret);
+    p += 4;
+  }
+
+  if (rar->file_flags & FHD_EXTFLAGS)
+  {
+    rar->mode |= (file_header.host_os << 8);
+    rar->mode |= file_header.method;
+    p += 2;
+  }
+
+  rar->bytes_remaining -= (p - (const char *)h);
+
+  rar->offset = rar->offset_outgoing;
+  rar->offset_outgoing += rar->packed_size;
+
+  rar->crc_calculated = 0;
+  rar->start_new_block = 1;
+  rar->entry_eof = 0;
+
+  return (ARCHIVE_OK);
+}
+
+static time_t
+get_time(int ttime)
+{
+  struct tm tm;
+  time_t ret;
+
+  tm.tm_sec = (ttime & 0x1f) * 2;
+  tm.tm_min = (ttime >> 5) & 0x3f;
+  tm.tm_hour = (ttime >> 11) & 0x1f;
+  tm.tm_mday = (ttime >> 16) & 0x1f;
+  tm.tm_mon = ((ttime >> 21) & 0x0f) - 1;
+  tm.tm_year = ((ttime >> 25) & 0x7f) + 80;
+  tm.tm_wday = 0;
+  tm.tm_yday = 0;
+  tm.tm_isdst = -1;
+
+  ret = mktime(&tm);
+  if (ret == -1)
+    ret = (time_t)ttime;
+  return (ret);
+}
+
+static int
+read_exttime(const char *p, struct rar *rar, const char *filename)
+{
+  int year, month, day, hour, minute, second;
+  int tz_hour, tz_minute;
+  int tz_flag;
+
+  year = (p[0] & 0x3f) + 1980;
+  month = (p[0] >> 6) | ((p[1] & 0x0f) << 2);
+  day = p[1] >> 4;
+  hour = p[2] & 0x1f;
+  minute = p[2] >> 5;
+  second = (p[3] & 0x3f) * 2;
+  tz_flag = (p[3] >> 6) & 0x03;
+  tz_hour = (p[4] & 0x1f);
+  tz_minute = p[4] >> 5;
+
+  if (tz_flag == 0) {
+    /* UTC */
+    rar->mtime = mktime(&(struct tm){.tm_year = year - 1900,
+                                    .tm_mon = month - 1,
+                                    .tm_mday = day,
+                                    .tm_hour = hour,
+                                    .tm_min = minute,
+                                    .tm_sec = second,
+                                    .tm_isdst = -1});
+  } else if (tz_flag == 1) {
+    /* Local */
+    rar->mtime = mktime(&(struct tm){.tm_year = year - 1900,
+                                    .tm_mon = month - 1,
+                                    .tm_mday = day,
+                                    .tm_hour = hour,
+                                    .tm_min = minute,
+                                    .tm_sec = second,
+                                    .tm_isdst = -1});
+    rar->mtime -= tz_hour * 3600 + tz_minute * 60;
+  } else if (tz_flag == 2) {
+    /* Unknown */
+    rar->mtime = mktime(&(struct tm){.tm_year = year - 1900,
+                                    .tm_mon = month - 1,
+                                    .tm_mday = day,
+                                    .tm_hour = hour,
+                                    .tm_min = minute,
+                                    .tm_sec = second,
+                                    .tm_isdst = -1});
+    rar->mtime += tz_hour * 3600 + tz_minute * 60;
+  } else {
+    /* Local */
+    rar->mtime = mktime(&(struct tm){.tm_year = year - 1900,
+                                    .tm_mon = month - 1,
+                                    .tm_mday = day,
+                                    .tm_hour = hour,
+                                    .tm_min = minute,
+                                    .tm_sec = second,
+                                    .tm_isdst = -1});
+    rar->mtime -= tz_hour * 3600 + tz_minute * 60;
+  }
+
+  return (ARCHIVE_OK);
+}
+
+static int
+read_symlink_stored(struct archive_read *a, struct archive_entry *entry,
+                    struct archive_string_conv *sconv)
+{
+  const void *h;
+  const char *p;
+  size_t skip;
+  struct rar *rar;
+  int ret;
+
+  rar = (struct rar *)(a->format->data);
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (memcmp(p, RAR_SIGNATURE, 7) != 0) {
+    archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+      "Invalid marker header");
+    return (ARCHIVE_FATAL);
+  }
+  __archive_read_consume(a, 7);
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if (rar->file_flags & FHD_COMMENT) {
+    skip = archive_le16dec(p + 5);
+    if ((h = __archive_read_ahead(a, skip, NULL)) == NULL)
+      return (ARCHIVE_FATAL);
+    p = h;
+  }
+
+  if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+    return (ARCHIVE_FATAL);
+  p = h;
+  if

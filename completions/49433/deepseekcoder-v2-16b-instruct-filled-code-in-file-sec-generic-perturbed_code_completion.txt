@@ -1,0 +1,313 @@
+cmsTagTypeSignature BaseType;
+    cmsTagDescriptor* TagDescriptor;
+    cmsUInt32Number ElemCount;
+    cmsUInt32Number TagSize;
+    cmsUInt32Number Begin;
+    cmsIOHANDLER* io = Icc ->IOhandler;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    // Search for given tag in ICC profile directory
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+
+        // Not found, create a new one
+        if (Icc -> TagCount >= MAX_TABLE_TAG) {
+            cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return FALSE;
+        }
+
+        Icc -> TagNames[Icc -> TagCount] = sig;
+        Icc -> TagOffsets[Icc -> TagCount] = 0;
+        Icc -> TagSizes[Icc -> TagCount] = 0;
+        Icc -> TagPtrs[Icc -> TagCount] = NULL;
+        Icc -> TagTypeHandlers[Icc -> TagCount] = NULL;
+        Icc -> TagSaveAsRaw[Icc -> TagCount] = FALSE;
+        Icc -> TagLinked[Icc -> TagCount] = (cmsTagSignature) 0;
+        n = Icc -> TagCount;
+        Icc -> TagCount++;
+    }
+
+    // Should this tag be saved as RAW? If so, tagsizes should be specified in advance (no further cooking is done)
+    if (data == NULL) {
+        Icc -> TagSaveAsRaw[n] = TRUE;
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return TRUE;
+    }
+
+    // Search for support on this tag
+    TagDescriptor = _cmsGetTagDescriptor(Icc->ContextID, sig);
+    if (TagDescriptor == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    if (TagDescriptor ->DecideType != NULL) {
+        BaseType = TagDescriptor ->DecideType(cmsGetProfileVersion((cmsHPROFILE) Icc), data);
+    }
+    else {
+        BaseType = TagDescriptor ->SupportedTypes[0];
+    }
+
+    TypeHandler = _cmsGetTagTypeHandler(Icc->ContextID, BaseType);
+    if (TypeHandler == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Calculate size
+    ElemCount = TagDescriptor ->ElemCount;
+    TagSize = TypeHandler ->CalcSize(ElemCount);
+
+    // Allocate memory for the tag
+    if (Icc -> TagPtrs[n]) {
+        freeOneTag(Icc, n);
+    }
+
+    Icc -> TagPtrs[n] = _cmsMalloc(Icc->ContextID, TagSize);
+    if (Icc -> TagPtrs[n] == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Copy data
+    memmove(Icc -> TagPtrs[n], data, TagSize);
+
+    // Save the tag
+    Icc -> TagSaveAsRaw[n] = FALSE;
+    Icc -> TagTypeHandlers[n] = TypeHandler;
+    Icc -> TagSizes[n] = TagSize;
+
+    // Align to 32 bit boundary.
+    Begin = io ->UsedSpace;
+    if (! _cmsWriteAlignment(io)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Write the type base
+    BaseType = TypeHandler ->Signature;
+    if (!_cmsWriteTypeBase(io, BaseType)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Write the tag
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+    if (!LocalTypeHandler.WritePtr(&LocalTypeHandler, io, Icc -> TagPtrs[n], ElemCount)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Update the offset
+    Icc -> TagOffsets[n] = Begin;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Delete a tag from a profile
+cmsBool CMSEXPORT cmsDeleteTag(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    _cmsDeleteTagByPos(Icc, n);
+    Icc -> TagNames[n] = (cmsTagSignature) 0;
+    Icc -> TagOffsets[n] = 0;
+    Icc -> TagSizes[n] = 0;
+    Icc -> TagPtrs[n] = NULL;
+    Icc -> TagTypeHandlers[n] = NULL;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Link a tag to another
+cmsBool CMSEXPORT cmsLinkTag(cmsHPROFILE hProfile, cmsTagSignature sig, cmsTagSignature linkedSig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    Icc -> TagLinked[n] = linkedSig;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Unlink a tag
+cmsBool CMSEXPORT cmsUnlinkTag(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    Icc -> TagLinked[n] = (cmsTagSignature) 0;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Get the linked tag signature
+cmsTagSignature CMSEXPORT cmsGetLinkedTag(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return 0;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return Icc -> TagLinked[n];
+}
+
+
+// Get the tag offset
+cmsUInt32Number CMSEXPORT cmsGetTagOffset(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return 0;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return Icc -> TagOffsets[n];
+}
+
+
+// Get the tag size
+cmsUInt32Number CMSEXPORT cmsGetTagSize(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return 0;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return Icc -> TagSizes[n];
+}
+
+
+// Get the tag data
+void* CMSEXPORT cmsGetTagData(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return NULL;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return NULL;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return Icc -> TagPtrs[n];
+}
+
+
+// Get the tag type handler
+cmsTagTypeHandler* CMSEXPORT cmsGetTagTypeHandler(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return NULL;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return NULL;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return Icc -> TagTypeHandlers[n];
+}
+
+
+// Get the tag descriptor
+cmsTagDescriptor* CMSEXPORT cmsGetTagDescriptor(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return NULL;
+
+    n = _cmsSearchTag(Icc, sig, TRUE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return NULL;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return _cmsGetTagDescriptor(Icc->ContextID, sig);
+}
+
+
+// Get the tag count
+cmsInt32Number CMSEXPORT cmsGetTagCount(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return -1;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return (cmsInt32Number) Icc -> TagCount;
+}
+
+
+// Get the profile version
+cmsFloat64Number CMSEXPORT cmsGetProfileVersion(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return -1;

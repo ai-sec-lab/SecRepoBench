@@ -1,0 +1,116 @@
+int has_year = FLB_FALSE;
+        char *epoch_ptr = strstr(p->time_fmt, "%s");
+        if (epoch_ptr) {
+            is_epoch = FLB_TRUE;
+            has_year = FLB_TRUE;
+        }
+        else {
+            char *year_ptr = strstr(p->time_fmt, "%Y");
+            if (!year_ptr) {
+                year_ptr = strstr(p->time_fmt, "%y");
+            }
+            if (year_ptr) {
+                has_year = FLB_TRUE;
+            }
+        }
+
+        if (!has_year) {
+            len = strlen(p->time_fmt);
+            tmp = flb_malloc(len + 4);
+            if (!tmp) {
+                flb_error("[parser:%s] memory error prepending year", name);
+                flb_free(p->time_fmt);
+                flb_free(p->time_fmt_full);
+                flb_free(p);
+                return NULL;
+            }
+            sprintf(tmp, "%%Y %s", p->time_fmt);
+            flb_free(p->time_fmt);
+            p->time_fmt = tmp;
+            p->time_fmt_year = flb_strdup(tmp);
+            if (!p->time_fmt_year) {
+                flb_error("[parser:%s] memory error copying year format", name);
+                flb_free(p->time_fmt);
+                flb_free(p->time_fmt_full);
+                flb_free(p);
+                return NULL;
+            }
+        }
+
+        const char *tz_patterns[] = {"%z", "%Z"};
+        int tz_found = 0;
+        for (size_t i = 0; i < sizeof(tz_patterns)/sizeof(tz_patterns[0]); i++) {
+            if (strstr(p->time_fmt, tz_patterns[i])) {
+                tz_found = 1;
+                break;
+            }
+        }
+
+        if (tz_found) {
+#ifdef FLB_HAVE_STRPTIME_TZ
+            p->time_with_tz = FLB_TRUE;
+#else
+            flb_error("[parser:%s] timezone not supported", name);
+            flb_free(p->time_fmt);
+            flb_free(p->time_fmt_full);
+            if (p->time_fmt_year) flb_free(p->time_fmt_year);
+            flb_free(p);
+            return NULL;
+#endif
+        }
+
+        char *frac_ptr = strstr(p->time_fmt, "%L");
+        if (frac_ptr) {
+            size_t pos = frac_ptr - p->time_fmt;
+            tmp = flb_strndup(p->time_fmt, pos + 2);
+            if (!tmp) {
+                flb_error("[parser:%s] memory error splitting fractional", name);
+                flb_free(p->time_fmt);
+                flb_free(p->time_fmt_full);
+                if (p->time_fmt_year) flb_free(p->time_fmt_year);
+                flb_free(p);
+                return NULL;
+            }
+            char *frac_str = flb_strdup(frac_ptr + 2);
+            if (!frac_str) {
+                flb_error("[parser:%s] memory error copying fractional", name);
+                flb_free(tmp);
+                flb_free(p->time_fmt);
+                flb_free(p->time_fmt_full);
+                if (p->time_fmt_year) flb_free(p->time_fmt_year);
+                flb_free(p);
+                return NULL;
+            }
+            flb_free(p->time_fmt);
+            p->time_fmt = tmp;
+            p->time_frac_str = frac_str;
+        }
+
+        if (time_offset) {
+            int hours, minutes;
+            char sign = 1;
+            const char *ptr = time_offset;
+
+            if (*ptr == '-') {
+                sign = -1;
+                ptr++;
+            }
+            else if (*ptr == '+') {
+                ptr++;
+            }
+
+            if (sscanf(ptr, "%2d:%2d", &hours, &minutes) == 2 ||
+                sscanf(ptr, "%2d%2d", &hours, &minutes) == 2) {
+                diff = sign * (hours * 3600 + minutes * 60);
+                p->time_offset = diff;
+            }
+            else {
+                flb_error("[parser:%s] invalid offset format", name);
+                flb_free(p->time_fmt);
+                flb_free(p->time_fmt_full);
+                if (p->time_fmt_year) flb_free(p->time_fmt_year);
+                if (p->time_frac_str) flb_free(p->time_frac_str);
+                flb_free(p);
+                return NULL;
+            }
+        }
