@@ -96,10 +96,10 @@ MODELS = {
     'llama-3.1-70b-instruct': 'meta-llama/Meta-Llama-3.1-70B-Instruct',
     'gpt-o3-mini': 'o3-mini-2025-01-31',
     'gpt-o1': 'o1-2024-12-17',
-    'gpt-4o-new': 'gpt-4o-2024-11-20',
+    'gpt-4o-2024-11-20': 'gpt-4o-2024-11-20',
     'claude-3.7-thinking': 'claude-3-7-sonnet-20250219',
-    'qwen-max': '',
-    'gemini-2-flash': '',
+    'qwen-plus': 'qwen-plus-2025-01-25',
+    'gemini-2-flash': 'gemini-2.0-flash',
 }
 
 FUNC_PROMPT = (
