@@ -1,0 +1,289 @@
+0) {
+          return BLOSC2_ERROR_DATA;
+        }
+        break;
+      case BLOSC2_SPECIAL_NANS:
+        // All NaNs
+        rc = set_nans(context->typesize, _dest, bsize_);
+        if (rc < 0) {
+          return BLOSC2_ERROR_DATA;
+        }
+        break;
+      default:
+        memcpy(_dest, src, bsize_);
+    }
+    if (context->postfilter != NULL) {
+      // Apply postfilter
+      blosc2_postfilter_params postparams;
+      memcpy(&postparams, context->postparams, sizeof(postparams));
+      postparams.in = _dest;
+      postparams.out = dest + dest_offset;
+      postparams.size = bsize_;
+      postparams.typesize = typesize;
+      postparams.offset = nblock * context->blocksize;
+      postparams.tid = thread_context->tid;
+      postparams.ttmp = thread_context->tmp;
+      postparams.ttmp_nbytes = thread_context->tmp_nbytes;
+      postparams.ctx = context;
+
+      if (context->postfilter(&postparams) != 0) {
+        BLOSC_TRACE_ERROR("Execution of postfilter function failed");
+        return BLOSC2_ERROR_POSTFILTER;
+      }
+    }
+    return bsize_;
+  }
+
+  /* The number of compressed data streams for this block */
+  if (!dont_split && !leftoverblock) {
+    nstreams = (int32_t)typesize;
+  }
+  else {
+    nstreams = 1;
+  }
+  neblock = bsize / nstreams;
+  for (int j = 0; j < nstreams; j++) {
+    if (!is_lazy) {
+      src += src_offset;
+    }
+    if (chunk_nbytes + context->header_overhead != chunk_cbytes) {
+      return BLOSC2_ERROR_WRITE_BUFFER;
+    }
+    if (chunk_cbytes < context->header_overhead + (nblock * context->blocksize) + bsize) {
+      /* Not enough input to decompress block */
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if (is_lazy) {
+      src += context->header_overhead + nblock * context->blocksize;
+    }
+    cbytes = _sr32(src);
+    src += sizeof(int32_t);
+    if (cbytes < 0) {
+      /* Negative cbytes means a run-length encoded block */
+      int32_t value = -cbytes;
+      if (ntbytes + value > bsize) {
+        return BLOSC2_ERROR_DATA;
+      }
+      memset(dest + dest_offset + ntbytes, value, value);
+      ntbytes += value;
+      continue;
+    }
+    if (cbytes == 0 || cbytes == neblock) {
+      /* The compressor has been unable to compress data at all. */
+      if (ntbytes + neblock > bsize) {
+        return BLOSC2_ERROR_DATA;
+      }
+      memcpy(dest + dest_offset + ntbytes, src, neblock);
+      ntbytes += neblock;
+      continue;
+    }
+    if (cbytes > neblock) {
+      /* Buffer overrun caused by compression (should never happen) */
+      return BLOSC2_ERROR_WRITE_BUFFER;
+    }
+    if (cbytes > srcsize) {
+      /* Not enough input to decompress block */
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if (context->compcode == BLOSC_BLOSCLZ) {
+      nbytes = blosclz_decompress(cbytes, src, dest + dest_offset + ntbytes);
+    }
+  #if defined(HAVE_LZ4)
+    else if (context->compcode == BLOSC_LZ4) {
+      nbytes = lz4_wrap_decompress((char*)src, (size_t)cbytes, (char*)(dest + dest_offset + ntbytes));
+    }
+    else if (context->compcode == BLOSC_LZ4HC) {
+      nbytes = lz4hc_wrap_decompress((char*)src, (size_t)cbytes, (char*)(dest + dest_offset + ntbytes));
+    }
+  #endif /* HAVE_LZ4 */
+  #if defined(HAVE_SNAPPY)
+    else if (context->compcode == BLOSC_SNAPPY) {
+      nbytes = snappy_wrap_decompress((char*)src, (size_t)cbytes, (char*)(dest + dest_offset + ntbytes));
+    }
+  #endif /* HAVE_SNAPPY */
+  #if defined(HAVE_ZLIB)
+    else if (context->compcode == BLOSC_ZLIB) {
+      nbytes = zlib_wrap_decompress((char*)src, (size_t)cbytes, (char*)(dest + dest_offset + ntbytes));
+    }
+  #endif /* HAVE_ZLIB */
+  #if defined(HAVE_ZSTD)
+    else if (context->compcode == BLOSC_ZSTD) {
+      nbytes = zstd_wrap_decompress(thread_context, (char*)src, (size_t)cbytes, (char*)(dest + dest_offset + ntbytes));
+    }
+  #endif /* HAVE_ZSTD */
+    else {
+      blosc_compcode_to_compname(context->compcode, &compname);
+      BLOSC_TRACE_ERROR("Blosc has not been compiled with '%s' compression support."
+                        "Please use one having it.", compname);
+      return BLOSC2_ERROR_CODEC_SUPPORT;
+    }
+
+    if (nbytes != (int32_t)neblock) {
+      /* Buffer overrun caused by decompression (should never happen) */
+      return BLOSC2_ERROR_WRITE_BUFFER;
+    }
+    if (nbytes < 0) {
+      /* Negative nbytes means a run-length encoded block */
+      int32_t value = -nbytes;
+      if (ntbytes + value > bsize) {
+        return BLOSC2_ERROR_DATA;
+      }
+      memset(dest + dest_offset + ntbytes, value, value);
+      ntbytes += value;
+      continue;
+    }
+    if (ntbytes + nbytes > bsize) {
+      return BLOSC2_ERROR_DATA;
+    }
+    src += cbytes;
+    ntbytes += nbytes;
+  }  /* Closes j < nstreams */
+
+  return ntbytes;
+}
+
+
+/* Initialize the thread pool */
+int init_threadpool(blosc2_context *context) {
+  int rc;
+  if (context->nthreads == 1) {
+    return 0;
+  }
+  if (threads_callback) {
+    rc = threads_callback(context, threads_callback_data, context->nthreads);
+    if (rc != 0) {
+      return rc;
+    }
+  }
+  else {
+    rc = pthread_mutex_init(&context->count_threads_mutex, NULL);
+    if (rc != 0) {
+      BLOSC_TRACE_ERROR("Could not initialize mutex: %d", rc);
+      return BLOSC2_ERROR_THREADS;
+    }
+    rc = pthread_cond_init(&context->count_threads_cv, NULL);
+    if (rc != 0) {
+      BLOSC_TRACE_ERROR("Could not initialize condition variable: %d", rc);
+      return BLOSC2_ERROR_THREADS;
+    }
+    if (BLOSC_POSIX_BARRIERS) {
+      rc = pthread_barrier_init(&context->barr_init, NULL, context->nthreads);
+      if (rc != 0) {
+        BLOSC_TRACE_ERROR("Could not initialize barrier (init): %d", rc);
+        return BLOSC2_ERROR_THREADS;
+      }
+      rc = pthread_barrier_init(&context->barr_finish, NULL, context->nthreads);
+      if (rc != 0) {
+        BLOSC_TRACE_ERROR("Could not initialize barrier (finish): %d", rc);
+        return BLOSC2_ERROR_THREADS;
+      }
+    }
+    context->count_threads = 0;
+  }
+  return 0;
+}
+
+
+/* Release the thread pool */
+int release_threadpool(blosc2_context *context) {
+  int rc;
+  if (context->nthreads == 1) {
+    return 0;
+  }
+  if (threads_callback) {
+    rc = threads_callback(context, threads_callback_data, 0);
+    if (rc != 0) {
+      return rc;
+    }
+  }
+  else {
+    if (BLOSC_POSIX_BARRIERS) {
+      rc = pthread_barrier_destroy(&context->barr_init);
+      if (rc != 0) {
+        BLOSC_TRACE_ERROR("Could not destroy barrier (init): %d", rc);
+        return BLOSC2_ERROR_THREADS;
+      }
+      rc = pthread_barrier_destroy(&context->barr_finish);
+      if (rc != 0) {
+        BLOSC_TRACE_ERROR("Could not destroy barrier (finish): %d", rc);
+        return BLOSC2_ERROR_THREADS;
+      }
+    }
+    rc = pthread_mutex_destroy(&context->count_threads_mutex);
+    if (rc != 0) {
+      BLOSC_TRACE_ERROR("Could not destroy mutex: %d", rc);
+      return BLOSC2_ERROR_THREADS;
+    }
+    rc = pthread_cond_destroy(&context->count_threads_cv);
+    if (rc != 0) {
+      BLOSC_TRACE_ERROR("Could not destroy condition variable: %d", rc);
+      return BLOSC2_ERROR_THREADS;
+    }
+  }
+  return 0;
+}
+
+
+/* Initialize the context for compression */
+int blosc2_init_ctx(blosc2_context* context, int32_t typesize, int32_t blocksize,
+                    int clevel, int compcode, int nthreads, int use_dict,
+                    blosc_threads_callback callback, void* callback_data) {
+  int rc;
+
+  if (typesize <= 0 || typesize > BLOSC_MAX_TYPESIZE) {
+    BLOSC_TRACE_ERROR("Invalid typesize.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  if (blocksize <= 0 || blocksize > BLOSC2_MAXBLOCKSIZE) {
+    BLOSC_TRACE_ERROR("Invalid blocksize.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  if (clevel < 0 || clevel > BLOSC_MAXCLEVEL) {
+    BLOSC_TRACE_ERROR("Invalid compression level.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  if (compcode < 0 || compcode > BLOSC_MAX_COMPCODES) {
+    BLOSC_TRACE_ERROR("Invalid compressor code.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  if (nthreads < 1 || nthreads > BLOSC_MAX_THREADS) {
+    BLOSC_TRACE_ERROR("Invalid number of threads.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  context->typesize = typesize;
+  context->blocksize = blocksize;
+  context->clevel = clevel;
+  context->compcode = compcode;
+  context->nthreads = nthreads;
+  context->use_dict = use_dict;
+  context->src = NULL;
+  context->dst = NULL;
+  context->srcsize = 0;
+  context->dstsize = 0;
+  context->cbytes = 0;
+  context->header_flags = 0;
+  context->header_overhead = 0;
+  context->filter_flags = 0;
+  context->special_type = 0;
+  context->prefilter = NULL;
+  context->postfilter = NULL;
+  context->preparams = NULL;
+  context->postparams = NULL;
+  context->threads_callback = callback;
+  context->threads_callback_data = callback_data;
+
+  rc = init_threadpool(context);
+  if (rc != 0) {
+    return rc;
+  }
+
+  return 0;
+}
+
+
+/* Release the context */
+int blosc2_free_ctx(blosc2_context* context) {
+  int rc;
+
+  rc = release_threadpool(context);

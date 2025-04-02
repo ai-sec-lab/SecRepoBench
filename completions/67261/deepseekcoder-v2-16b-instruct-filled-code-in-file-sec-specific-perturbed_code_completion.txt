@@ -1,0 +1,298 @@
+if (p) vtt_pre = p->value.string;
+		p = gf_filter_pck_get_property_str(ipck, "vtt_cueid");
+		if (p) vtt_cueid = p->value.string;
+		p = gf_filter_pck_get_property_str(ipck, "vtt_settings");
+		if (p) vtt_settings = p->value.string;
+		e = gf_webvtt_parser_parse_line(ctx->vttparser, vtt_pre, vtt_cueid, vtt_settings);
+		if (e != GF_OK) {
+			if (e == GF_EOS) {
+				ctx->playstate = 2;
+				return GF_EOS;
+			}
+			return e;
+		}
+	} else {
+		e = gf_webvtt_parser_parse(ctx->vttparser);
+		if (e != GF_OK) {
+			if (e == GF_EOS) {
+				ctx->playstate = 2;
+				return GF_EOS;
+			}
+			return e;
+		}
+	}
+
+	if (gf_filter_pid_would_block(ctx->opid))
+		return GF_OK;
+
+	return GF_OK;
+}
+#endif
+
+static GF_Err txtin_process_srt_or_webvtt(GF_Filter *filter, GF_TXTIn *ctx, GF_FilterPacket *ipck)
+{
+	if (ctx->fmt == GF_TXTIN_MODE_SRT)
+		return txtin_process_srt(filter, ctx, GF_FALSE);
+#ifndef GPAC_DISABLE_VTT
+	else if (ctx->fmt == GF_TXTIN_MODE_WEBVTT)
+		return txtin_process_webvtt(filter, ctx, ipck);
+#endif
+	else
+		return GF_NOT_SUPPORTED;
+}
+
+static GF_Err txtin_process_text(GF_Filter *filter, GF_TXTIn *ctx, GF_FilterPacket *ipck)
+{
+	GF_Err e;
+
+	if (!ctx->is_loaded) {
+		ctx->is_loaded = GF_TRUE;
+		e = gf_text_guess_format(ctx, ctx->file_name, &ctx->fmt);
+		if (e) return e;
+	}
+
+	if (ctx->fmt == GF_TXTIN_MODE_NONE) {
+		GF_LOG(GF_LOG_ERROR, GF_LOG_PARSER, ("[TXTIn] No text format detected for file %s\n", ctx->file_name));
+		return GF_NOT_SUPPORTED;
+	}
+
+	return txtin_process_srt_or_webvtt(filter, ctx, ipck);
+}
+
+static GF_Err txtin_process_packet(GF_Filter *filter, GF_TXTIn *ctx, GF_FilterPacket *ipck)
+{
+	GF_Err e;
+
+	if (!ctx->is_setup) {
+		e = txtin_setup_srt(filter, ctx, GF_FALSE);
+		if (e) return e;
+	}
+
+	if (!ctx->text_process) return GF_NOT_SUPPORTED;
+
+	return ctx->text_process(filter, ctx, ipck);
+}
+
+static GF_Err txtin_process_probe(GF_Filter *filter, GF_TXTIn *ctx)
+{
+	GF_Err e;
+
+	if (!ctx->is_loaded) {
+		ctx->is_loaded = GF_TRUE;
+		e = gf_text_guess_format(ctx, ctx->file_name, &ctx->fmt);
+		if (e) return e;
+	}
+
+	if (ctx->fmt == GF_TXTIN_MODE_NONE) {
+		GF_LOG(GF_LOG_ERROR, GF_LOG_PARSER, ("[TXTIn] No text format detected for file %s\n", ctx->file_name));
+		return GF_NOT_SUPPORTED;
+	}
+
+	if (!ctx->is_setup) {
+		ctx->is_setup = GF_TRUE;
+		e = txtin_setup_srt(filter, ctx, GF_TRUE);
+		if (e) return e;
+	}
+
+	return GF_OK;
+}
+
+static GF_Err txtin_process_flush(GF_Filter *filter, GF_TXTIn *ctx)
+{
+	if (!ctx->is_setup) return GF_OK;
+	ctx->is_setup = GF_FALSE;
+
+	if (ctx->src) {
+		gf_fclose(ctx->src);
+		ctx->src = NULL;
+	}
+
+	if (ctx->opid) {
+		gf_filter_pid_del(ctx->opid);
+		ctx->opid = NULL;
+	}
+
+	if (ctx->vttparser) {
+		gf_webvtt_parser_del(ctx->vttparser);
+		ctx->vttparser = NULL;
+	}
+
+	if (ctx->parser) {
+		gf_xml_dom_del(ctx->parser);
+		ctx->parser = NULL;
+	}
+
+	if (ctx->parser_working_copy) {
+		gf_xml_dom_del(ctx->parser_working_copy);
+		ctx->parser_working_copy = NULL;
+	}
+
+	if (ctx->text_descs) {
+		gf_list_del(ctx->text_descs);
+		ctx->text_descs = NULL;
+	}
+
+	if (ctx->div_nodes_list) {
+		gf_list_del(ctx->div_nodes_list);
+		ctx->div_nodes_list = NULL;
+	}
+
+	if (ctx->ttml_resources) {
+		gf_list_del(ctx->ttml_resources);
+		ctx->ttml_resources = NULL;
+	}
+
+	if (ctx->intervals) {
+		gf_list_del(ctx->intervals);
+		ctx->intervals = NULL;
+	}
+
+	if (ctx->bs_w) {
+		gf_bs_del(ctx->bs_w);
+		ctx->bs_w = NULL;
+	}
+
+	if (ctx->samp) {
+		gf_isom_text_reset(ctx->samp);
+		gf_isom_delete_text_sample(ctx->samp);
+		ctx->samp = NULL;
+	}
+
+	if (ctx->fio) {
+		gf_fileio_del(ctx->fio);
+		ctx->fio = NULL;
+	}
+
+	return GF_OK;
+}
+
+static GF_Err txtin_process_init(GF_Filter *filter, GF_TXTIn *ctx)
+{
+	ctx->is_loaded = ctx->is_setup = GF_FALSE;
+	ctx->unicode_type = -1;
+	ctx->src = NULL;
+	ctx->opid = NULL;
+	ctx->vttparser = NULL;
+	ctx->parser = NULL;
+	ctx->parser_working_copy = NULL;
+	ctx->text_descs = NULL;
+	ctx->div_nodes_list = NULL;
+	ctx->ttml_resources = NULL;
+	ctx->intervals = NULL;
+	ctx->bs_w = NULL;
+	ctx->samp = NULL;
+	ctx->fio = NULL;
+	ctx->first_samp = GF_FALSE;
+	ctx->hdr_parsed = GF_FALSE;
+	ctx->unframed = GF_FALSE;
+	ctx->simple_text = GF_FALSE;
+	ctx->state = 0;
+	ctx->default_color = 0xFFFFFFFF;
+	ctx->start = ctx->end = ctx->prev_end = 0;
+	ctx->curLine = 0;
+	ctx->style.fontID = 1;
+	ctx->style.font_size = 16;
+	ctx->style.text_color = 0xFFFFFFFF;
+	ctx->style.style_flags = 0;
+	ctx->style.startCharOffset = ctx->style.endCharOffset = 0;
+	ctx->forced_sub = GF_FALSE;
+	ctx->has_forced = 0;
+	ctx->timescale = 0;
+	ctx->txml_timescale = 0;
+	ctx->current_tt_interval = 0;
+	ctx->root_working_copy = NULL;
+	ctx->body_node = NULL;
+	ctx->non_compliant_ttml = GF_FALSE;
+	ctx->tick_rate = 0;
+	ctx->ttml_fps_num = 0;
+	ctx->ttml_fps_den = 0;
+	ctx->ttml_sfps = 0;
+	ctx->has_images = GF_FALSE;
+	ctx->do_suspend = GF_FALSE;
+	ctx->vtt_to_tx3g = GF_FALSE;
+	ctx->srt_to_tx3g = GF_FALSE;
+	ctx->intervals = NULL;
+	ctx->cts_first_interval = 0;
+	ctx->forced_sub = GF_FALSE;
+	ctx->has_forced = 0;
+	ctx->timescale = 1000;
+	ctx->txml_timescale = 1000;
+	ctx->current_tt_interval = 0;
+	ctx->root_working_copy = NULL;
+	ctx->body_node = NULL;
+	ctx->non_compliant_ttml = GF_FALSE;
+	ctx->tick_rate = 0;
+	ctx->ttml_fps_num = 0;
+	ctx->ttml_fps_den = 0;
+	ctx->ttml_sfps = 0;
+	ctx->has_images = GF_FALSE;
+	ctx->do_suspend = GF_FALSE;
+	ctx->vtt_to_tx3g = GF_FALSE;
+	ctx->srt_to_tx3g = GF_FALSE;
+	ctx->intervals = NULL;
+	ctx->cts_first_interval = 0;
+	ctx->forced_sub = GF_FALSE;
+	ctx->has_forced = 0;
+	ctx->timescale = 1000;
+	ctx->txml_timescale = 1000;
+	ctx->current_tt_interval = 0;
+	ctx->root_working_copy = NULL;
+	ctx->body_node = NULL;
+	ctx->non_compliant_ttml = GF_FALSE;
+	ctx->tick_rate = 0;
+	ctx->ttml_fps_num = 0;
+	ctx->ttml_fps_den = 0;
+	ctx->ttml_sfps = 0;
+	ctx->has_images = GF_FALSE;
+	ctx->do_suspend = GF_FALSE;
+	ctx->vtt_to_tx3g = GF_FALSE;
+	ctx->srt_to_tx3g = GF_FALSE;
+	ctx->intervals = NULL;
+	ctx->cts_first_interval = 0;
+	ctx->forced_sub = GF_FALSE;
+	ctx->has_forced = 0;
+	ctx->timescale = 1000;
+	ctx->txml_timescale = 1000;
+	ctx->current_tt_interval = 0;
+	ctx->root_working_copy = NULL;
+	ctx->body_node = NULL;
+	ctx->non_compliant_ttml = GF_FALSE;
+	ctx->tick_rate = 0;
+	ctx->ttml_fps_num = 0;
+	ctx->ttml_fps_den = 0;
+	ctx->ttml_sfps = 0;
+	ctx->has_images = GF_FALSE;
+	ctx->do_suspend = GF_FALSE;
+	ctx->vtt_to_tx3g = GF_FALSE;
+	ctx->srt_to_tx3g = GF_FALSE;
+	ctx->intervals = NULL;
+	ctx->cts_first_interval = 0;
+	ctx->forced_sub = GF_FALSE;
+	ctx->has_forced = 0;
+	ctx->timescale = 1000;
+	ctx->txml_timescale = 1000;
+	ctx->current_tt_interval = 0;
+	ctx->root_working_copy = NULL;
+	ctx->body_node = NULL;
+	ctx->non_compliant_ttml = GF_FALSE;
+	ctx->tick_rate = 0;
+	ctx->ttml_fps_num = 0;
+	ctx->ttml_fps_den = 0;
+	ctx->ttml_sfps = 0;
+	ctx->has_images = GF_FALSE;
+	ctx->do_suspend = GF_FALSE;
+	ctx->vtt_to_tx3g = GF_FALSE;
+	ctx->srt_to_tx3g = GF_FALSE;
+	ctx->intervals = NULL;
+	ctx->cts_first_interval = 0;
+	ctx->forced_sub = GF_FALSE;
+	ctx->has_forced = 0;
+	ctx->timescale = 1000;
+	ctx->txml_timescale = 1000;
+	ctx->current_tt_interval = 0;
+	ctx->root_working_copy = NULL;
+	ctx->body_node = NULL;
+	ctx->non_compliant_ttml = GF_FALSE;
+	ctx->tick_rate = 0;
+	ctx->ttml_fps_num = 0;
+	ctx->ttml_fps_den = 0
