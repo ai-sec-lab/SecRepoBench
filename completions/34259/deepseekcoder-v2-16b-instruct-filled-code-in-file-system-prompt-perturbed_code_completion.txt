@@ -1,0 +1,244 @@
+nmetalayers < 0 || nmetalayers > BLOSC2_MAX_METALAYERS) {
+    return BLOSC2_ERROR_DATA;
+  }
+  schunk->nvlmetalayers = nmetalayers;
+
+  // Populate the metalayers and its serialized values
+  for (int nmetalayer = 0; nmetalayer < nmetalayers; nmetalayer++) {
+    trailer_pos += 1;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if ((*idxp & 0xe0u) != 0xa0u) {   // sanity check
+      return BLOSC2_ERROR_DATA;
+    }
+    blosc2_metalayer* metalayer = calloc(sizeof(blosc2_metalayer), 1);
+    schunk->vlmetalayers[nmetalayer] = metalayer;
+
+    // Populate the metalayer string
+    int8_t nslen = *idxp & (uint8_t)0x1F;
+    idxp += 1;
+    trailer_pos += nslen;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    char* ns = malloc((size_t)nslen + 1);
+    memcpy(ns, idxp, nslen);
+    ns[nslen] = '\0';
+    idxp += nslen;
+    metalayer->name = ns;
+
+    // Populate the serialized value for this metalayer
+    // Get the offset
+    trailer_pos += 1;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if ((*idxp & 0xffu) != 0xd2u) {   // sanity check
+      return BLOSC2_ERROR_DATA;
+    }
+    idxp += 1;
+    int32_t offset;
+    trailer_pos += sizeof(offset);
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    from_big(&offset, idxp, sizeof(offset));
+    idxp += 4;
+    if (offset < 0 || offset >= trailer_len) {
+      // Offset is less than zero or exceeds trailer length
+      return BLOSC2_ERROR_DATA;
+    }
+    // Go to offset and see if we have the correct marker
+    uint8_t* content_marker = trailer + offset;
+    if (trailer_len < offset + 1 + 4) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if (*content_marker != 0xc6) {
+      return BLOSC2_ERROR_DATA;
+    }
+
+    // Read the size of the content
+    int32_t content_len;
+    from_big(&content_len, content_marker + 1, sizeof(content_len));
+    if (content_len < 0) {
+      return BLOSC2_ERROR_DATA;
+    }
+    metalayer->content_len = content_len;
+
+    // Finally, read the content
+    if (trailer_len < offset + 1 + 4 + content_len) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    char* content = malloc((size_t)content_len);
+    memcpy(content, content_marker + 1 + 4, (size_t)content_len);
+    metalayer->content = (uint8_t*)content;
+  }
+
+  return 1;
+}
+
+int frame_get_vlmetalayers(blosc2_frame_s* frame, blosc2_schunk* schunk) {
+  int32_t trailer_len;
+  int64_t frame_len;
+  int ret = get_header_info(frame, NULL, &frame_len, NULL, NULL,
+                            NULL, NULL, NULL,
+                            NULL, NULL, NULL, NULL, NULL, NULL,
+                            schunk->storage->io);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  // Get the trailer
+  uint8_t* trailer = NULL;
+  if (frame->cframe != NULL) {
+    trailer = frame->cframe + frame_len - FRAME_TRAILER_MINLEN;
+  } else {
+    int64_t rbytes = 0;
+    trailer = malloc(FRAME_TRAILER_MINLEN);
+    blosc2_io_cb *io_cb = blosc2_get_io_cb(frame->schunk->storage->io->id);
+    if (io_cb == NULL) {
+      BLOSC_TRACE_ERROR("Error getting the input/output API");
+      return BLOSC2_ERROR_PLUGIN_IO;
+    }
+
+    void* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb",
+                             frame->schunk->storage->io);
+    }
+    else {
+      fp = io_cb->open(frame->urlpath, "rb", frame->schunk->storage->io->params);
+    }
+    if (fp != NULL) {
+      rbytes = io_cb->read(trailer, 1, FRAME_TRAILER_MINLEN, fp);
+      io_cb->close(fp);
+    }
+    if (rbytes != (size_t) FRAME_TRAILER_MINLEN) {
+      BLOSC_TRACE_ERROR("Cannot access the trailer out of the frame.");
+      free(trailer);
+      return BLOSC2_ERROR_FILE_READ;
+    }
+  }
+
+  ret = get_vlmeta_from_trailer(frame, schunk, trailer, FRAME_TRAILER_MINLEN);
+
+  if (frame->cframe == NULL) {
+    free(trailer);
+  }
+
+  return ret;
+}
+
+
+int frame_update_vlmetalayers(blosc2_frame_s* frame, blosc2_schunk* schunk) {
+  int32_t trailer_len;
+  int64_t frame_len;
+  int ret = get_header_info(frame, NULL, &frame_len, NULL, NULL,
+                            NULL, NULL, NULL,
+                            NULL, NULL, NULL, NULL, NULL, NULL,
+                            schunk->storage->io);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  // Create the trailer in msgpack (see the frame format document)
+  uint32_t trailer_len_ = FRAME_TRAILER_MINLEN;
+  uint8_t* trailer = (uint8_t*)calloc((size_t)trailer_len_, 1);
+  uint8_t* ptrailer = trailer;
+  *ptrailer = 0x90 + 4;  // fixarray with 4 elements
+  ptrailer += 1;
+  // Trailer format version
+  *ptrailer = FRAME_TRAILER_VERSION;
+  ptrailer += 1;
+
+  int32_t current_trailer_len = (int32_t)(ptrailer - trailer);
+
+  // Now, deal with variable-length metalayers
+  int16_t nvlmetalayers = schunk->nvlmetalayers;
+  if (nvlmetalayers < 0 || nvlmetalayers > BLOSC2_MAX_METALAYERS) {
+    return -1;
+  }
+
+  // Make space for the header of metalayers (array marker, size, map of offsets)
+  trailer = realloc(trailer, (size_t) current_trailer_len + 1 + 1 + 2 + 1 + 2);
+  ptrailer = trailer + current_trailer_len;
+
+  // The msgpack header for the metalayers (array_marker, size, map of offsets, list of metalayers)
+  *ptrailer = 0x90 + 3;  // array with 3 elements
+  ptrailer += 1;
+
+  int32_t tsize = (ptrailer - trailer);
+
+  // Size for the map (index) of metalayer offsets, including this uint16 size (to be filled out later on)
+  *ptrailer = 0xcd;  // uint16
+  ptrailer += 1 + 2;
+
+  // Map (index) of offsets for optional metalayers
+  *ptrailer = 0xde;  // map 16 with N keys
+  ptrailer += 1;
+  to_big(ptrailer, &nvlmetalayers, sizeof(nvlmetalayers));
+  ptrailer += sizeof(nvlmetalayers);
+  current_trailer_len = (int32_t)(ptrailer - trailer);
+  int32_t *offtodata = malloc(nvlmetalayers * sizeof(int32_t));
+  for (int nvlmetalayer = 0; nvlmetalayer < nvlmetalayers; nvlmetalayer++) {
+    if (frame == NULL) {
+      return -1;
+    }
+    blosc2_metalayer *vlmetalayer = schunk->vlmetalayers[nvlmetalayer];
+    uint8_t name_len = (uint8_t) strlen(vlmetalayer->name);
+    trailer = realloc(trailer, (size_t)current_trailer_len + 1 + name_len + 1 + 4);
+    ptrailer = trailer + current_trailer_len;
+    // Store the vlmetalayer
+    if (name_len >= (1U << 5U)) {  // metalayer strings cannot be longer than 32 bytes
+      free(offtodata);
+      return -1;
+    }
+    *ptrailer = (uint8_t)0xa0 + name_len;  // str
+    ptrailer += 1;
+    memcpy(ptrailer, vlmetalayer->name, name_len);
+    ptrailer += name_len;
+    // Space for storing the offset for the value of this vlmetalayer
+    *ptrailer = 0xd2;  // int32
+    ptrailer += 1;
+    offtodata[nvlmetalayer] = (int32_t)(ptrailer - trailer);
+    ptrailer += 4;
+    current_trailer_len += 1 + name_len + 1 + 4;
+  }
+  int32_t tsize2 = (int32_t)(ptrailer - trailer);
+  if (tsize2 != current_trailer_len) {  // sanity check
+    return -1;
+  }
+
+  // Map size + int16 size
+  if ((uint32_t) (tsize2 - tsize) >= (1U << 16U)) {
+    return -1;
+  }
+  uint16_t map_size = (uint16_t) (tsize2 - tsize);
+  to_big(trailer + 4, &map_size, sizeof(map_size));
+
+  // Make space for an (empty) array
+  tsize = (int32_t)(ptrailer - trailer);
+  trailer = realloc(trailer, (size_t) tsize + 2 + 1 + 2);
+  ptrailer = trailer + tsize;
+
+  // Now, store the values in an array
+  *ptrailer = 0xdc;  // array 16 with N elements
+  ptrailer += 1;
+  to_big(ptrailer, &nvlmetalayers, sizeof(nvlmetalayers));
+  ptrailer += sizeof(nvlmetalayers);
+  current_trailer_len = (int32_t)(ptrailer - trailer);
+  for (int nvlmetalayer = 0; nvlmetalayer < nvlmetalayers; nvlmetalayer++) {
+    if (frame == NULL) {
+      return -1;
+    }
+    blosc2_metalayer *vlmetalayer = schunk->vlmetalayers[nvlmetalayer];
+    trailer = realloc(trailer, (size_t)current_trailer_len + 1 + 4 + vlmetalayer->content_len);
+    ptrailer = trailer + current_trailer_len;
+    // Store the serialized contents for this vlmetalayer
+    *ptrailer = 0xc6;  // bin32
+    ptrailer += 1;
+    to_big(ptrailer, &(vlmetalayer->content_len), sizeof(vlmetalayer->content_len));
+    ptrailer

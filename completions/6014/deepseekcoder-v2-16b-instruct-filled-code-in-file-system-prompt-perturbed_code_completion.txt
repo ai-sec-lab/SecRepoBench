@@ -1,0 +1,348 @@
+;
+                  root->attributes[i+1]=(char **) NULL;
+                }
+              if (root->attributes[i][1] == (char *) NULL)
+                {
+                  root->attributes[i][1]=(char **) AcquireQuantumMemory(2,
+                    sizeof(**root->attributes));
+                  if (root->attributes[i][1] == (char **) NULL)
+                    ThrowFatalException(ResourceLimitFatalError,
+                      "MemoryAllocationFailed");
+                  root->attributes[i][1][0]=ConstantString(c);
+                  root->attributes[i][1][1]=ConstantString(v);
+                  root->attributes[i][1][2]=(char *) NULL;
+                }
+              else
+                {
+                  j=1;
+                  while (root->attributes[i][1][j] != (char *) NULL)
+                    j++;
+                  root->attributes[i][1]=(char **) ResizeQuantumMemory(
+                    root->attributes[i][1],(size_t) (j+3),
+                    sizeof(**root->attributes));
+                  if (root->attributes[i][1] == (char **) NULL)
+                    ThrowFatalException(ResourceLimitFatalError,
+                      "MemoryAllocationFailed");
+                  root->attributes[i][1][j+2]=(char *) NULL;
+                  root->attributes[i][1][j+1]=ConstantString(v);
+                  root->attributes[i][1][j]=ConstantString(c);
+                }
+            }
+          }
+        else
+          {
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionWarning,"ParseError","malformed <!ATTLIST");
+            predefined_entitites=(char **) RelinquishMagickMemory(
+              predefined_entitites);
+            return(MagickFalse);
+          }
+        }
+      else
+        if (strncmp(xml,"<!DOCTYPE",9) == 0)
+          {
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionWarning,"ParseError","<!DOCTYPE not supported");
+            predefined_entitites=(char **) RelinquishMagickMemory(
+              predefined_entitites);
+            return(MagickFalse);
+          }
+      xml++;
+    }
+  predefined_entitites=(char **) RelinquishMagickMemory(predefined_entitites);
+  return(MagickTrue);
+}
+
+static XMLTreeInfo *ParseOpenTag(XMLTreeRoot *root,char *tag,
+  ExceptionInfo *exception)
+{
+  XMLTreeInfo
+    *xml_info;
+
+  xml_info=GetXMLTreeChild(root->node,tag);
+  if (xml_info != (XMLTreeInfo *) NULL)
+    {
+      root->node=xml_info;
+      return(xml_info);
+    }
+  xml_info=(XMLTreeInfo *) AcquireMagickMemory(sizeof(*xml_info));
+  if (xml_info == (XMLTreeInfo *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  (void) ResetMagickMemory(xml_info,0,sizeof(*xml_info));
+  xml_info->tag=tag;
+  xml_info->attributes=sentinel;
+  xml_info->content=ConstantString("");
+  xml_info->debug=IsEventLogging();
+  xml_info->signature=MagickCoreSignature;
+  xml_info=InsertTagIntoXMLTree(root->node,xml_info,0);
+  if (xml_info == (XMLTreeInfo *) NULL)
+    {
+      xml_info=(XMLTreeInfo *) RelinquishMagickMemory(xml_info);
+      ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+    }
+  root->node=xml_info;
+  return(xml_info);
+}
+
+static XMLTreeInfo *ParseTag(XMLTreeRoot *root,char *xml,size_t length,
+  ExceptionInfo *exception)
+{
+  char
+    *tag,
+    *value;
+
+  XMLTreeInfo
+    *xml_info;
+
+  size_t
+    extent;
+
+  tag=xml+strspn(xml,XMLWhitespace);
+  if (*tag == '\0')
+    return((XMLTreeInfo *) NULL);
+  xml_info=ParseOpenTag(root,tag,exception);
+  if (xml_info == (XMLTreeInfo *) NULL)
+    return((XMLTreeInfo *) NULL);
+  xml+=strcspn(xml,XMLWhitespace);
+  if (*xml == '\0')
+    return(xml_info);
+  if (*xml == '>')
+    {
+      xml++;
+      ParseCharacterContent(root,xml,length,' ');
+      return(ParseCloseTag(root,tag,exception));
+    }
+  if (*xml == '/')
+    {
+      xml++;
+      if (*xml == '>')
+        {
+          xml++;
+          return(ParseCloseTag(root,tag,exception));
+        }
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","malformed tag");
+      return(xml_info);
+    }
+  value=xml;
+  while ((*xml != '\0') && (*xml != '>') && (*xml != '/'))
+    xml++;
+  if (*xml == '\0')
+    {
+      extent=length;
+      value=ResizeQuantumMemory(value,extent+MagickPathExtent,sizeof(*value));
+      if (value == (char *) NULL)
+        ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+      length=extent;
+      xml=value+length;
+      (void) CopyMagickString(xml,value,length);
+      xml+=strcspn(xml,XMLWhitespace);
+      if (*xml == '\0')
+        return(xml_info);
+      if (*xml == '>')
+        {
+          xml++;
+          ParseCharacterContent(root,xml,length,' ');
+          return(ParseCloseTag(root,tag,exception));
+        }
+      if (*xml == '/')
+        {
+          xml++;
+          if (*xml == '>')
+            {
+              xml++;
+              return(ParseCloseTag(root,tag,exception));
+            }
+          (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+            "ParseError","malformed tag");
+          return(xml_info);
+        }
+    }
+  *xml='\0';
+  xml++;
+  ParseCharacterContent(root,value+strspn(value,XMLWhitespace),
+    xml-value-1,'*');
+  return(xml_info);
+}
+
+static XMLTreeInfo *ParseXML(XMLTreeRoot *root,char *xml,size_t length,
+  ExceptionInfo *exception)
+{
+  XMLTreeInfo
+    *xml_info;
+
+  size_t
+    extent;
+
+  xml_info=NULL;
+  while (*xml != '\0')
+  {
+    while ((*xml != '\0') && (*xml != '<'))
+      xml++;
+    if (*xml == '\0')
+      break;
+    xml+=strspn(xml,XMLWhitespace);
+    if (*xml == '\0')
+      break;
+    if (*xml == '<')
+      {
+        xml++;
+        if (*xml == '?')
+          {
+            xml+=strcspn(xml,"?>");
+            if (*xml == '?')
+              {
+                xml++;
+                ParseProcessingInstructions(root,xml,length);
+                xml+=strspn(xml,"?>");
+                continue;
+              }
+            (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+              "ParseError","malformed processing instruction");
+            return((XMLTreeInfo *) NULL);
+          }
+        if (*xml == '!')
+          {
+            xml+=strcspn(xml,"->");
+            if (*xml == '>')
+              {
+                xml++;
+                continue;
+              }
+            if (*xml == '-')
+              {
+                xml+=strcspn(xml,"->");
+                if (*xml == '>')
+                  {
+                    xml++;
+                    continue;
+                  }
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  OptionWarning,"ParseError","malformed comment");
+                return((XMLTreeInfo *) NULL);
+              }
+            if (*xml == '[')
+              {
+                xml+=strcspn(xml,"]>");
+                if (*xml == ']')
+                  {
+                    xml++;
+                    continue;
+                  }
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  OptionWarning,"ParseError","malformed CDATA section");
+                return((XMLTreeInfo *) NULL);
+              }
+            if (strncmp(xml,"DOCTYPE",7) == 0)
+              {
+                xml+=strspn(xml+7,XMLWhitespace);
+                if (ParseInternalDoctype(root,xml,length,exception) == MagickFalse)
+                  return((XMLTreeInfo *) NULL);
+                xml+=strcspn(xml,"?>");
+                if (*xml == '?')
+                  xml++;
+                continue;
+              }
+            (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+              "ParseError","malformed declaration");
+            return((XMLTreeInfo *) NULL);
+          }
+        xml_info=ParseTag(root,xml,length,exception);
+        if (xml_info == (XMLTreeInfo *) NULL)
+          return((XMLTreeInfo *) NULL);
+        xml+=strcspn(xml,XMLWhitespace);
+        if (*xml == '\0')
+          break;
+        if (*xml == '>')
+          {
+            xml++;
+            continue;
+          }
+        if (*xml == '/')
+          {
+            xml++;
+            if (*xml == '>')
+              {
+                xml++;
+                continue;
+              }
+            (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+              "ParseError","malformed tag");
+            return((XMLTreeInfo *) NULL);
+          }
+      }
+  }
+  return(xml_info);
+}
+
+MagickExport XMLTreeInfo *NewXMLTree(const char *xml,ExceptionInfo *exception)
+{
+  XMLTreeRoot
+    *root;
+
+  char
+    *content;
+
+  size_t
+    length;
+
+  assert(xml != (const char *) NULL);
+  assert(exception != (ExceptionInfo *) NULL);
+  content=ConstantString(xml);
+  length=strlen(content);
+  root=(XMLTreeRoot *) AcquireMagickMemory(sizeof(*root));
+  if (root == (XMLTreeRoot *) NULL)
+    {
+      content=DestroyString(content);
+      ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+    }
+  (void) ResetMagickMemory(root,0,sizeof(*root));
+  root->root.tag=ConstantString("root");
+  root->root.attributes=sentinel;
+  root->root.content=ConstantString("");
+  root->root.debug=IsEventLogging();
+  root->root.signature=MagickCoreSignature;
+  root->node=NULL;
+  root->standalone=MagickFalse;
+  root->processing_instructions=(char ***) AcquireQuantumMemory(1,
+    sizeof(*root->processing_instructions));
+  if (root->processing_instructions == (char ***) NULL)
+    {
+      content=DestroyString(content);
+      root=DestroyMagickMemory(root);
+      ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+    }
+  *root->processing_instructions=(char **) NULL;
+  root->entities=(char **) AcquireQuantumMemory(NumberPredefinedEntities*2+1,
+    sizeof(*root->entities));
+  if (root->entities == (char **) NULL)
+    {
+      content=DestroyString(content);
+      root->processing_instructions=(char ***) RelinquishMagickMemory(
+        root->processing_instructions);
+      root=DestroyMagickMemory(root);
+      ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+    }
+  (void) ResetMagickMemory(root->entities,0,NumberPredefinedEntities*2*
+    sizeof(*root->entities));
+  root->entities[NumberPredefinedEntities*2]=(char *) NULL;
+  root->semaphore=AcquireSemaphoreInfo();
+  if (root->semaphore == (SemaphoreInfo *) NULL)
+    {
+      content=DestroyString(content);
+      root->processing_instructions=(char ***) RelinquishMagickMemory(
+        root->processing_instructions);
+      root->entities=(char **) RelinquishMagickMemory(root->entities);
+      root=DestroyMagickMemory(root);
+      ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+    }
+  root->root.parent=NULL;
+  root->root.semaphore=root->semaphore;
+  root->root.signature=MagickCoreSignature;
+  xml_info=ParseXML(root,content,length,exception);
+  if (xml_info == (XMLTreeInfo *) NULL)
+    {
+      content=DestroyString(content);
+      root->processing_instructions=(char ***) RelinquishMagickMemory(
+        root->processing_instructions);
+      root->entities=(char **) RelinquishMagickMemory

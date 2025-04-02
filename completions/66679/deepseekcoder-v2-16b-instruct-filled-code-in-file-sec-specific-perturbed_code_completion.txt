@@ -1,0 +1,400 @@
+xmlFreeAttributeTableEntry(void *attr, const xmlChar *name ATTRIBUTE_UNUSED) {
+    xmlFreeAttribute((xmlAttributePtr) attr);
+}
+
+/**
+ * xmlFreeAttributeTable:
+ * @table:  An attribute table
+ *
+ * Deallocate the memory used by an attribute hash table.
+ */
+void
+xmlFreeAttributeTable(xmlAttributeTablePtr table) {
+    xmlHashFree(table, xmlFreeAttributeTableEntry);
+}
+
+#ifdef LIBXML_TREE_ENABLED
+/**
+ * xmlCopyAttribute:
+ * @attr:  An attribute
+ *
+ * Build a copy of an attribute.
+ *
+ * Returns the new xmlAttributePtr or NULL in case of error.
+ */
+static void *
+xmlCopyAttribute(void *payload, const xmlChar *name ATTRIBUTE_UNUSED) {
+    xmlAttributePtr attr = (xmlAttributePtr) payload;
+    xmlAttributePtr cur;
+
+    cur = (xmlAttributePtr) xmlMalloc(sizeof(xmlAttribute));
+    if (cur == NULL)
+	return(NULL);
+    memset(cur, 0, sizeof(xmlAttribute));
+    cur->type = XML_ATTRIBUTE_DECL;
+    cur->atype = attr->atype;
+    cur->def = attr->def;
+    cur->doc = attr->doc;
+    cur->name = xmlStrdup(attr->name);
+    if (cur->name == NULL) {
+	xmlFree(cur);
+	return(NULL);
+    }
+    cur->elem = xmlStrdup(attr->elem);
+    if (cur->elem == NULL) {
+	xmlFree(cur->name);
+	xmlFree(cur);
+	return(NULL);
+    }
+    if (attr->prefix != NULL) {
+	cur->prefix = xmlStrdup(attr->prefix);
+	if (cur->prefix == NULL) {
+	    xmlFree(cur->name);
+	    xmlFree(cur->elem);
+	    xmlFree(cur);
+	    return(NULL);
+	}
+    }
+    cur->tree = xmlCopyEnumeration(attr->tree);
+    if (cur->tree == NULL) {
+	xmlFree(cur->name);
+	xmlFree(cur->elem);
+	if (cur->prefix != NULL)
+	    xmlFree(cur->prefix);
+	xmlFree(cur);
+	return(NULL);
+    }
+    if (attr->defaultValue != NULL) {
+	cur->defaultValue = xmlStrdup(attr->defaultValue);
+	if (cur->defaultValue == NULL) {
+	    xmlFree(cur->name);
+	    xmlFree(cur->elem);
+	    if (cur->prefix != NULL)
+		xmlFree(cur->prefix);
+	    xmlFreeEnumeration(cur->tree);
+	    xmlFree(cur);
+	    return(NULL);
+	}
+    }
+
+    return(cur);
+}
+
+/**
+ * xmlCopyAttributeTable:
+ * @table:  An attribute table
+ *
+ * Build a copy of an attribute table.
+ *
+ * Returns the new xmlAttributeTablePtr or NULL in case of error.
+ */
+xmlAttributeTablePtr
+xmlCopyAttributeTable(xmlAttributeTablePtr table) {
+    return(xmlHashCopySafe(table, xmlCopyAttribute, xmlFreeAttributeTableEntry));
+}
+#endif /* LIBXML_TREE_ENABLED */
+
+#ifdef LIBXML_OUTPUT_ENABLED
+/**
+ * xmlDumpAttributeDecl:
+ * @buf:  the XML buffer output
+ * @attr:  An attribute table
+ *
+ * DEPRECATED: Use xmlSaveTree.
+ *
+ * This will dump the content of the attribute declaration as an XML
+ * DTD definition
+ */
+void
+xmlDumpAttributeDecl(xmlBufferPtr buf, xmlAttributePtr attr) {
+    xmlSaveCtxtPtr save;
+
+    if ((buf == NULL) || (attr == NULL))
+        return;
+
+    save = xmlSaveToBuffer(buf, NULL, 0);
+    xmlSaveTree(save, (xmlNodePtr) attr);
+    xmlSaveClose(save);
+}
+
+/**
+ * xmlDumpAttributeDeclScan:
+ * @attr:  An attribute table
+ * @buf:  the XML buffer output
+ *
+ * This routine is used by the hash scan function.  It just reverses
+ * the arguments.
+ */
+static void
+xmlDumpAttributeDeclScan(void *attr, void *buf,
+                         const xmlChar *name ATTRIBUTE_UNUSED) {
+    xmlDumpAttributeDecl((xmlBufferPtr) buf, (xmlAttributePtr) attr);
+}
+
+/**
+ * xmlDumpAttributeTable:
+ * @buf:  the XML buffer output
+ * @table:  An attribute table
+ *
+ * DEPRECATED: Don't use.
+ *
+ * This will dump the content of the attribute table as an XML DTD definition
+ */
+void
+xmlDumpAttributeTable(xmlBufferPtr buf, xmlAttributeTablePtr table) {
+    if ((buf == NULL) || (table == NULL))
+        return;
+    xmlHashScan(table, xmlDumpAttributeDeclScan, buf);
+}
+#endif /* LIBXML_OUTPUT_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidateAttribute:
+ * @ctxt:  the validation context
+ * @elem:  the element name
+ * @attr:  the attribute name
+ * @value:  the attribute value
+ *
+ * Validate an attribute value against the DTD.
+ *
+ * Returns 1 if the value is valid, 0 otherwise.
+ */
+int
+xmlValidateAttribute(xmlValidCtxtPtr ctxt, xmlElementPtr elem,
+                     const xmlChar *attr, const xmlChar *value) {
+    xmlAttributePtr attrDef;
+    int ret = 0;
+
+    if ((elem == NULL) || (attr == NULL) || (value == NULL))
+        return(0);
+
+    attrDef = xmlGetDtdElementDesc2(ctxt, elem->parent, elem->name);
+    if (attrDef == NULL)
+        return(0);
+
+    while (attrDef != NULL) {
+        xmlAttributePtr cur = attrDef->attributes;
+
+        while (cur != NULL) {
+            if ((xmlStrEqual(cur->name, attr)) &&
+                (cur->atype == XML_ATTRIBUTE_ENUMERATION)) {
+                if (xmlValidityChecker(ctxt, cur->tree, value) == 1) {
+                    ret = 1;
+                    break;
+                }
+            }
+            cur = cur->nexth;
+        }
+        if (ret == 1)
+            break;
+        attrDef = attrDef->next;
+    }
+    return(ret);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_REGEXP_ENABLED
+/**
+ * xmlValidityChecker:
+ * @ctxt:  the validation context
+ * @tree:  the enumeration tree
+ * @value:  the value to check
+ *
+ * Check if a value is valid according to an enumeration tree.
+ *
+ * Returns 1 if the value is valid, 0 otherwise.
+ */
+int
+xmlValidityChecker(xmlValidCtxtPtr ctxt, xmlEnumerationPtr tree,
+                   const xmlChar *value) {
+    int ret = 0;
+
+    if (tree == NULL)
+        return(0);
+
+    while (tree != NULL) {
+        if (xmlStrEqual(tree->name, value)) {
+            ret = 1;
+            break;
+        }
+        tree = tree->next;
+    }
+    return(ret);
+}
+#endif /* LIBXML_REGEXP_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidityErrorFunc:
+ * @ctxt:  the validation context
+ * @value:  the value that failed validation
+ * @tree:  the enumeration tree
+ *
+ * Handle a validation error for an enumeration value.
+ */
+static void
+xmlValidityErrorFunc(xmlValidCtxtPtr ctxt, const xmlChar *value,
+                     xmlEnumerationPtr tree) {
+    xmlErrValidNode(ctxt, NULL, XML_ERR_ATTRIBUTE_NOT_FOUND,
+                    "Value '%s' not found in enumeration for attribute\n",
+                    value, NULL, NULL);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_REGEXP_ENABLED
+/**
+ * xmlValidityWarningFunc:
+ * @ctxt:  the validation context
+ * @value:  the value that failed validation
+ * @tree:  the enumeration tree
+ *
+ * Handle a validation warning for an enumeration value.
+ */
+static void
+xmlValidityWarningFunc(xmlValidCtxtPtr ctxt, const xmlChar *value,
+                       xmlEnumerationPtr tree) {
+    xmlErrValidWarning(ctxt, NULL, XML_ERR_ATTRIBUTE_NOT_FOUND,
+                       "Value '%s' not found in enumeration for attribute\n",
+                       value, NULL, NULL);
+}
+#endif /* LIBXML_REGEXP_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidateAttributeValue:
+ * @doc:  the document
+ * @type:  the attribute type
+ * @value:  the attribute value
+ *
+ * Validate an attribute value against the DTD.
+ *
+ * Returns 1 if the value is valid, 0 otherwise.
+ */
+int
+xmlValidateAttributeValue(xmlDocPtr doc, xmlAttributeType type,
+                          const xmlChar *value) {
+    return(xmlValidateAttributeValueInternal(doc, type, value));
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidateAttributeValueInternal:
+ * @doc:  the document
+ * @type:  the attribute type
+ * @value:  the attribute value
+ *
+ * Validate an attribute value against the DTD.
+ *
+ * Returns 1 if the value is valid, 0 otherwise.
+ */
+int
+xmlValidateAttributeValueInternal(xmlDocPtr doc, xmlAttributeType type,
+                                  const xmlChar *value) {
+    int ret = 0;
+    xmlEnumerationPtr tree = NULL;
+
+    if (doc == NULL)
+        return(0);
+
+    switch (type) {
+        case XML_ATTRIBUTE_CDATA:
+        case XML_ATTRIBUTE_ID:
+        case XML_ATTRIBUTE_IDREF:
+        case XML_ATTRIBUTE_IDREFS:
+        case XML_ATTRIBUTE_ENTITY:
+        case XML_ATTRIBUTE_ENTITIES:
+        case XML_ATTRIBUTE_NMTOKEN:
+        case XML_ATTRIBUTE_NMTOKENS:
+            ret = 1;
+            break;
+        case XML_ATTRIBUTE_ENUMERATION:
+            tree = doc->dict->enumerations;
+            if (tree == NULL)
+                break;
+            ret = xmlValidityChecker(NULL, tree, value);
+            if (ret == 0) {
+                xmlValidityErrorFunc(NULL, value, tree);
+            }
+            break;
+        case XML_ATTRIBUTE_NOTATION:
+            ret = 1;
+            break;
+        default:
+            xmlErrValid(NULL, XML_ERR_INTERNAL_ERROR,
+                        "Internal: ATTRIBUTE struct corrupted invalid type\n",
+                        NULL);
+            break;
+    }
+    return(ret);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidityErrorFunc:
+ * @ctxt:  the validation context
+ * @value:  the value that failed validation
+ * @tree:  the enumeration tree
+ *
+ * Handle a validation error for an enumeration value.
+ */
+static void
+xmlValidityErrorFunc(xmlValidCtxtPtr ctxt, const xmlChar *value,
+                     xmlEnumerationPtr tree) {
+    xmlErrValidNode(ctxt, NULL, XML_ERR_ATTRIBUTE_NOT_FOUND,
+                    "Value '%s' not found in enumeration for attribute\n",
+                    value, NULL, NULL);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_REGEXP_ENABLED
+/**
+ * xmlValidityWarningFunc:
+ * @ctxt:  the validation context
+ * @value:  the value that failed validation
+ * @tree:  the enumeration tree
+ *
+ * Handle a validation warning for an enumeration value.
+ */
+static void
+xmlValidityWarningFunc(xmlValidCtxtPtr ctxt, const xmlChar *value,
+                       xmlEnumerationPtr tree) {
+    xmlErrValidWarning(ctxt, NULL, XML_ERR_ATTRIBUTE_NOT_FOUND,
+                       "Value '%s' not found in enumeration for attribute\n",
+                       value, NULL, NULL);
+}
+#endif /* LIBXML_REGEXP_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidityChecker:
+ * @ctxt:  the validation context
+ * @tree:  the enumeration tree
+ * @value:  the value to check
+ *
+ * Check if a value is valid according to an enumeration tree.
+ *
+ * Returns 1 if the value is valid, 0 otherwise.
+ */
+int
+xmlValidityChecker(xmlValidCtxtPtr ctxt, xmlEnumerationPtr tree,
+                   const xmlChar *value) {
+    int ret = 0;
+
+    if (tree == NULL)
+        return(0);
+
+    while (tree != NULL) {
+        if (xmlStrEqual(tree->name, value)) {
+            ret = 1;
+            break;
+        }
+        tree = tree->next;
+    }
+    return(ret);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#
