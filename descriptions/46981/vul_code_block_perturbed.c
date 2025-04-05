@@ -1,20 +1,20 @@
-if (current_image == (Image *) NULL)
+if (image == (Image *) NULL)
       {
         if (logging != MagickFalse)
           (void) LogMagickEvent(CoderEvent,GetMagickModule(),
             "exit ReadJNGImage() with error");
-        if (mng_info->image != (Image *) NULL)
+        if (mng_data->image != (Image *) NULL)
           {
-            CloseBlob(mng_info->image);
-            mng_info->image=DestroyImageList(mng_info->image);
+            CloseBlob(mng_data->image);
+            mng_data->image=DestroyImageList(mng_data->image);
           }
         return((Image *) NULL);
       }
 
-    if (current_image->columns == 0 || current_image->rows == 0)
+    if (image->columns == 0 || image->rows == 0)
       {
-        (void) CloseBlob(current_image);
-        return(DestroyImageList(current_image));
+        (void) CloseBlob(image);
+        return(DestroyImageList(image));
       }
 
-    mng_info->image=current_image;
+    mng_data->image=image;

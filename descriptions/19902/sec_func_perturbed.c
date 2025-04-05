@@ -1,8 +1,8 @@
 double
-mrb_str_len_to_dbl(mrb_state *state, const char *s, size_t len, mrb_bool badcheck)
+mrb_str_len_to_dbl(mrb_state *mrb, const char *char_buffer, size_t len, mrb_bool badcheck)
 {
   char buf[DBL_DIG * 4 + 20];
-  const char *p = s, *p2;
+  const char *p = char_buffer, *p2;
   const char *pend = p + len;
   char *end;
   char *n;
@@ -18,7 +18,7 @@ mrb_str_len_to_dbl(mrb_state *state, const char *s, size_t len, mrb_bool badchec
     mrb_value x;
 
     if (!badcheck) return 0.0;
-    x = mrb_str_len_to_inum(state, p, pend-p, 0, badcheck);
+    x = mrb_str_len_to_inum(mrb, p, pend-p, 0, badcheck);
     if (mrb_fixnum_p(x))
       d = (double)mrb_fixnum(x);
     else /* if (mrb_float_p(x)) */
@@ -28,7 +28,7 @@ mrb_str_len_to_dbl(mrb_state *state, const char *s, size_t len, mrb_bool badchec
   while (p < pend) {
     if (!*p) {
       if (badcheck) {
-        mrb_raise(state, E_ARGUMENT_ERROR, "string for Float contains null byte");
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "string for Float contains null byte");
         /* not reached */
       }
       pend = p;
@@ -74,7 +74,7 @@ nocopy:
   if (p == end) {
     if (badcheck) {
 bad:
-      mrb_raisef(state, E_ARGUMENT_ERROR, "invalid string for float(%!s)", s);
+      mrb_raisef(mrb, E_ARGUMENT_ERROR, "invalid string for float(%!s)", char_buffer);
       /* not reached */
     }
     return d;

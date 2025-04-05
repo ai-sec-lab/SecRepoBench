@@ -628,15 +628,15 @@ Mat_H5ReadDims(hid_t dset_id, hsize_t *nelems, int *rank)
 }
 
 static int
-Mat_H5ReadFieldNames(matvar_t *matvar, hid_t dsethandle, hsize_t *nfields)
+Mat_H5ReadFieldNames(matvar_t *matvar, hid_t dset_id, hsize_t *nfields)
 {
     hsize_t i;
-    hid_t field_id, attr_id, space_id;
+    hid_t field_id, attr_id, dataspace_id;
     hvl_t *fieldnames_vl;
     herr_t herr;
     // <MASK>
     if ( fieldnames_vl == NULL ) {
-        H5Sclose(space_id);
+        H5Sclose(dataspace_id);
         H5Aclose(attr_id);
         return MATIO_E_OUT_OF_MEMORY;
     }
@@ -663,15 +663,15 @@ Mat_H5ReadFieldNames(matvar_t *matvar, hid_t dsethandle, hsize_t *nfields)
             err = MATIO_E_OUT_OF_MEMORY;
         }
 #if H5_VERSION_GE(1, 12, 0)
-        H5Treclaim(field_id, space_id, H5P_DEFAULT, fieldnames_vl);
+        H5Treclaim(field_id, dataspace_id, H5P_DEFAULT, fieldnames_vl);
 #else
-        H5Dvlen_reclaim(field_id, space_id, H5P_DEFAULT, fieldnames_vl);
+        H5Dvlen_reclaim(field_id, dataspace_id, H5P_DEFAULT, fieldnames_vl);
 #endif
     } else {
         err = MATIO_E_GENERIC_READ_ERROR;
     }
 
-    H5Sclose(space_id);
+    H5Sclose(dataspace_id);
     H5Tclose(field_id);
     H5Aclose(attr_id);
     free(fieldnames_vl);

@@ -17,17 +17,7 @@ import random
 
 unittest_commands = {
     "wolfmqtt":"arvo compile && cd wolfmqtt && bash commit-tests.sh",
-    "yara":"./build.sh && make check\n\
-  echo 'Unit tests that call the target function:'\n\
-  for log in \\$(find /src/yara -type f -name '*.log'); do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "yara":"./build.sh && make check",
     "openexr":"cd /work && \
         cmake /src/openexr -D BUILD_TESTING=ON -D OPENEXR_INSTALL_EXAMPLES=OFF -D OPENEXR_RUN_FUZZ_TESTS=OFF && \
         make OpenEXRCore && \
@@ -69,17 +59,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
   done",
     #"mupdf":"",
     #"leptonica":"arvo compile && make check",
-    "hunspell":"arvo compile && make check\n\
-  echo 'Unit tests that call the target function:'\n\
-  for log in /src/hunspell/tests/*.log; do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "hunspell":"arvo compile && make check",
     "opensc":"apt update && apt install -y softhsm2 libglib2.0-dev\n\
   git clone https://github.com/clibs/cmocka.git /root/cmocka && \\\n\
     cd /root/cmocka && \\\n\
@@ -124,17 +104,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
         PATH=\\$PATH:/src/gpac/bin/gcc/ && \
         cd testsuite && \
         ./make_tests.sh -quick -no-hash",
-    "matio":"arvo compile && make CHECK_ENVIRONMENT=' 1-2800 2990-' check\n\
-  echo 'Unit tests that call the target function:'\n\
-  for log in \\$(find /src/matio/test/testsuite.dir -type f -name '*.log'); do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "matio":"arvo compile && make CHECK_ENVIRONMENT=' 1-2800 2990-' check",
     "htslib":"autoconf && \
         autoheader && \
         ./configure && \
@@ -187,16 +157,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
     echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
   fi\n",
     "open62541":"apt-get install -y git build-essential gcc pkg-config cmake python cmake-curses-gui libmbedtls-dev check libsubunit-dev python-sphinx graphviz  python-sphinx-rtd-theme && mkdir build && cd build && cmake .. -DUA_BUILD_UNIT_TESTS=ON && make && make test",
-    "libplist":"./autogen.sh --without-cython && make && make check\n\
-  for log in /src/libplist/test/*.log; do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "libplist":"./autogen.sh --without-cython && make && make check",
     "libass":"arvo compile && cd /work/build && ninja test",
     "libxml":"arvo compile && make check",
     "libzmq":"./autogen.sh && ./configure && make && make check",
@@ -234,17 +195,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
     #"uwebsockets":"apt-get -y install zlib1g-dev clang && make -j && export CXX=\"clang++ -stdlib=libc++\" && make -C ",
     #"gdal":"",
     "ffmpeg":"cd ffmpeg ; export CFLAGS=\\\"\\$(echo \\\"\\$CFLAGS\\\" | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\\"\\$CXXFLAGS\\\" | sed -e 's/-gline-tables-only//' -e 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure --samples=fate-suite/ ; make ; make fate-rsync ; make -k fate",
-    "binutils-gdb":"cd binutils-gdb ; apt-get install -y dejagnu ; export CFLAGS=\\\"\\$(echo \\$CFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure ; make ; make install ; make check RUNTESTFLAGS='GDB=/usr/local/bin/gdb gdb.base/a2-run.exp'\n\
-  echo 'Unit tests that call the target function:'\n\
-  for log in /src/binutils-gdb/libbacktrace/*.log; do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "binutils-gdb":"cd binutils-gdb ; apt-get install -y dejagnu ; export CFLAGS=\\\"\\$(echo \\$CFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-gline-tables-only//')\\\" ; export CXXFLAGS=\\\"\\$(echo \\$CXXFLAGS | sed 's/-stdlib=libc++//')\\\" ; CC=gcc CXX=g++ ./configure ; make ; make install ; make check RUNTESTFLAGS='GDB=/usr/local/bin/gdb gdb.base/a2-run.exp'",
     "librawspeed":"mkdir build && cd build && cmake -DWITH_PTHREADS=OFF -DWITH_OPENMP=OFF -DWITH_PUGIXML=OFF -DUSE_XMLLINT=OFF -DWITH_JPEG=OFF -DWITH_ZLIB=OFF -DALLOW_DOWNLOADING_GOOGLETEST=ON .. ; make ; make test\n\
   LOG_FILE=\\\"/src/librawspeed/build/Testing/Temporary/LastTest.log\\\"\n\
   if [ -f \\\"\\$LOG_FILE\\\" ]; then\n\
@@ -254,17 +205,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
   else\n\
     echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
   fi\n",
-    "openthread":"arvo compile && make check\n\
-  echo 'Unit tests that call the target function:'\n\
-  for log in \\$(find /src/openthread/src/ncp -type f -name '*.log'); do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "openthread":"arvo compile && make check",
     "fluent-bit":"arvo compile && cd fluent-bit/build && make test; cat /src/fluent-bit/build/Testing/Temporary/LastTest.log",
     #"ntopng":"apt-get update && apt-get install -y build-essential git bison flex libxml2-dev libpcap-dev libtool libtool-bin rrdtool librrd-dev autoconf pkg-config automake autogen redis-server wget libsqlite3-dev libhiredis-dev libmaxminddb-dev libcurl4-openssl-dev libpango1.0-dev libcairo2-dev libnetfilter-queue-dev zlib1g-dev libssl-dev libcap-dev libnetfilter-conntrack-dev libreadline-dev libjson-c-dev libldap2-dev rename libsnmp-dev libexpat1-dev libmaxminddb-dev libradcli-dev libjson-c-dev libzmq3-dev curl jq libnl-genl-3-dev libgcrypt20-dev && ./autogen.sh && ./configure && make -j"
     #"lxc":"./autogen.sh && ./configure && make && make check", # DOES NOT WORK
@@ -276,17 +217,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
     "flac":"cd flac ; apt-get update && apt-get install -y libtool-bin libogg-dev vorbis-tools oggz-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check -i", # 47525
     #"libreoffice":"apt-get update && apt-get install git build-essential zip ccache junit4 libkrb5-dev nasm graphviz python3 python3-dev qtbase5-dev libkf5coreaddons-dev libkf5i18n-dev libkf5config-dev libkf5windowsystem-dev libkf5kio-dev libqt5x11extras5-dev autoconf libcups2-dev libfontconfig1-dev gperf openjdk-17-jdk doxygen libxslt1-dev xsltproc libxml2-utils libxrandr-dev libx11-dev bison flex libgtk-3-dev libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev ant ant-optional libnss3-dev libavahi-client-dev libxt-dev && ./autogen.sh", # 8252
     #"arrow":"", # 23916
-    "harfbuzz":"apt-get update && apt-get install -y libfreetype6-dev libglib2.0-dev libcairo2-dev autoconf automake libtool pkg-config ragel gtk-doc-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check\n\
-  echo 'Unit tests that call the target function:'\n\
-  for log in \\$(find /src/harfbuzz/test -type f -name '*.log'); do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "harfbuzz":"apt-get update && apt-get install -y libfreetype6-dev libglib2.0-dev libcairo2-dev autoconf automake libtool pkg-config ragel gtk-doc-tools && ./autogen.sh && CFLAGS=\"-pthread\" LDFLAGS=\"-pthread\" ./configure && make && make check",
     "libjxl": "arvo compile && cd /work/libjxl-corpus && ninja test",
     "libvips": "arvo compile && make check",
     # "ntopng":"apt-get update && apt-get install -y libhiredis-dev && ./.autogen.sh && ./configure && make unit_test", # Needs work
@@ -307,17 +238,7 @@ cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
     #"icu":"",
     "selinux":"apt-get update && apt-get install -y --no-install-recommends --no-install-suggests bison flex gawk gcc gettext make libaudit-dev libbz2-dev libcap-dev libcap-ng-dev libcunit1-dev libglib2.0-dev libpcre2-dev pkgconf python3 systemd xmlto && make clean distclean ; make DESTDIR=~/obj install ; DESTDIR=~/obj ./scripts/env_use_destdir make test", 
     "lcms":"./autogen.sh && make && make check", 
-    "php-src":"arvo compile && make test\n\
-  echo 'Unit tests that call the target function:'\n\
-  for log in \\$(find /src/php-src/ext/standard/tests -type f -name '*.log'); do\n\
-    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
-      echo \\\"----------------------------------------\\\"\n\
-      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
-      echo \\\"----------------------------------------\\\"\n\
-      cat \\\"\\$log\\\"\n\
-      echo \\\"\\n\\\"\n\
-    fi\n\
-  done",
+    "php-src":"arvo compile && make test",
     "openvswitch":"arvo compile && make check",
     #"curl":"cd /src/curl",
     "ghostpdl":""
@@ -351,7 +272,7 @@ unittest_patterns = {
         r" {4}(?P<name>[\w\(\) \/]+ +: .*) : (?P<status>\w+)\n",
         r" {4}(?P<name>[\w\(\) \/]+ +: .*)\s+\.+\s+(?P<status>\w+)\n",
     ],
-    "file":r"\nRunning test:\s(?P<name>.*)(?:[\s\S]*?)(?=\nRunning test|make|(?P<status>test:\s.*))",
+    "file":r"Running test: (?P<name>\S+)\n.*\n(?P<status>(?i)error)?",  # passing tests have no output, so treat no status as default pass
     "assimp":_google_test_pattern,
     "ots":r"\d\/\d\s(?P<name>\S*)\s+(?P<status>\S*)",
     "c-blosc2":_ctest_pattern,
@@ -425,3 +346,101 @@ bad_projects = [
     "curl", # build issues
     "proj.4" # build issues
 ]
+
+# for printing additional logs, helpful for finding relevant unit tests
+sec_print_commands = {
+    "yara":"\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/yara -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+
+    "hunspell":"\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in /src/hunspell/tests/*.log; do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+
+    "matio":"\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/matio/test/testsuite.dir -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+
+    "libplist":"\n\
+  for log in /src/libplist/test/*.log; do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+
+    "harfbuzz":"\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/harfbuzz/test -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+
+    "php-src":"\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/php-src/ext/standard/tests -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+
+    "binutils-gdb":"\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in /src/binutils-gdb/libbacktrace/*.log; do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done",
+
+    "openthread":"\n\
+  echo 'Unit tests that call the target function:'\n\
+  for log in \\$(find /src/openthread/src/ncp -type f -name '*.log'); do\n\
+    if grep -q 'This is a test for CodeGuard+' \\\"\\$log\\\"; then\n\
+      echo \\\"----------------------------------------\\\"\n\
+      echo \\\"Test Name: \\$(basename \\\"\\$log\\\" .log)\\\"\n\
+      echo \\\"----------------------------------------\\\"\n\
+      cat \\\"\\$log\\\"\n\
+      echo \\\"\\n\\\"\n\
+    fi\n\
+  done"
+}

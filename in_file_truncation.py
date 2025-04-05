@@ -51,7 +51,7 @@ def get_constant_prompt_token_len(tokenizer):
 
 def truncate_in_file(id, constant_token_len, tokenizer, max_tokens=10_000):
     # get masked function and its len
-    mask_func_desc_perturbed = get_c_cpp_file(f"descriptions/{id}/mask_func_desc_perturbed")
+    mask_func_desc_perturbed = get_c_cpp_file(f"descriptions/{id}/mask_sec_func_desc_perturbed")
     mask_func_desc_perturbed_len = len(general_tokenizer(tokenizer, mask_func_desc_perturbed))
 
     # check if there's space for no context case, if not, can't use this id
@@ -87,14 +87,14 @@ def truncate_in_file(id, constant_token_len, tokenizer, max_tokens=10_000):
     if text_before_token_len > context_token_limit:
         # need to truncate the beginning
         keep_tokens = text_before_tokens[:context_token_limit]
-        keep_text = tokenizer.decode(keep_tokens)
+        keep_text = tokenizer.decode(keep_tokens[1:])
         context = keep_text + truncation_notice + mask_func_desc_perturbed
         return context
     else:
         # need to truncate the end
         context_token_limit -= text_before_token_len
         keep_tokens = text_after_tokens[:context_token_limit]
-        keep_text = tokenizer.decode(keep_tokens)
+        keep_text = tokenizer.decode(keep_tokens[1:])
         context = text_before + mask_func_desc_perturbed + keep_text + truncation_notice
         return context
 

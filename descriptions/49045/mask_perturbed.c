@@ -1800,7 +1800,7 @@ mrb_integer_to_str(mrb_state *mrb, mrb_value x, mrb_int base)
  *
  */
 static mrb_value
-int_to_s(mrb_state *state, mrb_value self)
+int_to_s(mrb_state *mrb, mrb_value obj)
 {
   // <MASK>
 }

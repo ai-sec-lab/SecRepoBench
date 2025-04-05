@@ -1,5 +1,5 @@
 char buf[DBL_DIG * 4 + 10];
-  const char *p = s;
+  const char *p = char_buffer;
   const char *pend = p + len;
   char *end;
   char *n;
@@ -13,7 +13,7 @@ char buf[DBL_DIG * 4 + 10];
     mrb_value x;
 
     if (!badcheck) return 0.0;
-    x = mrb_str_len_to_inum(state, p, pend-p, 0, badcheck);
+    x = mrb_str_len_to_inum(mrb, p, pend-p, 0, badcheck);
     if (mrb_fixnum_p(x))
       d = (double)mrb_fixnum(x);
     else /* if (mrb_float_p(x)) */
@@ -23,17 +23,17 @@ char buf[DBL_DIG * 4 + 10];
   while (p < pend) {
     if (!*p) {
       if (badcheck && p < pend) {
-        mrb_raise(state, E_ARGUMENT_ERROR, "string for Float contains null byte");
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "string for Float contains null byte");
         /* not reached */
       }
       pend = p;
-      p = s;
+      p = char_buffer;
       goto nocopy;
     }
     if (*p == '_') break;
     p++;
   }
-  p = s;
+  p = char_buffer;
   n = buf;
   while (p < pend) {
     char c = *p++;

@@ -253,7 +253,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/sec.txt \\$GIT_DIR/{patch_path}\n"
-        "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\n"
+        "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "echo 'NO UNIT TESTS'") + "\n"
         "  \""
     )
 
@@ -285,7 +285,8 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/sec_print.txt \\$GIT_DIR/{patch_path}\n"
-        "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\n"
+        "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "echo 'NO UNIT TESTS'") + "\n"
+        "  " + (sec_print_commands[project_name.lower()] if project_name in unittest_commands else "echo 'NO ADDITIONAL LOG PRINTS'") + "\n"
         "  \""
     )
 
