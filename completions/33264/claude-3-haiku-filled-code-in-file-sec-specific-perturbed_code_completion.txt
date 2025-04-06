@@ -1,0 +1,102 @@
+int32_t start, stop, startb, stopb, bsize2, j;
+int32_t ntbytes = 0;
+
+// Check if there are no items to process and return early if so
+if (start >= nitems || stop <= 0) {
+    return 0;
+}
+
+// Validate that the destination buffer is large enough for the decompressed data
+if (destsize < context->sourcesize) {
+    BLOSC_TRACE_ERROR("Destination buffer is not large enough to hold decompressed data.");
+    return BLOSC2_ERROR_WRITE_BUFFER;
+}
+
+// Set up block start positions based on the source buffer and context
+if (memcpyed) {
+    context->bstarts = NULL;
+} else {
+    context->bstarts = (int32_t *) (context->src + context->header_overhead);
+}
+
+// Verify that the start and stop positions are within valid bounds for the data
+if (start < 0 || start >= context->nblocks || stop < 0 || stop > context->nblocks) {
+    BLOSC_TRACE_ERROR("Start or stop position is out of bounds for the data.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+}
+
+// Determine if the data should be treated as memcpyed based on header flags or context type
+bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+if (!context->do_compress && context->special_type) {
+    // Fake a runlen as if its a memcpyed chunk
+    memcpyed = true;
+}
+
+// Handle special cases for data that is memcpyed or has specific characteristics
+if (memcpyed) {
+    int bsize_ = leftoverblock ? context->sourcesize % context->blocksize : context->blocksize;
+    if (!context->special_type) {
+        if (context->sourcesize + context->header_overhead != context->srcsize) {
+            return BLOSC2_ERROR_WRITE_BUFFER;
+        }
+        if (context->srcsize < context->header_overhead + (start * context->blocksize) + bsize_) {
+            /* Not enough input to copy block */
+            return BLOSC2_ERROR_READ_BUFFER;
+        }
+    }
+    if (!is_lazy) {
+        _src = (uint8_t*)context->src + context->header_overhead + start * context->blocksize;
+    }
+    _dest = (uint8_t*)dest;
+    if (context->postfilter != NULL) {
+        // We are making use of a postfilter, so use a temp for destination
+        _dest = scontext->tmp;
+    }
+    rc = 0;
+    switch (context->special_type) {
+        case BLOSC2_SPECIAL_VALUE:
+            // All repeated values
+            rc = set_values(context->typesize, context->src, _dest, bsize_);
+            if (rc < 0) {
+                BLOSC_TRACE_ERROR("set_values failed");
+                return BLOSC2_ERROR_DATA;
+            }
+            break;
+        case BLOSC2_SPECIAL_NAN:
+            rc = set_nans(context->typesize, _dest, bsize_);
+            if (rc < 0) {
+                BLOSC_TRACE_ERROR("set_nans failed");
+                return BLOSC2_ERROR_DATA;
+            }
+            break;
+        case BLOSC2_SPECIAL_ZERO:
+            memset(_dest, 0, bsize_);
+            break;
+        case BLOSC2_SPECIAL_UNINIT:
+            // We do nothing here
+            break;
+        default:
+            memcpy(_dest, _src, bsize_);
+    }
+    if (context->postfilter != NULL) {
+        // Create new postfilter parameters for this block (must be private for each thread)
+        blosc2_postfilter_params postparams;
+        memcpy(&postparams, context->postparams, sizeof(postparams));
+        postparams.in = scontext->tmp;
+        postparams.out = (uint8_t*)dest + ntbytes;
+        postparams.size = bsize;
+        postparams.typesize = context->typesize;
+        postparams.offset = start * context->blocksize;
+        postparams.tid = scontext->tid;
+        postparams.ttmp = scontext->tmp;
+        postparams.ttmp_nbytes = scontext->tmp_nbytes;
+        postparams.ctx = context;
+
+        // Execute the postfilter (the processed block will be copied to dest)
+        if (context->postfilter(&postparams) != 0) {
+            BLOSC_TRACE_ERROR("Execution of postfilter function failed");
+            return BLOSC2_ERROR_POSTFILTER;
+        }
+    }
+    return bsize_;
+}

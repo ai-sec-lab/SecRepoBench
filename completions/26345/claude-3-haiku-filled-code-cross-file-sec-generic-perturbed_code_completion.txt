@@ -1,0 +1,69 @@
+// Check if the time format string contains a year specifier ("%Y" or "%y").
+// If found, set a flag indicating the presence of a year in the format.
+p->time_has_year = (strstr(time_fmt, "%Y") != NULL || strstr(time_fmt, "%y") != NULL);
+
+// If the format contains "%s", set it as an epoch format and indicate it includes a year.
+if (strstr(time_fmt, "%s") != NULL) {
+    p->time_fmt_is_epoch = FLB_TRUE;
+    p->time_has_year = FLB_TRUE;
+}
+// If neither is found, allocate memory to prepend a year ("%Y") to the time format string.
+else if (!p->time_has_year) {
+    size_t len = strlen(time_fmt) + 3; // 3 for "%Y "
+    p->time_fmt_year = flb_malloc(len);
+    if (!p->time_fmt_year) {
+        flb_errno();
+        flb_free(p->time_fmt);
+        flb_free(p->time_fmt_full);
+        flb_free(p);
+        return NULL;
+    }
+    snprintf(p->time_fmt_year, len, "%%Y %s", time_fmt);
+    p->time_fmt = p->time_fmt_year;
+}
+
+// Check if the time format contains timezone indicators ("%z", "%Z", etc.).
+// If timezone support is enabled, set a flag indicating timezone is included.
+// Otherwise, log an error and clean up if the platform does not support timezone parsing.
+p->time_has_tz = (strstr(time_fmt, "%z") != NULL || strstr(time_fmt, "%Z") != NULL);
+if (p->time_has_tz && !flb_time_parse_is_supported()) {
+    flb_error("[parser:%s] Timezone parsing is not supported on this platform", name);
+    flb_free(p->time_fmt);
+    flb_free(p->time_fmt_full);
+    flb_free(p);
+    return NULL;
+}
+
+// Determine the correct format string to use for fractional seconds handling.
+// If fractional seconds ("%L") are found, truncate the format string at that position
+// and store a pointer to the location where fractional seconds should start.
+p->time_frac_has_dot = (strstr(time_fmt, "%L") != NULL);
+if (p->time_frac_has_dot) {
+    char *frac_pos = strstr(time_fmt, "%L");
+    size_t frac_len = strlen(frac_pos);
+    p->time_fmt_len = (frac_pos - time_fmt);
+    p->time_frac_len = frac_len - 2; // exclude "%L"
+    p->time_frac_start = frac_pos + 2;
+} else {
+    p->time_fmt_len = strlen(time_fmt);
+    p->time_frac_len = 0;
+    p->time_frac_start = NULL;
+}
+
+// Process an optional fixed timezone offset if provided, adjusting the offset variable.
+if (time_offset) {
+    int offset;
+    if (sscanf(time_offset, "%d", &offset) == 1) {
+        p->time_offset = offset;
+    } else {
+        flb_error("[parser:%s] Invalid time_offset value '%s'", name, time_offset);
+        flb_free(p->time_fmt);
+        flb_free(p->time_fmt_full);
+        flb_free(p);
+        return NULL;
+    }
+} else {
+    p->time_offset = 0;
+}
+
+return p;

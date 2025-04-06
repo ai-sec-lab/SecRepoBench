@@ -57,7 +57,7 @@ file_ext = {
     "java": "java", 
     "typescript": ["ts", "tsx"], 
     "csharp": "cs",
-    "c": ["c", "h", "cpp", "cc", "h", "hpp", "cxx"],
+    "c": ["c", "h", "cpp", "cc", "hh", "hpp", "cxx"],
     }
 
 
@@ -328,7 +328,7 @@ def attach_data(args):
         )
 
     cfc_text, status = get_cfc(args, semantic_ranker, project_context)
-    return cfc_text
+    return cfc_text, status
 
 
 if __name__ == "__main__":
@@ -451,7 +451,9 @@ if __name__ == "__main__":
             continue
 
         os.chdir(original_path)
-        cfc_context = attach_data(args)
+        cfc_context, status = attach_data(args)
+
+        # print(status)
 
         with open(os.path.join('descriptions', str(args.query_id), 'cross-file.txt'), "w") as f:
             f.write(cfc_context)

@@ -1,0 +1,53 @@
+// Calculate the number of streams and elements per block based on the context
+  // and determine whether to split the compressed data into multiple streams.
+  int nstreams = context->nstreams;
+  int elements_per_block = context->elements_per_block;
+  bool split_streams = context->split_streams;
+
+  // Prepare destination buffer depending on whether filters are applied.
+  uint8_t* dest_buffer = dest + destinationoffset;
+  if (context->use_filters) {
+    dest_buffer = tmp;
+  }
+
+  // Iterate over each stream and for each stream, read the compressed size and
+  // decompress the data using the appropriate decompression format.
+  for (int j = 0; j < nstreams; j++) {
+    int32_t csize = sw32_(src + 12 + j * 4);   /* compressed buffer size */
+    int32_t cbytes = blosc_d_stream(thread_context, elements_per_block, leftoverblock,
+                                    src + 16 + j * elements_per_block, csize,
+                                    dest_buffer, j * elements_per_block, tmp, tmp2);
+    if (cbytes < 0) {
+      return cbytes;         /* error in blosc_d_stream */
+    }
+    ntbytes += cbytes;
+  }
+
+  // Accumulate the total number of compressed and uncompressed bytes for the block.
+  // If successful, the number of uncompressed bytes is returned; otherwise,
+  // appropriate error codes are returned to indicate failure.
+  if (split_streams) {
+    // Handle cases of runs, uncompressed data, or compressed data based on the
+    // compressed byte size.
+    if (get_run(dest_buffer, dest_buffer + ntbytes)) {
+      return ntbytes;         /* run */
+    }
+    if (ntbytes == 0) {
+      return -1;              /* uncompressible data */
+    }
+    if (ntbytes == (int32_t)bsize) {
+      return ntbytes;         /* uncompressed data */
+    }
+  }
+
+  // Apply filters if any
+  if (context->use_filters) {
+    int errcode = pipeline_d(context, bsize, dest, destinationoffset, tmp, tmp2, tmp3,
+                             last_filter_index);
+    if (errcode < 0)
+      return errcode;
+  }
+
+  // Return the number of uncompressed bytes
+  return ntbytes;
+}

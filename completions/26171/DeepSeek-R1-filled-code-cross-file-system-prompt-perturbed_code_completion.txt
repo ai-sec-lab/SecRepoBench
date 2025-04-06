@@ -1,0 +1,76 @@
+int nstreams = 1;
+    switch (compformat) {
+        case BLOSC_BLOSCLZ_COMPNAME:
+            nstreams = 1;
+            break;
+        case BLOSC_LZ4_COMPNAME:
+            nstreams = 2;
+            break;
+        default:
+            return BLOSC2_ERROR_INVALID_CODEC;
+    }
+
+    int32_t ctbytes = 0;
+    int32_t ntbytes = 0;
+    last_filter_index = -1;
+
+    for (int j = 0; j < nstreams; j++) {
+        if (srcsize - ctbytes < 4) {
+            return BLOSC2_ERROR_READ_BUFFER;
+        }
+        int32_t cbytes = sw32_(src + src_offset + ctbytes);
+        ctbytes += 4;
+
+        if (cbytes < 0) {
+            return BLOSC2_ERROR_INVALID_HEADER;
+        }
+
+        uint8_t* dest_ptr = (j == 0) ? tmp : tmp2;
+        if (cbytes == 0) {
+            if (srcsize - ctbytes < 1) {
+                return BLOSC2_ERROR_RUN_LENGTH;
+            }
+            uint8_t x = src[src_offset + ctbytes];
+            if (!get_run(src + src_offset + ctbytes, src + src_offset + srcsize)) {
+                return BLOSC2_ERROR_RUN_LENGTH;
+            }
+            memset(dest_ptr, x, bsize);
+            ctbytes += 1;
+            ntbytes = bsize;
+        } else if (cbytes == 1) {
+            if (srcsize - ctbytes < bsize) {
+                return BLOSC2_ERROR_READ_BUFFER;
+            }
+            memcpy(dest_ptr, src + src_offset + ctbytes, bsize);
+            ctbytes += bsize;
+            ntbytes = bsize;
+        } else {
+            int result;
+            switch (compformat) {
+                case BLOSC_BLOSCLZ_COMPNAME:
+                    result = blosclz_decompress(src + src_offset + ctbytes, cbytes, dest_ptr, bsize);
+                    break;
+                case BLOSC_LZ4_COMPNAME:
+                    result = LZ4_decompress_safe((const char*)(src + src_offset + ctbytes),
+                                                (char*)dest_ptr, cbytes, bsize);
+                    break;
+                default:
+                    return BLOSC2_ERROR_INVALID_CODEC;
+            }
+            if (result != bsize) {
+                return BLOSC2_ERROR_DECOMP_FAIL;
+            }
+            ctbytes += cbytes;
+            ntbytes = bsize;
+        }
+    }
+
+    if (ctbytes > srcsize) {
+        return BLOSC2_ERROR_READ_BUFFER;
+    }
+
+    for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+        if (filters[i] != BLOSC_NOFILTER) {
+            last_filter_index = i;
+        }
+    }

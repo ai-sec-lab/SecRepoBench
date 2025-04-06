@@ -1,0 +1,38 @@
+if (packet->payload_length < 9) {
+    return; // Not enough data to analyze
+  }
+
+  operationcode = ovpn_payload[0];
+  hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+
+  if (hmac_size < 0) {
+    failed = 1; // HMAC size detection failed
+  } else {
+    if (operationcode & P_OPCODE_MASK == P_CONTROL_HARD_RESET_CLIENT_V1 ||
+        operationcode & P_OPCODE_MASK == P_CONTROL_HARD_RESET_CLIENT_V2) {
+      // Handle client reset
+      if (flow->openvpn_client_counter < P_HARD_RESET_CLIENT_MAX_COUNT) {
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(hmac_size);
+        // Store session ID securely
+        memcpy(flow->session_id, session_remote, 8); // Assuming session_id is large enough
+        flow->openvpn_client_counter++;
+      }
+    } else if (operationcode & P_OPCODE_MASK == P_CONTROL_HARD_RESET_SERVER_V1 ||
+               operationcode & P_OPCODE_MASK == P_CONTROL_HARD_RESET_SERVER_V2) {
+      // Handle server reset
+      if (flow->openvpn_client_counter > 0) {
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(hmac_size);
+        // Verify session ID
+        if (memcmp(flow->session_id, session_remote, 8) == 0) {
+          // Protocol identified as OpenVPN
+          ndpi_struct->detected_protocol = NDPI_CURRENT_PROTO;
+        } else {
+          failed = 1; // Session ID mismatch
+        }
+      }
+    }
+  }
+
+  if (failed) {
+    flow->possible_protocols &= ~NDPI_CURRENT_PROTO; // Exclude from possible protocols
+  }

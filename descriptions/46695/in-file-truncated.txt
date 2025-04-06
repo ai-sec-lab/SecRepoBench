@@ -1,0 +1,898 @@
+<｜begin▁of▁sentence｜>/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%           AAA   N   N  N   N   OOO   TTTTT   AAA   TTTTT  EEEEE             %
+%          A   A  NN  N  NN  N  O   O    T    A   A    T    E                 %
+%          AAAAA  N N N  N N N  O   O    T    AAAAA    T    EEE               %
+%          A   A  N  NN  N  NN  O   O    T    A   A    T    E                 %
+%          A   A  N   N  N   N   OOO     T    A   A    T    EEEEE             %
+%                                                                             %
+%                                                                             %
+%                   MagickCore Image Annotation Methods                       %
+%                                                                             %
+%                              Software Design                                %
+%                                   Cristy                                    %
+%                                 July 1992                                   %
+%                                                                             %
+%                                                                             %
+%  Copyright @ 1999 ImageMagick Studio LLC, a non-profit organization         %
+%  dedicated to making software imaging solutions freely available.           %
+%                                                                             %
+%  You may not use this file except in compliance with the License.  You may  %
+%  obtain a copy of the License at                                            %
+%                                                                             %
+%    https://imagemagick.org/script/license.php                               %
+%                                                                             %
+%  Unless required by applicable law or agreed to in writing, software        %
+%  distributed under the License is distributed on an "AS IS" BASIS,          %
+%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   %
+%  See the License for the specific language governing permissions and        %
+%  limitations under the License.                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% Digital Applications (www.digapp.com) contributed the stroked text algorithm.
+% It was written by Leonard Rosenthol.
+%
+%
+*/
+
+/*
+  Include declarations.
+*/
+#include "MagickCore/studio.h"
+#include "MagickCore/annotate.h"
+#include "MagickCore/annotate-private.h"
+#include "MagickCore/attribute.h"
+#include "MagickCore/cache-private.h"
+#include "MagickCore/cache-view.h"
+#include "MagickCore/channel.h"
+#include "MagickCore/client.h"
+#include "MagickCore/color.h"
+#include "MagickCore/color-private.h"
+#include "MagickCore/colorspace-private.h"
+#include "MagickCore/composite.h"
+#include "MagickCore/composite-private.h"
+#include "MagickCore/constitute.h"
+#include "MagickCore/draw.h"
+#include "MagickCore/draw-private.h"
+#include "MagickCore/enhance.h"
+#include "MagickCore/exception.h"
+#include "MagickCore/exception-private.h"
+#include "MagickCore/gem.h"
+#include "MagickCore/geometry.h"
+#include "MagickCore/image-private.h"
+#include "MagickCore/log.h"
+#include "MagickCore/quantum.h"
+#include "MagickCore/quantum-private.h"
+#include "MagickCore/pixel-accessor.h"
+#include "MagickCore/policy.h"
+#include "MagickCore/property.h"
+#include "MagickCore/resource_.h"
+#include "MagickCore/semaphore.h"
+#include "MagickCore/statistic.h"
+#include "MagickCore/string_.h"
+#include "MagickCore/token.h"
+#include "MagickCore/token-private.h"
+#include "MagickCore/transform.h"
+#include "MagickCore/transform-private.h"
+#include "MagickCore/type.h"
+#include "MagickCore/utility.h"
+#include "MagickCore/utility-private.h"
+#include "MagickCore/xwindow.h"
+#include "MagickCore/xwindow-private.h"
+#if defined(MAGICKCORE_FREETYPE_DELEGATE)
+#if defined(__MINGW32__)
+#  undef interface
+#endif
+#include <ft2build.h>
+#if defined(FT_FREETYPE_H)
+#  include FT_FREETYPE_H
+#else
+#  include <freetype/freetype.h>
+#endif
+#if defined(FT_GLYPH_H)
+#  include FT_GLYPH_H
+#else
+#  include <freetype/ftglyph.h>
+#endif
+#if defined(FT_OUTLINE_H)
+#  include FT_OUTLINE_H
+#else
+#  include <freetype/ftoutln.h>
+#endif
+#if defined(FT_BBOX_H)
+#  include FT_BBOX_H
+#else
+#  include <freetype/ftbbox.h>
+#endif /* defined(FT_BBOX_H) */
+#endif
+#if defined(MAGICKCORE_RAQM_DELEGATE)
+#include <raqm.h>
+#endif
+typedef struct _GraphemeInfo
+{
+  size_t
+    index,
+    x_offset,
+    x_advance,
+    y_offset;
+
+  size_t
+    cluster;
+} GraphemeInfo;
+
+/*
+  Annotate semaphores.
+*/
+static SemaphoreInfo
+  *annotate_semaphore = (SemaphoreInfo *) NULL;
+
+/*
+  Forward declarations.
+*/
+static MagickBooleanType
+  RenderType(Image *,const DrawInfo *,const PointInfo *,TypeMetric *,
+    ExceptionInfo *),
+  RenderPostscript(Image *,const DrawInfo *,const PointInfo *,TypeMetric *,
+    ExceptionInfo *),
+  RenderFreetype(Image *,const DrawInfo *,const char *,const PointInfo *,
+    TypeMetric *,ExceptionInfo *),
+  RenderX11(Image *,const DrawInfo *,const PointInfo *,TypeMetric *,
+    ExceptionInfo *);
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   A n n o t a t e C o m p o n e n t G e n e s i s                           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AnnotateComponentGenesis() instantiates the annotate component.
+%
+%  The format of the AnnotateComponentGenesis method is:
+%
+%      MagickBooleanType AnnotateComponentGenesis(void)
+%
+*/
+MagickPrivate MagickBooleanType AnnotateComponentGenesis(void)
+{
+  if (annotate_semaphore == (SemaphoreInfo *) NULL)
+    annotate_semaphore=AcquireSemaphoreInfo();
+  return(MagickTrue);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   A n n o t a t e C o m p o n e n t T e r m i n u s                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AnnotateComponentTerminus() destroys the annotate component.
+%
+%  The format of the AnnotateComponentTerminus method is:
+%
+%      AnnotateComponentTerminus(void)
+%
+*/
+MagickPrivate void AnnotateComponentTerminus(void)
+{
+  if (annotate_semaphore == (SemaphoreInfo *) NULL)
+    ActivateSemaphoreInfo(&annotate_semaphore);
+  RelinquishSemaphoreInfo(&annotate_semaphore);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   A n n o t a t e I m a g e                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AnnotateImage() annotates an image with text.
+%
+%  The format of the AnnotateImage method is:
+%
+%      MagickBooleanType AnnotateImage(Image *image,DrawInfo *draw_info,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType AnnotateImage(Image *image,
+  const DrawInfo *draw_info,ExceptionInfo *exception)
+{
+  char
+    *p,
+    color[MagickPathExtent],
+    primitive[MagickPathExtent],
+    *text,
+    **textlist;
+
+  DrawInfo
+    *annotate,
+    *annotate_info;
+
+  GeometryInfo
+    geometry_info;
+
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    pixel;
+
+  PointInfo
+    offset;
+
+  RectangleInfo
+    geometry;
+
+  ssize_t
+    i;
+
+  TypeMetric
+    metrics;
+
+  size_t
+    height,
+    number_lines;
+
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (DrawInfo *) NULL);
+  assert(draw_info->signature == MagickCoreSignature);
+  if (draw_info->text == (char *) NULL)
+    return(MagickFalse);
+  if (*draw_info->text == '\0')
+    return(MagickTrue);
+  annotate=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  text=annotate->text;
+  annotate->text=(char *) NULL;
+  annotate_info=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  number_lines=1;
+  for (p=text; *p != '\0'; p++)
+    if (*p == '\n')
+      number_lines++;
+  textlist=(char **) AcquireQuantumMemory(number_lines+1,sizeof(*textlist));
+  if (textlist == (char **) NULL)
+    {
+      annotate_info=DestroyDrawInfo(annotate_info);
+      annotate=DestroyDrawInfo(annotate);
+      text=DestroyString(text);
+      return(MagickFalse);
+    }
+  p=text;
+  for (i=0; i < (ssize_t) number_lines; i++)
+  {
+    char
+      *q;
+
+    textlist[i]=p;
+    for (q=p; *q != '\0'; q++)
+      if ((*q == '\r') || (*q == '\n'))
+        break;
+    if (*q == '\r')
+      {
+        *q='\0';
+        q++;
+      }
+    *q='\0';
+    p=q+1;
+  }
+  textlist[i]=(char *) NULL;
+  SetGeometry(image,&geometry);
+  SetGeometryInfo(&geometry_info);
+  if (annotate_info->geometry != (char *) NULL)
+    {
+      (void) ParsePageGeometry(image,annotate_info->geometry,&geometry,
+        exception);
+      (void) ParseGeometry(annotate_info->geometry,&geometry_info);
+    }
+  if (SetImageStorageClass(image,DirectClass,exception) == MagickFalse)
+    {
+      annotate_info=DestroyDrawInfo(annotate_info);
+      annotate=DestroyDrawInfo(annotate);
+      textlist=(char **) RelinquishMagickMemory(textlist);
+      text=DestroyString(text);
+      return(MagickFalse);
+    }
+  if (IsGrayColorspace(image->colorspace) != MagickFalse)
+    (void) SetImageColorspace(image,sRGBColorspace,exception);
+  status=MagickTrue;
+  (void) memset(&metrics,0,sizeof(metrics));
+  for (i=0; textlist[i] != (char *) NULL; i++)
+  {
+    if (*textlist[i] == '\0')
+      continue;
+    /*
+      Position text relative to image.
+    */
+    annotate_info->affine.tx=geometry_info.xi-image->page.x;
+    annotate_info->affine.ty=geometry_info.psi-image->page.y;
+    (void) CloneString(&annotate->text,textlist[i]);
+    if ((metrics.width == 0) || (annotate->gravity != NorthWestGravity))
+      (void) GetTypeMetrics(image,annotate,&metrics,exception);
+    height=(size_t) floor(metrics.ascent-metrics.descent+0.5);
+    if (height == 0)
+      height=draw_info->pointsize;
+    height+=(size_t) floor(draw_info->interline_spacing+0.5);
+    switch (annotate->gravity)
+    {
+      case UndefinedGravity:
+      default:
+      {
+        offset.x=annotate_info->affine.tx+i*annotate_info->affine.ry*height;
+        offset.y=annotate_info->affine.ty+i*annotate_info->affine.sy*height;
+        break;
+      }
+      case NorthWestGravity:
+      {
+        offset.x=(geometry.width == 0 ? -1.0 : 1.0)*annotate_info->affine.tx+i*
+          annotate_info->affine.ry*height+annotate_info->affine.ry*
+          (metrics.ascent+metrics.descent);
+        offset.y=(geometry.height == 0 ? -1.0 : 1.0)*annotate_info->affine.ty+i*
+          annotate_info->affine.sy*height+annotate_info->affine.sy*
+          metrics.ascent;
+        break;
+      }
+      case NorthGravity:
+      {
+        offset.x=(geometry.width == 0 ? -1.0 : 1.0)*annotate_info->affine.tx+
+          geometry.width/2.0+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width/2.0+annotate_info->affine.ry*
+          (metrics.ascent+metrics.descent);
+        offset.y=(geometry.height == 0 ? -1.0 : 1.0)*annotate_info->affine.ty+i*
+          annotate_info->affine.sy*height+annotate_info->affine.sy*
+          metrics.ascent-annotate_info->affine.rx*metrics.width/2.0;
+        break;
+      }
+      case NorthEastGravity:
+      {
+        offset.x=(geometry.width == 0 ? 1.0 : -1.0)*annotate_info->affine.tx+
+          geometry.width+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width+annotate_info->affine.ry*
+          (metrics.ascent+metrics.descent)-1.0;
+        offset.y=(geometry.height == 0 ? -1.0 : 1.0)*annotate_info->affine.ty+i*
+          annotate_info->affine.sy*height+annotate_info->affine.sy*
+          metrics.ascent-annotate_info->affine.rx*metrics.width;
+        break;
+      }
+      case WestGravity:
+      {
+        offset.x=(geometry.width == 0 ? -1.0 : 1.0)*annotate_info->affine.tx+i*
+          annotate_info->affine.ry*height+annotate_info->affine.ry*
+          (metrics.ascent+metrics.descent-(number_lines-1.0)*height)/2.0;
+        offset.y=(geometry.height == 0 ? -1.0 : 1.0)*annotate_info->affine.ty+
+          geometry.height/2.0+i*annotate_info->affine.sy*height+
+          annotate_info->affine.sy*(metrics.ascent+metrics.descent-
+          (number_lines-1.0)*height)/2.0;
+        break;
+      }
+      case CenterGravity:
+      {
+        offset.x=(geometry.width == 0 ? -1.0 : 1.0)*annotate_info->affine.tx+
+          geometry.width/2.0+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width/2.0+annotate_info->affine.ry*
+          (metrics.ascent+metrics.descent-(number_lines-1.0)*height)/2.0;
+        offset.y=(geometry.height == 0 ? -1.0 : 1.0)*annotate_info->affine.ty+
+          geometry.height/2.0+i*annotate_info->affine.sy*height-
+          annotate_info->affine.rx*metrics.width/2.0+annotate_info->affine.sy*
+          (metrics.ascent+metrics.descent-(number_lines-1.0)*height)/2.0;
+        break;
+      }
+      case EastGravity:
+      {
+        offset.x=(geometry.width == 0 ? 1.0 : -1.0)*annotate_info->affine.tx+
+          geometry.width+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width+
+          annotate_info->affine.ry*(metrics.ascent+metrics.descent-
+          (number_lines-1.0)*height)/2.0-1.0;
+        offset.y=(geometry.height == 0 ? -1.0 : 1.0)*annotate_info->affine.ty+
+          geometry.height/2.0+i*annotate_info->affine.sy*height-
+          annotate_info->affine.rx*metrics.width+
+          annotate_info->affine.sy*(metrics.ascent+metrics.descent-
+          (number_lines-1.0)*height)/2.0;
+        break;
+      }
+      case SouthWestGravity:
+      {
+        offset.x=(geometry.width == 0 ? -1.0 : 1.0)*annotate_info->affine.tx+i*
+          annotate_info->affine.ry*height-annotate_info->affine.ry*
+          (number_lines-1.0)*height;
+        offset.y=(geometry.height == 0 ? 1.0 : -1.0)*annotate_info->affine.ty+
+          geometry.height+i*annotate_info->affine.sy*height-
+          annotate_info->affine.sy*(number_lines-1.0)*height+metrics.descent;
+        break;
+      }
+      case SouthGravity:
+      {
+        offset.x=(geometry.width == 0 ? -1.0 : 1.0)*annotate_info->affine.tx+
+          geometry.width/2.0+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width/2.0-
+          annotate_info->affine.ry*(number_lines-1.0)*height/2.0;
+        offset.y=(geometry.height == 0 ? 1.0 : -1.0)*annotate_info->affine.ty+
+          geometry.height+i*annotate_info->affine.sy*height-
+          annotate_info->affine.rx*metrics.width/2.0-
+          annotate_info->affine.sy*(number_lines-1.0)*height+metrics.descent;
+        break;
+      }
+      case SouthEastGravity:
+      {
+        offset.x=(geometry.width == 0 ? 1.0 : -1.0)*annotate_info->affine.tx+
+          geometry.width+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width-
+          annotate_info->affine.ry*(number_lines-1.0)*height-1.0;
+        offset.y=(geometry.height == 0 ? 1.0 : -1.0)*annotate_info->affine.ty+
+          geometry.height+i*annotate_info->affine.sy*height-
+          annotate_info->affine.rx*metrics.width-
+          annotate_info->affine.sy*(number_lines-1.0)*height+metrics.descent;
+        break;
+      }
+    }
+    switch (annotate->align)
+    {
+      case LeftAlign:
+      {
+        offset.x=annotate_info->affine.tx+i*annotate_info->affine.ry*height;
+        offset.y=annotate_info->affine.ty+i*annotate_info->affine.sy*height;
+        break;
+      }
+      case CenterAlign:
+      {
+        offset.x=annotate_info->affine.tx+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width/2.0;
+        offset.y=annotate_info->affine.ty+i*annotate_info->affine.sy*height-
+          annotate_info->affine.rx*metrics.width/2.0;
+        break;
+      }
+      case RightAlign:
+      {
+        offset.x=annotate_info->affine.tx+i*annotate_info->affine.ry*height-
+          annotate_info->affine.sx*metrics.width;
+        offset.y=annotate_info->affine.ty+i*annotate_info->affine.sy*height-
+          annotate_info->affine.rx*metrics.width;
+        break;
+      }
+      default:
+        break;
+    }
+    if (draw_info->undercolor.alpha != TransparentAlpha)
+      {
+        DrawInfo
+          *undercolor_info;
+
+        /*
+          Text box.
+        */
+        undercolor_info=CloneDrawInfo((ImageInfo *) NULL,(DrawInfo *) NULL);
+        undercolor_info->fill=draw_info->undercolor;
+        undercolor_info->affine=draw_info->affine;
+        undercolor_info->affine.tx=offset.x-draw_info->affine.ry*metrics.ascent;
+        undercolor_info->affine.ty=offset.y-draw_info->affine.sy*metrics.ascent;
+        (void) FormatLocaleString(primitive,MagickPathExtent,
+          "rectangle 0.0,0.0 %g,%g",metrics.origin.x,(double) height);
+        (void) CloneString(&undercolor_info->primitive,primitive);
+        (void) DrawImage(image,undercolor_info,exception);
+        (void) DestroyDrawInfo(undercolor_info);
+      }
+    annotate_info->affine.tx=offset.x;
+    annotate_info->affine.ty=offset.y;
+    pixel=annotate_info->fill;
+    if (annotate_info->stroke.alpha != TransparentAlpha)
+      pixel=annotate_info->stroke;
+    (void) QueryColorname(image,&pixel,AllCompliance,color,exception);
+    (void) FormatLocaleString(primitive,MagickPathExtent,"stroke %s "
+      "stroke-width %g line 0,0 %g,0",color,(double)
+      metrics.underline_thickness,(double) metrics.width);
+    /*
+      Annotate image with text.
+    */
+    switch (annotate->decorate)
+    {
+      case OverlineDecoration:
+      {
+        annotate_info->affine.ty-=(draw_info->affine.sy*(metrics.ascent+
+          metrics.descent-metrics.underline_position));
+        (void) CloneString(&annotate_info->primitive,primitive);
+        (void) DrawImage(image,annotate_info,exception);
+        break;
+      }
+      case UnderlineDecoration:
+      {
+        annotate_info->affine.ty-=(draw_info->affine.sy*
+          metrics.underline_position);
+        (void) CloneString(&annotate_info->primitive,primitive);
+        (void) DrawImage(image,annotate_info,exception);
+        break;
+      }
+      default:
+        break;
+    }
+    status=RenderType(image,annotate,&offset,&metrics,exception);
+    if (status == MagickFalse)
+      break;
+
+    if (annotate->decorate == LineThroughDecoration) {
+        annotate_info->affine.ty-=(draw_info->affine.sy*(height+
+          metrics.underline_position+metrics.descent*2)/2.0);
+        (void) CloneString(&annotate_info->primitive,primitive);
+        (void) DrawImage(image,annotate_info,exception);
+    }
+  }
+  /*
+    Relinquish resources.
+  */
+  annotate_info=DestroyDrawInfo(annotate_info);
+  annotate=DestroyDrawInfo(annotate);
+  textlist=(char **) RelinquishMagickMemory(textlist);
+  text=DestroyString(text);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%  F o r m a t M a g i c k C a p t i o n                                      %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  FormatMagickCaption() formats a caption so that it fits within the image
+%  width.  It returns the number of lines in the formatted caption.
+%
+%  The format of the FormatMagickCaption method is:
+%
+%      ssize_t FormatMagickCaption(Image *image,DrawInfo *draw_info,
+%        const MagickBooleanType split,TypeMetric *metrics,char **caption,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows.
+%
+%    o image:  The image.
+%
+%    o draw_info: the draw info.
+%
+%    o split: when no convenient line breaks-- insert newline.
+%
+%    o metrics: Return the font metrics in this structure.
+%
+%    o caption: the caption.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+
+static inline char *ReplaceSpaceWithNewline(char **caption,char *space)
+{
+  size_t
+    octets;
+
+  octets=(size_t) GetUTFOctets(space);
+  if (octets == 1)
+    *space='\n';
+  else
+    {
+      char
+        *target;
+
+      size_t
+        length,
+        offset;
+
+      length=strlen(*caption);
+      *space='\n';
+      offset=space-(*caption);
+      target=AcquireString(*caption);
+      CopyMagickString(target,*caption,offset+2);
+      ConcatenateMagickString(target,space+octets,length);
+      (void) DestroyString(*caption);
+      *caption=target;
+      space=(*caption)+offset;
+    }
+  return(space);
+}
+
+MagickExport ssize_t FormatMagickCaption(Image *image,DrawInfo *draw_info,
+  const MagickBooleanType split,TypeMetric *metrics,char **caption,
+  ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  char
+    *p,
+    *q,
+    *s;
+
+  size_t
+    width;
+
+  ssize_t
+    i,
+    n;
+
+  q=draw_info->text;
+  s=(char *) NULL;
+  width=0;
+  for (p=(*caption); GetUTFCode(p) != 0; p+=GetUTFOctets(p))
+  {
+    int
+      code;
+
+    code=GetUTFCode(p);
+    if (code == '\n')
+      {
+        q=draw_info->text;
+        continue;
+      }
+    if ((IsUTFSpace(code) != MagickFalse) &&
+        (IsNonBreakingUTFSpace(code) == MagickFalse))
+      {
+        s=p;
+        if (width > image->columns)
+          p=ReplaceSpaceWithNewline(caption,s);
+      }
+    for (i=0; i < (ssize_t) GetUTFOctets(p); i++)
+      *q++=(*(p+i));
+    *q='\0';
+    status=GetTypeMetrics(image,draw_info,metrics,exception);
+    if (status == MagickFalse)
+      break;
+    width=(size_t) floor(metrics->width+draw_info->stroke_width+0.5);
+    if (width <= image->columns)
+      continue;
+    if (s != (char *) NULL)
+      p=ReplaceSpaceWithNewline(caption,s);
+    else
+      if ((split != MagickFalse) || (GetUTFOctets(p) > 2))
+        {
+          /*
+            No convenient line breaks-- insert newline.
+          */
+          n=p-(*caption);
+          if ((n > 0) && ((*
+
+// --- CODE TRUNCATED HERE ---
+
+static MagickBooleanType RenderFreetype(Image *img,const DrawInfo *draw_info,
+  const char *encoding,const PointInfo *offset,TypeMetric *metrics,
+  ExceptionInfo *exception)
+{
+#if !defined(FT_OPEN_PATHNAME)
+#define FT_OPEN_PATHNAME  ft_open_pathname
+#endif
+
+#define ThrowFreetypeErrorException(tag,ft_status,value) \
+{ \
+  const char \
+    *error_string=FreetypeErrorMessage(ft_status); \
+  if (error_string != (const char *) NULL) \
+    (void) ThrowMagickException(exception,GetMagickModule(),TypeError, \
+      tag,"`%s (%s)'",value, error_string); \
+  else \
+    (void) ThrowMagickException(exception,GetMagickModule(),TypeError, \
+      tag,"`%s'",value); \
+}
+
+  typedef struct _GlyphInfo
+  {
+    FT_UInt
+      id;
+
+    FT_Vector
+      origin;
+
+    FT_Glyph
+      image;
+  } GlyphInfo;
+
+  char
+    *p;
+
+  const char
+    *value;
+
+  DrawInfo
+    *annotate_info;
+
+  FT_BBox
+    bounds;
+
+  FT_BitmapGlyph
+    bitmap;
+
+  FT_Encoding
+    encoding_type;
+
+  FT_Error
+    ft_status;
+
+  FT_Face
+    face;
+
+  FT_Int32
+    flags;
+
+  FT_Library
+    library;
+
+  FT_Long
+    face_index;
+
+  FT_Matrix
+    affine;
+
+  FT_Open_Args
+    args;
+
+  FT_StreamRec
+    *stream;
+
+  FT_UInt
+    first_glyph_id,
+    last_glyph_id,
+    missing_glyph_id;
+
+  FT_Vector
+    origin;
+
+  GlyphInfo
+    glyph;
+
+  GraphemeInfo
+    *grapheme;
+
+  MagickBooleanType
+    status;
+
+  PointInfo
+    point,
+    resolution;
+
+  ssize_t
+    i;
+
+  size_t
+    length;
+
+  ssize_t
+    code,
+    last_character,
+    y;
+
+  static FT_Outline_Funcs
+    OutlineMethods =
+    {
+      (FT_Outline_MoveTo_Func) TraceMoveTo,
+      (FT_Outline_LineTo_Func) TraceLineTo,
+      (FT_Outline_ConicTo_Func) TraceQuadraticBezier,
+      (FT_Outline_CubicTo_Func) TraceCubicBezier,
+      0, 0
+    };
+
+  struct stat
+    attributes;
+
+  unsigned char
+    *utf8;
+
+  /*
+    Initialize Truetype library.
+  */
+  ft_status=FT_Init_FreeType(&library);
+  if (ft_status != 0)
+    ThrowFreetypeErrorException("UnableToInitializeFreetypeLibrary",ft_status,
+      img->filename);
+  /*
+    Open font face.
+  */
+  face_index=(FT_Long) draw_info->face;
+  (void) memset(&args,0,sizeof(args));
+  if (draw_info->font == (char *) NULL)
+    args.pathname=ConstantString("helvetica");
+  else
+    if (*draw_info->font != '@')
+      args.pathname=ConstantString(draw_info->font);
+    else
+      {
+        /*
+          Extract face index, e.g. @msgothic[1].
+        */
+        ImageInfo *image_info = AcquireImageInfo();
+        (void) strcpy(image_info->filename,draw_info->font+1);
+        (void) SetImageInfo(image_info,0,exception);
+        face_index=(FT_Long) image_info->scene;
+        args.pathname=ConstantString(image_info->filename);
+        image_info=DestroyImageInfo(image_info);
+     }
+  /*
+    Configure streaming interface.
+  */
+  stream=(FT_StreamRec *) AcquireCriticalMemory(sizeof(*stream));
+  (void) memset(stream,0,sizeof(*stream));
+  (void) stat(args.pathname,&attributes);
+  stream->size=attributes.st_size;
+  stream->descriptor.pointer=fopen_utf8(args.pathname,"rb");
+  stream->read=(&FTReadStream);
+  stream->close=(&FTCloseStream);
+  args.flags=FT_OPEN_STREAM;
+  args.stream=stream;
+  face=(FT_Face) NULL;
+  ft_status=FT_Open_Face(library,&args,face_index,&face);
+  if (ft_status != 0)
+    {
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToReadFont",ft_status,args.pathname);
+      args.pathname=DestroyString(args.pathname);
+      return(MagickFalse);
+    }
+  args.pathname=DestroyString(args.pathname);
+  if ((draw_info->metrics != (char *) NULL) &&
+      (IsPathAccessible(draw_info->metrics) != MagickFalse))
+    (void) FT_Attach_File(face,draw_info->metrics);
+  encoding_type=FT_ENCODING_UNICODE;
+  ft_status=FT_Select_Charmap(face,encoding_type);
+  if ((ft_status != 0) && (face->num_charmaps != 0))
+    ft_status=FT_Set_Charmap(face,face->charmaps[0]);
+  // Select the appropriate character map (encoding) for the font face based on
+  // the provided encoding string. If an encoding is specified, determine the
+  // corresponding FreeType encoding type using a series of string comparisons.
+  // If the encoding type is successfully determined, apply it to the font face.
+  // If the encoding type cannot be applied, handle the error by cleaning up
+  // resources and throwing an exception.
+  // 
+  // Set the character size for the font face based on the point size and
+  // resolution specified in the DrawInfo structure. Adjust the resolution
+  // if a custom density is provided. If setting the character size fails,
+  // handle the error by cleaning up resources and throwing an exception.
+  // 
+  // Initialize the TypeMetric structure with font size metrics such as ascent,
+  // descent, width, height, and maximum advance. If necessary, sanitize any
+  // incorrect ascender and descender values. Calculate underline position and
+  // thickness based on the font's properties.
+  // 
+  // If there is no text to render, or no glyphs in the font, clean up resources
+  // and return a successful status without proceeding further.
+  // 
+  // Configure rendering options such as anti-aliasing and hinting based on
+  // the DrawInfo settings and image properties. Prepare structures for
+  // rendering each glyph in the text string, transforming the glyphs according
+  // to specified affine transformations.
+  // 
+  // Loop through each character in the text, rendering glyphs, tracing outlines
+  // if necessary, and rasterizing the glyphs onto the image. Adjust the
+  // position and metrics of each rendered glyph, and update the bounding box
+  // of the text as needed. Manage resources and synchronize image data
+  // appropriately during the rendering process.
+  // 
+  // Finalize the font metrics by normalizing the bounding box coordinates and
+  // width. Clean up any remaining resources and return the rendering status.
+  // <MASK>
+}

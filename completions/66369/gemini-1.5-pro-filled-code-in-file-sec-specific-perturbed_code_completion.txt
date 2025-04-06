@@ -1,0 +1,91 @@
+key = string_ndup(c->comp_hdr->TD_keys, aux, 3);
+                if (!key)
+                    goto block_err;
+
+                if (CRAM_MAJOR_VERS(filedescriptor->version) == 1) {
+                    k = kh_put(m_s2i, c->tags_used, CRAM_KEY(key[0], key[1]),
+                               &new);
+                } else {
+                    k = kh_put(m_s2i, c->tags_used,
+                               CRAM_KEY(key[0], key[1]) + (key[2]<<16), &new);
+                }
+                if (new < 0)
+                    goto err;
+
+                cram_tag_map *tm = kh_val(c->tags_used, k);
+                if (new > 0) {
+                    tm->codec = cram_encoder_init(E_EXTERNAL, NULL,
+                                                   cram_tag_type(key, aux,
+                                                                 aux_end),
+                                                   (void *)s->hdr->num_blocks,
+                                                   filedescriptor->version,
+                                                   &filedescriptor->vv);
+                    if (!tm->codec)
+                        goto block_err;
+
+                    if (!(tm->blk = cram_new_block(EXTERNAL, s->hdr->num_blocks)))
+                        goto block_err;
+
+                    if (tm->codec->codec == E_BYTE_ARRAY_LEN) {
+                        if (!(tm->blk2 = cram_new_block(EXTERNAL, s->hdr->num_blocks+1)))
+                            goto block_err;
+                        tm->codec->u.e_byte_array_len.len_codec->u.external.content_id = s->hdr->num_blocks+1;
+                        tm->codec->u.e_byte_array_len.val_codec->u.external.content_id = s->hdr->num_blocks;
+                        s->hdr->num_blocks++;
+                    }
+                    s->hdr->num_blocks++;
+
+                    tm->m = cram_new_metrics();
+                    if (!tm->m)
+                        goto block_err;
+                }
+
+                if (!tm->codec)
+                    goto err;
+
+                // Encode tag value
+                if (tm->codec->encode(s, tm->codec, aux, 1) < 0)
+                    goto block_err;
+
+                if (cram_stats_add(tm->m, tm->codec->out->uncomp_size) < 0)
+                    goto block_err;
+
+                aux += 3 + cram_tag_data_size(aux, aux_end);
+                if (aux > aux_end)
+                    goto err;
+
+                if (c->stats[DS_aux]) {
+                    if (cram_stats_add(c->stats[DS_aux],
+                                       tm->codec->out->uncomp_size) < 0)
+                        goto block_err;
+                }
+                if (c->stats[DS_aux_oz]) {
+                    if (cram_stats_add(c->stats[DS_aux_oz],
+                                       tm->codec->out->comp_size) < 0)
+                        goto block_err;
+                }
+
+                if (strcmp(key, "RG:Z") == 0) {
+                    brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, aux);
+                    if (!brg) {
+                        hts_log_warning("Read group '%s' present in BAM but "
+                                        "not in header RG lines", aux);
+                    }
+                }
+
+                if (strcmp(key, "MD:Z") == 0 && !verbatim_MD) {
+                    if (MD) {
+                        if (strcmp(aux, MD->s) != 0) {
+                            hts_log_warning("MD mismatch: %s vs %s", aux, MD->s);
+                            verbatim_MD = 1;
+                        }
+                    }
+                }
+
+                if (strcmp(key, "NM:i") == 0 && !verbatim_NM) {
+                    int nm = bam_aux2i_end(bam_aux_get(b, "NM"), aux_end);
+                    if (nm != NM) {
+                        hts_log_warning("NM mismatch: %d vs %d", nm, NM);
+                        verbatim_NM = 1;
+                    }
+                }

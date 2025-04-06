@@ -1,0 +1,68 @@
+if(general_name_type == 0x87) {
+		    if(len == 4) { /* IPv4 */
+		      snprintf(dNSName, sizeof(dNSName), "%u.%u.%u.%u",
+			       packet->payload[i+2], packet->payload[i+3],
+			       packet->payload[i+4], packet->payload[i+5]);
+		    } else if(len == 16) { /* IPv6 */
+		      snprintf(dNSName, sizeof(dNSName), "%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X",
+			       packet->payload[i+2], packet->payload[i+3],
+			       packet->payload[i+4], packet->payload[i+5],
+			       packet->payload[i+6], packet->payload[i+7],
+			       packet->payload[i+8], packet->payload[i+9],
+			       packet->payload[i+10], packet->payload[i+11],
+			       packet->payload[i+12], packet->payload[i+13],
+			       packet->payload[i+14], packet->payload[i+15],
+			       packet->payload[i+16], packet->payload[i+17]);
+		    } else {
+		      ndpi_set_risk(ndpi_struct, connection, NDPI_TLS_CERTIFICATE_MISMATCH);
+		      break;
+		    }
+		  } else {
+		    if(len >= sizeof(dNSName)) {
+		      ndpi_set_risk(ndpi_struct, connection, NDPI_TLS_CERTIFICATE_MISMATCH);
+		      break;
+		    }
+		    strncpy(dNSName, (const char*)&packet->payload[i+2], len);
+		    dNSName[len] = '\0';
+		  }
+
+		  cleanupServerName(dNSName, len);
+
+		  if(ndpi_is_printable_string(dNSName, len) == 0)
+		    ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+
+		  if(strcmp(dNSName, connection->host_server_name) == 0) {
+		    matched_name = 1;
+#ifdef DEBUG_TLS
+		    printf("******* [TLS] Found matching server name [%s]\n", dNSName);
+#endif
+		  }
+
+		  if(connection->server_names == NULL) {
+		    connection->server_names = ndpi_strdup(dNSName);
+		    connection->server_names_len = strlen(dNSName);
+		  } else {
+		    char *new_server_names = (char*)ndpi_malloc(connection->server_names_len + len + 2);
+		    if(new_server_names == NULL) {
+		      ndpi_free(connection->server_names);
+		      connection->server_names = NULL;
+		      connection->server_names_len = 0;
+		      break;
+		    }
+		    strcpy(new_server_names, connection->server_names);
+		    new_server_names[connection->server_names_len] = ',';
+		    strcpy(new_server_names + connection->server_names_len + 1, dNSName);
+		    ndpi_free(connection->server_names);
+		    connection->server_names = new_server_names;
+		    connection->server_names_len += len + 1;
+		  }
+
+		  if(connection->detected_protocol_stack[0] == NDPI_PROTOCOL_UNKNOWN) {
+		    ndpi_protocol detected_proto = ndpi_parse_server_name(ndpi_struct, dNSName, len);
+		    if(detected_proto.master_protocol != NDPI_PROTOCOL_UNKNOWN) {
+		      ndpi_set_detected_protocol(ndpi_struct, connection, detected_proto.master_protocol, detected_proto.app_protocol);
+		    }
+		  }
+
+		  i += 2 + len;
+		}

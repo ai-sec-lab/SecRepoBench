@@ -7753,7 +7753,7 @@ static Image *ReadMNGImage(const ImageInfo *image_info,
   (void) CloseBlob(image);
 
   if (logging != MagickFalse)
-    (void) LogMagickEvent(CoderEvent,GetMagickModule(),"exit ReadMNGImage()");
+    (void) LogMagickEvent(CoderEvent,GetMagickModule(),"   ReadMNGImage()");
 
   return(GetFirstImageInList(image));
 }

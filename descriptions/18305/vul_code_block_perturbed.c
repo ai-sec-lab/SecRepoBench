@@ -1,11 +1,11 @@
 option=GetImageOption(image_info,"tiff:exif-properties");
     if (IsStringFalse(option) == MagickFalse) /* enabled by default */
-      TIFFGetEXIFProperties(tiff,image,errorinfo);
+      TIFFGetEXIFProperties(tiff,image,exception);
     (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_SAMPLESPERPIXEL,
       &samples_per_pixel);
-    if ((TIFFGetFieldDefaulted(tiff,TIFFTAG_XRESOLUTION,&x_resolution) == 1) &&
+    if ((TIFFGetFieldDefaulted(tiff,TIFFTAG_XRESOLUTION,&hor_res) == 1) &&
         (TIFFGetFieldDefaulted(tiff,TIFFTAG_YRESOLUTION,&y_resolution) == 1))
       {
-        image->resolution.x=x_resolution;
+        image->resolution.x=hor_res;
         image->resolution.y=y_resolution;
       }

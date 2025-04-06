@@ -1,0 +1,129 @@
+for(i = 9; i < packet->payload_packet_len-4; i++) {
+  /* Organization OID: 2.5.4.10 */
+  if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0a)) {
+    u_int8_t server_len = packet->payload[i+4];
+
+    num_found++;
+    /* what we want is subject certificate, so we bypass the issuer certificate */
+    if(num_found!= 2) continue;
+
+    // packet is truncated... further inspection is not needed
+    if(i+4+server_len >= packet->payload_packet_len) {
+      break;
+    }
+
+    char *server_org = (char*)&packet->payload[i+5];
+
+    u_int len = (u_int)ndpi_min(server_len, buffer_len-1);
+    strncpy(buffer, server_org, len);
+    buffer[len] = '\0';
+
+    // check if organization string are all printable
+    u_int8_t is_printable = 1;
+    for (j = 0; j < len; j++) {
+      if(!ndpi_isprint(buffer[j])) {
+        is_printable = 0;
+        break;
+      }
+    }
+
+    if(is_printable == 1) {
+      snprintf(flow->protos.stun_ssl.ssl.server_organization,
+               sizeof(flow->protos.stun_ssl.ssl.server_organization), "%s", buffer);
+#ifdef DEBUG_TLS
+      printf("Certificate organization: %s\n", flow->protos.stun_ssl.ssl.server_organization);
+#endif
+    }
+  } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x1e) && (packet->payload[i+2] == 0x17)) {
+    u_int8_t len = packet->payload[i+3];
+    u_int offset = i+4;
+
+    if((offset+len) < packet->payload_packet_len) {
+      char utcDate[32];
+
+#ifdef DEBUG_TLS
+      printf("[CERTIFICATE] notBefore [len: %u][", len);
+      for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+      printf("]\n");
+#endif
+
+      if(len < (sizeof(utcDate)-1)) {
+        struct tm utc;
+        utc.tm_isdst = -1; /* Not set by strptime */
+
+        strncpy(utcDate, (const char*)&packet->payload[i+4], len);
+        utcDate[len] = '\0';
+
+        /* 141021000000Z */
+        if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc)!= NULL) {
+          flow->protos.stun_ssl.ssl.notBefore = timegm(&utc);
+#ifdef DEBUG_TLS
+          printf("[CERTIFICATE] notBefore %u [%s]\n",
+                 flow->protos.stun_ssl.ssl.notBefore, utcDate);
+#endif
+        }
+      }
+
+      offset += len;
+
+      if((offset+1) < packet->payload_packet_len) {
+        len = packet->payload[offset+1];
+
+        offset += 2;
+
+        if((offset+len) < packet->payload_packet_len) {
+#ifdef DEBUG_TLS
+          printf("[CERTIFICATE] notAfter [len: %u][", len);
+          for(j=0; j<len; j++) printf("%c", packet->payload[offset+j]);
+          printf("]\n");
+#endif
+
+          if(len < (sizeof(utcDate)-1)) {
+            struct tm utc;
+            utc.tm_isdst = -1; /* Not set by strptime */
+
+            strncpy(utcDate, (const char*)&packet->payload[offset], len);
+            utcDate[len] = '\0';
+
+            /* 141021000000Z */
+            if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc)!= NULL) {
+              flow->protos.stun_ssl.ssl.notAfter = timegm(&utc);
+#ifdef DEBUG_TLS
+              printf("[CERTIFICATE] notAfter %u [%s]\n",
+                     flow->protos.stun_ssl.ssl.notAfter, utcDate);
+#endif
+            }
+          }
+        }
+      }
+    }
+  } else if((packet->payload[i] == 0x04) && (packet->payload[i+1] == 0x03) && (packet->payload[i+2] == 0x0c)
+            || (packet->payload[i] == 0x04) && (packet->payload[i+1] == 0x03) && (packet->payload[i+2] == 0x13)
+            || (packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x03)) {
+    // Extract the server name from the TLS certificate payload.
+    // Check if the extracted server name appears to be a valid host name or IP address.
+    // If valid, store the server name in the flow's `server_certificate` field.
+    // Optionally, attempt to match the extracted server name to a known protocol.
+    // If a subprotocol is detected, set the flow's detected protocol accordingly.
+    // If a valid server name is extracted and optionally matched, return indicating success.
+    u_int16_t server_name_len = (packet->payload[i+3] << 8) + packet->payload[i+4];
+    u_int server_name_offset = i + 5;
+
+    if(server_name_len < (packet->payload_packet_len - i - 5)) {
+      char server_name[server_name_len + 1];
+      server_name[server_name_len] = '\0';
+
+      strncpy(server_name, (char*)&packet->payload[server_name_offset], server_name_len);
+
+      if(ndpi_is_valid_hostname(server_name)) {
+        if(ndpi_match_server_name_to_protocol(ndpi_struct, flow, server_name)) {
+          flow->detected_protocol = ndpi_struct->detected_protocols[flow->detected_protocol_id];
+        }
+
+        if(!ndpi_struct->disable_metadata_export) {
+          snprintf(flow->server_certificate, sizeof(flow->server_certificate), "%s", server_name);
+        }
+      }
+    }
+  }
+}

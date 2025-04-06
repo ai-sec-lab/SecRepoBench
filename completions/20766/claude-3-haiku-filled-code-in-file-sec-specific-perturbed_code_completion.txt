@@ -1,0 +1,46 @@
+if(proto == IPPROTO_UDP) {
+    // Parse the UDP header from the packet using the current IP offset.
+    struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset];
+    u_int16_t sport = ntohs(udp->source), dport = ntohs(udp->dest);
+
+    // Check for GTP-U protocol by comparing ports
+    if((sport == GTP_U_V1_PORT || dport == GTP_U_V1_PORT) && (ipsize >= (ip_offset + sizeof(struct ndpi_udphdr) + 8))) {
+        // Verify GTP version and message type
+        u_int8_t *gtp = (u_int8_t *)&packet[ip_offset + sizeof(struct ndpi_udphdr)];
+        if((gtp[0] == 0xFF) && (gtp[1] == 0x01)) {
+            // GTP-U protocol detected
+            tunnel_type = ndpi_gtp_tunnel;
+            ip_offset += sizeof(struct ndpi_udphdr) + 8; // Skip GTP header
+        }
+    }
+    // Check for TZSP protocol using ports
+    else if((sport == TZSP_PORT || dport == TZSP_PORT) && (ipsize >= (ip_offset + sizeof(struct ndpi_udphdr) + 1))) {
+        // Verify TZSP version and encapsulated protocol
+        u_int8_t *tzsp = (u_int8_t *)&packet[ip_offset + sizeof(struct ndpi_udphdr)];
+        if(tzsp[0] == 0x01) {
+            // TZSP protocol detected
+            tunnel_type = ndpi_tzsp_tunnel;
+            // Navigate through TZSP tags to reach the encapsulated Ethernet frame
+            ip_offset += sizeof(struct ndpi_udphdr) + 1;
+            while(ip_offset < header->caplen && tzsp[0] != 0x00) {
+                ip_offset += tzsp[1] + 2;
+                tzsp = (u_int8_t *)&packet[ip_offset];
+            }
+            if(ip_offset < header->caplen) {
+                ip_offset += 2; // Skip the end tag
+                datalink_type = DLT_EN10MB;
+                goto datalink_check;
+            }
+        }
+    }
+    // Check for CAPWAP protocol using source port
+    else if(sport == NDPI_CAPWAP_DATA_PORT && (ipsize >= (ip_offset + sizeof(struct ndpi_udphdr) + 1))) {
+        // Verify CAPWAP message type
+        u_int8_t *capwap = (u_int8_t *)&packet[ip_offset + sizeof(struct ndpi_udphdr)];
+        if((capwap[0] & 0x0F) == 0x00) {
+            // CAPWAP protocol detected
+            tunnel_type = ndpi_capwap_tunnel;
+            ip_offset += sizeof(struct ndpi_udphdr) + ((capwap[1] & 0x0F) * 4); // Skip CAPWAP header
+        }
+    }
+}

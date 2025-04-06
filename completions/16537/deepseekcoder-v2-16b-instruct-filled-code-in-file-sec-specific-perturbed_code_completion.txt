@@ -1,0 +1,347 @@
+&composite_mask->background_color,exception);
+  composite_mask->background_color.alpha=(MagickRealType) TransparentAlpha;
+  composite_mask->background_color.alpha_trait=BlendPixelTrait;
+  status=SetImageBackgroundColor(composite_mask,exception);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"\nbegin composite-mask %s",
+      id);
+  clone_info=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  (void) CloneString(&clone_info->primitive,mask_path);
+  status=QueryColorCompliance("#ffffff",AllCompliance,&clone_info->fill,
+    exception);
+  if (clone_info->composite_mask != (char *) NULL)
+    clone_info->composite_mask=DestroyString(clone_info->composite_mask);
+  status=QueryColorCompliance("#00000000",AllCompliance,&clone_info->stroke,
+    exception);
+  clone_info->stroke_width=0.0;
+  clone_info->alpha=OpaqueAlpha;
+  clone_info->composite_mask=MagickTrue;
+  status=RenderMVGContent(composite_mask,clone_info,0,exception);
+  clone_info=DestroyDrawInfo(clone_info);
+  separate_mask=SeparateImage(composite_mask,AlphaChannel,exception);
+  if (separate_mask != (Image *) NULL)
+    {
+      composite_mask=DestroyImage(composite_mask);
+      composite_mask=separate_mask;
+      status=NegateImage(composite_mask,MagickFalse,exception);
+      if (status == MagickFalse)
+        composite_mask=DestroyImage(composite_mask);
+    }
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"end composite-mask");
+  return(composite_mask);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o m p o s i t e I m a g e                                       %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawCompositeImage() composites the source over the destination image as
+%  dictated by the composite operator.
+%
+%  The format of the DrawCompositeImage method is:
+%
+%      MagickBooleanType DrawCompositeImage(Image *image,const Image *source,
+%        const CompositeOperator compose,const double x,const double y,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o source: the source image.
+%
+%    o compose: the composite operator.
+%
+%    o x: the destination x-coordinate.
+%
+%    o y: the destination y-coordinate.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawCompositeImage(Image *image,
+  const Image *source,const CompositeOperator compose,const double x,
+  const double y,ExceptionInfo *exception)
+{
+  CacheView
+    *image_view,
+    *source_view;
+
+  MagickBooleanType
+    status;
+
+  PointInfo
+    point;
+
+  /*
+    Composite image.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(source != (const Image *) NULL);
+  assert(source->signature == MagickCoreSignature);
+  status=MagickTrue;
+  point.x=x;
+  point.y=y;
+  source_view=AcquireVirtualCacheView(source,exception);
+  image_view=AcquireAuthenticCacheView(image,exception);
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  #pragma omp parallel for schedule(static) shared(status) \
+    magick_number_threads(source,image,image->rows,image->columns)
+#endif
+  for (ssize_t row=0; row < (ssize_t) image->rows; row++)
+  {
+    register Quantum
+      *magick_restrict q;
+
+    register ssize_t
+      column;
+
+    q=GetCacheViewAuthenticPixels(image_view,0,row,image->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      continue;
+    for (column=0; column < (ssize_t) image->columns; column++)
+    {
+      PixelPacket
+        pixel,
+        source_pixel;
+
+      status=GetOneVirtualPixel(source,source_view,column+x,row+y,
+        &source_pixel,exception);
+      if (status == MagickFalse)
+        break;
+      GetPixelPacket(image,q,&pixel);
+      CompositePixelPacket(compose,&source_pixel,&pixel,exception);
+      SetPixelPacket(image,&pixel,q);
+      q+=GetPixelChannels(image);
+    }
+    if (SyncCacheViewAuthenticPixels(image_view,exception) == MagickFalse)
+      status=MagickFalse;
+  }
+  source_view=DestroyCacheView(source_view);
+  image_view=DestroyCacheView(image_view);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o l o r F i l l                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawColorFill() fills the area with the specified color.
+%
+%  The format of the DrawColorFill method is:
+%
+%      MagickBooleanType DrawColorFill(Image *image,const DrawInfo *draw_info,
+%        const double x,const double y,ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o x: the starting x-coordinate of the area to fill.
+%
+%    o y: the starting y-coordinate of the area to fill.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawColorFill(Image *image,
+  const DrawInfo *draw_info,const double x,const double y,ExceptionInfo *exception)
+{
+  CacheView
+    *image_view;
+
+  MagickBooleanType
+    status;
+
+  PointInfo
+    point;
+
+  /*
+    Fill area with color.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  point.x=x;
+  point.y=y;
+  image_view=AcquireAuthenticCacheView(image,exception);
+  status=DrawFloodfillPaint(image,image_view,draw_info->fill,draw_info->fill_alpha,
+    point,draw_info->fill_rule,draw_info->stroke,draw_info->stroke_width,
+    draw_info->stroke_antialias,draw_info->text_antialias,exception);
+  image_view=DestroyCacheView(image_view);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o l o r S t r o k e                                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawColorStroke() strokes the outline of a shape with the specified color.
+%
+%  The format of the DrawColorStroke method is:
+%
+%      MagickBooleanType DrawColorStroke(Image *image,const DrawInfo *draw_info,
+%        const double x1,const double y1,const double x2,const double y2,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o x1: the starting x-coordinate of the shape.
+%
+%    o y1: the starting y-coordinate of the shape.
+%
+%    o x2: the ending x-coordinate of the shape.
+%
+%    o y2: the ending y-coordinate of the shape.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawColorStroke(Image *image,
+  const DrawInfo *draw_info,const double x1,const double y1,const double x2,
+  const double y2,ExceptionInfo *exception)
+{
+  CacheView
+    *image_view;
+
+  MagickBooleanType
+    status;
+
+  PointInfo
+    start,
+    end;
+
+  /*
+    Stroke outline with color.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  start.x=x1;
+  start.y=y1;
+  end.x=x2;
+  end.y=y2;
+  image_view=AcquireAuthenticCacheView(image,exception);
+  status=DrawPathStroke(image,image_view,draw_info,start,end,exception);
+  image_view=DestroyCacheView(image_view);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o n t o u r                                                   %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawContour() draws a contour line around the image.
+%
+%  The format of the DrawContour method is:
+%
+%      MagickBooleanType DrawContour(Image *image,const DrawInfo *draw_info,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawContour(Image *image,
+  const DrawInfo *draw_info,ExceptionInfo *exception)
+{
+  CacheView
+    *image_view;
+
+  MagickBooleanType
+    status;
+
+  /*
+    Draw a contour line around the image.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  image_view=AcquireAuthenticCacheView(image,exception);
+  status=DrawContourImage(image,image_view,draw_info,exception);
+  image_view=DestroyCacheView(image_view);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C u r v e                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawCurve() draws a bezier curve.
+%
+%  The format of the DrawCurve method is:
+%
+%      MagickBooleanType DrawCurve(Image *image,const DrawInfo *draw_info,
+%        const double x1,const double y1,const double x2,const double y2,
+%        const double x3,const double y3,const double x4,const double y4,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o x1,y1: the first control point.
+%
+%    o x2,y2: the second control point.
+%
+%    o x3,y3: the third control point.
+%
+%    o x4,y4: the fourth control

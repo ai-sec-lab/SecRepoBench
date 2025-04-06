@@ -1,0 +1,358 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// valid.c
+xmlIDPtr
+xmlAddID(xmlValidCtxtPtr ctxt, xmlDocPtr doc, const xmlChar *value,
+         xmlAttrPtr attr) {
+    xmlIDPtr id;
+    int res;
+
+    res = xmlAddIDSafe(doc, value, attr, xmlIsStreaming(ctxt), &id);
+    if (res < 0) {
+        xmlVErrMemory(ctxt);
+    }
+#ifdef LIBXML_VALID_ENABLED
+    else if (res == 0) {
+        if (ctxt != NULL) {
+            /*
+             * The id is already defined in this DTD.
+             */
+            xmlErrValidNode(ctxt, attr->parent, XML_DTD_ID_REDEFINED,
+                            "ID %s already defined\n", value, NULL, NULL);
+        }
+    }
+#endif /* LIBXML_VALID_ENABLED */
+
+    return(id);
+}
+
+// the below code fragment can be found in:
+// valid.c
+int
+xmlRemoveID(xmlDocPtr doc, xmlAttrPtr attr) {
+    xmlIDTablePtr table;
+
+    if (doc == NULL) return(-1);
+    if ((attr == NULL) || (attr->id == NULL)) return(-1);
+
+    table = (xmlIDTablePtr) doc->ids;
+    if (table == NULL)
+        return(-1);
+
+    if (xmlHashRemoveEntry(table, attr->id->value, xmlFreeIDTableEntry) < 0)
+        return(-1);
+
+    attr->atype = 0;
+    attr->id = NULL;
+
+    return(0);
+}
+
+// the below code fragment can be found in:
+// valid.c
+int
+xmlIsID(xmlDocPtr doc, xmlNodePtr elem, xmlAttrPtr attr) {
+    if ((attr == NULL) || (attr->name == NULL)) return(0);
+    if ((attr->ns != NULL) && (attr->ns->prefix != NULL) &&
+        (!strcmp((char *) attr->name, "id")) &&
+        (!strcmp((char *) attr->ns->prefix, "xml")))
+	return(1);
+    if (doc == NULL) return(0);
+    if ((doc->intSubset == NULL) && (doc->extSubset == NULL) &&
+        (doc->type != XML_HTML_DOCUMENT_NODE)) {
+	return(0);
+    } else if (doc->type == XML_HTML_DOCUMENT_NODE) {
+        if ((xmlStrEqual(BAD_CAST "id", attr->name)) ||
+	    ((xmlStrEqual(BAD_CAST "name", attr->name)) &&
+	    ((elem == NULL) || (xmlStrEqual(elem->name, BAD_CAST "a")))))
+	    return(1);
+	return(0);
+    } else if (elem == NULL) {
+	return(0);
+    } else {
+	xmlAttributePtr attrDecl = NULL;
+
+	xmlChar felem[50];
+	xmlChar *fullelemname;
+        const xmlChar *aprefix;
+
+	fullelemname = (elem->ns != NULL && elem->ns->prefix != NULL) ?
+	    xmlBuildQName(elem->name, elem->ns->prefix, felem, 50) :
+	    (xmlChar *)elem->name;
+        if (fullelemname == NULL)
+            return(-1);
+
+        aprefix = (attr->ns != NULL) ? attr->ns->prefix : NULL;
+
+	if (fullelemname != NULL) {
+	    attrDecl = xmlGetDtdQAttrDesc(doc->intSubset, fullelemname,
+		                          attr->name, aprefix);
+	    if ((attrDecl == NULL) && (doc->extSubset != NULL))
+		attrDecl = xmlGetDtdQAttrDesc(doc->extSubset, fullelemname,
+					      attr->name, aprefix);
+	}
+
+	if ((fullelemname != felem) && (fullelemname != elem->name))
+	    xmlFree(fullelemname);
+
+        if ((attrDecl != NULL) && (attrDecl->atype == XML_ATTRIBUTE_ID))
+	    return(1);
+    }
+    return(0);
+}
+
+// the below code fragment can be found in:
+// valid.c
+xmlAttrPtr
+xmlGetID(xmlDocPtr doc, const xmlChar *ID) {
+    xmlIDTablePtr table;
+    xmlIDPtr id;
+
+    if (doc == NULL) {
+	return(NULL);
+    }
+
+    if (ID == NULL) {
+	return(NULL);
+    }
+
+    table = (xmlIDTablePtr) doc->ids;
+    if (table == NULL)
+        return(NULL);
+
+    id = xmlHashLookup(table, ID);
+    if (id == NULL)
+	return(NULL);
+    if (id->attr == NULL) {
+	/*
+	 * We are operating on a stream, return a well known reference
+	 * since the attribute node doesn't exist anymore
+	 */
+	return((xmlAttrPtr) doc);
+    }
+    return(id->attr);
+}
+
+// the below code fragment can be found in:
+// SAX2.c
+static xmlAttrPtr
+xmlSAX2AttributeNs(xmlParserCtxtPtr ctxt,
+                   const xmlChar * localname,
+                   const xmlChar * prefix,
+		   const xmlChar * value,
+		   const xmlChar * valueend)
+{
+    xmlAttrPtr ret;
+    xmlNsPtr namespace = NULL;
+    xmlChar *dup = NULL;
+
+    /*
+     * Note: if prefix == NULL, the attribute is not in the default namespace
+     */
+    if (prefix != NULL) {
+	namespace = xmlParserNsLookupSax(ctxt, prefix);
+	if ((namespace == NULL) && (xmlStrEqual(prefix, BAD_CAST "xml"))) {
+	    namespace = xmlSearchNs(ctxt->myDoc, ctxt->node, prefix);
+	}
+    }
+
+    /*
+     * allocate the node
+     */
+    if (ctxt->freeAttrs != NULL) {
+        ret = ctxt->freeAttrs;
+	ctxt->freeAttrs = ret->next;
+	ctxt->freeAttrsNr--;
+    } else {
+        ret = xmlMalloc(sizeof(*ret));
+        if (ret == NULL) {
+            xmlSAX2ErrMemory(ctxt);
+            return(NULL);
+        }
+    }
+
+    memset(ret, 0, sizeof(xmlAttr));
+    ret->type = XML_ATTRIBUTE_NODE;
+
+    /*
+     * xmlParseBalancedChunkMemoryRecover had a bug that could result in
+     * a mismatch between ctxt->node->doc and ctxt->myDoc. We use
+     * ctxt->node->doc here, but we should somehow make sure that the
+     * document pointers match.
+     */
+
+    /* assert(ctxt->node->doc == ctxt->myDoc); */
+
+    ret->parent = ctxt->node;
+    ret->doc = ctxt->node->doc;
+    ret->ns = namespace;
+
+    if (ctxt->dictNames) {
+        ret->name = localname;
+    } else {
+        ret->name = xmlStrdup(localname);
+        if (ret->name == NULL)
+            xmlSAX2ErrMemory(ctxt);
+    }
+
+    if ((__xmlRegisterCallbacks) && (xmlRegisterNodeDefaultValue))
+        xmlRegisterNodeDefaultValue((xmlNodePtr)ret);
+
+    if ((ctxt->replaceEntities == 0) && (!ctxt->html)) {
+	xmlNodePtr tmp;
+
+	/*
+	 * We know that if there is an entity reference, then
+	 * the string has been dup'ed and terminates with 0
+	 * otherwise with ' or "
+	 */
+	if (*valueend != 0) {
+	    tmp = xmlSAX2TextNode(ctxt, value, valueend - value);
+	    ret->children = tmp;
+	    ret->last = tmp;
+	    if (tmp != NULL) {
+		tmp->doc = ret->doc;
+		tmp->parent = (xmlNodePtr) ret;
+	    }
+	} else if (valueend > value) {
+	    ret->children = xmlStringLenGetNodeList(ctxt->myDoc, value,
+						    valueend - value);
+            if (ret->children == NULL)
+                xmlSAX2ErrMemory(ctxt);
+	    tmp = ret->children;
+	    while (tmp != NULL) {
+	        tmp->doc = ret->doc;
+		tmp->parent = (xmlNodePtr) ret;
+		if (tmp->next == NULL)
+		    ret->last = tmp;
+		tmp = tmp->next;
+	    }
+	}
+    } else if (value != NULL) {
+	xmlNodePtr tmp;
+
+	tmp = xmlSAX2TextNode(ctxt, value, valueend - value);
+	ret->children = tmp;
+	ret->last = tmp;
+	if (tmp != NULL) {
+	    tmp->doc = ret->doc;
+	    tmp->parent = (xmlNodePtr) ret;
+	}
+    }
+
+#ifdef LIBXML_VALID_ENABLED
+    if ((!ctxt->html) && ctxt->validate && ctxt->wellFormed &&
+        ctxt->myDoc && ctxt->myDoc->intSubset) {
+	/*
+	 * If we don't substitute entities, the validation should be
+	 * done on a value with replaced entities anyway.
+	 */
+        if (!ctxt->replaceEntities) {
+	    dup = xmlSAX2DecodeAttrEntities(ctxt, value, valueend);
+	    if (dup == NULL) {
+	        if (*valueend == 0) {
+		    ctxt->valid &= xmlValidateOneAttribute(&ctxt->vctxt,
+				    ctxt->myDoc, ctxt->node, ret, value);
+		} else {
+		    /*
+		     * That should already be normalized.
+		     * cheaper to finally allocate here than duplicate
+		     * entry points in the full validation code
+		     */
+		    dup = xmlStrndup(value, valueend - value);
+                    if (dup == NULL)
+                        xmlSAX2ErrMemory(ctxt);
+
+		    ctxt->valid &= xmlValidateOneAttribute(&ctxt->vctxt,
+				    ctxt->myDoc, ctxt->node, ret, dup);
+		}
+	    } else {
+	        /*
+		 * dup now contains a string of the flattened attribute
+		 * content with entities substituted. Check if we need to
+		 * apply an extra layer of normalization.
+		 * It need to be done twice ... it's an extra burden related
+		 * to the ability to keep references in attributes
+		 */
+		if (ctxt->attsSpecial != NULL) {
+		    xmlChar *nvalnorm;
+		    xmlChar fn[50];
+		    xmlChar *fullname;
+
+		    fullname = xmlBuildQName(localname, prefix, fn, 50);
+		    if (fullname != NULL) {
+			ctxt->vctxt.valid = 1;
+		        nvalnorm = xmlValidCtxtNormalizeAttributeValue(
+			                 &ctxt->vctxt, ctxt->myDoc,
+					 ctxt->node, fullname, dup);
+			if (ctxt->vctxt.valid != 1)
+			    ctxt->valid = 0;
+
+			if ((fullname != fn) && (fullname != localname))
+			    xmlFree(fullname);
+			if (nvalnorm != NULL) {
+			    xmlFree(dup);
+			    dup = nvalnorm;
+			}
+		    }
+		}
+
+		ctxt->valid &= xmlValidateOneAttribute(&ctxt->vctxt,
+			        ctxt->myDoc, ctxt->node, ret, dup);
+	    }
+	} else {
+	    /*
+	     * if entities already have been substituted, then
+	     * the attribute as passed is already normalized
+	     */
+	    dup = xmlStrndup(value, valueend - value);
+            if (dup == NULL)
+                xmlSAX2ErrMemory(ctxt);
+
+	    ctxt->valid &= xmlValidateOneAttribute(&ctxt->vctxt,
+	                             ctxt->myDoc, ctxt->node, ret, dup);
+	}
+    } else
+#endif /* LIBXML_VALID_ENABLED */
+           if (((ctxt->loadsubset & XML_SKIP_IDS) == 0) &&
+               /* Don't create IDs containing entity references */
+               (ret->children != NULL) &&
+               (ret->children->type == XML_TEXT_NODE) &&
+               (ret->children->next == NULL)) {
+        xmlChar *content = ret->children->content;
+        /*
+	 * when validating, the ID registration is done at the attribute
+	 * validation level. Otherwise we have to do specific handling here.
+	 */
+        if ((prefix == ctxt->str_xml) &&
+	           (localname[0] == 'i') && (localname[1] == 'd') &&
+		   (localname[2] == 0)) {
+	    /*
+	     * Add the xml:id value
+	     *
+	     * Open issue: normalization of the value.
+	     */
+	    if (xmlValidateNCName(content, 1) != 0) {
+	        xmlErrValid(ctxt, XML_DTD_XMLID_VALUE,
+                            "xml:id : attribute value %s is not an NCName\n",
+                            content, NULL);
+	    }
+	    xmlAddID(&ctxt->vctxt, ctxt->myDoc, content, ret);
+	} else {
+            int res = xmlIsID(ctxt->myDoc, ctxt->node, ret);
+
+            if (res < 0)
+                xmlCtxtErrMemory(ctxt);
+            else if (res > 0)
+                xmlAddID(&ctxt->vctxt, ctxt->myDoc, content, ret);
+            else if (xmlIsRef(ctxt->myDoc, ctxt->node, ret))
+                xmlAddRef(&ctxt->vctxt, ctxt->myDoc, content, ret);
+	}
+    }
+    if (dup != NULL)
+	xmlFree(dup);
+
+    return(ret);
+}
+

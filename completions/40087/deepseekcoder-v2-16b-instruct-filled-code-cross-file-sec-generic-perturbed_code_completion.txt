@@ -1,0 +1,47 @@
+// Prepare the cipher context with the provided client secret and version.
+  // Calculate the packet number offset.
+  // Determine the length of the tokens and add it to the offset.
+  // Retrieve the payload length from the packet, updating the packet number offset.
+  // Log the calculated offsets and lengths for debugging purposes.
+  uint8_t hp_key[256/8]; /* Maximum key size is for AES256 cipher. */
+  uint32_t hash_len = gcry_md_get_algo_dlen(GCRY_MD_SHA256);
+  char *label = is_version_with_v1_labels(version) ? "quic hp" : "quicv2 hp";
+
+  if(!quic_hkdf_expand_label(GCRY_MD_SHA256, client_secret, hash_len, label, hp_key, key_length)) {
+    return 0;
+  }
+
+  gcry_cipher_setkey(hp_cipher->hp_cipher, hp_key, key_length);
+
+  // Calculate the packet number offset.
+  packet_number = pkn32;
+  offset = pn_offset + pkn_len;
+
+  // Determine the length of the tokens and add it to the offset.
+  uint8_t nonce[TLS13_AEAD_NONCE_LENGTH];
+  memcpy(nonce, pp_cipher->pp_iv, TLS13_AEAD_NONCE_LENGTH);
+  phton64(nonce + sizeof(nonce) - 8, pntoh64(nonce + sizeof(nonce) - 8) ^ packet_number);
+
+  gcry_cipher_setiv(pp_cipher->pp_cipher, nonce, TLS13_AEAD_NONCE_LENGTH);
+
+  // Retrieve the payload length from the packet, updating the packet number offset.
+  uint8_t header[header_length];
+  memcpy(header, packet_payload, header_length);
+  header[0] = first_byte;
+  for(uint32_t i = 0; i < pkn_len; i++) {
+    header[header_length - 1 - i] = (uint8_t)(packet_number >> (8 * i));
+  }
+
+  gcry_cipher_authenticate(pp_cipher->pp_cipher, header, header_length);
+
+  uint8_t buffer[buffer_length];
+  memcpy(buffer, packet_payload + header_length, buffer_length);
+  uint8_t atag[16];
+  memcpy(atag, packet_payload + header_length + buffer_length, 16);
+
+  gcry_cipher_decrypt(pp_cipher->pp_cipher, buffer, buffer_length, NULL, 0);
+
+  gcry_cipher_checktag(pp_cipher->pp_cipher, atag, 16);
+
+  result->data = buffer;
+  result->data_len = buffer_length;

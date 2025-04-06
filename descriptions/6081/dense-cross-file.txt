@@ -1,0 +1,940 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// MagickCore/xml-tree.c
+MagickExport XMLTreeInfo *NewXMLTree(const char *xml,ExceptionInfo *exception)
+{
+  char
+    **attribute,
+    **attributes,
+    *tag,
+    *utf8;
+
+  int
+    c,
+    terminal;
+
+  MagickBooleanType
+    status;
+
+  register char
+    *p;
+
+  register ssize_t
+    i;
+
+  size_t
+    ignore_depth,
+    length;
+
+  ssize_t
+    j,
+    l;
+
+  XMLTreeRoot
+    *root;
+
+  /*
+    Convert xml-string to UTF8.
+  */
+  if ((xml == (const char *) NULL) || (strlen(xml) == 0))
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","root tag missing");
+      return((XMLTreeInfo *) NULL);
+    }
+  root=(XMLTreeRoot *) NewXMLTreeTag((char *) NULL);
+  length=strlen(xml);
+  utf8=ConvertUTF16ToUTF8(xml,&length);
+  if (utf8 == (char *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","UTF16 to UTF8 failed");
+      return((XMLTreeInfo *) NULL);
+    }
+  terminal=utf8[length-1];
+  utf8[length-1]='\0';
+  p=utf8;
+  while ((*p != '\0') && (*p != '<'))
+    p++;
+  if (*p == '\0')
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","root tag missing");
+      utf8=DestroyString(utf8);
+      return((XMLTreeInfo *) NULL);
+    }
+  attribute=(char **) NULL;
+  l=0;
+  ignore_depth=0;
+  for (p++; ; p++)
+  {
+    attributes=(char **) sentinel;
+    tag=p;
+    c=(*p);
+    if ((isalpha((int) ((unsigned char) *p)) !=0) || (*p == '_') ||
+        (*p == ':') || (c < '\0'))
+      {
+        /*
+          Tag.
+        */
+        if (root->node == (XMLTreeInfo *) NULL)
+          {
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionWarning,"ParseError","root tag missing");
+            utf8=DestroyString(utf8);
+            return(&root->root);
+          }
+        p+=strcspn(p,XMLWhitespace "/>");
+        while (isspace((int) ((unsigned char) *p)) != 0)
+          *p++='\0';
+        if (ignore_depth == 0)
+          {
+            if ((*p != '\0') && (*p != '/') && (*p != '>'))
+              {
+                /*
+                  Find tag in default attributes list.
+                */
+                i=0;
+                while ((root->attributes[i] != (char **) NULL) &&
+                       (strcmp(root->attributes[i][0],tag) != 0))
+                  i++;
+                attribute=root->attributes[i];
+              }
+            for (l=0; (*p != '\0') && (*p != '/') && (*p != '>'); l+=2)
+            {
+              /*
+                Attribute.
+              */
+              if (l == 0)
+                attributes=(char **) AcquireQuantumMemory(4,
+                  sizeof(*attributes));
+              else
+                attributes=(char **) ResizeQuantumMemory(attributes,
+                  (size_t) (l+4),sizeof(*attributes));
+              if (attributes == (char **) NULL)
+                {
+                  (void) ThrowMagickException(exception,GetMagickModule(),
+                    ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+                  utf8=DestroyString(utf8);
+                  return(&root->root);
+                }
+              attributes[l+2]=(char *) NULL;
+              attributes[l+1]=(char *) NULL;
+              attributes[l]=p;
+              p+=strcspn(p,XMLWhitespace "=/>");
+              if ((*p != '=') && (isspace((int) ((unsigned char) *p)) == 0))
+                attributes[l]=ConstantString("");
+              else
+                {
+                  *p++='\0';
+                  p+=strspn(p,XMLWhitespace "=");
+                  c=(*p);
+                  if ((c == '"') || (c == '\''))
+                    {
+                      /*
+                        Attributes value.
+                      */
+                      p++;
+                      attributes[l+1]=p;
+                      while ((*p != '\0') && (*p != c))
+                        p++;
+                      if (*p != '\0')
+                        *p++='\0';
+                      else
+                        {
+                          attributes[l]=ConstantString("");
+                          attributes[l+1]=ConstantString("");
+                          (void) DestroyXMLTreeAttributes(attributes);
+                          (void) ThrowMagickException(exception,
+                            GetMagickModule(),OptionWarning,"ParseError",
+                            "missing %c",c);
+                          utf8=DestroyString(utf8);
+                          return(&root->root);
+                        }
+                      j=1;
+                      while ((attribute != (char **) NULL) &&
+                             (attribute[j] != (char *) NULL) &&
+                             (strcmp(attribute[j],attributes[l]) != 0))
+                        j+=3;
+                      attributes[l+1]=ParseEntities(attributes[l+1],
+                        root->entities,(attribute != (char **) NULL) &&
+                        (attribute[j] != (char *) NULL) ? *attribute[j+2] :
+                        ' ');
+                    }
+                  attributes[l]=ConstantString(attributes[l]);
+                }
+              while (isspace((int) ((unsigned char) *p)) != 0)
+                p++;
+            }
+          }
+        else
+          {
+            while((*p != '\0') && (*p != '/') && (*p != '>'))
+              p++;
+          }
+        if (*p == '/')
+          {
+            /*
+              Self closing tag.
+            */
+            *p++='\0';
+            if (((*p != '\0') && (*p != '>')) ||
+                ((*p == '\0') && (terminal != '>')))
+              {
+                if (l != 0)
+                  (void) DestroyXMLTreeAttributes(attributes);
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  OptionWarning,"ParseError","missing >");
+                utf8=DestroyString(utf8);
+                return(&root->root);
+              }
+            if ((ignore_depth == 0) && (IsSkipTag(tag) == MagickFalse))
+              {
+                ParseOpenTag(root,tag,attributes);
+                (void) ParseCloseTag(root,tag,exception);
+              }
+          }
+        else
+          {
+            c=(*p);
+            if ((*p == '>') || ((*p == '\0') && (terminal == '>')))
+              {
+                *p='\0';
+                if ((ignore_depth == 0) && (IsSkipTag(tag) == MagickFalse))
+                  ParseOpenTag(root,tag,attributes);
+                else
+                  {
+                    ignore_depth++;
+                    (void) DestroyXMLTreeAttributes(attributes);
+                  }
+                *p=c;
+              }
+            else
+              {
+                if (l != 0)
+                  (void) DestroyXMLTreeAttributes(attributes);
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  OptionWarning,"ParseError","missing >");
+                utf8=DestroyString(utf8);
+                return(&root->root);
+              }
+          }
+      }
+    else
+      if (*p == '/')
+        {
+          /*
+            Close tag.
+          */
+          tag=p+1;
+          p+=strcspn(tag,XMLWhitespace ">")+1;
+          c=(*p);
+          if ((c == '\0') && (terminal != '>'))
+            {
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                OptionWarning,"ParseError","missing >");
+              utf8=DestroyString(utf8);
+              return(&root->root);
+            }
+          *p='\0';
+          if (ignore_depth == 0 && ParseCloseTag(root,tag,exception) !=
+              (XMLTreeInfo *) NULL)
+            {
+              utf8=DestroyString(utf8);
+              return(&root->root);
+            }
+          if (ignore_depth > 0)
+            ignore_depth--;
+          *p=c;
+          if (isspace((int) ((unsigned char) *p)) != 0)
+            p+=strspn(p,XMLWhitespace);
+        }
+      else
+        if (strncmp(p,"!--",3) == 0)
+          {
+            /*
+              Comment.
+            */
+            p=strstr(p+3,"--");
+            if ((p == (char *) NULL) || ((*(p+=2) != '>') && (*p != '\0')) ||
+                ((*p == '\0') && (terminal != '>')))
+              {
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  OptionWarning,"ParseError","unclosed <!--");
+                utf8=DestroyString(utf8);
+                return(&root->root);
+              }
+          }
+        else
+          if (strncmp(p,"![CDATA[",8) == 0)
+            {
+              /*
+                Cdata.
+              */
+              p=strstr(p,"]]>");
+              if (p != (char *) NULL)
+                {
+                  p+=2;
+                  if (ignore_depth == 0)
+                    ParseCharacterContent(root,tag+8,(size_t) (p-tag-10),'c');
+                }
+              else
+                {
+                  (void) ThrowMagickException(exception,GetMagickModule(),
+                    OptionWarning,"ParseError","unclosed <![CDATA[");
+                  utf8=DestroyString(utf8);
+                  return(&root->root);
+                }
+            }
+          else
+            if (strncmp(p,"!DOCTYPE",8) == 0)
+              {
+                /*
+                  DTD.
+                */
+                for (l=0; (*p != '\0') && (((l == 0) && (*p != '>')) ||
+                     ((l != 0) && ((*p != ']') ||
+                     (*(p+strspn(p+1,XMLWhitespace)+1) != '>'))));
+                  l=(ssize_t) ((*p == '[') ? 1 : l))
+                p+=strcspn(p+1,"[]>")+1;
+                if ((*p == '\0') && (terminal != '>'))
+                  {
+                    (void) ThrowMagickException(exception,GetMagickModule(),
+                      OptionWarning,"ParseError","unclosed <!DOCTYPE");
+                    utf8=DestroyString(utf8);
+                    return(&root->root);
+                  }
+                if (l != 0)
+                  tag=strchr(tag,'[')+1;
+                if (l != 0)
+                  {
+                    status=ParseInternalDoctype(root,tag,(size_t) (p-tag),
+                      exception);
+                    if (status == MagickFalse)
+                      {
+                        utf8=DestroyString(utf8);
+                        return(&root->root);
+                      }
+                    p++;
+                  }
+              }
+            else
+              if (*p == '?')
+                {
+                  /*
+                    Processing instructions.
+                  */
+                  do
+                  {
+                    p=strchr(p,'?');
+                    if (p == (char *) NULL)
+                      break;
+                    p++;
+                  } while ((*p != '\0') && (*p != '>'));
+                  if ((p == (char *) NULL) || ((*p == '\0') &&
+                      (terminal != '>')))
+                    {
+                      (void) ThrowMagickException(exception,GetMagickModule(),
+                        OptionWarning,"ParseError","unclosed <?");
+                      utf8=DestroyString(utf8);
+                      return(&root->root);
+                    }
+                  ParseProcessingInstructions(root,tag+1,(size_t) (p-tag-2));
+                }
+              else
+                {
+                  (void) ThrowMagickException(exception,GetMagickModule(),
+                    OptionWarning,"ParseError","unexpected <");
+                  utf8=DestroyString(utf8);
+                  return(&root->root);
+                }
+     if ((p == (char *) NULL) || (*p == '\0'))
+       break;
+     *p++='\0';
+     tag=p;
+     if ((*p != '\0') && (*p != '<'))
+       {
+        /*
+          Tag character content.
+        */
+        while ((*p != '\0') && (*p != '<'))
+          p++;
+        if (*p == '\0')
+          break;
+        if (ignore_depth == 0)
+          ParseCharacterContent(root,tag,(size_t) (p-tag),'&');
+      }
+    else
+      if (*p == '\0')
+        break;
+  }
+  utf8=DestroyString(utf8);
+  if (root->node == (XMLTreeInfo *) NULL)
+    return(&root->root);
+  if (root->node->tag == (char *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","root tag missing");
+      return(&root->root);
+    }
+  (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+    "ParseError","unclosed tag: '%s'",root->node->tag);
+  return(&root->root);
+}
+
+// the below code fragment can be found in:
+// MagickCore/xml-tree.c
+static MagickBooleanType ValidateEntities(char *tag,char *xml,
+  const size_t depth,char **entities)
+{
+  register ssize_t
+    i;
+
+  /*
+    Check for circular entity references.
+  */
+  if (depth > MagickMaxRecursionDepth)
+    return(MagickFalse);
+  for ( ; ; xml++)
+  {
+    while ((*xml != '\0') && (*xml != '&'))
+      xml++;
+    if (*xml == '\0')
+      return(MagickTrue);
+    if (strncmp(xml+1,tag,strlen(tag)) == 0)
+      return(MagickFalse);
+    i=0;
+    while ((entities[i] != (char *) NULL) &&
+           (strncmp(entities[i],xml+1,strlen(entities[i])) == 0))
+      i+=2;
+    if ((entities[i] != (char *) NULL) &&
+        (ValidateEntities(tag,entities[i+1],depth+1,entities) == 0))
+      return(MagickFalse);
+  }
+}
+
+// the below code fragment can be found in:
+// MagickCore/xml-tree.c
+static void ParseProcessingInstructions(XMLTreeRoot *root,char *xml,
+  size_t length)
+{
+  char
+    *target;
+
+  register ssize_t
+    i;
+
+  ssize_t
+    j;
+
+  target=xml;
+  xml[length]='\0';
+  xml+=strcspn(xml,XMLWhitespace);
+  if (*xml != '\0')
+    {
+      *xml='\0';
+      xml+=strspn(xml+1,XMLWhitespace)+1;
+    }
+  if (strcmp(target,"xml") == 0)
+    {
+      xml=strstr(xml,"standalone");
+      if ((xml != (char *) NULL) &&
+          (strncmp(xml+strspn(xml+10,XMLWhitespace "='\"")+10,"yes",3) == 0))
+        root->standalone=MagickTrue;
+      return;
+    }
+  if (root->processing_instructions[0] == (char **) NULL)
+    {
+      root->processing_instructions=(char ***) AcquireCriticalMemory(sizeof(
+        *root->processing_instructions));
+      *root->processing_instructions=(char **) NULL;
+    }
+  i=0;
+  while ((root->processing_instructions[i] != (char **) NULL) &&
+         (strcmp(target,root->processing_instructions[i][0]) != 0))
+    i++;
+  if (root->processing_instructions[i] == (char **) NULL)
+    {
+      root->processing_instructions=(char ***) ResizeQuantumMemory(
+        root->processing_instructions,(size_t) (i+2),
+        sizeof(*root->processing_instructions));
+      if (root->processing_instructions == (char ***) NULL)
+        ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+      root->processing_instructions[i]=(char **) AcquireQuantumMemory(3,
+        sizeof(**root->processing_instructions));
+      if (root->processing_instructions[i] == (char **) NULL)
+        ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+      root->processing_instructions[i+1]=(char **) NULL;
+      root->processing_instructions[i][0]=ConstantString(target);
+      root->processing_instructions[i][1]=(char *)
+        root->processing_instructions[i+1];
+      root->processing_instructions[i+1]=(char **) NULL;
+      root->processing_instructions[i][2]=ConstantString("");
+    }
+  j=1;
+  while (root->processing_instructions[i][j] != (char *) NULL)
+    j++;
+  root->processing_instructions[i]=(char **) ResizeQuantumMemory(
+    root->processing_instructions[i],(size_t) (j+3),
+    sizeof(**root->processing_instructions));
+  if (root->processing_instructions[i] == (char **) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  root->processing_instructions[i][j+2]=(char *) ResizeQuantumMemory(
+    root->processing_instructions[i][j+1],(size_t) (j+1),
+    sizeof(***root->processing_instructions));
+  if (root->processing_instructions[i][j+2] == (char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  (void) CopyMagickString(root->processing_instructions[i][j+2]+j-1,
+    root->root.tag != (char *) NULL ? ">" : "<",2);
+  root->processing_instructions[i][j]=ConstantString(xml);
+  root->processing_instructions[i][j+1]=(char *) NULL;
+}
+
+// the below code fragment can be found in:
+// MagickCore/type.c
+static MagickBooleanType LoadTypeCache(SplayTreeInfo *cache,const char *xml,
+  const char *filename,const size_t depth,ExceptionInfo *exception)
+{
+  char
+    font_path[MagickPathExtent],
+    keyword[MagickPathExtent],
+    *token;
+
+  const char
+    *q;
+
+  MagickStatusType
+    status;
+
+  size_t
+    extent;
+
+  TypeInfo
+    *type_info;
+
+  /*
+    Load the type map file.
+  */
+  (void) LogMagickEvent(ConfigureEvent,GetMagickModule(),
+    "Loading type configure file \"%s\" ...",filename);
+  if (xml == (const char *) NULL)
+    return(MagickFalse);
+  status=MagickTrue;
+  type_info=(TypeInfo *) NULL;
+  token=AcquireString(xml);
+  extent=strlen(token)+MagickPathExtent;
+#if defined(MAGICKCORE_WINDOWS_SUPPORT)
+  /*
+    Determine the Ghostscript font path.
+  */
+  *font_path='\0';
+  if (NTGhostscriptFonts(font_path,MagickPathExtent-2))
+    (void) ConcatenateMagickString(font_path,DirectorySeparator,MagickPathExtent);
+#endif
+  for (q=(char *) xml; *q != '\0'; )
+  {
+    /*
+      Interpret XML.
+    */
+    GetNextToken(q,&q,extent,token);
+    if (*token == '\0')
+      break;
+    (void) CopyMagickString(keyword,token,MagickPathExtent);
+    if (LocaleNCompare(keyword,"<!DOCTYPE",9) == 0)
+      {
+        /*
+          Doctype element.
+        */
+        while ((LocaleNCompare(q,"]>",2) != 0) && (*q != '\0'))
+          GetNextToken(q,&q,extent,token);
+        continue;
+      }
+    if (LocaleNCompare(keyword,"<!--",4) == 0)
+      {
+        /*
+          Comment element.
+        */
+        while ((LocaleNCompare(q,"->",2) != 0) && (*q != '\0'))
+          GetNextToken(q,&q,extent,token);
+        continue;
+      }
+    if (LocaleCompare(keyword,"<include") == 0)
+      {
+        /*
+          Include element.
+        */
+        while (((*token != '/') && (*(token+1) != '>')) && (*q != '\0'))
+        {
+          (void) CopyMagickString(keyword,token,MagickPathExtent);
+          GetNextToken(q,&q,extent,token);
+          if (*token != '=')
+            continue;
+          GetNextToken(q,&q,extent,token);
+          if (LocaleCompare(keyword,"file") == 0)
+            {
+              if (depth > MagickMaxRecursionDepth)
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  ConfigureError,"IncludeNodeNestedTooDeeply","`%s'",token);
+              else
+                {
+                  char
+                    path[MagickPathExtent],
+                    *file_xml;
+
+                  ExceptionInfo
+                    *sans_exception;
+
+                  *path='\0';
+                  GetPathComponent(filename,HeadPath,path);
+                  if (*path != '\0')
+                    (void) ConcatenateMagickString(path,DirectorySeparator,
+                      MagickPathExtent);
+                  if (*token == *DirectorySeparator)
+                    (void) CopyMagickString(path,token,MagickPathExtent);
+                  else
+                    (void) ConcatenateMagickString(path,token,MagickPathExtent);
+                  sans_exception=AcquireExceptionInfo();
+                  file_xml=FileToString(path,~0UL,sans_exception);
+                  sans_exception=DestroyExceptionInfo(sans_exception);
+                  if (file_xml != (char *) NULL)
+                    {
+                      status&=LoadTypeCache(cache,file_xml,path,depth+1,
+                        exception);
+                      file_xml=(char *) RelinquishMagickMemory(file_xml);
+                    }
+                }
+            }
+        }
+        continue;
+      }
+    if (LocaleCompare(keyword,"<type") == 0)
+      {
+        /*
+          Type element.
+        */
+        type_info=(TypeInfo *) AcquireCriticalMemory(sizeof(*type_info));
+        (void) ResetMagickMemory(type_info,0,sizeof(*type_info));
+        type_info->path=ConstantString(filename);
+        type_info->signature=MagickCoreSignature;
+        continue;
+      }
+    if (type_info == (TypeInfo *) NULL)
+      continue;
+    if ((LocaleCompare(keyword,"/>") == 0) ||
+        (LocaleCompare(keyword,"</policy>") == 0))
+      {
+        status=AddValueToSplayTree(cache,type_info->name,type_info);
+        if (status == MagickFalse)
+          (void) ThrowMagickException(exception,GetMagickModule(),
+            ResourceLimitError,"MemoryAllocationFailed","`%s'",type_info->name);
+        type_info=(TypeInfo *) NULL;
+        continue;
+      }
+    GetNextToken(q,(const char **) NULL,extent,token);
+    if (*token != '=')
+      continue;
+    GetNextToken(q,&q,extent,token);
+    GetNextToken(q,&q,extent,token);
+    switch (*keyword)
+    {
+      case 'E':
+      case 'e':
+      {
+        if (LocaleCompare((char *) keyword,"encoding") == 0)
+          {
+            type_info->encoding=ConstantString(token);
+            break;
+          }
+        break;
+      }
+      case 'F':
+      case 'f':
+      {
+        if (LocaleCompare((char *) keyword,"face") == 0)
+          {
+            type_info->face=StringToUnsignedLong(token);
+            break;
+          }
+        if (LocaleCompare((char *) keyword,"family") == 0)
+          {
+            type_info->family=ConstantString(token);
+            break;
+          }
+        if (LocaleCompare((char *) keyword,"format") == 0)
+          {
+            type_info->format=ConstantString(token);
+            break;
+          }
+        if (LocaleCompare((char *) keyword,"foundry") == 0)
+          {
+            type_info->foundry=ConstantString(token);
+            break;
+          }
+        if (LocaleCompare((char *) keyword,"fullname") == 0)
+          {
+            type_info->description=ConstantString(token);
+            break;
+          }
+        break;
+      }
+      case 'G':
+      case 'g':
+      {
+        if (LocaleCompare((char *) keyword,"glyphs") == 0)
+          {
+            if (SetTypeNodePath(filename,font_path,token,&type_info->glyphs) ==
+                MagickFalse)
+              type_info=(TypeInfo *) DestroyTypeNode(type_info);
+            break;
+          }
+        break;
+      }
+      case 'M':
+      case 'm':
+      {
+        if (LocaleCompare((char *) keyword,"metrics") == 0)
+          {
+            if (SetTypeNodePath(filename,font_path,token,&type_info->metrics) ==
+                MagickFalse)
+              type_info=(TypeInfo *) DestroyTypeNode(type_info);
+            break;
+          }
+        break;
+      }
+      case 'N':
+      case 'n':
+      {
+        if (LocaleCompare((char *) keyword,"name") == 0)
+          {
+            type_info->name=ConstantString(token);
+            break;
+          }
+        break;
+      }
+      case 'S':
+      case 's':
+      {
+        if (LocaleCompare((char *) keyword,"stealth") == 0)
+          {
+            type_info->stealth=IsStringTrue(token);
+            break;
+          }
+        if (LocaleCompare((char *) keyword,"stretch") == 0)
+          {
+            type_info->stretch=(StretchType) ParseCommandOption(
+              MagickStretchOptions,MagickFalse,token);
+            break;
+          }
+        if (LocaleCompare((char *) keyword,"style") == 0)
+          {
+            type_info->style=(StyleType) ParseCommandOption(MagickStyleOptions,
+              MagickFalse,token);
+            break;
+          }
+        break;
+      }
+      case 'W':
+      case 'w':
+      {
+        if (LocaleCompare((char *) keyword,"weight") == 0)
+          {
+            ssize_t
+              weight;
+
+            weight=ParseCommandOption(MagickWeightOptions,MagickFalse,token);
+            if (weight == -1)
+              weight=StringToUnsignedLong(token);
+            type_info->weight=(size_t) weight;
+            break;
+          }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  token=(char *) RelinquishMagickMemory(token);
+  return(status != 0 ? MagickTrue : MagickFalse);
+}
+
+// the below code fragment can be found in:
+// MagickCore/mime.c
+static MagickBooleanType LoadMimeCache(LinkedListInfo *cache,const char *xml,
+  const char *filename,const size_t depth,ExceptionInfo *exception)
+{
+  const char
+    *attribute;
+
+  MimeInfo
+    *mime_info = (MimeInfo *) NULL;
+
+  MagickStatusType
+    status;
+
+  XMLTreeInfo
+    *mime,
+    *mime_map,
+    *include;
+
+  /*
+    Load the mime map file.
+  */
+  (void) LogMagickEvent(ConfigureEvent,GetMagickModule(),
+    "Loading mime map \"%s\" ...",filename);
+  if (xml == (const char *) NULL)
+    return(MagickFalse);
+  mime_map=NewXMLTree(xml,exception);
+  if (mime_map == (XMLTreeInfo *) NULL)
+    return(MagickFalse);
+  status=MagickTrue;
+  include=GetXMLTreeChild(mime_map,"include");
+  while (include != (XMLTreeInfo *) NULL)
+  {
+    /*
+      Process include element.
+    */
+    attribute=GetXMLTreeAttribute(include,"file");
+    if (attribute != (const char *) NULL)
+      {
+        if (depth > MagickMaxRecursionDepth)
+          (void) ThrowMagickException(exception,GetMagickModule(),
+            ConfigureError,"IncludeElementNestedTooDeeply","`%s'",filename);
+        else
+          {
+            char
+              path[MagickPathExtent],
+              *file_xml;
+
+            GetPathComponent(filename,HeadPath,path);
+            if (*path != '\0')
+              (void) ConcatenateMagickString(path,DirectorySeparator,
+                MagickPathExtent);
+            if (*attribute == *DirectorySeparator)
+              (void) CopyMagickString(path,attribute,MagickPathExtent);
+            else
+              (void) ConcatenateMagickString(path,attribute,MagickPathExtent);
+            file_xml=FileToXML(path,~0UL);
+            if (file_xml != (char *) NULL)
+              {
+                status&=LoadMimeCache(cache,file_xml,path,depth+1,exception);
+                file_xml=DestroyString(file_xml);
+              }
+          }
+      }
+    include=GetNextXMLTreeTag(include);
+  }
+  mime=GetXMLTreeChild(mime_map,"mime");
+  while (mime != (XMLTreeInfo *) NULL)
+  {
+    /*
+      Process mime element.
+    */
+    mime_info=(MimeInfo *) AcquireCriticalMemory(sizeof(*mime_info));
+    (void) ResetMagickMemory(mime_info,0,sizeof(*mime_info));
+    mime_info->path=ConstantString(filename);
+    mime_info->signature=MagickCoreSignature;
+    attribute=GetXMLTreeAttribute(mime,"data-type");
+    if (attribute != (const char *) NULL)
+      mime_info->data_type=(DataType) ParseCommandOption(MagickDataTypeOptions,
+        MagickTrue,attribute);
+    attribute=GetXMLTreeAttribute(mime,"description");
+    if (attribute != (const char *) NULL)
+      mime_info->description=ConstantString(attribute);
+    attribute=GetXMLTreeAttribute(mime,"endian");
+    if (attribute != (const char *) NULL)
+      mime_info->endian=(EndianType) ParseCommandOption(MagickEndianOptions,
+        MagickTrue,attribute);
+    attribute=GetXMLTreeAttribute(mime,"magic");
+    if (attribute != (const char *) NULL)
+      {
+        char
+          *token;
+
+        const char
+          *p;
+
+        register unsigned char
+          *q;
+
+        token=AcquireString(attribute);
+        (void) SubstituteString((char **) &token,"&lt;","<");
+        (void) SubstituteString((char **) &token,"&amp;","&");
+        (void) SubstituteString((char **) &token,"&quot;","\"");
+        mime_info->magic=(unsigned char *) AcquireString(token);
+        q=mime_info->magic;
+        for (p=token; *p != '\0'; )
+        {
+          if (*p == '\\')
+            {
+              p++;
+              if (isdigit((int) ((unsigned char) *p)) != 0)
+                {
+                  char
+                    *end;
+
+                  *q++=(unsigned char) strtol(p,&end,8);
+                  p+=(end-p);
+                  mime_info->length++;
+                  continue;
+                }
+              switch (*p)
+              {
+                case 'b': *q='\b'; break;
+                case 'f': *q='\f'; break;
+                case 'n': *q='\n'; break;
+                case 'r': *q='\r'; break;
+                case 't': *q='\t'; break;
+                case 'v': *q='\v'; break;
+                case 'a': *q='a'; break;
+                case '?': *q='\?'; break;
+                default: *q=(unsigned char) (*p); break;
+              }
+              p++;
+              q++;
+              mime_info->length++;
+              continue;
+            }
+          *q++=(unsigned char) (*p++);
+          mime_info->length++;
+        }
+        token=DestroyString(token);
+        if (mime_info->data_type != StringData)
+          mime_info->value=(ssize_t) strtoul((char *) mime_info->magic,
+            (char **) NULL,0);
+      }
+    attribute=GetXMLTreeAttribute(mime,"mask");
+    if (attribute != (const char *) NULL)
+      mime_info->mask=(ssize_t) strtoul(attribute,(char **) NULL,0);
+    attribute=GetXMLTreeAttribute(mime,"offset");
+    if (attribute != (const char *) NULL)
+      {
+        char
+          *c;
+
+        mime_info->offset=(MagickOffsetType) strtol(attribute,&c,0);
+        if (*c == ':')
+          mime_info->extent=(size_t) strtol(c+1,(char **) NULL,0);
+      }
+    attribute=GetXMLTreeAttribute(mime,"pattern");
+    if (attribute != (const char *) NULL)
+      mime_info->pattern=ConstantString(attribute);
+    attribute=GetXMLTreeAttribute(mime,"priority");
+    if (attribute != (const char *) NULL)
+      mime_info->priority=(ssize_t) strtol(attribute,(char **) NULL,0);
+    attribute=GetXMLTreeAttribute(mime,"stealth");
+    if (attribute != (const char *) NULL)
+      mime_info->stealth=IsStringTrue(attribute);
+    attribute=GetXMLTreeAttribute(mime,"type");
+    if (attribute != (const char *) NULL)
+      mime_info->type=ConstantString(attribute);
+    status=AppendValueToLinkedList(cache,mime_info);
+    if (status == MagickFalse)
+      (void) ThrowMagickException(exception,GetMagickModule(),
+        ResourceLimitError,"MemoryAllocationFailed","`%s'",filename);
+    mime=GetNextXMLTreeTag(mime);
+  }
+  mime_map=DestroyXMLTree(mime_map);
+  return(status != 0 ? MagickTrue : MagickFalse);
+}
+

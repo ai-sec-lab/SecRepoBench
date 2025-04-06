@@ -1,0 +1,661 @@
+/*  sam.c -- SAM and BAM file I/O and manipulation.
+
+    Copyright (C) 2008-2010, 2012-2019 Genome Research Ltd.
+    Copyright (C) 2010, 2012, 2013 Broad Institute.
+
+    Author: Heng Li <lh3@sanger.ac.uk>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.  */
+
+#include <config.h>
+
+#include <strings.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <zlib.h>
+#include <assert.h>
+#include <signal.h>
+#include <inttypes.h>
+
+// Suppress deprecation message for cigar_tab, which we initialise
+#include "htslib/hts_defs.h"
+#undef HTS_DEPRECATED
+#define HTS_DEPRECATED(message)
+
+#include "htslib/sam.h"
+#include "htslib/bgzf.h"
+#include "cram/cram.h"
+#include "hts_internal.h"
+#include "sam_internal.h"
+#include "htslib/hfile.h"
+#include "htslib/hts_endian.h"
+#include "header.h"
+
+#include "htslib/khash.h"
+KHASH_DECLARE(s2i, kh_cstr_t, int64_t)
+
+#ifndef EFTYPE
+#define EFTYPE ENOEXEC
+#endif
+#ifndef EOVERFLOW
+#define EOVERFLOW ERANGE
+#endif
+
+/**********************
+ *** BAM header I/O ***
+ **********************/
+
+const int8_t bam_cigar_table[256] = {
+    // 0 .. 47
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+
+    // 48 .. 63  (including =)
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, BAM_CEQUAL, -1, -1,
+
+    // 64 .. 79  (including MIDNHB)
+    -1, -1, BAM_CBACK, -1,  BAM_CDEL, -1, -1, -1,
+        BAM_CHARD_CLIP, BAM_CINS, -1, -1,  -1, BAM_CMATCH, BAM_CREF_SKIP, -1,
+
+    // 80 .. 95  (including SPX)
+    BAM_CPAD, -1, -1, BAM_CSOFT_CLIP,  -1, -1, -1, -1,
+        BAM_CDIFF, -1, -1, -1,  -1, -1, -1, -1,
+
+    // 96 .. 127
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+
+    // 128 .. 255
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,
+    -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1,  -1, -1, -1, -1
+};
+
+sam_hdr_t *sam_hdr_init()
+{
+    sam_hdr_t *bh = (sam_hdr_t*)calloc(1, sizeof(sam_hdr_t));
+    if (bh == NULL) return NULL;
+
+    bh->cigar_tab = bam_cigar_table;
+    return bh;
+}
+
+void sam_hdr_destroy(sam_hdr_t *bh)
+{
+    int32_t i;
+
+    if (bh == NULL) return;
+
+    if (bh->ref_count > 0) {
+        --bh->ref_count;
+        return;
+    }
+
+    if (bh->target_name) {
+        for (i = 0; i < bh->n_targets; ++i)
+            free(bh->target_name[i]);
+        free(bh->target_name);
+        free(bh->target_len);
+    }
+    free(bh->text);
+    if (bh->hrecs)
+        sam_hrecs_free(bh->hrecs);
+    if (bh->sdict)
+        kh_destroy(s2i, (khash_t(s2i) *) bh->sdict);
+    free(bh);
+}
+
+sam_hdr_t *sam_hdr_dup(const sam_hdr_t *h0)
+{
+    if (h0 == NULL) return NULL;
+    sam_hdr_t *h;
+    if ((h = sam_hdr_init()) == NULL) return NULL;
+    // copy the simple data
+    h->n_targets = 0;
+    h->ignore_sam_err = h0->ignore_sam_err;
+    h->l_text = 0;
+
+    // Then the pointery stuff
+
+    if (!h0->hrecs) {
+        h->target_len = (uint32_t*)calloc(h0->n_targets, sizeof(uint32_t));
+        if (!h->target_len) goto fail;
+        h->target_name = (char**)calloc(h0->n_targets, sizeof(char*));
+        if (!h->target_name) goto fail;
+
+        int i;
+        for (i = 0; i < h0->n_targets; ++i) {
+            h->target_len[i] = h0->target_len[i];
+            h->target_name[i] = strdup(h0->target_name[i]);
+            if (!h->target_name[i]) break;
+        }
+        h->n_targets = i;
+        if (i < h0->n_targets) goto fail;
+    }
+
+    if (h0->hrecs) {
+        kstring_t tmp = { 0, 0, NULL };
+        if (sam_hrecs_rebuild_text(h0->hrecs, &tmp) != 0) {
+            free(ks_release(&tmp));
+            goto fail;
+        }
+
+        h->l_text = tmp.l;
+        h->text   = ks_release(&tmp);
+
+        if (sam_hdr_update_target_arrays(h, h0->hrecs, 0) != 0)
+            goto fail;
+    } else {
+        h->l_text = h0->l_text;
+        h->text = malloc(h->l_text + 1);
+        if (!h->text) goto fail;
+        memcpy(h->text, h0->text, h->l_text);
+        h->text[h->l_text] = '\0';
+    }
+
+    return h;
+
+ fail:
+    sam_hdr_destroy(h);
+    return NULL;
+}
+
+sam_hdr_t *bam_hdr_read(BGZF *fp)
+{
+    sam_hdr_t *h;
+    uint8_t buf[4];
+    int magic_len, has_EOF;
+    int32_t i, name_len, num_names = 0;
+    size_t bufsize;
+    ssize_t bytes;
+    // check EOF
+    has_EOF = bgzf_check_EOF(fp);
+    if (has_EOF < 0) {
+        perror("[W::bam_hdr_read] bgzf_check_EOF");
+    } else if (has_EOF == 0) {
+        hts_log_warning("EOF marker is absent. The input is probably truncated");
+    }
+    // read "BAM1"
+    magic_len = bgzf_read(fp, buf, 4);
+    if (magic_len != 4 || memcmp(buf, "BAM\1", 4)) {
+        hts_log_error("Invalid BAM binary header");
+        return 0;
+    }
+    h = sam_hdr_init();
+    if (!h) goto nomem;
+
+    // read plain text and the number of reference sequences
+    bytes = bgzf_read(fp, buf, 4);
+    if (bytes != 4) goto read_err;
+    h->l_text = le_to_u32(buf);
+
+    bufsize = h->l_text + 1;
+    if (bufsize < h->l_text) goto nomem; // so large that adding 1 overflowed
+    h->text = (char*)malloc(bufsize);
+    if (!h->text) goto nomem;
+    h->text[h->l_text] = 0; // make sure it is NULL terminated
+    bytes = bgzf_read(fp, h->text, h->l_text);
+    if (bytes != h->l_text) goto read_err;
+
+    bytes = bgzf_read(fp, &h->n_targets, 4);
+    if (bytes != 4) goto read_err;
+    if (fp->is_be) ed_swap_4p(&h->n_targets);
+
+    if (h->n_targets < 0) goto invalid;
+
+    // read reference sequence names and lengths
+    if (h->n_targets > 0) {
+        h->target_name = (char**)calloc(h->n_targets, sizeof(char*));
+        if (!h->target_name) goto nomem;
+        h->target_len = (uint32_t*)calloc(h->n_targets, sizeof(uint32_t));
+        if (!h->target_len) goto nomem;
+    }
+    else {
+        h->target_name = NULL;
+        h->target_len = NULL;
+    }
+
+    for (i = 0; i != h->n_targets; ++i) {
+        bytes = bgzf_read(fp, &name_len, 4);
+        if (bytes != 4) goto read_err;
+        if (fp->is_be) ed_swap_4p(&name_len);
+        if (name_len <= 0) goto invalid;
+
+        h->target_name[i] = (char*)malloc(name_len);
+        if (!h->target_name[i]) goto nomem;
+        num_names++;
+
+        bytes = bgzf_read(fp, h->target_name[i], name_len);
+        if (bytes != name_len) goto read_err;
+
+        if (h->target_name[i][name_len - 1] != '\0') {
+            /* Fix missing NUL-termination.  Is this being too nice?
+               We could alternatively bail out with an error. */
+            char *new_name;
+            if (name_len == INT32_MAX) goto invalid;
+            new_name = realloc(h->target_name[i], name_len + 1);
+            if (new_name == NULL) goto nomem;
+            h->target_name[i] = new_name;
+            h->target_name[i][name_len] = '\0';
+        }
+
+        bytes = bgzf_read(fp, &h->target_len[i], 4);
+        if (bytes != 4) goto read_err;
+        if (fp->is_be) ed_swap_4p(&h->target_len[i]);
+    }
+    return h;
+
+ nomem:
+    hts_log_error("Out of memory");
+    goto clean;
+
+ read_err:
+    if (bytes < 0) {
+        hts_log_error("Error reading BGZF stream");
+    } else {
+        hts_log_error("Truncated BAM header");
+    }
+    goto clean;
+
+ invalid:
+    hts_log_error("Invalid BAM binary header");
+
+ clean:
+    if (h != NULL) {
+        h->n_targets = num_names; // ensure we free only allocated target_names
+        sam_hdr_destroy(h);
+    }
+    return NULL;
+}
+
+int bam_hdr_write(BGZF *fp, const sam_hdr_t *h)
+{
+    int32_t i, name_len, x;
+    kstring_t hdr_ks = { 0, 0, NULL };
+    char *text;
+    uint32_t l_text;
+
+    if (!h) return -1;
+
+    if (h->hrecs) {
+        if (sam_hrecs_rebuild_text(h->hrecs, &hdr_ks) != 0) return -1;
+        if (hdr_ks.l > INT32_MAX) {
+            hts_log_error("Header too long for BAM format");
+            free(hdr_ks.s);
+            return -1;
+        }
+        text = hdr_ks.s;
+        l_text = hdr_ks.l;
+    } else {
+        if (h->l_text > INT32_MAX) {
+            hts_log_error("Header too long for BAM format");
+            return -1;
+        }
+        text = h->text;
+        l_text = h->l_text;
+    }
+    // write "BAM1"
+    if (bgzf_write(fp, "BAM\1", 4) < 0) { free(hdr_ks.s); return -1; }
+    // write plain text and the number of reference sequences
+    if (fp->is_be) {
+        x = ed_swap_4(l_text);
+        if (bgzf_write(fp, &x, 4) < 0) { free(hdr_ks.s); return -1; }
+        if (l_text) {
+            if (bgzf_write(fp, text, l_text) < 0) { free(hdr_ks.s); return -1; }
+        }
+        x = ed_swap_4(h->n_targets);
+        if (bgzf_write(fp, &x, 4) < 0) { free(hdr_ks.s); return -1; }
+    } else {
+        if (bgzf_write(fp, &l_text, 4) < 0) { free(hdr_ks.s); return -1; }
+        if (l_text) {
+            if (bgzf_write(fp, text, l_text) < 0) { free(hdr_ks.s); return -1; }
+        }
+        if (bgzf_write(fp, &h->n_targets, 4) < 0) { free(hdr_ks.s); return -1; }
+    }
+    free(hdr_ks.s);
+    // write sequence names and lengths
+    for (i = 0; i != h->n_targets; ++i) {
+        char *p = h->target_name[i];
+        name_len = strlen(p) + 1;
+        if (fp->is_be) {
+            x = ed_swap_4(name_len);
+            if (bgzf_write(fp, &x, 4) < 0) return -1;
+        } else {
+            if (bgzf_write(fp, &name_len, 4) < 0) return -1;
+        }
+        if (bgzf_write(fp, p, name_len) < 0) return -1;
+        if (fp->is_be) {
+            x = ed_swap_4(h->target_len[i]);
+            if (bgzf_write(fp, &x, 4) < 0) return -1;
+        } else {
+            if (bgzf_write(fp, &h->target_len[i], 4) < 0) return -1;
+        }
+    }
+    if (bgzf_flush(fp) < 0) return -1;
+    return 0;
+}
+
+const char *sam_parse_region(sam_hdr_t *h, const char *s, int *tid, int64_t *beg, int64_t *end, int flags) {
+    return hts_parse_region(s, tid, beg, end, (hts_name2id_f)bam_name2id, h, flags);
+}
+
+/*************************
+ *** BAM alignment I/O ***
+ *************************/
+
+bam1_t *bam_init1()
+{
+    return (bam1_t*)calloc(1, sizeof(bam1_t));
+}
+
+int sam_realloc_bam_data(bam1_t *b, size_t desired)
+{
+    uint32_t new_m_data;
+    uint8_t *new_data;
+    new_m_data = desired;
+    kroundup32(new_m_data);
+    if (new_m_data < desired) {
+        errno = ENOMEM; // Not strictly true but we can't store the size
+        return -1;
+    }
+    if ((bam_get_mempolicy(b) & BAM_USER_OWNS_DATA) == 0) {
+        new_data = realloc(b->data, new_m_data);
+    } else {
+        if ((new_data = malloc(new_m_data)) != NULL) {
+            if (b->l_data > 0)
+                memcpy(new_data, b->data,
+                       b->l_data < b->m_data ? b->l_data : b->m_data);
+            bam_set_mempolicy(b, bam_get_mempolicy(b) & (~BAM_USER_OWNS_DATA));
+        }
+    }
+    if (!new_data) return -1;
+    b->data = new_data;
+    b->m_data = new_m_data;
+    return 0;
+}
+
+void bam_destroy1(bam1_t *b)
+{
+    if (b == 0) return;
+    if ((bam_get_mempolicy(b) & BAM_USER_OWNS_DATA) == 0) {
+        free(b->data);
+        if ((bam_get_mempolicy(b) & BAM_USER_OWNS_STRUCT) != 0) {
+            // In case of reuse
+            b->data = NULL;
+            b->m_data = 0;
+            b->l_data = 0;
+        }
+    }
+
+    if ((bam_get_mempolicy(b) & BAM_USER_OWNS_STRUCT) == 0)
+        free(b);
+}
+
+bam1_t *bam_copy1(bam1_t *bdst, const bam1_t *bsrc)
+{
+    if (realloc_bam_data(bdst, bsrc->l_data) < 0) return NULL;
+    memcpy(bdst->data, bsrc->data, bsrc->l_data); // copy var-len data
+    memcpy(&bdst->core, &bsrc->core, sizeof(bsrc->core)); // copy the rest
+    bdst->l_data = bsrc->l_data;
+    bdst->id = bsrc->id;
+    return bdst;
+}
+
+bam1_t *bam_dup1(const bam1_t *bsrc)
+{
+    if (bsrc == NULL) return NULL;
+    bam1_t *bdst = bam_init1();
+    if (bdst == NULL) return NULL;
+    if (bam_copy1(bdst, bsrc) == NULL) {
+        bam_destroy1(bdst);
+        return NULL;
+    }
+    return bdst;
+}
+
+void bam_cigar2rqlens(int n_cigar, const uint32_t *cigar, int *rlen, int *qlen)
+{
+    int k;
+    *rlen = *qlen = 0;
+    for (k = 0; k < n_cigar; ++k) {
+        int type = bam_cigar_type(bam_cigar_op(cigar[k]));
+        int len = bam_cigar_oplen(cigar[k]);
+        if (type & 1) *qlen += len;
+        if (type & 2) *rlen += len;
+    }
+}
+
+int bam_cigar2qlen(int n_cigar, const uint32_t *cigar)
+{
+    int k, l;
+    for (k = l = 0; k < n_cigar; ++k)
+        if (bam_cigar_type(bam_cigar_op(cigar[k]))&1)
+            l += bam_cigar_oplen(cigar[k]);
+    return l;
+}
+
+hts_pos_t bam_cigar2rlen(int n_cigar, const uint32_t *cigar)
+{
+    int k;
+    hts_pos_t l;
+    for (k = l = 0; k < n_cigar; ++k)
+        if (bam_cigar_type(bam_cigar_op(cigar[k]))&2)
+            l += bam_cigar_oplen(cigar[k]);
+    return l;
+}
+
+hts_pos_t bam_endpos(const bam1_t *b)
+{
+    if (!(b->core.flag & BAM_FUNMAP) && b->core.n_cigar > 0)
+        return b->core.pos + bam_cigar2rlen(b->core.n_cigar, bam_get_cigar(b));
+    else
+        return b->core.pos + 1;
+}
+
+static int bam_tag2cigar(bam1_t *b, int recal_bin, int give_warning) // return 0 if CIGAR is untouched; 1 if CIGAR is updated with CG
+{
+    bam1_core_t *c = &b->core;
+    uint32_t cigar_st, n_cigar4, CG_st, CG_en, ori_len = b->l_data, *cigar0, CG_len, fake_bytes;
+    uint8_t *CG;
+
+    // test where there is a real CIGAR in the CG tag to move
+    if (c->n_cigar == 0 || c->tid < 0 || c->pos < 0) return 0;
+    cigar0 = bam_get_cigar(b);
+    if (bam_cigar_op(cigar0[0]) != BAM_CSOFT_CLIP || bam_cigar_oplen(cigar0[0]) != c->l_qseq) return 0;
+    fake_bytes = c->n_cigar * 4;
+    if ((CG = bam_aux_get(b, "CG")) == 0) return 0; // no CG tag
+    if (CG[0] != 'B' || CG[1] != 'I') return 0; // not of type B,I
+    CG_len = le_to_u32(CG + 2);
+    if (CG_len < c->n_cigar || CG_len >= 1U<<29) return 0; // don't move if the real CIGAR length is shorter than the fake cigar length
+
+    // move from the CG tag to the right position
+    cigar_st = (uint8_t*)cigar0 - b->data;
+    c->n_cigar = CG_len;
+    n_cigar4 = c->n_cigar * 4;
+    CG_st = CG - b->data - 2;
+    CG_en = CG_st + 8 + n_cigar4;
+    if (possibly_expand_bam_data(b, n_cigar4 - fake_bytes) < 0) return -1;
+    b->l_data = b->l_data - fake_bytes + n_cigar4; // we need c->n_cigar-fake_bytes bytes to swap CIGAR to the right place
+    memmove(b->data + cigar_st + n_cigar4, b->data + cigar_st + fake_bytes, ori_len - (cigar_st + fake_bytes)); // insert c->n_cigar-fake_bytes empty space to make room
+    memcpy(b->data + cigar_st, b->data + (n_cigar4 - fake_bytes) + CG_st + 8, n_cigar4); // copy the real CIGAR to the right place; -fake_bytes for the fake CIGAR
+    if (ori_len > CG_en) // move data after the CG tag
+        memmove(b->data + CG_st + n_cigar4 - fake_bytes, b->data + CG_en + n_cigar4 - fake_bytes, ori_len - CG_en);
+    b->l_data -= n_cigar4 + 8; // 8: CGBI (4 bytes) and CGBI length (4)
+    if (recal_bin)
+        b->core.bin = hts_reg2bin(b->core.pos, b->core.pos + bam_cigar2rlen(b->core.n_cigar, bam_get_cigar(b)), 14, 5);
+    if (give_warning)
+        hts_log_error("%s encodes a CIGAR with %d operators at the CG tag", bam_get_qname(b), c->n_cigar);
+    return 1;
+}
+
+static inline int aux_type2size(uint8_t type)
+{
+    switch (type) {
+    case 'A': case 'c': case 'C':
+        return 1;
+    case 's': case 'S':
+        return 2;
+    case 'i': case 'I': case 'f':
+        return 4;
+    case 'd':
+        return 8;
+    case 'Z': case 'H': case 'B':
+        return type;
+    default:
+        return 0;
+    }
+}
+
+static void swap_data(const bam1_core_t *c, int l_data, uint8_t *data, int is_host)
+{
+    uint32_t *cigar = (uint32_t*)(data + c->l_qname);
+    uint32_t i;
+    for (i = 0; i < c->n_cigar; ++i) ed_swap_4p(&cigar[i]);
+}
+
+// Fix bad records where qname is not terminated correctly.
+static int fixup_missing_qname_nul(bam1_t *b) {
+    bam1_core_t *c = &b->core;
+
+    // Note this is called before c->l_extranul is added to c->l_qname
+    if (c->l_extranul > 0) {
+        b->data[c->l_qname++] = '\0';
+        c->l_extranul--;
+    } else {
+        if (b->l_data > INT_MAX - 4) return -1;
+        if (realloc_bam_data(b, b->l_data + 4) < 0) return -1;
+        b->l_data += 4;
+        b->data[c->l_qname++] = '\0';
+        c->l_extranul = 3;
+    }
+    return 0;
+}
+
+/*
+ * Note a second interface that returns a bam pointer instead would avoid bam_copy1
+ * in multi-threaded handling.  This may be worth considering for htslib2.
+ */
+int bam_read1(BGZF *filepointer, bam1_t *b)
+{
+    bam1_core_t *c = &b->core;
+    int32_t block_len, ret, i;
+    uint32_t x[8], new_l_data;
+
+    b->l_data = 0;
+
+    if ((ret = bgzf_read(filepointer, &block_len, 4)) != 4) {
+        if (ret == 0) return -1; // normal end-of-file
+        else return -2; // truncated
+    }
+    if (filepointer->is_be)
+        ed_swap_4p(&block_len);
+    if (block_len < 32) return -4;  // block_len includes core data
+    if (bgzf_read(filepointer, x, 32) != 32) return -3;
+    if (filepointer->is_be) {
+        for (i = 0; i < 8; ++i) ed_swap_4p(x + i);
+    }
+    c->tid = x[0]; c->pos = (int32_t)x[1];
+    c->bin = x[2]>>16; c->qual = x[2]>>8&0xff; c->l_qname = x[2]&0xff;
+    c->l_extranul = (c->l_qname%4 != 0)? (4 - c->l_qname%4) : 0;
+    c->flag = x[3]>>16; c->n_cigar = x[3]&0xffff;
+    c->l_qseq = x[4];
+    c->mtid = x[5]; c->mpos = (int32_t)x[6]; 
+    // Set the insert size from the input data.
+    // Calculate the new length for data allocation, considering extra nulls.
+    // Check for overflow and consistency errors in data lengths.
+    // Allocate or reallocate memory for the BAM data buffer to accommodate the new data size.
+    // Read the query name part of the BAM record into the buffer.
+    // Pad the query name with extra nulls if necessary.
+    // <MASK>
+    if (b->l_data < c->l_qname ||
+        bgzf_read(filepointer, b->data + c->l_qname, b->l_data - c->l_qname) != b->l_data - c->l_qname)
+        return -4;
+    if (filepointer->is_be) swap_data(c, b->l_data, b->data, 0);
+    if (bam_tag2cigar(b, 0, 0) < 0)
+        return -4;
+
+    if (c->n_cigar > 0) { // recompute "bin" and check CIGAR-qlen consistency
+        int rlen, qlen;
+        bam_cigar2rqlens(c->n_cigar, bam_get_cigar(b), &rlen, &qlen);
+        if ((b->core.flag & BAM_FUNMAP)) rlen=1;
+        b->core.bin = hts_reg2bin(b->core.pos, b->core.pos + rlen, 14, 5);
+        // Sanity check for broken CIGAR alignments
+        if (c->l_qseq > 0 && !(c->flag & BAM_FUNMAP) && qlen != c->l_qseq) {
+            hts_log_error("CIGAR and query sequence lengths differ for %s",
+                    bam_get_qname(b));
+            return -4;
+        }
+    }
+
+    return 4 + block_len;
+}<｜begin▁of▁sentence｜>
+
+int bam_write1(BGZF *fp, const bam1_t *b)
+{
+    const bam1_core_t *c = &b->core;
+    uint32_t x[8], block_len = b->l_data - c->l_extranul + 32, y;
+    int i, ok;
+    if (c->l_qname - c->l_extranul > 255) {
+        hts_log_error("QNAME \"%s\" is longer than 254 characters", bam_get_qname(b));
+        errno = EOVERFLOW;
+        return -1;
+    }
+    if (c->n_cigar > 0xffff) block_len += 16; // "16" for "CGBI", 4-byte tag length and 8-byte fake CIGAR
+    if (c->pos > INT_MAX ||
+        c->mpos > INT_MAX ||
+        c->isize < INT_MIN || c->isize > INT_MAX) {
+        hts_log_error("Positional data is too large for BAM format");
+        return -1;
+    }
+    x[0] = c->tid;
+    x[1] = c->pos;
+    x[2] = (uint32_t)c->bin<<16 | c->qual<<8 | (c->l_qname - c->l_extranul);
+    if (c->n_cigar > 0xffff) x[3] = (uint32_t)c->flag << 16 | 2;
+    else x[3] = (uint32_t)c->flag << 16 | (c->n_cigar & 0xffff);
+    x[4] = c->l_qseq;
+    x[5] = c->mtid;
+    x[6] = c->mpos;
+    x[7] = c->isize;
+    ok = (bgzf_flush_try(fp, 4 + block_len) >= 0);
+    if (fp->is_be) {
+        for (i = 0; i < 8; ++i) ed_swap_4p(x + i);
+        y = block_len;
+        if (ok) ok = (bgzf_write(fp, ed_swap_4p(&y), 4) >= 0);
+        swap_data(c, b->l_data, b->data, 1);
+    } else {
+        if (ok) ok = (bgzf_write(fp, &block_len, 4) >= 0);
+    }
+    if (ok) ok = (bgzf_write(fp, x, 32) >= 0);
+    if (ok) ok = (bgzf_write(fp, b->data, c->l_qname - c->l_extranul) >= 0);
+    if (c->n_cigar <= 0xffff) { // no long CIGAR; write normally
+        if (ok) ok = (bgzf_write(fp, b->data + c->l_qname, b->l_data - c->l_qname) >= 0);
+    } else { // with long CIGAR, insert a fake CIGAR record and move the real CIGAR to the CG:B,I tag
+        uint8_t buf[8];
+
+
+// --- CODE TRUNCATED HERE ---
+

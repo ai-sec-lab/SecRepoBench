@@ -1,0 +1,160 @@
+switch (tag)
+		{
+			case 0: // mono element
+			case 1: // stereo element
+				// mono and stereo elements are almost the same except for the interleaving
+				// of the output samples
+
+				// read the 12-bit element size
+				bits1 = BitBufferReadSmall (bits, 12) ;
+
+				// read the header if this is not a partial frame
+				headerByte = BitBufferReadSmall (bits, 8) ;
+				partialFrame = (headerByte & 0x80) ? 0 : 1 ;
+
+				if (!partialFrame)
+				{
+					mixBits = headerByte & 0x07 ;
+					mixResiduals = headerByte & 0x08 ;
+					escapeFlag = headerByte & 0x10 ;
+					unusedHeader = headerByte & 0x60 ;
+
+					// only 2, 3, or 4 channels are supported
+					chanBits = (tag == 0) ? 0 : BitBufferReadSmall (bits, 2) + 1 ;
+					RequireAction (chanBits <= 2, status = kALAC_TooManyChannels ; goto Exit ;) ;
+
+					// if we have a stereo element, it's possible the channel count from the
+					// magic cookie is only 1.  If so, then we duplicate the mono channel
+					// into both stereo channels.
+					if (chanBits > 1 && numChannels == 1)
+						numChannels = 2 ;
+
+					// byte align the bitstream
+					BitBufferByteAlign (bits, false) ;
+
+					// check for possible problems with the header
+					if (mixBits > 4)
+					{
+						status = kALAC_InvalidMixBits ;
+						goto Exit ;
+					}
+
+					// read the shifted values, which are interleaved
+					bytesShifted = BitBufferReadSmall (bits, chanBits) ;
+
+					shiftBits = *bits ;
+
+					for (i = 0 ; i < chanBits ; i++)
+					{
+						shift = (bytesShifted >> i) & 1 ;
+
+						// read the prediction coefficients
+						numU = BitBufferReadSmall (bits, 4) ;
+						if (numU == 15)
+							numU += BitBufferReadSmall (bits, 5) - 1 ;
+
+						for (j = 0 ; j < numU ; j++)
+							coefsU [j] = (int16_t) BitBufferReadSmall (bits, 16) ;
+
+						numV = BitBufferReadSmall (bits, 4) ;
+						if (numV == 15)
+							numV += BitBufferReadSmall (bits, 5) - 1 ;
+
+						for (j = 0 ; j < numV ; j++)
+							coefsV [j] = (int16_t) BitBufferReadSmall (bits, 16) ;
+
+						modeU = BitBufferReadSmall (bits, 3) ;
+						denShiftU = BitBufferReadSmall (bits, 5) ;
+						pbFactorU = BitBufferReadSmall (bits, 4) ;
+
+						modeV = BitBufferReadSmall (bits, 3) ;
+						denShiftV = BitBufferReadSmall (bits, 5) ;
+						pbFactorV = BitBufferReadSmall (bits, 4) ;
+
+						// if shift active, skip the interleaved shifted values
+						if (shift)
+						{
+							extraBits = 32 - p->mConfig.bitDepth ;
+							BitBufferAdvance (&shiftBits, extraBits) ;
+						}
+
+						// set up the predictor for this channel
+						p->u.mPredictor [i].mShift = shift ;
+						p->u.mPredictor [i].mMixBits = mixBits ;
+						p->u.mPredictor [i].mMixResiduals = mixResiduals ;
+						p->u.mPredictor [i].mEscapeFlag = escapeFlag ;
+						p->u.mPredictor [i].mNumCoefsU = numU ;
+						p->u.mPredictor [i].mNumCoefsV = numV ;
+						p->u.mPredictor [i].mModeU = modeU ;
+						p->u.mPredictor [i].mDenShiftU = denShiftU ;
+						p->u.mPredictor [i].mPBFactorU = pbFactorU ;
+						p->u.mPredictor [i].mModeV = modeV ;
+						p->u.mPredictor [i].mDenShiftV = denShiftV ;
+						p->u.mPredictor [i].mPBFactorV = pbFactorV ;
+
+						memcpy (p->u.mPredictor [i].mCoefsU, coefsU, numU * sizeof (int16_t)) ;
+						memcpy (p->u.mPredictor [i].mCoefsV, coefsV, numV * sizeof (int16_t)) ;
+
+						p->mActiveElements++ ;
+					}
+
+					// now that we've read the predictor config, prime the predictors
+					// with the first few samples
+					for (i = 0 ; i < chanBits ; i++)
+					{
+						shift = (bytesShifted >> i) & 1 ;
+
+						if (shift)
+						{
+							extraBits = 32 - p->mConfig.bitDepth ;
+
+							val = SignExtend24 (BitBufferReadSmall (&shiftBits, p->mConfig.bitDepth + extraBits), p->mConfig.bitDepth + extraBits) ;
+							p->u.mPredictor [i].mShiftBuffer [0] = val ;
+
+							if (mixBits > 0)
+							{
+								val = SignExtend24 (BitBufferReadSmall (&shiftBits, p->mConfig.bitDepth + extraBits), p->mConfig.bitDepth + extraBits) ;
+								p->u.mPredictor [i].mShiftBuffer [1] = val ;
+							}
+						}
+					}
+
+					*bits = shiftBits ;
+				}
+
+				// copy the local channel count
+				p->mLocalChanCount = chanBits ;
+
+				// now read the samples and apply prediction
+				out32 = sampleBuffer + channelIndex ;
+				status = PredictDecompressStereo (p->u.mPredictor, bits, out32, bits1, numSamples, numChannels, chanBits, pb) ;
+				RequireNoErr (status, goto Exit ;) ;
+
+				channelIndex += chanBits ;
+				break ;
+
+			case 2: // data stream element
+				status = alac_data_stream_element (bits) ;
+				goto Exit ;
+
+			case 3: // fill element
+				status = alac_fill_element (bits) ;
+				goto Exit ;
+
+			case 4: // 4-bit element
+			case 5: // 5-bit element
+			case 6: // 6-bit element
+			case 7: // 7-bit element
+				status = kALAC_UnsupportedFormat ;		// these formats are no longer used
+				goto Exit ;
+
+			default:
+				status = kALAC_InvalidElementTag ;
+				goto Exit ;
+		}
+
+		// byte-align after each element
+		BitBufferByteAlign (bits, false) ;
+
+		if (channelIndex == numChannels)
+			goto NoMoreChannels ;

@@ -1,18 +1,18 @@
 case 1:
-        if (ndx1 != NULL_ADDRESS) {
+        if (firstArgIndex != NULL_ADDRESS) {
           (void) ThrowMagickException (
             pfx->exception, GetMagickModule(), OptionError,
             "For function", "'%s' required argument is missing at '%s'",
             funStr, SetShortExp(pfx));
-          return isCoordQualifier;
+          return MagickFalse;
         }
-        ndx1 = pfx->usedElements;
+        firstArgIndex = pfx->usedElements;
         if (fe==fWhile) {
           (void) AddAddressingElement (pfx, rIfZeroGoto, NULL_ADDRESS); /* address will be ndx2+1 */
         } else if (fe==fDo) {
           (void) AddAddressingElement (pfx, rIfZeroGoto, NULL_ADDRESS); /* address will be ndx2+1 */
         } else if (fe==fFor) {
-          pfx->Elements[pfx->usedElements-1].DoPush = isCoordQualifier;
+          pfx->Elements[pfx->usedElements-1].DoPush = MagickFalse;
         } else if (fe==fIf) {
           (void) AddAddressingElement (pfx, rIfZeroGoto, NULL_ADDRESS); /* address will be ndx2 + 1 */
           pfx->Elements[pfx->usedElements-1].DoPush = MagickTrue; /* we may need return from if() */
@@ -24,14 +24,14 @@ case 1:
             pfx->exception, GetMagickModule(), OptionError,
             "For function", "'%s' required argument is missing at '%s'",
             funStr, SetShortExp(pfx));
-          return isCoordQualifier;
+          return MagickFalse;
         }
         ndx2 = pfx->usedElements;
         if (fe==fWhile) {
-          pfx->Elements[pfx->usedElements-1].DoPush = isCoordQualifier;
+          pfx->Elements[pfx->usedElements-1].DoPush = MagickFalse;
           (void) AddAddressingElement (pfx, rGoto, ndx0);
         } else if (fe==fDo) {
-          pfx->Elements[pfx->usedElements-1].DoPush = isCoordQualifier;
+          pfx->Elements[pfx->usedElements-1].DoPush = MagickFalse;
           (void) AddAddressingElement (pfx, rGoto, ndx0 + 1);
         } else if (fe==fFor) {
           (void) AddAddressingElement (pfx, rIfZeroGoto, NULL_ADDRESS); /* address will be ndx3 */
@@ -47,11 +47,11 @@ case 1:
             pfx->exception, GetMagickModule(), OptionError,
             "For function", "'%s' required argument is missing at '%s'",
             funStr, SetShortExp(pfx));
-          return isCoordQualifier;
+          return MagickFalse;
         }
         if (fe==fFor) {
-          pfx->Elements[pfx->usedElements-1].DoPush = isCoordQualifier;
-          (void) AddAddressingElement (pfx, rGoto, ndx1);
+          pfx->Elements[pfx->usedElements-1].DoPush = MagickFalse;
+          (void) AddAddressingElement (pfx, rGoto, firstArgIndex);
         }
         ndx3 = pfx->usedElements;
         break;

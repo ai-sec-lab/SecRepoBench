@@ -1,0 +1,51 @@
+else if(extension_id == 43 /* supported_versions */) {
+    u_int16_t s_offset = offset + extension_offset;
+    u_int16_t num_versions = extension_len / 2;
+    
+    if(num_versions > 0 && s_offset + extension_len <= total_len) {
+        for(i = 0; i < num_versions; i++) {
+            u_int16_t version = ntohs(*((u_int16_t*)&packet->payload[s_offset + i*2]));
+            
+            if(version != 0 && packet->payload[s_offset + i*2] != packet->payload[s_offset + i*2 + 1]) {
+                int rc = snprintf(&ja3.client.supported_versions[strlen(ja3.client.supported_versions)], 
+                                sizeof(ja3.client.supported_versions) - strlen(ja3.client.supported_versions),
+                                "%s%04X", (i > 0) ? "-" : "", version);
+                if(rc < 0 || (strlen(ja3.client.supported_versions) + rc >= sizeof(ja3.client.supported_versions))) break;
+            }
+        }
+    }
+} else if(extension_id == 0xFFCE /* encrypted_server_name (65024 in decimal, 0xFE0D in hex?) */) {
+    flow->protos.tls_quic.encrypted_sni.esni = 1;
+    if(extension_len >= 4) {
+        flow->protos.tls_quic.encrypted_sni.cipher = ntohs(*((u_int16_t*)&packet->payload[offset+extension_offset]));
+        flow->protos.tls_quic.encrypted_sni.hash_id = packet->payload[offset+extension_offset+2];
+        flow->protos.tls_quic.encrypted_sni.record_digest_len = packet->payload[offset+extension_offset+3];
+        
+        if(extension_len > 4 && flow->protos.tls_quic.encrypted_sni.record_digest_len <= (extension_len-4)) {
+            ndpi_MD5_CTX md5_ctx;
+            ndpi_MD5Init(&md5_ctx);
+            ndpi_MD5Update(&md5_ctx, &packet->payload[offset+extension_offset+4], flow->protos.tls_quic.encrypted_sni.record_digest_len);
+            ndpi_MD5Final(flow->protos.tls_quic.encrypted_sni.md5_digest, &md5_ctx);
+        }
+    }
+} else if(extension_id == 57 /* quic_transport_parameters */) {
+    u_int32_t param_offset = offset + extension_offset;
+    u_int32_t param_end = param_offset + extension_len;
+    
+    while(param_offset + 4 <= param_end && param_offset < total_len) {
+        u_int16_t param_id = ntohs(*((u_int16_t*)&packet->payload[param_offset]));
+        u_int16_t param_len = ntohs(*((u_int16_t*)&packet->payload[param_offset+2]));
+        
+        if(param_offset + 4 + param_len > param_end) break;
+        
+        if(param_id == 0xFFA1 /* Google User Agent ID */ && param_len > 0) {
+            u_int16_t ua_len = ndpi_min(param_len, sizeof(flow->protos.tls_quic.quic_user_agent)-1);
+            strncpy(flow->protos.tls_quic.quic_user_agent, (char*)&packet->payload[param_offset+4], ua_len);
+            flow->protos.tls_quic.quic_user_agent[ua_len] = '\0';
+            
+            if(ndpi_is_printable_string(flow->protos.tls_quic.quic_user_agent, ua_len) == 0)
+                ndpi_set_risk(ndpi_struct, flow, NDPI_INVALID_CHARACTERS);
+        }
+        param_offset += 4 + param_len;
+    }
+}

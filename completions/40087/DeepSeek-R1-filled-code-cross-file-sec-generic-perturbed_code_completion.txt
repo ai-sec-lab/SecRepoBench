@@ -1,0 +1,43 @@
+if (!quic_hp_cipher_init(&ciphers.hp_cipher, GCRY_MD_SHA256, 16, client_secret, version)) {
+    NDPI_LOG_DBG(ndpi_struct, "Failed to initialize HP cipher\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  uint8_t pp_key[16], pp_iv[12];
+  if (!quic_hkdf_expand_label(GCRY_MD_SHA256, client_secret, HASH_SHA2_256_LENGTH, "quic key", pp_key, sizeof(pp_key)) ||
+      !quic_hkdf_expand_label(GCRY_MD_SHA256, client_secret, HASH_SHA2_256_LENGTH, "quic iv", pp_iv, sizeof(pp_iv))) {
+    NDPI_LOG_DBG(ndpi_struct, "Failed to derive PP key/IV\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  gcry_error_t err = gcry_cipher_open(&ciphers.pp_cipher.pp_cipher, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM, 0);
+  if (err || (err = gcry_cipher_setkey(ciphers.pp_cipher.pp_cipher, pp_key, sizeof(pp_key)))) {
+    NDPI_LOG_DBG(ndpi_struct, "Failed to initialize PP cipher: %s\n", gcry_strerror(err));
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  memcpy(ciphers.pp_cipher.pp_iv, pp_iv, sizeof(pp_iv));
+
+  offset = 1 + 4 + 1 + dest_conn_id_len + 1 + src_conn_id_len;
+
+  if (!ndpi_parse_quic_varint(packet->payload, packet->payload_packet_len, &offset, &token_length) ||
+      offset + token_length > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Invalid token length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  offset += token_length;
+
+  uint64_t length_field;
+  if (!ndpi_parse_quic_varint(packet->payload, packet->payload_packet_len, &offset, &length_field)) {
+    NDPI_LOG_DBG(ndpi_struct, "Invalid length field\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  payload_length = length_field;
+  pn_offset = offset;
+
+  NDPI_LOG_DBG2(ndpi_struct, "Offsets: token=%llu pn=%u payload_len=%llu\n",
+                (unsigned long long)token_length, pn_offset, (unsigned long long)payload_length);

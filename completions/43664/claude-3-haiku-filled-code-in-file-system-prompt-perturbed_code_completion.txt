@@ -1,0 +1,139 @@
+if(extension_id == 45 /* quic transport params */) {
+  u_int16_t s_offset = offset+extension_offset + 2;
+  u_int16_t quic_params_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+  s_offset += 2;
+
+  if((s_offset + quic_params_len) <= total_len) {
+    u_int32_t quic_version = 0;
+    u_int64_t quic_param_value;
+    int rc;
+
+    while(s_offset < (s_offset + quic_params_len)) {
+      u_int16_t quic_param_id = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+      s_offset += 2;
+
+      rc = quic_len(&packet->payload[s_offset], &quic_param_value);
+      if(rc < 0) {
+        ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+        break;
+      }
+      s_offset += rc;
+
+      switch(quic_param_id) {
+      case 0x0a: /* original_destination_connection_id */
+        break;
+      case 0x0b: /* max_idle_timeout */
+        break;
+      case 0x0c: /* stateless_reset_token */
+        break;
+      case 0x0d: /* max_udp_payload_size */
+        break;
+      case 0x0e: /* initial_max_data */
+        break;
+      case 0x0f: /* initial_max_stream_data_bidi_local */
+        break;
+      case 0x10: /* initial_max_stream_data_bidi_remote */
+        break;
+      case 0x11: /* initial_max_stream_data_uni */
+        break;
+      case 0x12: /* initial_max_streams_bidi */
+        break;
+      case 0x13: /* initial_max_streams_uni */
+        break;
+      case 0x14: /* ack_delay_exponent */
+        break;
+      case 0x15: /* max_ack_delay */
+        break;
+      case 0x16: /* disable_active_migration */
+        break;
+      case 0x17: /* preferred_address */
+        break;
+      case 0x18: /* active_connection_id_limit */
+        break;
+      case 0x1a: /* initial_source_connection_id */
+        break;
+      case 0x1b: /* retry_source_connection_id */
+        break;
+      case 0x1c: /* max_datagram_frame_size */
+        break;
+      default:
+        break;
+      }
+
+      if(quic_param_id == 0x0a /* original_destination_connection_id */) {
+        quic_version = (u_int32_t)quic_param_value;
+#ifdef DEBUG_TLS
+        printf("[QUIC] Version: %u\n", quic_version);
+#endif
+        if(is_version_with_var_int_transport_params(quic_version)) {
+          processClientServerHello(ndpi_struct, flow, quic_version);
+        } else {
+          ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+        }
+      }
+    }
+
+    http_process_user_agent(ndpi_struct, flow,
+                            &packet->payload[offset+extension_offset+2+4],
+                            quic_params_len);
+  } else {
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+  }
+} else if(extension_id == 0x0d /* encrypted server name */) {
+  u_int16_t s_offset = offset+extension_offset + 2;
+  u_int16_t encrypted_sni_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+  s_offset += 2;
+
+  if((s_offset + encrypted_sni_len) <= total_len) {
+#ifdef DEBUG_ENCRYPTED_SNI
+    printf("[TLS] Encrypted SNI [len: %u]\n", encrypted_sni_len);
+#endif
+
+    flow->protos.tls_quic.encrypted_sni.esni = ndpi_malloc(encrypted_sni_len+1);
+    if(flow->protos.tls_quic.encrypted_sni.esni) {
+      memcpy(flow->protos.tls_quic.encrypted_sni.esni,
+             &packet->payload[s_offset], encrypted_sni_len);
+      flow->protos.tls_quic.encrypted_sni.esni[encrypted_sni_len] = '\0';
+      flow->protos.tls_quic.encrypted_sni.esni_len = encrypted_sni_len;
+    }
+  } else {
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+  }
+} else if(extension_id == 43 /* supported versions */) {
+  u_int16_t s_offset = offset+extension_offset + 1;
+  u_int16_t tot_supported_versions_len = packet->payload[s_offset++];
+
+  if((s_offset + tot_supported_versions_len) <= total_len) {
+    u_int16_t j;
+    char supported_versions[MAX_JA3_STRLEN];
+    u_int16_t supported_versions_len = 0;
+
+#ifdef DEBUG_TLS
+    printf("[TLS] Supported Versions [len: %u]\n", tot_supported_versions_len);
+#endif
+
+    for(j=0; j<tot_supported_versions_len && s_offset+j+1<total_len; j+=2) {
+      u_int16_t tls_version = ntohs(*((u_int16_t*)&packet->payload[s_offset+j]));
+
+      if(supported_versions_len > 0)
+        supported_versions[supported_versions_len++] = '-';
+
+      supported_versions_len += snprintf(&supported_versions[supported_versions_len],
+                                        sizeof(supported_versions)-supported_versions_len,
+                                        "%04X", tls_version);
+
+#ifdef DEBUG_TLS
+      printf("[TLS] Supported Version: 0x%04X\n", tls_version);
+#endif
+
+      if(flow->protos.tls_quic.ssl_version == 0)
+        flow->protos.tls_quic.ssl_version = tls_version;
+    }
+
+    supported_versions[supported_versions_len] = '\0';
+    snprintf(ja3.client.supported_versions, sizeof(ja3.client.supported_versions),
+             "%s", supported_versions);
+  } else {
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+  }
+}

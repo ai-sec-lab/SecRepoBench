@@ -1,0 +1,201 @@
+switch (tag)
+		{
+			case ID_SCE:
+			case ID_LFE:
+				// mono or LFE channel
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				//Assert (elementInstanceTag == 0) ;		// only 0 is valid right now
+
+				// read the 12-bit header
+				headerByte = BitBufferReadSmall (bits, 8) ;
+				extraBits = BitBufferReadSmall (bits, 4) ;
+				chanBits = headerByte + extraBits ;
+
+				// check for compressed vs. uncompressed frames
+				if ((headerByte & 0x80u) == 0)
+				{
+					// uncompressed frame, just read the data
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						val = BitBufferRead (bits, chanBits) ;
+						sampleBuffer [channelIndex + (i * numChannels)] = val ;
+					}
+				}
+				else
+				{
+					// compressed frame, read the compressed data into the prediction buffer
+					shift = headerByte & 0x60u ;
+					bytesShifted = shift >> 5 ;
+					shift = bytesShifted * 8 ;
+
+					partialFrame = headerByte & 0x10u ;
+					escapeFlag = headerByte & 0x08u ;
+					unusedHeader = headerByte & 0x07u ;
+
+					if (partialFrame)
+						BitBufferRead (bits, 32) ;		// partial frames are not yet supported!
+
+					if (escapeFlag)
+					{
+						// escape mechanism is not yet supported!
+						status = kALAC_UnsupportedFormat ;
+						goto Exit ;
+					}
+
+					mixBits = BitBufferReadSmall (bits, 8) ;
+					mixResiduals = BitBufferReadSmall (bits, 8) ;
+
+					modeU = BitBufferReadSmall (bits, 8) ;
+					denShiftU = modeU & 0x0Fu ;
+					modeU = modeU >> 4 ;
+					numU = BitBufferReadSmall (bits, 8) ;
+					pbFactorU = numU & 0x1Fu ;
+					numU = numU >> 5 ;
+					for (i = 0; i < numU; i++)
+						coefsU [i] = (int16_t) BitBufferRead (bits, 16) ;
+
+					// if shift active, read the shifted values into the shift buffer
+					if (bytesShifted)
+					{
+						shiftBits = *bits ;
+
+						for (i = 0 ; i < numSamples ; i++)
+						{
+							val = BitBufferRead (&shiftBits, shift) ;
+							p->mShiftBuffer [i] = (uint8_t) val ;
+						}
+
+						*bits = shiftBits ;
+					}
+
+					set_ag_params (&agParams, MB0, (pbFactorU * PB0) / 4, KB0, numSamples, numSamples, p->mMaxRun) ;
+					status = dyn_decomp (&agParams, bits, p->mPredictionBuffer, numSamples, chanBits, &bits1) ;
+					if (status)
+						goto Exit ;
+
+					// now that we have the predicted data, uncompress it
+					unpc_block (p->mPredictionBuffer, sampleBuffer + channelIndex, numSamples, coefsU, numU, chanBits, denShiftU, p->mShiftBuffer, bytesShifted) ;
+				}
+
+				channelIndex++ ;
+				break ;
+
+			case ID_CPE:
+				// stereo channel pair
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				//Assert (elementInstanceTag == 0) ;		// only 0 is valid right now
+
+				RequireAction (channelIndex < numChannels - 1, status = kALAC_ParamError ; goto Exit ;) ;
+
+				// read the 12-bit header
+				headerByte = BitBufferReadSmall (bits, 8) ;
+				extraBits = BitBufferReadSmall (bits, 4) ;
+				chanBits = headerByte + extraBits ;
+
+				// check for compressed vs. uncompressed frames
+				if ((headerByte & 0x80u) == 0)
+				{
+					// uncompressed frame, just read the data
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						val = BitBufferRead (bits, chanBits) ;
+						sampleBuffer [channelIndex + (i * numChannels)] = val ;
+
+						val = BitBufferRead (bits, chanBits) ;
+						sampleBuffer [channelIndex + 1 + (i * numChannels)] = val ;
+					}
+				}
+				else
+				{
+					// compressed frame, read the compressed data into the prediction buffer
+					shift = headerByte & 0x60u ;
+					bytesShifted = shift >> 5 ;
+					shift = bytesShifted * 8 ;
+
+					partialFrame = headerByte & 0x10u ;
+					escapeFlag = headerByte & 0x08u ;
+					unusedHeader = headerByte & 0x07u ;
+
+					if (partialFrame)
+						BitBufferRead (bits, 32) ;		// partial frames are not yet supported!
+
+					if (escapeFlag)
+					{
+						// escape mechanism is not yet supported!
+						status = kALAC_UnsupportedFormat ;
+						goto Exit ;
+					}
+
+					mixBits = BitBufferReadSmall (bits, 8) ;
+					mixResiduals = BitBufferReadSmall (bits, 8) ;
+
+					modeU = BitBufferReadSmall (bits, 8) ;
+					denShiftU = modeU & 0x0Fu ;
+					modeU = modeU >> 4 ;
+					numU = BitBufferReadSmall (bits, 8) ;
+					pbFactorU = numU & 0x1Fu ;
+					numU = numU >> 5 ;
+					for (i = 0; i < numU; i++)
+						coefsU [i] = (int16_t) BitBufferRead (bits, 16) ;
+
+					modeV = BitBufferReadSmall (bits, 8) ;
+					denShiftV = modeV & 0x0Fu ;
+					modeV = modeV >> 4 ;
+					numV = BitBufferReadSmall (bits, 8) ;
+					pbFactorV = numV & 0x1Fu ;
+					numV = numV >> 5 ;
+					for (i = 0; i < numV; i++)
+						coefsV [i] = (int16_t) BitBufferRead (bits, 16) ;
+
+					// if shift active, read the interleaved shifted values into the shift buffers
+					if (bytesShifted)
+					{
+						shiftBits = *bits ;
+
+						for (i = 0 ; i < numSamples ; i++)
+						{
+							val = BitBufferRead (&shiftBits, shift) ;
+							p->mShiftBuffer [i * 2 + 0] = (uint8_t) val ;
+
+							val = BitBufferRead (&shiftBits, shift) ;
+							p->mShiftBuffer [i * 2 + 1] = (uint8_t) val ;
+						}
+
+						*bits = shiftBits ;
+					}
+
+					set_ag_params (&agParams, MB0, (pbFactorU * PB0) / 4, KB0, numSamples, numSamples, p->mMaxRun) ;
+					status = dyn_decomp (&agParams, bits, p->mPredictionBuffer, numSamples, chanBits, &bits1) ;
+					if (status)
+						goto Exit ;
+
+					set_ag_params (&agParams, MB0, (pbFactorV * PB0) / 4, KB0, numSamples, numSamples, p->mMaxRun) ;
+					status = dyn_decomp (&agParams, bits, p->mPredictionBuffer + numSamples, numSamples, chanBits, &bits2) ;
+					if (status)
+						goto Exit ;
+
+					// now that we have the predicted data, uncompress it
+					out32 = sampleBuffer + channelIndex ;
+					unpc_stereo (out32, numSamples, coefsU, numU, coefsV, numV, chanBits, denShiftU, denShiftV, p->mShiftBuffer, bytesShifted, numChannels) ;
+				}
+
+				channelIndex += 2 ;
+				break ;
+
+			case ID_END:
+				// frame end, all done so byte align
+				goto NoMoreChannels ;
+
+			default:
+				// unsupported element, set the status and ignore any fill data
+				status = kALAC_UnsupportedFormat ;
+
+				if (tag == ID_FILL)
+					BitBufferByteAlign (bits, false) ;
+
+				goto Exit ;
+		}
+
+		// byte align the bitstream if there's fill data
+		if (tag == ID_FILL)
+			BitBufferByteAlign (bits, false) ;

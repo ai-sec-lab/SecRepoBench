@@ -1,0 +1,89 @@
+p = b;
+if (p[0] == 0) {
+    /* Skip to next sector */
+    skip_size -= step;
+    step = 0;
+    break;
+}
+if (p[0] > step) {
+    archive_set_error(&archivereader->archive,
+        ARCHIVE_ERRNO_MISC,
+        "Invalid directory entry size");
+    return (ARCHIVE_FATAL);
+}
+
+while (p < b + step) {
+    size_t entry_len = p[0];
+    if (entry_len == 0)
+        break;
+    if (entry_len < 34) {
+        archive_set_error(&archivereader->archive,
+            ARCHIVE_ERRNO_MISC,
+            "Invalid directory entry length");
+        return (ARCHIVE_FATAL);
+    }
+
+    /* Skip '.' and '..' entries */
+    if (p[32] == 0 && p[31] == 1) {  /* Current directory */
+        p += entry_len + (entry_len & 1 ? 1 : 0);
+        continue;
+    }
+    if (p[32] == 1 && p[31] == 1) {  /* Parent directory */
+        p += entry_len + (entry_len & 1 ? 1 : 0);
+        continue;
+    }
+
+    struct file_info *file = calloc(1, sizeof(*file));
+    if (file == NULL) {
+        archive_set_error(&archivereader->archive,
+            ENOMEM, "No memory");
+        return (ARCHIVE_FATAL);
+    }
+    file->parent = parent;
+
+    /* Parse basic file info */
+    file->offset = iso9660->logical_block_size *
+        (uint64_t)archive_le32dec(p + 2);
+    file->size = archive_le32dec(p + 10);
+    file->flags = p[25];
+    file->name_len = p[31];
+    archive_strncpy(&file->name, (const char *)(p + 32), file->name_len);
+
+    /* Handle multi-extent files */
+    if (multi != NULL && (multi->flags & 0x80)) {
+        multi->contents.next = file;
+        multi = file;
+    } else if (parent->contents.first == NULL) {
+        parent->contents.first = file;
+        multi = file;
+    } else {
+        struct file_info *cur = parent->contents.first;
+        while (cur->contents.next != NULL)
+            cur = cur->contents.next;
+        cur->contents.next = file;
+        multi = file;
+    }
+
+    /* Process Rockridge extensions */
+    const unsigned char *rr_start = p + 33 + file->name_len;
+    size_t rr_remaining = entry_len - (33 + file->name_len);
+    while (rr_remaining >= 4) {
+        const unsigned char *rr_entry = rr_start;
+        size_t rr_len = rr_entry[2];
+        if (rr_len == 0 || rr_len > rr_remaining)
+            break;
+
+        if (rr_entry[0] == 'N' && rr_entry[1] == 'M') {
+            parse_rockridge_NM1(file, rr_entry + 4, rr_len - 4);
+        }
+
+        rr_start += rr_len;
+        rr_remaining -= rr_len;
+    }
+
+    /* Move to next entry */
+    entry_len += entry_len & 1;  /* Pad to even length */
+    p += entry_len;
+    skip_size -= entry_len;
+    step -= entry_len;
+}

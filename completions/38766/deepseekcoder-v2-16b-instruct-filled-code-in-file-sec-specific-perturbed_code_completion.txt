@@ -1,0 +1,342 @@
+7\010 signature. */
+		if (p[0] == 'P' && p[1] == 'K' && p[2] == '\007'
+		    && p[3] == '\010') {
+			__archive_read_consume(a, 4);
+			if (zip->hctx_valid) {
+				if (__archive_read_ahead(a, AUTH_CODE_SIZE,
+				    NULL) == NULL) {
+					archive_set_error(&a->archive,
+					    ARCHIVE_ERRNO_FILE_FORMAT,
+					    "Truncated ZIP file data");
+					return (ARCHIVE_FATAL);
+				}
+				__archive_read_consume(a, AUTH_CODE_SIZE);
+			}
+			__archive_read_consume(a, 20);
+		} else {
+			/* Consume the data descriptor. */
+			__archive_read_consume(a, 16);
+		}
+	}
+	return (ARCHIVE_OK);
+}
+
+static int
+zip_read_data(struct archive_read *a, const void **buff, size_t *size,
+    int64_t *offset)
+{
+	struct zip *zip = (struct zip *)(a->format->data);
+	int r;
+
+	if (zip->end_of_entry) {
+		r = consume_optional_marker(a, zip);
+		if (r != ARCHIVE_OK)
+			return (r);
+		zip->end_of_entry = 0;
+	}
+
+	if (zip->decompress_init == 0) {
+		r = zip_read_data_none(a, buff, size, offset);
+		if (r != ARCHIVE_OK)
+			return (r);
+		zip->decompress_init = 1;
+	}
+
+#ifdef HAVE_ZLIB_H
+	if (zip->stream_valid) {
+		r = zip_read_data_deflate(a, buff, size, offset);
+		if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+			return (r);
+	}
+#endif
+
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	if (zip->zipx_lzma_valid) {
+		r = zip_read_data_zipx_lzma_alone(a, buff, size, offset);
+		if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+			return (r);
+	}
+#endif
+
+#ifdef HAVE_BZLIB_H
+	if (zip->bzstream_valid) {
+		r = zip_read_data_bzip2(a, buff, size, offset);
+		if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+			return (r);
+	}
+#endif
+
+#if HAVE_ZSTD_H && HAVE_LIBZSTD
+	if (zip->zstdstream_valid) {
+		r = zip_read_data_zstd(a, buff, size, offset);
+		if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+			return (r);
+	}
+#endif
+
+	if (zip->ppmd8_valid) {
+		r = zip_read_data_ppmd8(a, buff, size, offset);
+		if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+			return (r);
+	}
+
+	if (zip->tctx_valid || zip->cctx_valid) {
+		r = zip_read_data_none(a, buff, size, offset);
+		if (r != ARCHIVE_OK)
+			return (r);
+	}
+
+	return (ARCHIVE_OK);
+}
+
+/*
+ * Read data from the current entry.
+ */
+static int
+archive_read_format_zip_read_data(struct archive_read *a, const void **buff,
+    size_t *size, int64_t *offset)
+{
+	struct zip *zip = (struct zip *)(a->format->data);
+	int r;
+
+	if (zip->entry_bytes_remaining == 0) {
+		zip->end_of_entry = 1;
+		if (zip->hctx_valid) {
+			r = check_authentication_code(a, NULL);
+			if (r != ARCHIVE_OK)
+				return (r);
+		}
+		return (ARCHIVE_OK);
+	}
+
+	r = zip_read_data(a, buff, size, offset);
+	if (r != ARCHIVE_OK)
+		return (r);
+
+	if (zip->entry_bytes_remaining == 0) {
+		zip->end_of_entry = 1;
+		if (zip->hctx_valid) {
+			r = check_authentication_code(a, NULL);
+			if (r != ARCHIVE_OK)
+				return (r);
+		}
+	}
+
+	return (ARCHIVE_OK);
+}
+
+/*
+ * Initialize the ZIP format.
+ */
+static int
+archive_read_format_zip_seekable_bid(struct archive_read *a,
+    struct archive_entry *entry)
+{
+	struct zip *zip = (struct zip *)(a->format->data);
+
+	zip->central_directory_offset = 0;
+	zip->central_directory_offset_adjusted = 0;
+	zip->central_directory_entries_total = 0;
+	zip->central_directory_entries_on_this_disk = 0;
+	zip->has_encrypted_entries = 0;
+	zip->zip_entries = NULL;
+	archive_rb_tree_init(&zip->tree);
+	archive_rb_tree_init(&zip->tree_rsrc);
+	zip->unconsumed = 0;
+	zip->entry = NULL;
+	zip->entry_bytes_remaining = 0;
+	zip->entry_compressed_bytes_read = 0;
+	zip->entry_uncompressed_bytes_read = 0;
+	zip->entry_crc32 = 0;
+	zip->crc32func = real_crc32;
+	zip->ignore_crc32 = 0;
+	zip->decompress_init = 0;
+	zip->end_of_entry = 0;
+	zip->uncompressed_buffer = NULL;
+	zip->uncompressed_buffer_size = 0;
+
+#ifdef HAVE_ZLIB_H
+	zip->stream_valid = 0;
+#endif
+
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	zip->zipx_lzma_valid = 0;
+#endif
+
+#ifdef HAVE_BZLIB_H
+	zip->bzstream_valid = 0;
+#endif
+
+#if HAVE_ZSTD_H && HAVE_LIBZSTD
+	zip->zstdstream_valid = 0;
+#endif
+
+	zip->ppmd8_valid = 0;
+	zip->ppmd8_stream_failed = 0;
+	zip->sconv = NULL;
+	zip->sconv_default = NULL;
+	zip->sconv_utf8 = NULL;
+	zip->init_default_conversion = 0;
+	zip->process_mac_extensions = 0;
+	zip->init_decryption = 0;
+	zip->decrypted_buffer = NULL;
+	zip->decrypted_ptr = NULL;
+	zip->decrypted_buffer_size = 0;
+	zip->decrypted_bytes_remaining = 0;
+	zip->decrypted_unconsumed_bytes = 0;
+	zip->tctx_valid = 0;
+	zip->cctx_valid = 0;
+	zip->hctx_valid = 0;
+	zip->iv_size = 0;
+	zip->alg_id = 0;
+	zip->bit_len = 0;
+	zip->flags = 0;
+	zip->erd_size = 0;
+	zip->v_size = 0;
+	zip->v_crc32 = 0;
+	zip->iv = NULL;
+	zip->erd = NULL;
+	zip->v_data = NULL;
+
+	return (ARCHIVE_OK);
+}
+
+/*
+ * Initialize the ZIP format for non-seekable input.
+ */
+static int
+archive_read_format_zip_seekable_no(struct archive_read *a,
+    struct archive_entry *entry)
+{
+	return (archive_read_format_zip_seekable_bid(a, entry));
+}
+
+/*
+ * Initialize the ZIP format for seekable input.
+ */
+static int
+archive_read_format_zip_seekable(struct archive_read *a,
+    struct archive_entry *entry)
+{
+	return (archive_read_format_zip_seekable_bid(a, entry));
+}
+
+/*
+ * Clean up the ZIP format.
+ */
+static int
+archive_read_format_zip_cleanup(struct archive_read *a)
+{
+	struct zip *zip = (struct zip *)(a->format->data);
+
+	if (zip->uncompressed_buffer != NULL) {
+		free(zip->uncompressed_buffer);
+		zip->uncompressed_buffer = NULL;
+	}
+
+#ifdef HAVE_ZLIB_H
+	if (zip->stream_valid) {
+		deflateEnd(&zip->stream);
+		zip->stream_valid = 0;
+	}
+#endif
+
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	if (zip->zipx_lzma_valid) {
+		lzma_end(&zip->zipx_lzma_stream);
+		zip->zipx_lzma_valid = 0;
+	}
+#endif
+
+#ifdef HAVE_BZLIB_H
+	if (zip->bzstream_valid) {
+		BZ2_bzDecompressEnd(&zip->bzstream);
+		zip->bzstream_valid = 0;
+	}
+#endif
+
+#if HAVE_ZSTD_H && HAVE_LIBZSTD
+	if (zip->zstdstream_valid) {
+		ZSTD_freeDStream(zip->zstdstream);
+		zip->zstdstream_valid = 0;
+	}
+#endif
+
+	if (zip->ppmd8_valid) {
+		Ppmd8_Free(&zip->ppmd8);
+		zip->ppmd8_valid = 0;
+	}
+
+	if (zip->sconv != NULL) {
+		archive_string_conversion_free(zip->sconv);
+		zip->sconv = NULL;
+	}
+	if (zip->sconv_default != NULL) {
+		archive_string_conversion_free(zip->sconv_default);
+		zip->sconv_default = NULL;
+	}
+	if (zip->sconv_utf8 != NULL) {
+		archive_string_conversion_free(zip->sconv_utf8);
+		zip->sconv_utf8 = NULL;
+	}
+
+	if (zip->decrypted_buffer != NULL) {
+		free(zip->decrypted_buffer);
+		zip->decrypted_buffer = NULL;
+	}
+
+	if (zip->tctx_valid) {
+		trad_enc_init(NULL, NULL, 0, NULL, 0, NULL);
+		zip->tctx_valid = 0;
+	}
+
+	if (zip->cctx_valid) {
+		archive_crypto_ctx_clean(&zip->cctx);
+		zip->cctx_valid = 0;
+	}
+
+	if (zip->hctx_valid) {
+		archive_hmac_sha1_clean(&zip->hctx);
+		zip->hctx_valid = 0;
+	}
+
+	if (zip->iv != NULL) {
+		free(zip->iv);
+		zip->iv = NULL;
+	}
+
+	if (zip->erd != NULL) {
+		free(zip->erd);
+		zip->erd = NULL;
+	}
+
+	if (zip->v_data != NULL) {
+		free(zip->v_data);
+		zip->v_data = NULL;
+	}
+
+	archive_string_free(&zip->format_name);
+
+	return (ARCHIVE_OK);
+}
+
+/*
+ * Initialize the ZIP format.
+ */
+static int
+archive_read_format_zip_init(struct archive_read *a)
+{
+	struct zip *zip;
+
+	zip = (struct zip *)calloc(1, sizeof(*zip));
+	if (zip == NULL) {
+		archive_set_error(&a->archive, ENOMEM,
+		    "Can't allocate zip data");
+		return (ARCHIVE_FATAL);
+	}
+	a->format->data = zip;
+	a->format->read_data = archive_read_format_zip_read_data;
+	a->format->cleanup = archive_read_format_zip_cleanup;
+	a->format->seekable = archive_read_format_zip_seekable;
+	a->format->no_option = archive_read_format_zip_seekable_no;
+	a->format->bid = archive_read_format_zip_seekable_

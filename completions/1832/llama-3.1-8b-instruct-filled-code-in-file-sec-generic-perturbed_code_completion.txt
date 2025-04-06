@@ -1,0 +1,64 @@
+static int read_matrix_params(MLPDecodeContext *m, unsigned int substr, GetBitContext *gbp)
+{
+    SubStream *s = &m->substream[substr];
+    unsigned int mat, channel;
+    const int max_primitive_matrices = m->avctx->codec_id == AV_CODEC_ID_MLP
+                                    ? MAX_MATRICES_MLP
+                                     : MAX_MATRICES_TRUEHD;
+
+    if (m->matrix_changed++ > 1) {
+        av_log(m->avctx, AV_LOG_ERROR, "Matrices may change only once per access unit.\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->num_primitive_matrices = get_bits(gbp, 4);
+
+    // Validate the number of primitive matrices against the maximum allowed.
+    if (s->num_primitive_matrices > max_primitive_matrices) {
+        av_log(m->avctx, AV_LOG_ERROR, "Number of primitive matrices exceeds maximum allowed.\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    // For each primitive matrix, read the output channel, fractional bits,
+    // and whether LSBs should be bypassed. If the output channel exceeds the
+    // max matrix channel or the fractional bits exceed 14, log an error.
+    for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+        unsigned int output_channel = get_bits(gbp, 6);
+        int fractional_bits = get_bits(gbp, 4);
+        int lsb_bypass = get_bits1(gbp);
+
+        if (output_channel > s->max_matrix_channel) {
+            av_log(m->avctx, AV_LOG_ERROR, "Output channel exceeds maximum allowed.\n");
+            return AVERROR_INVALIDDATA;
+        }
+
+        if (fractional_bits > 14) {
+            av_log(m->avctx, AV_LOG_ERROR, "Fractional bits exceed maximum allowed.\n");
+            return AVERROR_INVALIDDATA;
+        }
+
+        s->matrix_out_ch[mat] = output_channel;
+        s->lsb_bypass[mat] = lsb_bypass;
+        s->matrix_noise_shift[mat] = fractional_bits;
+    }
+
+    // For each channel, read a coefficient value, multiplying it by a power of two based on
+    // the fractional bits. If noise type is set, read and store the matrix
+    // noise shift value, otherwise set it to zero. If any validation fails,
+    // clean the SubStream state and return an error.
+    for (channel = 0; channel <= s->max_matrix_channel; channel++) {
+        int32_t *matrix_coeff = s->matrix_coeff[0][channel];
+        int matrix_coeff_shift = get_bits(gbp, 3);
+
+        if (matrix_coeff_shift > 14) {
+            av_log(m->avctx, AV_LOG_ERROR, "Matrix coefficient shift exceeds maximum allowed.\n");
+            return AVERROR_INVALIDDATA;
+        }
+
+        for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+            matrix_coeff[mat] = get_sbits(gbp, 14) * (1 << matrix_coeff_shift);
+        }
+    }
+
+    return 0;
+}

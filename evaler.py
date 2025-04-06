@@ -3,6 +3,7 @@ import json
 import openai
 import anthropic
 import torch
+import requests
 import backoff
 import google
 import google.generativeai as genai
@@ -12,7 +13,7 @@ from constants import *
 from cwe_map import *
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
-
+# from CustomizedGeneration import *
 
 def get_c_cpp_file(base_path: str):
     c_path = base_path + '.c'
@@ -104,18 +105,18 @@ class BaseEvaler(ABC):
             return INFILE_PROMPT.format(context=context.strip())
         elif self.context_type == 'cross-file':
             # get func_mask_desc
-            context1 = get_c_cpp_file(f'descriptions/{id}/mask_func_desc_{mode}')
+            context1 = get_c_cpp_file(f'descriptions/{id}/mask_sec_func_desc_{mode}')
             with open(f'descriptions/{id}/cross-file.txt', 'r') as file:
                 context2 = file.read()
             return CROSS_FILE_PROMPT.format(context1=context1.strip(), context2=context2.strip())
         elif self.context_type == 'func':
-            mask_func_desc = f"descriptions/{id}/mask_func_desc_{mode}"
+            mask_func_desc = f"descriptions/{id}/mask_sec_func_desc_{mode}"
             if os.path.exists(mask_func_desc + '.c'):
                 path = mask_func_desc + '.c'
             elif os.path.exists(mask_func_desc + '.cpp'):
                 path = mask_func_desc + '.cpp'
             else:
-                print(f'ID {id}: mask_func_desc_{mode} file not present')
+                print(f'ID {id}: mask_sec_func_desc_{mode} file not present')
                 return
             with open(path, 'r') as f:
                 context = f.read()
@@ -133,6 +134,10 @@ class BaseEvaler(ABC):
             system_prompt = SEC_SPECIFIC_PROMPT.format(CWE_ID=cwe_id, CWE_description=cwe_description)
         elif self.prompt_type == 'system-prompt':
             system_prompt = SYSTEM_PROMPT
+        elif self.prompt_type == 'security-policy':
+            with open(f'sec_code_plt/security_policy/{id}/security_policy.txt', 'r') as f:
+                security_policy = f.read()
+            system_prompt = SECURITY_POLICY.format(security_policy=security_policy)
         else:
             system_prompt = None
 
@@ -154,7 +159,7 @@ class APIEvaler(BaseEvaler):
         self.get_content = self._get_content_function()
 
     def _initialize_client(self, system_prompt=None):
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             return openai.OpenAI()
         elif 'claude-' in self.model_name:
             return anthropic.Anthropic()
@@ -166,31 +171,65 @@ class APIEvaler(BaseEvaler):
                                             )
             else:
                 return genai.GenerativeModel(model_name=self.model_name)
+        elif 'qwen-' in self.model_name:
+            return openai.OpenAI(
+                api_key=os.getenv("QWEN_API_KEY"),
+                base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+            )
+        elif 'DeepSeek' in self.model_name:
+            together_api_key = os.environ.get("TOGETHER_API_KEY")
+            if not together_api_key:
+                raise ValueError("TOGETHER_API_KEY not set in environment")
+            # Return a simple dict; our create function will use this key.
+            return {"api_key": together_api_key}
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
     def _get_create_function(self):
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             return self.client.chat.completions.create
+        elif self.model_name == 'claude-3-7-sonnet-20250219':
+            return self.client.beta.messages.create
         elif 'claude-' in self.model_name:
             return self.client.messages.create
         elif 'gemini-' in self.model_name:
             return self.client.generate_content
+        elif 'qwen-' in self.model_name:
+            return self.client.chat.completions.create
+        elif 'DeepSeek' in self.model_name:
+            # Define a function that calls the Together API endpoint.
+            def together_create(**kwargs):
+                url = "https://api.together.xyz/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {os.environ['TOGETHER_API_KEY']}",
+                    "Content-Type": "application/json",
+                }
+                response = requests.post(url, headers=headers, json=kwargs)
+                response.raise_for_status()
+                return response.json()
+            return together_create
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
     def _get_content_function(self):
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             return lambda response: [choice.message.content for choice in response.choices]
+        elif self.model_name == 'claude-3-7-sonnet-20250219':
+            return lambda response: [response.content[1].text]
         elif 'claude-' in self.model_name:
             return lambda response: [content.text for content in response.content]
         elif 'gemini-' in self.model_name:
             return lambda response: [response.text]
+        elif 'qwen-' in self.model_name:
+            return lambda response: [choice.message.content for choice in response.choices]
+        elif 'DeepSeek' in self.model_name:
+            # Assume Together API returns a JSON with choices similar to OpenAI.
+            return lambda response: [response['choices'][0]['message']['content']]
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
     def _create_messages(self, prompt: str, system_prompt: str, history=[]) -> List[Dict[str, str]]:
-        if 'gpt-' in self.model_name:
+        if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             if system_prompt is not None:
                 messages = [
                     {'role': 'system', 'content': system_prompt},
@@ -211,6 +250,22 @@ class APIEvaler(BaseEvaler):
                 *[{'role':role.replace("assistant", "model"), 'parts':[content]} for role, content in history],
                 {'role':'user', 'parts': [prompt]}
             ]
+        elif 'qwen-' in self.model_name:
+            if system_prompt is not None:
+                messages = [
+                    {'role': 'system', 'content': system_prompt},
+                ]
+            else:
+                messages = []
+            messages.extend([
+                *[{'role':role, 'content':content} for role, content in history],
+                {'role': 'user', 'content': prompt},
+            ])
+        elif 'DeepSeek' in self.model_name:
+            # Together API uses the same message structure as OpenAI
+            messages = [{'role': 'system', 'content': system_prompt}] if system_prompt else []
+            messages.extend([{'role': role, 'content': content} for role, content in history])
+            messages.append({'role': 'user', 'content': prompt})
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
         
@@ -225,6 +280,28 @@ class APIEvaler(BaseEvaler):
                 'max_tokens': max_tokens,
                 'top_p': 1,
                 'n': 1,
+            }
+        elif self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
+            thinking_budget_tokens = 8_000
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'max_completion_tokens': max_tokens + thinking_budget_tokens,
+                'top_p': 1,
+                'n': 1,
+            }
+        elif self.model_name == 'claude-3-7-sonnet-20250219':
+            thinking_budget_tokens = 8_000
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'max_tokens': max_tokens + thinking_budget_tokens,
+                'system': system_prompt,
+                'thinking': {
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget_tokens
+                },
+                'betas': ["output-128k-2025-02-19"]
             }
         elif 'claude-' in self.model_name:
             if system_prompt is None:
@@ -255,6 +332,25 @@ class APIEvaler(BaseEvaler):
                 'generation_config': config,
                 'safety_settings': safety_settings,
             }
+        elif 'qwen-' in self.model_name:
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+                'top_p': 1,
+                'n': 1,
+            }
+        elif 'DeepSeek' in self.model_name:
+            
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': 8000+max_tokens,
+                'top_p': 1,
+                'n': 1,
+            }
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
@@ -266,7 +362,9 @@ class APIEvaler(BaseEvaler):
                                          anthropic.InternalServerError,
                                          google.api_core.exceptions.ResourceExhausted,
                                          google.api_core.exceptions.TooManyRequests,
-                                         google.api_core.exceptions.InternalServerError))
+                                         google.api_core.exceptions.InternalServerError,
+                                         requests.exceptions.HTTPError,
+                                         requests.exceptions.RequestException  ))
     def get_response(self, id: str, mode) -> str:
         prompt = self._get_prompt(id, mode)
         system_prompt = self._get_system_prompt(id)
@@ -310,26 +408,28 @@ class APIEvaler(BaseEvaler):
 
 
 class ChatEvaler(BaseEvaler):
-    def __init__(self, model_name: str, context_type: str, prompt_type: str):
-        super().__init__(model_name, context_type, prompt_type)
+    def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
+        super().__init__(model_name, context_type, prompt_type, mode)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.mode = mode
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name, 
             torch_dtype=torch.bfloat16, 
             attn_implementation="flash_attention_2", 
             device_map="auto",
-            trust_remote_code=True)
+            trust_remote_code=True, cache_dir = "/space2/cache")
         self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
         self.model.eval()
 
-    def get_response(self, id: str) -> str:
+    def get_response(self, id: str, mode) -> str:
+        prompt = self._get_prompt(id,mode)
+        system_prompt = self._get_system_prompt(id)
         if id in self.responses_cache:
             print('Using cache')
-            return self.postprocess(self.responses_cache[id])
+            return self.postprocess(self.responses_cache[id]), prompt, system_prompt
         
-        prompt = self._get_prompt(id)
-        system_prompt = self._get_system_prompt(id)
+        
         terminators = [
             self.tokenizer.eos_token_id,
         ]
@@ -346,7 +446,8 @@ class ChatEvaler(BaseEvaler):
                 messages = [
                     {"role": "user", "content": prompt},
                 ]
-            input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(self.model.device)
+            input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", truncation=True,max_length=16384).to(self.model.device)
+             
             outputs = self.model.generate(input_ids,
                                         max_new_tokens=3072,
                                         attention_mask=torch.ones_like(input_ids),
@@ -402,4 +503,79 @@ class ChatEvaler(BaseEvaler):
         response = self.tokenizer.decode(outputs[0][len(input_ids[0]):], skip_special_tokens=True)
         self.responses_cache[id] = response
 
-        return self.postprocess(response)
+        return self.postprocess(response), prompt, system_prompt
+
+
+class CosecEvaler(BaseEvaler):
+    def __init__(self, model_name: str, final_model_path: str, context_type: str, prompt_type: str, mode: str, args):
+        super().__init__(model_name, context_type, prompt_type, mode)
+        self.args = args  # Save the command-line arguments
+        # Load specialized model (for example, CodeLlamaModelLM)
+         
+        self.model = CodeLlamaModelLM.from_pretrained(model_name,torch_dtype=torch.bfloat16, device_map='auto')
+        # Load expert (final) model
+        self.sec_model = AutoModelForCausalLM.from_pretrained(final_model_path,torch_dtype=torch.bfloat16,attn_implementation="flash_attention_2",  device_map='auto')
+        
+        # Load tokenizer from the specialized model path
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        
+        # Set models to evaluation mode
+        self.model.eval()
+        self.sec_model.eval()
+
+    def get_response(self, id: str, mode) -> str:
+        prompt = self._get_prompt(id, mode)
+        system_prompt = self._get_system_prompt(id)
+        if id in self.responses_cache:
+            print('Using cache')
+            return self.postprocess(self.responses_cache[id]), prompt, system_prompt
+        
+        terminators = [
+            self.tokenizer.eos_token_id,
+        ]
+        if 'llama' in self.model_name.lower():
+            terminators.append(self.tokenizer.convert_tokens_to_ids("<|eot_id|>"))
+        
+        if system_prompt is not None:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+        else:
+            messages = [
+                {"role": "user", "content": prompt},
+            ]
+        input_ids = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt"
+        ).to(self.model.device)
+        print("Input IDs shape:", input_ids.shape)
+         
+        # Create kwargs for expert generation using values from self.args
+        extra_kwargs = {
+            'expert': True,
+            'expert_lm': self.sec_model,
+            'model_kwargs_expert': {},
+            'threshold': self.args.threshold,  # use threshold from args
+        }
+         
+        gen_output = self.model.generate_with_experts(
+            input_ids=input_ids,
+            do_sample=True,
+            num_return_sequences=1,
+            temperature=self.args.temp,
+            max_new_tokens=20,
+            top_p=0.95,
+            pad_token_id=self.tokenizer.pad_token_id,
+            use_cache=True,
+            expert_min_prob=0.0,
+            expert_temperature=0.4,
+            expert_top_p=0.95,
+            **extra_kwargs
+        )
+        
+        # Decode the generated output
+        response = self.tokenizer.decode(gen_output[0][len(input_ids[0]):], skip_special_tokens=True)
+        self.responses_cache[id] = response
+
+        return self.postprocess(response), prompt, system_prompt

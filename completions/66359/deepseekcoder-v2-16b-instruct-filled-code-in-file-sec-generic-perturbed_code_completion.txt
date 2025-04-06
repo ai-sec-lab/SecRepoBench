@@ -1,0 +1,286 @@
+break;
+		} else if (e) {
+			break;
+		}
+	}
+	gf_m4v_parser_del(parser);
+
+	if (nb_frames) {
+		score->score = 100;
+		return "MPEG-4 (Part 2)";
+	}
+	return NULL;
+}
+
+GF_Err mpgviddmx_init_filter(GF_Filter *filter)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	ctx->fps.num = 25000;
+	ctx->fps.den = 1000;
+	ctx->index = 1.0;
+	ctx->vfr = GF_FALSE;
+	ctx->importer = GF_FALSE;
+	ctx->notime = GF_FALSE;
+	ctx->ipid = NULL;
+	ctx->opid = NULL;
+	ctx->bs = NULL;
+	ctx->cts = 0;
+	ctx->dts = 0;
+	ctx->prev_dts = 0;
+	ctx->width = 0;
+	ctx->height = 0;
+	ctx->duration.num = 0;
+	ctx->duration.den = 0;
+	ctx->start_range = 0;
+	ctx->in_seek = GF_FALSE;
+	ctx->timescale = 0;
+	ctx->resume_from = 0;
+	ctx->cur_fps.num = 0;
+	ctx->cur_fps.den = 0;
+	ctx->is_mpg12 = GF_FALSE;
+	ctx->forced_packed = GF_FALSE;
+	ctx->vparser = NULL;
+	memset(&ctx->dsi, 0, sizeof(GF_M4VDecSpecInfo));
+	ctx->b_frames = 0;
+	ctx->is_packed = GF_FALSE;
+	ctx->is_vfr = GF_FALSE;
+	ctx->pck_queue = NULL;
+	ctx->last_ref_cts = 0;
+	ctx->frame_started = GF_FALSE;
+	ctx->nb_i = 0;
+	ctx->nb_p = 0;
+	ctx->nb_b = 0;
+	ctx->nb_frames = 0;
+	ctx->max_b = 0;
+	ctx->bytes_in_header = 0;
+	ctx->hdr_store = NULL;
+	ctx->hdr_store_size = 0;
+	ctx->hdr_store_alloc = 0;
+	ctx->is_playing = GF_FALSE;
+	ctx->is_file = GF_FALSE;
+	ctx->file_loaded = GF_FALSE;
+	ctx->initial_play_done = GF_FALSE;
+	ctx->input_is_au_start = GF_FALSE;
+	ctx->input_is_au_end = GF_FALSE;
+	ctx->recompute_cts = GF_FALSE;
+	ctx->copy_props = GF_FALSE;
+	ctx->src_pck = NULL;
+	ctx->indexes = NULL;
+	ctx->index_alloc_size = 0;
+	ctx->index_size = 0;
+	ctx->bitrate = 0;
+	ctx->trash_trailer = GF_FALSE;
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_destroy_filter(GF_Filter *filter)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	if (ctx) {
+		mpgviddmx_finalize(filter);
+		gf_free(ctx);
+	}
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_get_filter_caps(GF_Filter *filter, GF_FilterCaps *caps)
+{
+	caps->caps = GF_CAPS_PID_IN | GF_CAPS_PID_OUT | GF_CAPS_CONFIG;
+	caps->pid_caps = GF_CAPS_PID_IN | GF_CAPS_PID_OUT | GF_CAPS_EVENT;
+	caps->pid_caps_in = GF_CAPS_PID_IN | GF_CAPS_EVENT;
+	caps->pid_caps_out = GF_CAPS_PID_OUT;
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_get_pid_caps(GF_Filter *filter, GF_FilterPid *pid, GF_FilterPidCaps *caps)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	if (!ctx) return GF_NOT_INIT;
+
+	caps->caps = GF_CAPS_PID_IN | GF_CAPS_PID_OUT | GF_CAPS_EVENT;
+	caps->pid_caps = GF_CAPS_PID_IN | GF_CAPS_PID_OUT | GF_CAPS_EVENT;
+	caps->pid_caps_in = GF_CAPS_PID_IN | GF_CAPS_EVENT;
+	caps->pid_caps_out = GF_CAPS_PID_OUT;
+
+	if (pid == ctx->ipid) {
+		caps->caps |= GF_CAPS_PID_IN;
+		caps->pid_caps_in |= GF_CAPS_PID_IN;
+	}
+	if (pid == ctx->opid) {
+		caps->caps |= GF_CAPS_PID_OUT;
+		caps->pid_caps_out |= GF_CAPS_PID_OUT;
+	}
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_get_property(GF_Filter *filter, const GF_Property *prop, GF_PropertyValue *value)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	if (!ctx) return GF_NOT_INIT;
+
+	switch (prop->id) {
+	case GF_PROP_FILTER_FPS:
+		value->frac = ctx->fps;
+		return GF_OK;
+	case GF_PROP_FILTER_INDEX:
+		value->doubleval = ctx->index;
+		return GF_OK;
+	case GF_PROP_FILTER_VFR:
+		value->boolean = ctx->vfr;
+		return GF_OK;
+	case GF_PROP_FILTER_IMPO:
+		value->boolean = ctx->importer;
+		return GF_OK;
+	case GF_PROP_FILTER_NOTIME:
+		value->boolean = ctx->notime;
+		return GF_OK;
+	case GF_PROP_FILTER_BITRATE:
+		value->uint = ctx->bitrate;
+		return GF_OK;
+	case GF_PROP_FILTER_DURATION:
+		value->frac64 = ctx->duration;
+		return GF_OK;
+	case GF_PROP_FILTER_START_RANGE:
+		value->doubleval = ctx->start_range;
+		return GF_OK;
+	case GF_PROP_FILTER_IN_SEEK:
+		value->boolean = ctx->in_seek;
+		return GF_OK;
+	case GF_PROP_FILTER_TIMESCALE:
+		value->uint = ctx->timescale;
+		return GF_OK;
+	case GF_PROP_FILTER_RESUME_FROM:
+		value->uint = ctx->resume_from;
+		return GF_OK;
+	case GF_PROP_FILTER_CUR_FPS:
+		value->frac = ctx->cur_fps;
+		return GF_OK;
+	case GF_PROP_FILTER_IS_MPG12:
+		value->boolean = ctx->is_mpg12;
+		return GF_OK;
+	case GF_PROP_FILTER_FORCED_PACKED:
+		value->boolean = ctx->forced_packed;
+		return GF_OK;
+	case GF_PROP_FILTER_IS_PACKED:
+		value->boolean = ctx->is_packed;
+		return GF_OK;
+	case GF_PROP_FILTER_IS_VFR:
+		value->boolean = ctx->is_vfr;
+		return GF_OK;
+	case GF_PROP_FILTER_NB_I:
+		value->uint = ctx->nb_i;
+		return GF_OK;
+	case GF_PROP_FILTER_NB_P:
+		value->uint = ctx->nb_p;
+		return GF_OK;
+	case GF_PROP_FILTER_NB_B:
+		value->uint = ctx->nb_b;
+		return GF_OK;
+	case GF_PROP_FILTER_NB_FRAMES:
+		value->uint = ctx->nb_frames;
+		return GF_OK;
+	case GF_PROP_FILTER_MAX_B:
+		value->uint = ctx->max_b;
+		return GF_OK;
+	case GF_PROP_FILTER_BYTES_IN_HEADER:
+		value->uint = ctx->bytes_in_header;
+		return GF_OK;
+	case GF_PROP_FILTER_HDR_STORE_SIZE:
+		value->uint = ctx->hdr_store_size;
+		return GF_OK;
+	case GF_PROP_FILTER_HDR_STORE_ALLOC:
+		value->uint = ctx->hdr_store_alloc;
+		return GF_OK;
+	case GF_PROP_FILTER_IS_PLAYING:
+		value->boolean = ctx->is_playing;
+		return GF_OK;
+	case GF_PROP_FILTER_IS_FILE:
+		value->boolean = ctx->is_file;
+		return GF_OK;
+	case GF_PROP_FILTER_FILE_LOADED:
+		value->boolean = ctx->file_loaded;
+		return GF_OK;
+	case GF_PROP_FILTER_INITIAL_PLAY_DONE:
+		value->boolean = ctx->initial_play_done;
+		return GF_OK;
+	case GF_PROP_FILTER_INPUT_IS_AU_START:
+		value->boolean = ctx->input_is_au_start;
+		return GF_OK;
+	case GF_PROP_FILTER_INPUT_IS_AU_END:
+		value->boolean = ctx->input_is_au_end;
+		return GF_OK;
+	case GF_PROP_FILTER_RECOMPUTE_CTS:
+		value->boolean = ctx->recompute_cts;
+		return GF_OK;
+	case GF_PROP_FILTER_COPY_PROPS:
+		value->boolean = ctx->copy_props;
+		return GF_OK;
+	case GF_PROP_FILTER_SRC_PCK:
+		value->ptr = ctx->src_pck;
+		return GF_OK;
+	case GF_PROP_FILTER_INDEXES:
+		value->ptr = ctx->indexes;
+		return GF_OK;
+	case GF_PROP_FILTER_INDEX_ALLOC_SIZE:
+		value->uint = ctx->index_alloc_size;
+		return GF_OK;
+	case GF_PROP_FILTER_INDEX_SIZE:
+		value->uint = ctx->index_size;
+		return GF_OK;
+	case GF_PROP_FILTER_BITRATE:
+		value->uint = ctx->bitrate;
+		return GF_OK;
+	case GF_PROP_FILTER_TRASH_TRAILER:
+		value->boolean = ctx->trash_trailer;
+		return GF_OK;
+	default:
+		return GF_NOT_FOUND;
+	}
+}
+
+GF_Err mpgviddmx_set_property(GF_Filter *filter, const GF_Property *prop, const GF_PropertyValue *value)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	if (!ctx) return GF_NOT_INIT;
+
+	switch (prop->id) {
+	case GF_PROP_FILTER_FPS:
+		ctx->fps = value->frac;
+		return GF_OK;
+	case GF_PROP_FILTER_INDEX:
+		ctx->index = value->doubleval;
+		return GF_OK;
+	case GF_PROP_FILTER_VFR:
+		ctx->vfr = value->boolean;
+		return GF_OK;
+	case GF_PROP_FILTER_IMPO:
+		ctx->importer = value->boolean;
+		return GF_OK;
+	case GF_PROP_FILTER_NOTIME:
+		ctx->notime = value->boolean;
+		return GF_OK;
+	case GF_PROP_FILTER_BITRATE:
+		ctx->bitrate = value->uint;
+		return GF_OK;
+	case GF_PROP_FILTER_DURATION:
+		ctx->duration = value->frac64;
+		return GF_OK;
+	case GF_PROP_FILTER_START_RANGE:
+		ctx->start_range = value->doubleval;
+		return GF_OK;
+	case GF_PROP_FILTER_IN_SEEK:
+		ctx->in_seek = value->boolean;
+		return GF_OK;
+	case GF_PROP_FILTER_TIMESCALE:
+		ctx->timescale = value->uint;
+		return GF_OK;
+	case GF_PROP_FILTER_RESUME_FROM:
+		ctx->resume_from = value->uint;
+		return GF_OK;
+	case GF_PROP_FILTER_CUR_FPS:
+		ctx->cur_fps = value->frac;
+		return GF_OK;
+	case GF_PROP_FILTER_IS_MPG12:
+		ctx->is_mpg12 = value->boolean;
+		return GF_OK;
+	case GF_PROP_FILTER_FORCED_PACKED

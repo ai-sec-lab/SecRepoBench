@@ -1,0 +1,255 @@
+.", 8) == 0))
+     return;
+ 
+   if(flow->http.method == NDPI_HTTP_METHOD_UNKNOWN) {
+     flow->http.method = ndpi_http_str2method((const char *)&packet->line[0].ptr[filename_start],
+                          (u_int16_t)(packet->line[0].len - filename_start));
+   }
+ 
+   if(flow->http.method == NDPI_HTTP_METHOD_UNKNOWN) {
+     NDPI_LOG_DBG2(ndpi_struct, "Unknown HTTP method\n");
+     return;
+   }
+ 
+   if(flow->http.request_content_type == NULL) {
+     flow->http.request_content_type = ndpi_malloc(packet->line[0].len - filename_start + 1);
+     if(flow->http.request_content_type) {
+       strncpy(flow->http.request_content_type,
+               (const char *)&packet->line[0].ptr[filename_start],
+               packet->line[0].len - filename_start);
+       flow->http.request_content_type[packet->line[0].len - filename_start] = '\0';
+     }
+   }
+ 
+   if(flow->http.url == NULL) {
+     flow->http.url = ndpi_malloc(packet->line[0].len - filename_start + 1);
+     if(flow->http.url) {
+       strncpy(flow->http.url,
+               (const char *)&packet->line[0].ptr[filename_start],
+               packet->line[0].len - filename_start);
+       flow->http.url[packet->line[0].len - filename_start] = '\0';
+     }
+   }
+ 
+   ndpi_check_http_url(ndpi_struct, flow, flow->http.url);
+ 
+   if(flow->http.server == NULL) {
+     flow->http.server = ndpi_malloc(packet->line[0].len + 1);
+     if(flow->http.server) {
+       strncpy(flow->http.server,
+               (const char *)packet->line[0].ptr,
+               packet->line[0].len);
+       flow->http.server[packet->line[0].len] = '\0';
+     }
+   }
+ 
+   ndpi_http_parse_subprotocol(ndpi_struct, flow, 1);
+ 
+   if(flow->guessed_protocol_id == NDPI_PROTOCOL_UNKNOWN)
+     flow->guessed_protocol_id = NDPI_PROTOCOL_HTTP;
+ 
+   ndpi_check_http_header(ndpi_struct, flow);
+ }
+ 
+ static void process_response(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+   u_int16_t master_protocol;
+ 
+   ndpi_parse_packet_line_info(ndpi_struct, flow);
+ 
+   master_protocol = NDPI_PROTOCOL_HTTP;
+ 
+   if(packet->parsed_lines == 0 ||
+      !(packet->line[0].len >= 12 &&
+        strncasecmp((const char *)packet->line[0].ptr, "HTTP/1.", 7) == 0))
+     return;
+ 
+   if(flow->http.response_status_code == 0) {
+     parse_response_code(ndpi_struct, flow);
+   }
+ 
+   if(flow->http.content_type == NULL) {
+     flow->http.content_type = ndpi_malloc(packet->line[0].len + 1);
+     if(flow->http.content_type) {
+       strncpy(flow->http.content_type,
+               (const char *)packet->line[0].ptr,
+               packet->line[0].len);
+       flow->http.content_type[packet->line[0].len] = '\0';
+     }
+   }
+ 
+   if(flow->http.server == NULL) {
+     flow->http.server = ndpi_malloc(packet->line[0].len + 1);
+     if(flow->http.server) {
+       strncpy(flow->http.server,
+               (const char *)packet->line[0].ptr,
+               packet->line[0].len);
+       flow->http.server[packet->line[0].len] = '\0';
+     }
+   }
+ 
+   ndpi_http_parse_subprotocol(ndpi_struct, flow, 1);
+ 
+   if(flow->guessed_protocol_id == NDPI_PROTOCOL_UNKNOWN)
+     flow->guessed_protocol_id = NDPI_PROTOCOL_HTTP;
+ 
+   ndpi_check_http_header(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_search_http_tcp(struct ndpi_detection_module_struct *ndpi_struct,
+          struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+   u_int16_t filename_start;
+ 
+   if(packet->payload_packet_len == 0)
+     return;
+ 
+   if(is_request(ndpi_struct, flow)) {
+     process_request(ndpi_struct, flow, filename_start);
+   } else if(is_response(ndpi_struct, flow)) {
+     process_response(ndpi_struct, flow);
+   }
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_check_http_tcp_again(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_len == 0 || packet->tcp_retransmission)
+     return;
+ 
+   ndpi_search_http_tcp(ndpi_struct, flow);
+ 
+ #ifdef HTTP_DEBUG
+   printf("=> %s()\n", __FUNCTION__);
+ #endif
+ 
+   if(flow->extra_packets_func == NULL) {
+     return; /* We're good now */
+   }
+ 
+   /* Possibly more processing */
+   flow->extra_packets_func = ndpi_check_http_tcp_again;
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_init_http_variables(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   flow->http.method = NDPI_HTTP_METHOD_UNKNOWN;
+   flow->http.request_content_type = NULL;
+   flow->http.content_type = NULL;
+   flow->http.server = NULL;
+   flow->http.url = NULL;
+   flow->http.user_agent = NULL;
+   flow->http.nat_ip = NULL;
+   flow->http.detected_os = NULL;
+   flow->http.response_status_code = 0;
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_free_http_variables(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   if(flow->http.request_content_type) ndpi_free(flow->http.request_content_type);
+   if(flow->http.content_type) ndpi_free(flow->http.content_type);
+   if(flow->http.server) ndpi_free(flow->http.server);
+   if(flow->http.url) ndpi_free(flow->http.url);
+   if(flow->http.user_agent) ndpi_free(flow->http.user_agent);
+   if(flow->http.nat_ip) ndpi_free(flow->http.nat_ip);
+   if(flow->http.detected_os) ndpi_free(flow->http.detected_os);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_reset_http_flow(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   ndpi_free_http_variables(ndpi_struct, flow);
+   ndpi_init_http_variables(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_update_http_flow(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_len == 0)
+     return;
+ 
+   if(is_request(ndpi_struct, flow)) {
+     process_request(ndpi_struct, flow, 0);
+   } else if(is_response(ndpi_struct, flow)) {
+     process_response(ndpi_struct, flow);
+   }
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_http_add_connection(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   ndpi_int_http_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_HTTP);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_http_add_connection_no_payload(struct ndpi_detection_module_struct *ndpi_struct,
+             struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_len == 0)
+     ndpi_http_add_connection(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_http_add_connection_no_payload_or_retransmission(struct ndpi_detection_module_struct *ndpi_struct,
+             struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_len == 0 || packet->tcp_retransmission)
+     ndpi_http_add_connection(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_http_add_connection_no_payload_or_retransmission_or_fragment(struct ndpi_detection_module_struct *ndpi_struct,
+             struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_len == 0 || packet->tcp_retransmission || packet->is_fragment)
+     ndpi_http_add_connection(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_http_add_connection_no_payload_or_retransmission_or_fragment_or_tcp_rst(struct ndpi_detection_module_struct *ndpi_struct,
+             struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_len == 0 || packet->tcp_retransmission || packet->is_fragment || packet->tcp_rst)
+     ndpi_http_add_connection(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_http_add_connection_no_payload_or_retransmission_or_fragment_or_tcp_rst_or_icmp(struct ndpi_detection_module_struct *ndpi_struct,
+             struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_len == 0 || packet->tcp_retransmission || packet->is_fragment || packet->tcp_rst || packet->icmp_type != 0)
+     ndpi_http_add_connection(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_http_add_connection_no_payload_or_retransmission_or_fragment_or_tcp_rst_or_icmp_or_udp(struct ndpi_detection_module_struct *ndpi_struct,
+             struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   if(packet->payload_packet_

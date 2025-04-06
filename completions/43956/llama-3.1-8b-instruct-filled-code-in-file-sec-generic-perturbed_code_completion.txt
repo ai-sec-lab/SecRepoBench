@@ -1,0 +1,360 @@
+static MagickBooleanType inline GetCoordQualifier (FxInfo * pfx, int op)
+/* Returns -1 if invalid CoordQualifier, +1 if valid and appropriate.
+*/
+{
+  if (op!= fU && op!= fV && op!= fS) return -1;
+
+  (void) GetToken (pfx);
+
+  if (pfx->lenToken!= 1) {
+    return -1;
+  }
+  if (*pfx->token!= 'p' && *pfx->token!= 'P') return -1;
+  if (!GetFunction (pfx, fP)) return -1;
+
+  return 1;
+}
+
+static PixelChannel GetChannelQualifier (FxInfo * pfx, int op)
+{
+  if (op == fU || op == fV || op == fP || 
+      op == fUP || op == fVP ||
+      op == fS || (op >= FirstImgAttr && op <= aNull)
+     )
+  {
+    const ChannelT * pch = &Channels[0];
+    (void) GetToken (pfx);
+
+    while (*pch->str) {
+      if (LocaleCompare (pch->str, pfx->token)==0) {
+
+        if (op >= FirstImgAttr && op <= (OperatorE)aNull &&
+              (pch->pixChan == HUE_CHANNEL ||
+               pch->pixChan == SAT_CHANNEL ||
+               pch->pixChan == LIGHT_CHANNEL)
+           )
+        {
+          (void) ThrowMagickException (
+            pfx->exception, GetMagickModule(), OptionError,
+            "Can't have image attribute with HLS qualifier at", "'%s'",
+            SetShortExp(pfx));
+          return NO_CHAN_QUAL;
+        }
+
+        pfx->pex += pfx->lenToken;
+        return pch->pixChan;
+      }
+      pch++;
+    }
+  }
+  return NO_CHAN_QUAL;
+}
+
+static ImgAttrE GetImgAttrToken (FxInfo * pfx)
+{
+  ImgAttrE ia = aNull;
+  const char * iaStr;
+  for (ia = FirstImgAttr; ia < aNull; ia=(ImgAttrE) (ia+1)) {
+    iaStr = ImgAttrs[ia-FirstImgAttr].str;
+    if (LocaleCompare (iaStr, pfx->token)==0) {
+      pfx->pex += strlen(pfx->token);
+      if (ImgAttrs[ia-FirstImgAttr].NeedStats == 1) pfx->NeedStats = MagickTrue;
+      MaybeXYWH (pfx, &ia);
+      break;
+    }
+  }
+
+  if (ia == aPage || ia == aPrintsize || ia == aRes) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Attribute", "'%s' needs qualifier at '%s'",
+      iaStr, SetShortExp(pfx));
+  }
+
+  return ia;
+}
+
+static ImgAttrE GetImgAttrQualifier (FxInfo * pfx, int op)
+{
+  ImgAttrE ia = aNull;
+  if (op == (OperatorE)fU || op == (OperatorE)fV || op == (OperatorE)fP || op == (OperatorE)fS) {
+    (void) GetToken (pfx);
+    if (pfx->lenToken == 0) {
+      return aNull;
+    }
+    ia = GetImgAttrToken (pfx);
+  }
+  return ia;
+}
+
+static MagickBooleanType IsQualifier (FxInfo * pfx)
+{
+  if (PeekChar (pfx) == '.') {
+    pfx->pex++;
+    return MagickTrue;
+  }
+  return MagickFalse;
+}
+
+static ssize_t GetProperty (FxInfo * pfx, fxFltType *val)
+/* returns number of character to swallow.
+   "-1" means invalid input
+   "0" means no relevant input (don't swallow, but not an error)
+*/
+{
+  if (PeekStr (pfx, "%[")) {
+    int level = 0;
+    size_t len;
+    char sProperty [MagickPathExtent];
+    char * p = pfx->pex + 2;
+
+    while (*p) {
+
+      if (*p == '[') level++;
+      else if (*p == ']') {
+        if (level == 0) break;
+        level--;
+      }
+      p++;
+    }
+    if (!*p || level!= 0) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "After '%[' expected ']' at", "'%s'",
+        SetShortExp(pfx));
+      return -1;
+    }
+
+    len = (size_t) (p - pfx->pex + 1);
+    if (len > MaxTokenLen) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Too much text between '%[' and ']' at", "'%s'",
+        SetShortExp(pfx));
+      return -1;
+    }
+
+    (void) CopyMagickString (sProperty, pfx->pex, len+1);
+    sProperty[len] = '\0';
+    {
+      char * tailptr;
+      char * text;
+      text = InterpretImageProperties (pfx->image->image_info, pfx->image,
+         sProperty, pfx->exception);
+      if (!text ||!*text) {
+        text = DestroyString(text);
+        (void) ThrowMagickException (
+          pfx->exception, GetMagickModule(), OptionError,
+          "Unknown property", "'%s' at '%s'",
+          sProperty, SetShortExp(pfx));
+        return -1;
+      }
+
+      *val = strtold (text, &tailptr);
+      if (text == tailptr) {
+        text = DestroyString(text);
+        (void) ThrowMagickException (
+          pfx->exception, GetMagickModule(), OptionError,
+          "Property", "'%s' text '%s' is not a number at '%s'",
+          sProperty, text, SetShortExp(pfx));
+        return -1;
+      }
+
+      text = DestroyString(text);
+    }
+    return ((ssize_t) len);
+  }
+
+  return 0;
+}
+
+static ssize_t inline GetConstantColour (FxInfo * pfx, fxFltType *v0, fxFltType *v1, fxFltType *v2)
+/* Finds named colour such as "blue" and colorspace function such as "lab(10,20,30)".
+   Returns number of characters to swallow.
+   Return -1 means apparantly a constant colour, but with an error.
+   Return 0 means not a constant colour, but not an error.
+*/
+{
+  PixelInfo
+    colour;
+
+  ExceptionInfo
+    *dummy_exception = AcquireExceptionInfo ();
+
+  char
+    *p;
+
+  MagickBooleanType
+    IsGray,
+    IsIcc,
+    IsDev;
+
+  char ColSp[MagickPathExtent];
+  (void) CopyMagickString (ColSp, pfx->token, MaxTokenLen);
+  p = ColSp + pfx->lenToken - 1;
+  if (*p == 'a' || *p == 'A') *p = '\0';
+
+  (void) GetPixelInfo (pfx->image, &colour);
+
+  /* "gray" is both a colorspace and a named colour. */
+
+  IsGray = (LocaleCompare (ColSp, "gray") == 0)? MagickTrue : MagickFalse;
+  IsIcc = (LocaleCompare (ColSp, "icc-color") == 0)? MagickTrue : MagickFalse;
+  IsDev = (LocaleNCompare (ColSp, "device-", 7) == 0)? MagickTrue : MagickFalse;
+
+  /* QueryColorCompliance will raise a warning if it isn't a colour, so we discard any exceptions.
+  */
+  if (!QueryColorCompliance (pfx->token, AllCompliance, &colour, dummy_exception) || IsGray) {
+    ssize_t type = ParseCommandOption (MagickColorspaceOptions, MagickFalse, ColSp);
+    if (type >= 0 || IsIcc || IsDev) {
+      char * q = pfx->pex + pfx->lenToken;
+      while (isspace((int) ((unsigned char) *q))) q++;
+      if (*q == '(') {
+        size_t lenfun;
+        char sFunc[MagickPathExtent];
+        while (*q && *q!= ')') q++;
+        if (!*q) {
+          (void) ThrowMagickException (
+            pfx->exception, GetMagickModule(), OptionError,
+            "constant color missing ')'", "at '%s'",
+            SetShortExp(pfx));
+          dummy_exception = DestroyExceptionInfo (dummy_exception);
+          return -1;
+        }
+        lenfun = (size_t) (q - pfx->pex + 1);
+        if (lenfun > MaxTokenLen) {
+          (void) ThrowMagickException (
+            pfx->exception, GetMagickModule(), OptionError,
+            "lenfun too long", "'%lu' at '%s'",
+            lenfun, SetShortExp(pfx));
+          dummy_exception = DestroyExceptionInfo (dummy_exception);
+          return -1;
+        }
+        (void) CopyMagickString (sFunc, pfx->pex, lenfun+1);
+        if (QueryColorCompliance (sFunc, AllCompliance, &colour, dummy_exception)) {
+          *v0 = colour.red   / QuantumRange;
+          *v1 = colour.green / QuantumRange;
+          *v2 = colour.blue  / QuantumRange;
+          dummy_exception = DestroyExceptionInfo (dummy_exception);
+          return (ssize_t)lenfun;
+        }
+      } else {
+        (void) ThrowMagickException (
+          pfx->exception, GetMagickModule(), OptionError,
+          "colorspace but not a valid color with '(...)' at", "'%s'",
+          SetShortExp(pfx));
+        dummy_exception = DestroyExceptionInfo (dummy_exception);
+        return -1;
+      }
+    }
+    if (!IsGray) {
+      dummy_exception = DestroyExceptionInfo (dummy_exception);
+      return 0;
+    }
+  }
+
+  *v0 = colour.red   / QuantumRange;
+  *v1 = colour.green / QuantumRange;
+  *v2 = colour.blue  / QuantumRange;
+
+  dummy_exception = DestroyExceptionInfo (dummy_exception);
+  return (ssize_t)strlen (pfx->token);
+}
+
+static ssize_t inline GetHexColour (FxInfo * pfx, fxFltType *v0, fxFltType *v1, fxFltType *v2)
+/* Returns number of characters to swallow.
+   Negative return means it starts with '#', but invalid hex number.
+*/
+{
+  char * p;
+  size_t len;
+  PixelInfo colour;
+
+  if (*pfx->pex!= '#') return 0;
+
+  /* find end of hex digits. */
+  p = pfx->pex + 1;
+  while (isxdigit ((int)*p)) p++;
+  if (isalpha ((int)*p)) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Bad hex number at", "'%s'",
+      SetShortExp(pfx));
+    return -1;
+  }
+
+  len = (size_t) (p - pfx->pex);
+  if (len < 1) return 0;
+  if (len >= MaxTokenLen) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Hex colour too long at", "'%s'",
+      SetShortExp(pfx));
+    return -1;
+  }
+  (void) CopyMagickString (pfx->token, pfx->pex, len+1);
+
+  (void) GetPixelInfo (pfx->image, &colour);
+
+  if (!QueryColorCompliance (pfx->token, AllCompliance, &colour, pfx->exception)) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "QueryColorCompliance rejected", "'%s' at '%s'",
+      pfx->token, SetShortExp(pfx));
+    return -1;
+  }
+
+  *v0 = colour.red   / QuantumRange;
+  *v1 = colour.green / QuantumRange;
+  *v2 = colour.blue  / QuantumRange;
+
+  return (ssize_t) len;
+}
+
+static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
+{
+  /* A function, so get open-parens, n args, close-parens
+  */
+  const char * funStr = Functions[fe-FirstFunc].str;
+  int nArgs = Functions[fe-FirstFunc].nArgs;
+  char chLimit = ')';
+  char expChLimit = ')';
+  const char *strLimit = ",)";
+  OperatorE pushOp = oOpenParen;
+
+  char * pExpStart;
+
+  int lenExp = 0;
+
+  int FndArgs = 0;
+  int ndx0 = NULL_ADDRESS, ndx1 = NULL_ADDRESS, ndx2 = NULL_ADDRESS, ndx3 = NULL_ADDRESS;
+
+  MagickBooleanType coordQual = isCoordQualifier;
+  PixelChannel chQual = NO_CHAN_QUAL;
+  ImgAttrE iaQual = aNull;
+
+  pfx->pex += pfx->lenToken;
+
+  if (fe == fP) {
+    char p = PeekChar (pfx);
+    if (p=='{') {
+      (void) ExpectChar (pfx, '{');
+      pushOp = oOpenBrace;
+      strLimit = ",}";
+      chLimit = '}';
+      expChLimit = '}';
+    } else if (p=='[') {
+      (void) ExpectChar (pfx, '[');
+      pushOp = oOpenBracket;
+      strLimit = ",]";
+      chLimit = ']';
+      expChLimit = ']';
+    } else {
+      nArgs = 0;
+      chLimit = ']';
+      expChLimit = ']';
+    }
+  } else if (fe == fU) {
+    char p = PeekChar (pfx);
+    if (p=='[') {
+      (void) ExpectChar (pfx, '[');

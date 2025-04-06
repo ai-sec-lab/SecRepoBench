@@ -1,0 +1,61 @@
+// Calculate the trailer offset using the header length and compressed bytes.
+  int64_t trailer_offset = header_len + cbytes;
+  if (trailer_offset < 0) {
+    BLOSC_TRACE_ERROR("Invalid trailer offset calculation.");
+    return -1;
+  }
+
+  // Proceed to obtain the size of the user metadata from within the trailer.
+  int32_t usermeta_len_network;
+  if (frame_struct->sdata != NULL) {
+    memcpy(&usermeta_len_network, frame_struct->sdata + trailer_offset + FRAME_TRAILER_USERMETA_LEN_OFFSET, sizeof(int32_t));
+  } else {
+    FILE* fp = fopen(frame_struct->fname, "rb");
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the file for reading.");
+      return -1;
+    }
+    fseek(fp, trailer_offset + FRAME_TRAILER_USERMETA_LEN_OFFSET, SEEK_SET);
+    size_t rbytes = fread(&usermeta_len_network, 1, sizeof(int32_t), fp);
+    if (rbytes != sizeof(int32_t)) {
+      BLOSC_TRACE_ERROR("Cannot read the usermeta_len from the file.");
+      fclose(fp);
+      return -1;
+    }
+    fclose(fp);
+  }
+  int32_t usermeta_len;
+  swap_store(&usermeta_len, &usermeta_len_network, sizeof(int32_t));
+
+  if (usermeta_len == 0) {
+    *usermeta = NULL;
+    return 0;
+  }
+
+  *usermeta = malloc(usermeta_len);
+  if (*usermeta == NULL) {
+    BLOSC_TRACE_ERROR("Memory allocation failed for user metadata.");
+    return -1;
+  }
+
+  if (frame_struct->sdata != NULL) {
+    memcpy(*usermeta, frame_struct->sdata + trailer_offset + FRAME_TRAILER_USERMETA_OFFSET, usermeta_len);
+  } else {
+    FILE* fp = fopen(frame_struct->fname, "rb+");
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the file for reading and writing.");
+      free(*usermeta);
+      *usermeta = NULL;
+      return -1;
+    }
+    fseek(fp, trailer_offset + FRAME_TRAILER_USERMETA_OFFSET, SEEK_SET);
+    size_t rbytes = fread(*usermeta, 1, usermeta_len, fp);
+    if (rbytes != (size_t)usermeta_len) {
+      BLOSC_TRACE_ERROR("Cannot read the complete usermeta chunk from the file.");
+      free(*usermeta);
+      *usermeta = NULL;
+      fclose(fp);
+      return -1;
+    }
+    fclose(fp);
+  }

@@ -1,0 +1,63 @@
+// <MASK>
+int mx, my, sourcex, src_y, uvsrc_x, uvsrc_y, sx, sy, uvsx, uvsy;
+ptrdiff_t uvlinesize, linesize;
+
+// Calculate the source positions for luma and chroma
+mx = motion_x;
+my = motion_y;
+if (s->quarter_sample) {
+    mx >>= 1;
+    my >>= 1;
+}
+
+sourcex = (s->mb_x * block_s) + (mx >> lowres);
+src_y = (mb_y * block_s) + (my >> lowres);
+uvsrc_x = sourcex >> s->chroma_x_shift;
+uvsrc_y = src_y >> s->chroma_y_shift;
+
+// Adjust the source positions based on field-based encoding
+if (field_based) {
+    src_y += (bottom_field ^ field_select) * block_s;
+    uvsrc_y += (bottom_field ^ field_select) * (block_s >> s->chroma_y_shift);
+}
+
+// Calculate the edge emulation parameters
+sx = mx & s_mask;
+sy = my & s_mask;
+uvsx = (sx << (2 - s->chroma_x_shift)) >> lowres;
+uvsy = (sy << (2 - s->chroma_y_shift)) >> lowres;
+
+linesize = s->linesize;
+uvlinesize = s->uvlinesize;
+
+// Perform the actual motion compensation
+ptr_y = ref_picture[0] + src_y * linesize + sourcex;
+ptr_cb = ref_picture[1] + uvsrc_y * uvlinesize + uvsrc_x;
+ptr_cr = ref_picture[2] + uvsrc_y * uvlinesize + uvsrc_x;
+
+if ((unsigned)sourcex > (unsigned)(h_edge_pos - (!!sx) - block_s) ||
+    (unsigned)src_y > (unsigned)(v_edge_pos - (!!sy) - block_s)) {
+    s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_y,
+                             linesize, linesize,
+                             block_s, block_s,
+                             sourcex, src_y, h_edge_pos, v_edge_pos);
+    ptr_y = s->sc.edge_emu_buffer;
+    if ((unsigned)uvsrc_x > (unsigned)(h_edge_pos - (!!uvsx) - (block_s >> s->chroma_x_shift)) ||
+        (unsigned)uvsrc_y > (unsigned)(v_edge_pos - (!!uvsy) - (block_s >> s->chroma_y_shift))) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer + 0x10000, ptr_cb,
+                                 uvlinesize, uvlinesize,
+                                 block_s >> s->chroma_x_shift, block_s >> s->chroma_y_shift,
+                                 uvsrc_x, uvsrc_y, h_edge_pos >> s->chroma_x_shift, v_edge_pos >> s->chroma_y_shift);
+        ptr_cb = s->sc.edge_emu_buffer + 0x10000;
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer + 0x11000, ptr_cr,
+                                 uvlinesize, uvlinesize,
+                                 block_s >> s->chroma_x_shift, block_s >> s->chroma_y_shift,
+                                 uvsrc_x, uvsrc_y, h_edge_pos >> s->chroma_x_shift, v_edge_pos >> s->chroma_y_shift);
+        ptr_cr = s->sc.edge_emu_buffer + 0x11000;
+    }
+}
+
+pix_op[op_index](dest_y, ptr_y, linesize, block_s, sx, sy);
+pix_op[op_index](dest_cb, ptr_cb, uvlinesize, block_s >> s->chroma_x_shift, uvsx, uvsy);
+pix_op[op_index](dest_cr, ptr_cr, uvlinesize, block_s >> s->chroma_x_shift, uvsx, uvsy);
+// </MASK>

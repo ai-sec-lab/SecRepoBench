@@ -1,0 +1,278 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/flb_signv4.c
+static flb_sds_t uri_encode_params(const char *uri, size_t len)
+{
+    int i;
+    flb_sds_t buf = NULL;
+    flb_sds_t tmp = NULL;
+
+    buf = flb_sds_create_size(len * 2);
+    if (!buf) {
+        flb_error("[signv4] cannot allocate buffer for URI encoding");
+        return NULL;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (to_encode(uri[i]) == FLB_TRUE || uri[i] == '/') {
+            tmp = flb_sds_printf(&buf, "%%%02X", (unsigned char) *(uri + i));
+            if (!tmp) {
+                flb_error("[signv4] error formatting special character");
+                flb_sds_destroy(buf);
+                return NULL;
+            }
+            continue;
+        }
+
+        /* Direct assignment, just copy the character */
+        if (buf) {
+            tmp = flb_sds_cat(buf, uri + i, 1);
+            if (!tmp) {
+                flb_error("[signv4] error composing outgoing buffer");
+                flb_sds_destroy(buf);
+                return NULL;
+            }
+            buf = tmp;
+        }
+    }
+
+    return buf;
+}
+
+// the below code fragment can be found in:
+// src/flb_signv4.c
+static flb_sds_t uri_encode(const char *uri, size_t len)
+{
+    int i;
+    flb_sds_t buf = NULL;
+    flb_sds_t tmp = NULL;
+    int is_query_string = FLB_FALSE;
+    int do_encode = FLB_FALSE;
+
+    buf = flb_sds_create_size(len * 2);
+    if (!buf) {
+        flb_error("[signv4] cannot allocate buffer for URI encoding");
+        return NULL;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (uri[i] == '?') {
+            is_query_string = FLB_TRUE;
+        }
+        do_encode = FLB_FALSE;
+
+        if (is_query_string == FLB_FALSE && to_encode_path(uri[i]) == FLB_TRUE) {
+            do_encode = FLB_TRUE;
+        }
+        if (is_query_string == FLB_TRUE && to_encode(uri[i]) == FLB_TRUE) {
+            do_encode = FLB_TRUE;
+        }
+        if (do_encode == FLB_TRUE) {
+            tmp = flb_sds_printf(&buf, "%%%02X", (unsigned char) *(uri + i));
+            if (!tmp) {
+                flb_error("[signv4] error formatting special character");
+                flb_sds_destroy(buf);
+                return NULL;
+            }
+            buf = tmp;
+            continue;
+        }
+
+        /* Direct assignment, just copy the character */
+        if (buf) {
+            tmp = flb_sds_cat(buf, uri + i, 1);
+            if (!tmp) {
+                flb_error("[signv4] error composing outgoing buffer");
+                flb_sds_destroy(buf);
+                return NULL;
+            }
+            buf = tmp;
+        }
+    }
+
+    return buf;
+}
+
+// the below code fragment can be found in:
+// src/flb_utils.c
+int flb_utils_url_split(const char *in_url, char **out_protocol,
+                        char **out_host, char **out_port, char **out_uri)
+{
+    char *protocol = NULL;
+    char *host = NULL;
+    char *port = NULL;
+    char *uri = NULL;
+    char *p;
+    char *tmp;
+    char *sep;
+
+    /* Protocol */
+    p = strstr(in_url, "://");
+    if (!p) {
+        return -1;
+    }
+    if (p == in_url) {
+        return -1;
+    }
+
+    protocol = mk_string_copy_substr(in_url, 0, p - in_url);
+    if (!protocol) {
+        flb_errno();
+        return -1;
+    }
+
+    /* Advance position after protocol */
+    p += 3;
+
+    /* Check for first '/' */
+    sep = strchr(p, '/');
+    tmp = strchr(p, ':');
+
+    /* Validate port separator is found before the first slash */
+    if (sep && tmp) {
+        if (tmp > sep) {
+            tmp = NULL;
+        }
+    }
+
+    if (tmp) {
+        host = flb_copy_host(p, 0, tmp - p);
+        if (!host) {
+            flb_errno();
+            goto error;
+        }
+        p = tmp + 1;
+
+        /* Look for an optional URI */
+        tmp = strchr(p, '/');
+        if (tmp) {
+            port = mk_string_copy_substr(p, 0, tmp - p);
+            uri = flb_strdup(tmp);
+        }
+        else {
+            port = flb_strdup(p);
+            uri = flb_strdup("/");
+        }
+    }
+    else {
+        tmp = strchr(p, '/');
+        if (tmp) {
+            host = flb_copy_host(p, 0, tmp - p);
+            uri = flb_strdup(tmp);
+        }
+        else {
+            host = flb_copy_host(p, 0, strlen(p));
+            uri = flb_strdup("/");
+        }
+    }
+
+    if (!port) {
+        if (strcmp(protocol, "http") == 0) {
+            port = flb_strdup("80");
+        }
+        else if (strcmp(protocol, "https") == 0) {
+            port = flb_strdup("443");
+        }
+    }
+
+    *out_protocol = protocol;
+    *out_host = host;
+    *out_port = port;
+    *out_uri = uri;
+
+    return 0;
+
+ error:
+    if (protocol) {
+        flb_free(protocol);
+    }
+
+    return -1;
+}
+
+// the below code fragment can be found in:
+// src/flb_uri.c
+flb_sds_t flb_uri_encode(const char *uri, size_t len)
+{
+    int i;
+    flb_sds_t buf = NULL;
+    flb_sds_t tmp = NULL;
+
+    buf = flb_sds_create_size(len * 2);
+    if (!buf) {
+        flb_error("[uri] cannot allocate buffer for URI encoding");
+        return NULL;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (flb_uri_to_encode(uri[i]) == FLB_TRUE) {
+            tmp = flb_sds_printf(&buf, "%%%02X", (unsigned char) *(uri + i));
+            if (!tmp) {
+                flb_error("[uri] error formatting special character");
+                flb_sds_destroy(buf);
+                return NULL;
+            }
+            continue;
+        }
+
+        /* Direct assignment, just copy the character */
+        if (buf) {
+            tmp = flb_sds_cat(buf, uri + i, 1);
+            if (!tmp) {
+                flb_error("[uri] error composing outgoing buffer");
+                flb_sds_destroy(buf);
+                return NULL;
+            }
+            buf = tmp;
+        }
+    }
+
+    return buf;
+}
+
+// the below code fragment can be found in:
+// src/flb_sds.c
+flb_sds_t flb_sds_cat_esc(flb_sds_t s, const char *str, int len,
+                                       char *esc, size_t esc_size)
+{
+    size_t avail;
+    struct flb_sds *head;
+    flb_sds_t tmp = NULL;
+    uint32_t c;
+    int i;
+
+    avail = flb_sds_avail(s);
+    if (avail < len) {
+        tmp = flb_sds_increase(s, len);
+        if (!tmp) {
+            return NULL;
+        }
+        s = tmp;
+    }
+    head = FLB_SDS_HEADER(s);
+
+    for (i = 0; i < len; i++) {
+        if (flb_sds_avail(s) < 8) {
+            tmp = flb_sds_increase(s, 8);
+            if (tmp == NULL) {
+                return NULL;
+            }
+            s = tmp;
+            head = FLB_SDS_HEADER(s);
+        }
+        c = (unsigned char) str[i];
+        if (esc != NULL && c < esc_size && esc[c] != 0) {
+            s[head->len++] = '\\';
+            s[head->len++] = esc[c];
+        }
+        else {
+            s[head->len++] = c;
+        }
+    }
+
+    s[head->len] = '\0';
+
+    return s;
+}
+

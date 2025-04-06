@@ -1,0 +1,567 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// blosc/frame.c
+void *new_header_frame(blosc2_schunk *schunk, blosc2_frame_s *frame) {
+  if (frame == NULL) {
+    return NULL;
+  }
+  uint8_t* h2 = calloc(FRAME_HEADER_MINLEN, 1);
+  uint8_t* h2p = h2;
+
+  // The msgpack header starts here
+  *h2p = 0x90;  // fixarray...
+  *h2p += 14;   // ...with 13 elements
+  h2p += 1;
+
+  // Magic number
+  *h2p = 0xa0 + 8;  // str with 8 elements
+  h2p += 1;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+  strcpy((char*)h2p, "b2frame");
+  h2p += 8;
+
+  // Header size
+  *h2p = 0xd2;  // int32
+  h2p += 1 + 4;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Total frame size
+  *h2p = 0xcf;  // uint64
+  // Fill it with frame->len which is known *after* the creation of the frame (e.g. when updating the header)
+  int64_t flen = frame->len;
+  to_big(h2 + FRAME_LEN, &flen, sizeof(flen));
+  h2p += 1 + 8;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Flags
+  *h2p = 0xa0 + 4;  // str with 4 elements
+  h2p += 1;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+  // General flags
+  *h2p = BLOSC2_VERSION_FRAME_FORMAT;  // version
+  *h2p += 0x10;  // 64-bit offsets.  We only support this for now.
+  h2p += 1;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Frame type
+  // We only support contiguous and sparse directories frames currently
+  *h2p = frame->sframe ? 1 : 0;
+  h2p += 1;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Codec flags
+  *h2p = schunk->compcode;
+  if (schunk->compcode >= BLOSC_LAST_CODEC) {
+    *h2p = BLOSC_UDCODEC_FORMAT;
+  }
+  *h2p += (schunk->clevel) << 4u;  // clevel
+  h2p += 1;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Reserved flags
+  *h2p = 0;
+  h2p += 1;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Uncompressed size
+  *h2p = 0xd3;  // int64
+  h2p += 1;
+  int64_t nbytes = schunk->nbytes;
+  to_big(h2p, &nbytes, sizeof(nbytes));
+  h2p += 8;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Compressed size
+  *h2p = 0xd3;  // int64
+  h2p += 1;
+  int64_t cbytes = schunk->cbytes;
+  to_big(h2p, &cbytes, sizeof(cbytes));
+  h2p += 8;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Type size
+  *h2p = 0xd2;  // int32
+  h2p += 1;
+  int32_t typesize = schunk->typesize;
+  to_big(h2p, &typesize, sizeof(typesize));
+  h2p += 4;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Block size
+  *h2p = 0xd2;  // int32
+  h2p += 1;
+  int32_t blocksize = schunk->blocksize;
+  to_big(h2p, &blocksize, sizeof(blocksize));
+  h2p += 4;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Chunk size
+  *h2p = 0xd2;  // int32
+  h2p += 1;
+  int32_t chunksize = schunk->chunksize;
+  to_big(h2p, &chunksize, sizeof(chunksize));
+  h2p += 4;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Number of threads for compression
+  *h2p = 0xd1;  // int16
+  h2p += 1;
+  int16_t nthreads = (int16_t)schunk->cctx->nthreads;
+  to_big(h2p, &nthreads, sizeof(nthreads));
+  h2p += 2;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // Number of threads for decompression
+  *h2p = 0xd1;  // int16
+  h2p += 1;
+  nthreads = (int16_t)schunk->dctx->nthreads;
+  to_big(h2p, &nthreads, sizeof(nthreads));
+  h2p += 2;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // The boolean for variable-length metalayers
+  *h2p = (schunk->nvlmetalayers > 0) ? (uint8_t)0xc3 : (uint8_t)0xc2;
+  h2p += 1;
+  if (h2p - h2 >= FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  // The space for FRAME_FILTER_PIPELINE
+  *h2p = 0xd8;  //  fixext 16
+  h2p += 1;
+  if (BLOSC2_MAX_FILTERS > FRAME_FILTER_PIPELINE_MAX) {
+    return NULL;
+  }
+  // Store the filter pipeline in header
+  uint8_t* mp_filters = h2 + FRAME_FILTER_PIPELINE + 1;
+  uint8_t* mp_meta = h2 + FRAME_FILTER_PIPELINE + 1 + FRAME_FILTER_PIPELINE_MAX;
+  int nfilters = 0;
+  for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+      mp_filters[i] = schunk->filters[i];
+      mp_meta[i] = schunk->filters_meta[i];
+  }
+  *h2p = (uint8_t) BLOSC2_MAX_FILTERS;
+  h2p += 1;
+  h2p += 16;
+
+  // User-defined codec and codec metadata
+  uint8_t* udcodec = h2 + FRAME_FILTER_PIPELINE + 1 + BLOSC2_MAX_FILTERS + 1;
+  *udcodec = schunk->compcode;
+  uint8_t* codec_meta = h2 + FRAME_FILTER_PIPELINE + 1 + BLOSC2_MAX_FILTERS + 2;
+  *codec_meta = schunk->compcode_meta;
+
+  if (h2p - h2 != FRAME_HEADER_MINLEN) {
+    return NULL;
+  }
+
+  int32_t hsize = FRAME_HEADER_MINLEN;
+
+  // Now, deal with metalayers
+  int16_t nmetalayers = schunk->nmetalayers;
+  if (nmetalayers < 0 || nmetalayers > BLOSC2_MAX_METALAYERS) {
+    return NULL;
+  }
+
+  // Make space for the header of metalayers (array marker, size, map of offsets)
+  h2 = realloc(h2, (size_t)hsize + 1 + 1 + 2 + 1 + 2);
+  h2p = h2 + hsize;
+
+  // The msgpack header for the metalayers (array_marker, size, map of offsets, list of metalayers)
+  *h2p = 0x90 + 3;  // array with 3 elements
+  h2p += 1;
+
+  // Size for the map (index) of offsets, including this uint16 size (to be filled out later on)
+  *h2p = 0xcd;  // uint16
+  h2p += 1 + 2;
+
+  // Map (index) of offsets for optional metalayers
+  *h2p = 0xde;  // map 16 with N keys
+  h2p += 1;
+  to_big(h2p, &nmetalayers, sizeof(nmetalayers));
+  h2p += sizeof(nmetalayers);
+  int32_t current_header_len = (int32_t)(h2p - h2);
+  int32_t *offtooff = malloc(nmetalayers * sizeof(int32_t));
+  for (int nmetalayer = 0; nmetalayer < nmetalayers; nmetalayer++) {
+    if (frame == NULL) {
+      return NULL;
+    }
+    blosc2_metalayer *metalayer = schunk->metalayers[nmetalayer];
+    uint8_t namelen = (uint8_t) strlen(metalayer->name);
+    h2 = realloc(h2, (size_t)current_header_len + 1 + namelen + 1 + 4);
+    h2p = h2 + current_header_len;
+    // Store the metalayer
+    if (namelen >= (1U << 5U)) {  // metalayer strings cannot be longer than 32 bytes
+      free(offtooff);
+      return NULL;
+    }
+    *h2p = (uint8_t)0xa0 + namelen;  // str
+    h2p += 1;
+    memcpy(h2p, metalayer->name, namelen);
+    h2p += namelen;
+    // Space for storing the offset for the value of this metalayer
+    *h2p = 0xd2;  // int32
+    h2p += 1;
+    offtooff[nmetalayer] = (int32_t)(h2p - h2);
+    h2p += 4;
+    current_header_len += 1 + namelen + 1 + 4;
+  }
+  int32_t hsize2 = (int32_t)(h2p - h2);
+  if (hsize2 != current_header_len) {  // sanity check
+    return NULL;
+  }
+
+  // Map size + int16 size
+  if ((uint32_t) (hsize2 - hsize) >= (1U << 16U)) {
+    return NULL;
+  }
+  uint16_t map_size = (uint16_t) (hsize2 - hsize);
+  to_big(h2 + FRAME_IDX_SIZE, &map_size, sizeof(map_size));
+
+  // Make space for an (empty) array
+  hsize = (int32_t)(h2p - h2);
+  h2 = realloc(h2, (size_t)hsize + 2 + 1 + 2);
+  h2p = h2 + hsize;
+
+  // Now, store the values in an array
+  *h2p = 0xdc;  // array 16 with N elements
+  h2p += 1;
+  to_big(h2p, &nmetalayers, sizeof(nmetalayers));
+  h2p += sizeof(nmetalayers);
+  current_header_len = (int32_t)(h2p - h2);
+  for (int nmetalayer = 0; nmetalayer < nmetalayers; nmetalayer++) {
+    if (frame == NULL) {
+      return NULL;
+    }
+    blosc2_metalayer *metalayer = schunk->metalayers[nmetalayer];
+    h2 = realloc(h2, (size_t)current_header_len + 1 + 4 + metalayer->content_len);
+    h2p = h2 + current_header_len;
+    // Store the serialized contents for this metalayer
+    *h2p = 0xc6;  // bin32
+    h2p += 1;
+    to_big(h2p, &(metalayer->content_len), sizeof(metalayer->content_len));
+    h2p += 4;
+    memcpy(h2p, metalayer->content, metalayer->content_len);  // buffer, no need to swap
+    h2p += metalayer->content_len;
+    // Update the offset now that we know it
+    to_big(h2 + offtooff[nmetalayer], &current_header_len, sizeof(current_header_len));
+    current_header_len += 1 + 4 + metalayer->content_len;
+  }
+  free(offtooff);
+  hsize = (int32_t)(h2p - h2);
+  if (hsize != current_header_len) {  // sanity check
+    return NULL;
+  }
+
+  // Set the length of the whole header now that we know it
+  to_big(h2 + FRAME_HEADER_LEN, &hsize, sizeof(hsize));
+
+  return h2;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+static int get_vlmeta_from_trailer(blosc2_frame_s* frame, blosc2_schunk* schunk, uint8_t* trailer,
+                                   int32_t trailer_len) {
+
+  int64_t trailer_pos = FRAME_TRAILER_VLMETALAYERS + 2;
+  uint8_t* idxp = trailer + trailer_pos;
+
+  // Get the size for the index of metalayers
+  trailer_pos += 2;
+  if (trailer_len < trailer_pos) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+  uint16_t idx_size;
+  from_big(&idx_size, idxp, sizeof(idx_size));
+  idxp += 2;
+
+  trailer_pos += 1;
+  // Get the actual index of metalayers
+  if (trailer_len < trailer_pos) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+  if (idxp[0] != 0xde) {   // sanity check
+    return BLOSC2_ERROR_DATA;
+  }
+  idxp += 1;
+
+  uint16_t nmetalayers;
+  trailer_pos += sizeof(nmetalayers);
+  if (trailer_len < trailer_pos) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+  from_big(&nmetalayers, idxp, sizeof(uint16_t));
+  idxp += 2;
+  if (nmetalayers < 0 || nmetalayers > BLOSC2_MAX_VLMETALAYERS) {
+    return BLOSC2_ERROR_DATA;
+  }
+  schunk->nvlmetalayers = nmetalayers;
+
+  // Populate the metalayers and its serialized values
+  for (int nmetalayer = 0; nmetalayer < nmetalayers; nmetalayer++) {
+    trailer_pos += 1;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if ((*idxp & 0xe0u) != 0xa0u) {   // sanity check
+      return BLOSC2_ERROR_DATA;
+    }
+    blosc2_metalayer* metalayer = calloc(sizeof(blosc2_metalayer), 1);
+    schunk->vlmetalayers[nmetalayer] = metalayer;
+
+    // Populate the metalayer string
+    int8_t nslen = *idxp & (uint8_t)0x1F;
+    idxp += 1;
+    trailer_pos += nslen;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    char* ns = malloc((size_t)nslen + 1);
+    memcpy(ns, idxp, nslen);
+    ns[nslen] = '\0';
+    idxp += nslen;
+    metalayer->name = ns;
+
+    // Populate the serialized value for this metalayer
+    // Get the offset
+    trailer_pos += 1;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if ((*idxp & 0xffu) != 0xd2u) {   // sanity check
+      return BLOSC2_ERROR_DATA;
+    }
+    idxp += 1;
+    int32_t offset;
+    trailer_pos += sizeof(offset);
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    from_big(&offset, idxp, sizeof(offset));
+    idxp += 4;
+    if (offset < 0 || offset >= trailer_len) {
+      // Offset is less than zero or exceeds trailer length
+      return BLOSC2_ERROR_DATA;
+    }
+    // Go to offset and see if we have the correct marker
+    uint8_t* content_marker = trailer + offset;
+    if (trailer_len < offset + 1 + 4) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if (*content_marker != 0xc6) {
+      return BLOSC2_ERROR_DATA;
+    }
+
+    // Read the size of the content
+    int32_t content_len;
+    from_big(&content_len, content_marker + 1, sizeof(content_len));
+    if (content_len < 0) {
+      return BLOSC2_ERROR_DATA;
+    }
+    metalayer->content_len = content_len;
+
+    // Finally, read the content
+    if (trailer_len < offset + 1 + 4 + content_len) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    char* content = malloc((size_t)content_len);
+    memcpy(content, content_marker + 1 + 4, (size_t)content_len);
+    metalayer->content = (uint8_t*)content;
+  }
+  return 1;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int frame_get_metalayers(blosc2_frame_s* frame, blosc2_schunk* schunk) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t blocksize;
+  int32_t chunksize;
+  int32_t nchunks;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes,
+                            &blocksize, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL, NULL,
+                            schunk->storage->io);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  // Get the header
+  uint8_t* header = NULL;
+  if (frame->cframe != NULL) {
+    header = frame->cframe;
+  } else {
+    int64_t rbytes = 0;
+    header = malloc(header_len);
+    blosc2_io_cb *io_cb = blosc2_get_io_cb(frame->schunk->storage->io->id);
+    if (io_cb == NULL) {
+      BLOSC_TRACE_ERROR("Error getting the input/output API");
+      return BLOSC2_ERROR_PLUGIN_IO;
+    }
+
+    void* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb",
+                             frame->schunk->storage->io);
+    }
+    else {
+      fp = io_cb->open(frame->urlpath, "rb", frame->schunk->storage->io->params);
+    }
+    if (fp != NULL) {
+      rbytes = io_cb->read(header, 1, header_len, fp);
+      io_cb->close(fp);
+    }
+    if (rbytes != (size_t) header_len) {
+      BLOSC_TRACE_ERROR("Cannot access the header out of the frame.");
+      free(header);
+      return BLOSC2_ERROR_FILE_READ;
+    }
+  }
+
+  ret = get_meta_from_header(frame, schunk, header, header_len);
+
+  if (frame->cframe == NULL) {
+    free(header);
+  }
+
+  return ret;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int frame_update_header(blosc2_frame_s* frame, blosc2_schunk* schunk, bool new) {
+  uint8_t* framep = frame->cframe;
+  uint8_t header[FRAME_HEADER_MINLEN];
+
+  if (frame->len <= 0) {
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (new && schunk->cbytes > 0) {
+    BLOSC_TRACE_ERROR("New metalayers cannot be added after actual data "
+                      "has been appended.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  blosc2_io_cb *io_cb = blosc2_get_io_cb(frame->schunk->storage->io->id);
+  if (io_cb == NULL) {
+    BLOSC_TRACE_ERROR("Error getting the input/output API");
+    return BLOSC2_ERROR_PLUGIN_IO;
+  }
+
+  if (frame->cframe == NULL) {
+    int64_t rbytes = 0;
+    void* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb+",
+                             frame->schunk->storage->io);
+    }
+    else {
+      fp = io_cb->open(frame->urlpath, "rb", frame->schunk->storage->io->params);
+    }
+    if (fp != NULL) {
+      rbytes = io_cb->read(header, 1, FRAME_HEADER_MINLEN, fp);
+      io_cb->close(fp);
+    }
+    (void) rbytes;
+    if (rbytes != FRAME_HEADER_MINLEN) {
+      return BLOSC2_ERROR_FILE_WRITE;
+    }
+    framep = header;
+  }
+  uint32_t prev_h2len;
+  from_big(&prev_h2len, framep + FRAME_HEADER_LEN, sizeof(prev_h2len));
+
+  // Build a new header
+  uint8_t* h2 = new_header_frame(schunk, frame);
+  uint32_t h2len;
+  from_big(&h2len, h2 + FRAME_HEADER_LEN, sizeof(h2len));
+
+  // The frame length is outdated when adding a new metalayer, so update it
+  if (new) {
+    int64_t frame_len = h2len;  // at adding time, we only have to worry of the header for now
+    to_big(h2 + FRAME_LEN, &frame_len, sizeof(frame_len));
+    frame->len = frame_len;
+  }
+
+  if (!new && prev_h2len != h2len) {
+    BLOSC_TRACE_ERROR("The new metalayer sizes should be equal the existing ones.");
+    return BLOSC2_ERROR_DATA;
+  }
+
+  void* fp = NULL;
+  if (frame->cframe == NULL) {
+    // Write updated header down to file
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb+",
+                             frame->schunk->storage->io);
+    }
+    else {
+      fp = io_cb->open(frame->urlpath, "rb+", frame->schunk->storage->io->params);
+    }
+    if (fp != NULL) {
+      io_cb->write(h2, h2len, 1, fp);
+      io_cb->close(fp);
+    }
+  }
+  else {
+    if (new) {
+      frame->cframe = realloc(frame->cframe, h2len);
+    }
+    memcpy(frame->cframe, h2, h2len);
+  }
+  free(h2);
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// blosc/schunk.c
+int blosc2_meta_get(blosc2_schunk *schunk, const char *name, uint8_t **content,
+                    uint32_t *content_len) {
+  int nmetalayer = blosc2_meta_exists(schunk, name);
+  if (nmetalayer < 0) {
+    BLOSC_TRACE_ERROR("Metalayer \"%s\" not found.", name);
+    return nmetalayer;
+  }
+  *content_len = (uint32_t)schunk->metalayers[nmetalayer]->content_len;
+  *content = malloc((size_t)*content_len);
+  memcpy(*content, schunk->metalayers[nmetalayer]->content, (size_t)*content_len);
+  return nmetalayer;
+}
+

@@ -1,0 +1,422 @@
+;
+
+    return TRUE;
+
+Error:
+    if (sd.stream) fclose(sd.stream);
+    return FALSE;
+}
+
+
+// Saves whole file in memory
+cmsBool CMSEXPORT cmsIT8SaveToMem(cmsHANDLE hIT8, cmsUInt8Number** Buffer, cmsUInt32Number* Size)
+{
+    SAVESTREAM sd;
+    cmsUInt32Number i;
+    cmsIT8* it8 = (cmsIT8*) hIT8;
+
+    memset(&sd, 0, sizeof(sd));
+
+    sd.Ptr = *Buffer;
+    sd.Base = *Buffer;
+    sd.Max = *Size;
+
+    for (i=0; i < it8 ->TablesCount; i++) {
+
+        TABLE* t;
+
+        if (cmsIT8SetTable(hIT8, i) < 0) goto Error;
+        
+        /**
+        * Check for wrong data
+        */
+        t = GetTable(it8);
+        if (t->Data == NULL) goto Error;
+        if (t->DataFormat == NULL) goto Error;
+
+        WriteHeader(it8, &sd);
+        WriteDataFormat(&sd, it8);
+        WriteData(&sd, it8);
+    }
+
+    *Size = sd.Used;
+    return TRUE;
+
+Error:
+    *Size = 0;
+    return FALSE;
+}
+
+
+// --------------------------------------------------------------- Parsing
+
+
+// Reads a string from file
+static
+cmsBool ReadString(cmsIT8* it8, string* s)
+{
+    char c;
+
+    if (it8->ch == '\"' || it8->ch == '\'') {
+
+        c = it8->ch;
+        StringClear(s);
+        NextCh(it8);
+
+        while (it8->ch != c && it8->ch != 0) {
+
+            if (it8->ch == '\n' || it8->ch == '\r') {
+                SynError(it8, "String not closed");
+                return FALSE;
+            }
+
+            StringAppend(s, (char) it8->ch);
+            NextCh(it8);
+        }
+
+        if (it8->ch == c) NextCh(it8);
+        else {
+            SynError(it8, "String not closed");
+            return FALSE;
+        }
+
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+// Reads an identifier from file
+static
+cmsBool ReadIdentifier(cmsIT8* it8, string* s)
+{
+    if (isfirstidchar(it8->ch)) {
+
+        StringClear(s);
+
+        do {
+            StringAppend(s, (char) it8->ch);
+            NextCh(it8);
+
+        } while (isidchar(it8->ch));
+
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+// Reads an integer from file
+static
+cmsBool ReadInteger(cmsIT8* it8, cmsInt32Number* i)
+{
+    int sign = 1;
+
+    if (it8->ch == '-') {
+        sign = -1;
+        NextCh(it8);
+    }
+
+    *i = 0;
+
+    if (isdigit(it8->ch)) {
+
+        while (isdigit(it8->ch)) {
+            *i = *i * 10 + (it8->ch - '0');
+            NextCh(it8);
+        }
+
+        *i *= sign;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+// Reads a real number from file
+static
+cmsBool ReadReal(cmsIT8* it8, cmsFloat64Number* d)
+{
+    int sign = 1;
+
+    if (it8->ch == '-') {
+        sign = -1;
+        NextCh(it8);
+    }
+
+    *d = 0.0;
+
+    if (isdigit(it8->ch)) {
+
+        while (isdigit(it8->ch)) {
+            *d = *d * 10.0 + (cmsFloat64Number)(it8->ch - '0');
+            NextCh(it8);
+        }
+
+        if (it8->ch == '.') {
+
+            cmsFloat64Number frac = 0.0;
+            int prec = 0;
+
+            NextCh(it8);
+
+            while (isdigit(it8->ch)) {
+                frac = frac * 10.0 + (cmsFloat64Number)(it8->ch - '0');
+                prec++;
+                NextCh(it8);
+            }
+
+            *d = *d + (frac / xpow10(prec));
+        }
+
+        *d *= sign;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+// Reads a comment from file
+static
+cmsBool ReadComment(cmsIT8* it8)
+{
+    if (it8->ch == '#') {
+
+        NextCh(it8);
+
+        while (it8->ch && it8->ch != '\n' && it8->ch != '\r')
+            NextCh(it8);
+
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+// Reads a line from file
+static
+cmsBool ReadLine(cmsIT8* it8)
+{
+    if (it8->ch == '\n' || it8->ch == '\r') {
+
+        NextCh(it8);
+
+        if (it8->ch == '\n' || it8->ch == '\r')
+            NextCh(it8);
+
+        it8->lineno++;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+// Reads a symbol from file
+static
+cmsBool ReadSymbol(cmsIT8* it8, SYMBOL* sy)
+{
+    if (it8->ch == '\n' || it8->ch == '\r') {
+
+        *sy = SEOLN;
+        return TRUE;
+    }
+
+    if (it8->ch == 0) {
+
+        *sy = SEOF;
+        return TRUE;
+    }
+
+    if (it8->ch == '#') {
+
+        *sy = SCOMMENT;
+        return TRUE;
+    }
+
+    if (it8->ch == '\"' || it8->ch == '\'') {
+
+        *sy = SSTRING;
+        return TRUE;
+    }
+
+    if (isdigit(it8->ch) || it8->ch == '.' || it8->ch == '-' || it8->ch == '+') {
+
+        *sy = SDNUM;
+        return TRUE;
+    }
+
+    if (isfirstidchar(it8->ch)) {
+
+        *sy = SIDENT;
+        return TRUE;
+    }
+
+    *sy = SSYNERROR;
+    return FALSE;
+}
+
+
+// Parses a file
+cmsBool CMSEXPORT cmsIT8ParseFile(cmsHANDLE hIT8, const char* cFileName)
+{
+    cmsIT8* it8 = (cmsIT8*) hIT8;
+    FILE* f;
+    SYMBOL sy;
+    string id, str;
+    cmsInt32Number inum;
+    cmsFloat64Number dnum;
+
+    if (it8->MemoryBlock) {
+        it8->Source = it8->MemoryBlock;
+        it8->MemoryBlock = NULL;
+    }
+    else {
+        f = fopen(cFileName, "rt");
+        if (!f) return FALSE;
+
+        it8->FileStack[0]->Stream = f;
+        it8->IncludeSP = 0;
+    }
+
+    it8->sy = SUNDEFINED;
+    it8->ch = ' ';
+    it8->lineno = 1;
+
+    it8->id = &id;
+    it8->str = &str;
+
+    InSymbol(it8);
+
+    while (it8->sy != SEOF) {
+
+        if (it8->sy == SINCLUDE) {
+
+            FILECTX* FileNest;
+
+            if (it8->IncludeSP >= (MAXINCLUDE-1)) {
+                SynError(it8, "Too many recursion levels");
+                return FALSE;
+            }
+
+            if (!ReadString(it8, &str)) return FALSE;
+
+            FileNest = it8->FileStack[it8->IncludeSP + 1];
+            if (FileNest == NULL) {
+                FileNest = it8->FileStack[it8->IncludeSP + 1] = (FILECTX*) AllocChunk(it8, sizeof(FILECTX));
+                if (FileNest == NULL) {
+                    SynError(it8, "Out of memory");
+                    return FALSE;
+                }
+            }
+
+            if (BuildAbsolutePath(StringPtr(&str),
+                                  it8->FileStack[it8->IncludeSP]->FileName,
+                                  FileNest->FileName, cmsMAX_PATH-1) == FALSE) {
+                SynError(it8, "File path too long");
+                return FALSE;
+            }
+
+            FileNest->Stream = fopen(FileNest->FileName, "rt");
+            if (FileNest->Stream == NULL) {
+                SynError(it8, "File %s not found", FileNest->FileName);
+                return FALSE;
+            }
+            it8->IncludeSP++;
+
+            it8->ch = ' ';
+            InSymbol(it8);
+        }
+        else {
+            switch (it8->sy) {
+
+            case SBEGIN_DATA:
+                if (!Check(it8, SBEGIN_DATA, "BEGIN_DATA expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SEND_DATA:
+                if (!Check(it8, SEND_DATA, "END_DATA expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SBEGIN_DATA_FORMAT:
+                if (!Check(it8, SBEGIN_DATA_FORMAT, "BEGIN_DATA_FORMAT expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SEND_DATA_FORMAT:
+                if (!Check(it8, SEND_DATA_FORMAT, "END_DATA_FORMAT expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SDATA_FORMAT_ID:
+                if (!Check(it8, SDATA_FORMAT_ID, "DATA_FORMAT_IDENTIFIER expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SKEYWORD:
+                if (!Check(it8, SKEYWORD, "KEYWORD expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SINCLUDE:
+                if (!Check(it8, SINCLUDE, "INCLUDE expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SIDENT:
+                if (!ReadIdentifier(it8, &id)) return FALSE;
+
+                if (BinSrchKey(StringPtr(&id)) == SKEYWORD) {
+
+                    if (!Check(it8, SKEYWORD, "KEYWORD expected")) return FALSE;
+                    if (!CheckEOLN(it8)) return FALSE;
+                }
+                else {
+                    if (!Check(it8, SIDENT, "Identifier expected")) return FALSE;
+                    if (!CheckEOLN(it8)) return FALSE;
+                }
+                break;
+
+            case SINUM:
+                if (!ReadInteger(it8, &inum)) return FALSE;
+                if (!Check(it8, SINUM, "Integer expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SDNUM:
+                if (!ReadReal(it8, &dnum)) return FALSE;
+                if (!Check(it8, SDNUM, "Real expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SSTRING:
+                if (!ReadString(it8, &str)) return FALSE;
+                if (!Check(it8, SSTRING, "String expected")) return FALSE;
+                if (!CheckEOLN(it8)) return FALSE;
+                break;
+
+            case SCOMMENT:
+                if (!ReadComment(it8)) return FALSE;
+                if (!Check(it8, SCOMMENT, "Comment expected")) return FALSE;
+                break;
+
+            case SEOLN:
+                if (!ReadLine(it8)) return FALSE;
+                if (!Check(it8, SEOLN, "EOLN expected")) return FALSE;
+                break;
+
+            case SEOF:
+                break;
+
+            case SSYNERROR:
+                return FALSE;
+
+            default:
+                SynError(it8, "Unrecognized symbol %d", it

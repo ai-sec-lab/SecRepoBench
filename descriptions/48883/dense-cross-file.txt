@@ -1,0 +1,212 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/ftp_data.c
+void ndpi_search_ftp_data(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow) {
+	
+  /* Break after 20 packets. */
+  if(flow->packet_counter > 20) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  NDPI_LOG_DBG(ndpi_struct, "search FTP_DATA\n");
+  ndpi_check_ftp_data(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/ntp.c
+void ndpi_search_ntp_udp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  
+  NDPI_LOG_DBG(ndpi_struct, "search NTP\n");
+
+  if (packet->udp->dest == htons(123) || packet->udp->source == htons(123)) {
+  
+    NDPI_LOG_DBG2(ndpi_struct, "NTP port and length detected\n");
+  
+    if ((((packet->payload[0] & 0x38) >> 3) <= 4)) {
+    
+      // 38 in binary representation is 00111000 
+      flow->protos.ntp.version = (packet->payload[0] & 0x38) >> 3;
+    
+      if (packet->payload_packet_len > 3 && flow->protos.ntp.version == 2) {
+        flow->protos.ntp.request_code = packet->payload[3];
+      }
+    
+      NDPI_LOG_INFO(ndpi_struct, "found NTP\n");
+      ndpi_int_ntp_add_connection(ndpi_struct, flow);
+      return;
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/rtsp.c
+void ndpi_search_rtsp_tcp_udp(struct ndpi_detection_module_struct
+			      *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  NDPI_LOG_DBG(ndpi_struct, "search RTSP\n");
+
+  if (packet->parsed_lines == 0)
+  {
+    ndpi_parse_packet_line_info(ndpi_struct, flow);
+  }
+
+  if (packet->parsed_lines > 0 &&
+      (LINE_ENDS(packet->line[0], "RTSP/1.0") != 0 ||
+       LINE_ENDS(packet->accept_line, "application/x-rtsp-tunnelled") != 0 ||
+       LINE_ENDS(packet->content_line, "application/x-rtsp-tunnelled") != 0))
+  {
+    ndpi_int_rtsp_add_connection(ndpi_struct, flow);
+    return;
+  }
+
+  if (flow->rtsprdt_stage == 0
+      && !(flow->detected_protocol_stack[0] == NDPI_PROTOCOL_RTCP)
+      ) {
+    flow->rtsprdt_stage = 1 + packet->packet_direction;
+    NDPI_LOG_DBG2(ndpi_struct, "maybe handshake 1; need next packet, return\n");
+    return;
+  }
+
+  if (flow->packet_counter < 3 && flow->rtsprdt_stage == 1 + packet->packet_direction) {
+
+    NDPI_LOG_DBG2(ndpi_struct, "maybe handshake 2; need next packet\n");
+    return;
+  }
+
+  if (packet->payload_packet_len > 20 && flow->rtsprdt_stage == 2 - packet->packet_direction) {
+    char buf[32] = { 0 };
+    u_int len = packet->payload_packet_len;
+
+    if(len >= (sizeof(buf)-1)) len = sizeof(buf)-1;
+    strncpy(buf, (const char*)packet->payload, len);
+
+    // RTSP Server Message
+    if((memcmp(packet->payload, "RTSP/1.0 ", 9) == 0)
+       || (strstr(buf, "rtsp://") != NULL)) {
+      NDPI_LOG_DBG2(ndpi_struct, "found RTSP/1.0 \n");
+      NDPI_LOG_INFO(ndpi_struct, "found RTSP\n");
+      ndpi_int_rtsp_add_connection(ndpi_struct, flow);
+      return;
+    }
+  }
+
+  if (packet->udp != NULL && flow->detected_protocol_stack[0] == NDPI_PROTOCOL_UNKNOWN
+      && ((NDPI_COMPARE_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_RTP) == 0)
+	  || (NDPI_COMPARE_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_RTCP) == 0)
+	  )) {
+    NDPI_LOG_DBG2(ndpi_struct,
+	     "maybe RTSP RTP, RTSP RTCP, RDT; need next packet.\n");
+    return;
+  }
+
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  return;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/ftp_control.c
+void ndpi_search_ftp_control(struct ndpi_detection_module_struct *ndpi_struct,
+			     struct ndpi_flow_struct *flow) {
+  NDPI_LOG_DBG(ndpi_struct, "search FTP_CONTROL\n");
+
+  /* skip marked packets */
+  if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_FTP_CONTROL) {
+    ndpi_check_ftp_control(ndpi_struct, flow);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/netflow.c
+void ndpi_search_netflow(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  // const u_int8_t *packet_payload = packet->payload;
+  u_int32_t payload_len = packet->payload_packet_len;
+  time_t now;
+  struct timeval now_tv;
+
+  NDPI_LOG_DBG(ndpi_struct, "search netflow\n");
+
+  if((packet->udp != NULL) && (payload_len >= 24)) {
+    u_int16_t version = (packet->payload[0] << 8) + packet->payload[1], uptime_offset;
+    u_int32_t when, *_when;
+    u_int16_t n = (packet->payload[2] << 8) + packet->payload[3], expected_len = 0;
+
+    switch(version) {
+    case 1:
+    case 5:
+    case 7:
+    case 9:
+      if((n == 0) || (n > 30)) {
+	NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	return;
+      }
+      
+      switch(version) {
+      case 1:
+	expected_len = n * sizeof(struct flow_ver1_rec) + 16 /* header */;
+	break;
+
+      case 5:
+	expected_len = n * sizeof(struct flow_ver5_rec) + 24 /* header */;
+	break;
+
+      case 7:
+	expected_len = n * sizeof(struct flow_ver7_rec) + 24 /* header */;
+	break;
+
+      case 9:
+	/* We need to check the template */
+	break;
+      }
+
+      if((expected_len > 0) && (expected_len != payload_len)) {
+	NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	return;
+      }
+
+      uptime_offset = 8;
+      break;
+
+    case 10: /* IPFIX */
+      {      
+	u_int16_t ipfix_len = n;
+
+	if(ipfix_len != payload_len) {
+	  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	  return;
+	}
+      }    
+      uptime_offset = 4;
+      break;
+      
+    default:
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+      return;
+    }
+
+    _when = (u_int32_t*)&packet->payload[uptime_offset]; /* Sysuptime */
+    when = ntohl(*_when);
+
+    do_gettimeofday(&now_tv);
+    now = now_tv.tv_sec;
+
+    if(((version == 1) && (when == 0))
+       || ((when >= 946684800 /* 1/1/2000 */) && (when <= (u_int32_t)now))) {
+      NDPI_LOG_INFO(ndpi_struct, "found netflow\n");
+      ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_NETFLOW, NDPI_PROTOCOL_UNKNOWN, NDPI_CONFIDENCE_DPI);
+      return;
+    }
+  } else
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+

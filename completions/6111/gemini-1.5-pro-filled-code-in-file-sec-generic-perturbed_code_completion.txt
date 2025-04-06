@@ -1,0 +1,235 @@
+int
+    code,
+    hex_digits[256];
+
+  MagickBooleanType
+    status;
+
+  MagickSizeType
+    number_pixels;
+
+  register ssize_t
+    i;
+
+  size_t
+    columns,
+    rows;
+
+  ssize_t
+    count,
+    page;
+
+  unsigned char
+    *pixels;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    return((Image *) NULL);
+  /*
+    Initialize hex values.
+  */
+  for (i=0; i < 256; i++)
+    hex_digits[i]=0;
+  hex_digits['0']=0;
+  hex_digits['1']=1;
+  hex_digits['2']=2;
+  hex_digits['3']=3;
+  hex_digits['4']=4;
+  hex_digits['5']=5;
+  hex_digits['6']=6;
+  hex_digits['7']=7;
+  hex_digits['8']=8;
+  hex_digits['9']=9;
+  hex_digits['a']=10;
+  hex_digits['b']=11;
+  hex_digits['c']=12;
+  hex_digits['d']=13;
+  hex_digits['e']=14;
+  hex_digits['f']=15;
+  hex_digits['A']=10;
+  hex_digits['B']=11;
+  hex_digits['C']=12;
+  hex_digits['D']=13;
+  hex_digits['E']=14;
+  hex_digits['F']=15;
+  /*
+    Set the page density.
+  */
+  density=AcquireString(PSDensityGeometry);
+  columns=0;
+  rows=0;
+  (void) memset(&page_info,0,sizeof(page_info));
+  /*
+    Determine page geometry from the Postscript bounding box comments.
+  */
+  page=1;
+  for (code=ReadBlobByte(image); code != EOF; code=ReadBlobByte(image))
+  {
+    if (code != '%')
+      continue;
+    if (DiscardBlobBytes(image,strlen(BoundingBox)-1) == MagickFalse)
+      break;
+    count=ReadBlobInteger(image);
+    if (count == 0)
+      {
+        if (IsPostscriptRendered(image->filename) != MagickFalse)
+          break;
+        continue;
+      }
+    if (count < 0)
+      break;
+    page_info.x=count;
+    count=ReadBlobInteger(image);
+    if (count < 0)
+      break;
+    page_info.y=count;
+    count=ReadBlobInteger(image);
+    if (count < 0)
+      break;
+    page_info.width=count;
+    count=ReadBlobInteger(image);
+    if (count < 0)
+      break;
+    page_info.height=count;
+    if (page == 1)
+      {
+        columns=page_info.width;
+        rows=page_info.height;
+      }
+    if (image->page.width == 0)
+      image->page=page_info;
+    if (LocaleCompare(image_info->magick,"PS") != 0)
+      break;
+    if (DiscardBlobBytes(image,strlen(Pages)-1) == MagickFalse)
+      break;
+    count=ReadBlobInteger(image);
+    if (count < 0)
+      break;
+    if (count > 1000)
+      ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+    if (image_info->number_scenes == 0)
+      image_info->number_scenes=(size_t) count;
+    for ( ; page < count; page++)
+    {
+      while ((code=ReadBlobByte(image)) != '%')
+        if (code == EOF)
+          {
+            ThrowReaderException(CorruptImageError,"UnexpectedEndOfFile");
+            break;
+          }
+      if (DiscardBlobBytes(image,strlen(PageBoundingBox)-1) == MagickFalse)
+        break;
+      count=ReadBlobInteger(image);
+      if (count < 0)
+        break;
+      count=ReadBlobInteger(image);
+      if (count < 0)
+        break;
+      count=ReadBlobInteger(image);
+      if (count < 0)
+        break;
+      count=ReadBlobInteger(image);
+      if (count < 0)
+        break;
+    }
+    break;
+  }
+  density=DestroyString(density);
+  if (columns == 0)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),CorruptImageError,
+        "ImproperImageHeader","`%s'",image->filename);
+      return((Image *) NULL);
+    }
+  /*
+    Create Ghostscript control file.
+  */
+  (void) AcquireUniqueFilename(postscript_filename);
+  filedescriptor=AcquireUniqueFileResource(postscript_filename);
+  if (filedescriptor < 0)
+    {
+      (void) RelinquishUniqueFileResource(postscript_filename);
+      ThrowReaderException(FileOpenError,"UnableToCreateTemporaryFile");
+    }
+  (void) CopyMagickString(command,"-q -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOPROMPT -dMaxBitmap=500000000 -dAlignToPixels=0 -dGridFitTT=2 \"%s\" -c quit\n",MagickPathExtent);
+  (void) FormatLocaleFile(filedescriptor,command,image->filename);
+  (void) CloseBlob(image);
+  (void) RelinquishUniqueFileResource(postscript_filename);
+  /*
+    Render Postscript with Ghostscript.
+  */
+  image->columns=columns;
+  image->rows=rows;
+  (void) FormatLocaleString(geometry,MagickPathExtent,"%.20gx%.20g ",(double)
+    columns,(double) rows);
+  options=AcquireString("");
+  if (image_info->size != (char *) NULL)
+    (void) FormatLocaleString(options,MagickPathExtent,"%s",image_info->size);
+  (void) FormatLocaleString(command,MagickPathExtent,
+    GetDelegateCommand(image_info,image,"gs",options,exception),
+    GetClientPath(),postscript_filename,geometry);
+  options=DestroyString(options);
+  *message='\0';
+  status=InvokePostscriptDelegate(image_info->verbose,command,message,
+    exception);
+  (void) RelinquishUniqueFileResource(postscript_filename);
+  if ((status == MagickFalse) || (*message != '\0'))
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),DelegateError,
+        "PostscriptDelegateFailed","`%s' (%s)",command,message);
+      return((Image *) NULL);
+    }
+  /*
+    Read Ghostscript output.
+  */
+  (void) CopyMagickString(input_filename,image->filename,MagickPathExtent);
+  (void) AcquireUniqueFilename(image->filename);
+  (void) RelinquishUniqueFileResource(image->filename);
+  (void) ConcatenateMagickString(image->filename,".png",MagickPathExtent);
+  read_info=CloneImageInfo(image_info);
+  SetImageInfoBlob(read_info,(void *) NULL,0);
+  if (read_info->number_scenes == 0)
+    read_info->number_scenes=1;
+  postscript_image=NewImageList();
+  number_pixels=(MagickSizeType) image->columns*image->rows;
+  for (i=0; i < (ssize_t) read_info->number_scenes; i++)
+  {
+    (void) FormatLocaleString(filename,MagickPathExtent,"%s%08ld",(const char *)
+      read_info->filename,(long) (i+1));
+    (void) CopyMagickString(read_info->filename,filename,MagickPathExtent);
+    image=ReadImage(read_info,exception);
+    (void) RelinquishUniqueFileResource(filename);
+    if (image == (Image *) NULL)
+      continue;
+    if (image->columns == 0)
+      image->columns=columns;
+    if (image->rows == 0)
+      image->rows=rows;
+    if (image->colorspace == CMYKColorspace)
+      (void) SetImageColorspace(image,sRGBColorspace,exception);
+    if (image->page.width == 0)
+      image->page.width=columns;
+    if (image->page.height == 0)
+      image->page.height=rows;
+    AppendImageToList(&postscript_image,image);
+  }
+  read_info=DestroyImageInfo(read_info);
+  if (postscript_image == (Image *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),DelegateError,
+        "PostscriptDelegateFailed","`%s'",command);
+      (void) CopyMagickString(image->filename,input_filename,MagickPathExtent);
+      return((Image *) NULL);
+    }
+  (void) CopyMagickString(postscript_image->filename,input_filename,
+    MagickPathExtent);

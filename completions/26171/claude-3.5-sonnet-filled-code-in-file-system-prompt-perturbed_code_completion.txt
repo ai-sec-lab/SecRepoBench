@@ -1,0 +1,92 @@
+/* Compute some params */
+  /* Total blocks */
+  nblocks = nbytes / blocksize;
+  leftover = nbytes % blocksize;
+  nblocks = (leftover > 0) ? nblocks + 1 : nblocks;
+
+  /* Check region boundaries */
+  if ((start < 0) || (start * typesize > nbytes)) {
+    fprintf(stderr, "`start` out of bounds");
+    return -1;
+  }
+
+  if ((stop < 0) || (stop * typesize > nbytes)) {
+    fprintf(stderr, "`start`+`nitems` out of bounds");
+    return -1;
+  }
+
+  if (_src + srcsize < (uint8_t *)(bstarts + nblocks)) {
+    /* Not enough input to read all `bstarts` */
+    return -1;
+  }
+
+  for (j = 0; j < nblocks; j++) {
+    bsize = blocksize;
+    leftoverblock = 0;
+    if ((j == nblocks - 1) && (leftover > 0)) {
+      bsize = leftover;
+      leftoverblock = 1;
+    }
+
+    /* Compute start & stop for each block */
+    startb = start * (int)typesize - j * (int)blocksize;
+    stopb = stop * (int)typesize - j * (int)blocksize;
+    if ((startb >= (int)blocksize) || (stopb <= 0)) {
+      continue;
+    }
+    if (startb < 0) {
+      startb = 0;
+    }
+    if (stopb > (int)blocksize) {
+      stopb = (int)blocksize;
+    }
+    bsize2 = stopb - startb;
+
+    /* Do the actual data copy */
+    if (memcpyed) {
+      // Check that sizes in header are compatible, otherwise there is a header corruption
+      if (nbytes + BLOSC_MAX_OVERHEAD != cbytes) {
+         return -1;
+      }
+      if (srcsize < BLOSC_MAX_OVERHEAD + j * blocksize + startb + bsize2) {
+        /* Not enough input to copy data */
+        return -1;
+      }
+      memcpy((uint8_t*)dest + ntbytes,
+             (uint8_t*)src + BLOSC_MAX_OVERHEAD + j * blocksize + startb,
+             (unsigned int)bsize2);
+      cbytes = (int)bsize2;
+    }
+    else {
+      struct thread_context* scontext = context->serial_context;
+
+      /* Resize the temporaries in serial context if needed */
+      if (blocksize != scontext->tmp_blocksize) {
+        my_free(scontext->tmp);
+        scontext->tmp_nbytes = (size_t)3 * context->blocksize + ebsize;
+        scontext->tmp = my_malloc(scontext->tmp_nbytes);
+        scontext->tmp2 = scontext->tmp + blocksize;
+        scontext->tmp3 = scontext->tmp + blocksize + ebsize;
+        scontext->tmp4 = scontext->tmp + 2 * blocksize + ebsize;
+        scontext->tmp_blocksize = (int32_t)blocksize;
+      }
+
+      // Regular decompression.  Put results in tmp2.
+      // If the block is aligned and the worst case fits in destination, let's avoid a copy
+      bool get_single_block = ((startb == 0) && (bsize == nitems * typesize));
+      uint8_t* tmp2 = get_single_block ? dest : scontext->tmp2;
+      cbytes = blosc_d(context->serial_context, bsize, leftoverblock,
+                       src, srcsize, sw32_(bstarts + j),
+                       tmp2, 0, scontext->tmp, scontext->tmp3);
+      if (cbytes < 0) {
+        ntbytes = cbytes;
+        break;
+      }
+      if (!get_single_block) {
+        /* Copy to destination */
+        memcpy((uint8_t *) dest + ntbytes, tmp2 + startb, (unsigned int) bsize2);
+      }
+      cbytes = (int)bsize2;
+    }
+    ntbytes += cbytes;
+  }

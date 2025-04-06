@@ -1,0 +1,90 @@
+/* Check if the flow corresponds to the SSH protocol.
+ * If so, copy SSH-related information, such as client and server signatures,
+ * and client/server hash data to the flow structure.
+ */
+if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_SSH) ||
+   (flow_info->detected_protocol.master_protocol == NDPI_PROTOCOL_SSH)) {
+    if(flow_info->ndpi_flow->protos.ssh.client_signature[0] != '\0')
+        flow_info->ssh_tls.client_signature = ndpi_strdup(flow_info->ndpi_flow->protos.ssh.client_signature);
+    if(flow_info->ndpi_flow->protos.ssh.server_signature[0] != '\0')
+        flow_info->ssh_tls.server_signature = ndpi_strdup(flow_info->ndpi_flow->protos.ssh.server_signature);
+    flow_info->ssh_tls.client_hassh = flow_info->ndpi_flow->protos.ssh.client_hassh;
+    flow_info->ssh_tls.server_hassh = flow_info->ndpi_flow->protos.ssh.server_hassh;
+    flow_info->ssh_tls.hassh_version = flow_info->ndpi_flow->protos.ssh.hassh_version;
+    flow_info->info_type = INFO_SSH;
+}
+/* Check if the flow corresponds to the TLS protocol or related protocols.
+ * If the protocol matches, update the flow structure with relevant TLS/QUIC information.
+ * This includes SSL version, server names, certificate validity dates, and JA3 fingerprints.
+ */
+else if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_TLS) ||
+        (flow_info->detected_protocol.master_protocol == NDPI_PROTOCOL_TLS) ||
+        is_ndpi_proto(flow_info, NDPI_PROTOCOL_QUIC) ||
+        (flow_info->detected_protocol.master_protocol == NDPI_PROTOCOL_QUIC)) {
+    flow_info->info_type = INFO_TLS;
+
+    if(flow_info->ndpi_flow->protos.tls.ssl_version != 0)
+        flow_info->ssh_tls.ssl_version = flow_info->ndpi_flow->protos.tls.ssl_version;
+
+    if(flow_info->ndpi_flow->protos.tls.server_names[0] != '\0')
+        flow_info->ssh_tls.server_names = ndpi_strdup(flow_info->ndpi_flow->protos.tls.server_names);
+
+    if(flow_info->ndpi_flow->protos.tls.alpn[0] != '\0')
+        flow_info->ssh_tls.tls_alpn = ndpi_strdup(flow_info->ndpi_flow->protos.tls.alpn);
+
+    if(flow_info->ndpi_flow->protos.tls.tls_supported_versions[0] != '\0')
+        flow_info->ssh_tls.tls_supported_versions = ndpi_strdup(flow_info->ndpi_flow->protos.tls.tls_supported_versions);
+
+    if(flow_info->ndpi_flow->protos.tls.issuerDN[0] != '\0')
+        flow_info->ssh_tls.tls_issuerDN = ndpi_strdup(flow_info->ndpi_flow->protos.tls.issuerDN);
+
+    if(flow_info->ndpi_flow->protos.tls.subjectDN[0] != '\0')
+        flow_info->ssh_tls.tls_subjectDN = ndpi_strdup(flow_info->ndpi_flow->protos.tls.subjectDN);
+
+    if(flow_info->ndpi_flow->protos.tls.ja3_client[0] != '\0')
+        flow_info->ssh_tls.ja3_client = ndpi_strdup(flow_info->ndpi_flow->protos.tls.ja3_client);
+
+    if(flow_info->ndpi_flow->protos.tls.ja3_server[0] != '\0')
+        flow_info->ssh_tls.ja3_server = ndpi_strdup(flow_info->ndpi_flow->protos.tls.ja3_server);
+
+    if(flow_info->ndpi_flow->protos.tls.encrypted_sni.esni[0] != '\0')
+        flow_info->ssh_tls.encrypted_sni.esni = ndpi_strdup(flow_info->ndpi_flow->protos.tls.encrypted_sni.esni);
+
+    if(enable_doh_dot_detection && flow_info->ndpi_flow->protos.tls.doh_dot_status != 0)
+        flow_info->ssh_tls.doh_dot_status = flow_info->ndpi_flow->protos.tls.doh_dot_status;
+
+    if(enable_ja3_plus && flow_info->ndpi_flow->protos.tls.ja3_plus[0] != '\0')
+        flow_info->ssh_tls.ja3_plus = ndpi_strdup(flow_info->ndpi_flow->protos.tls.ja3_plus);
+
+    /* Reset and update the payload length distribution based on TLS block lengths. */
+    if(flow_info->ndpi_flow->protos.tls.num_tls_blocks > 0) {
+#ifdef DIRECTION_BINS
+        ndpi_reset_bin(&flow_info->payload_len_bin_src2dst);
+        ndpi_reset_bin(&flow_info->payload_len_bin_dst2src);
+#else
+        ndpi_reset_bin(&flow_info->payload_len_bin);
+#endif
+        for(int i = 0; i < flow_info->ndpi_flow->protos.tls.num_tls_blocks; i++) {
+            u_int16_t tls_block_len = flow_info->ndpi_flow->protos.tls.tls_block_lengths[i];
+#ifdef DIRECTION_BINS
+            if(flow_info->ndpi_flow->protos.tls.tls_block_directions[i] == 0)
+                ndpi_inc_bin(&flow_info->payload_len_bin_src2dst, plen2slot(tls_block_len));
+            else
+                ndpi_inc_bin(&flow_info->payload_len_bin_dst2src, plen2slot(tls_block_len));
+#else
+            ndpi_inc_bin(&flow_info->payload_len_bin, plen2slot(tls_block_len), 1);
+#endif
+        }
+    }
+}
+/* If ALPN and supported versions are present, store them and set the appropriate info type. */
+else if((flow_info->ndpi_flow->protos.tls.alpn[0] != '\0') ||
+        (flow_info->ndpi_flow->protos.tls.tls_supported_versions[0] != '\0')) {
+    flow_info->info_type = INFO_TLS;
+
+    if(flow_info->ndpi_flow->protos.tls.alpn[0] != '\0')
+        flow_info->ssh_tls.tls_alpn = ndpi_strdup(flow_info->ndpi_flow->protos.tls.alpn);
+
+    if(flow_info->ndpi_flow->protos.tls.tls_supported_versions[0] != '\0')
+        flow_info->ssh_tls.tls_supported_versions = ndpi_strdup(flow_info->ndpi_flow->protos.tls.tls_supported_versions);
+}

@@ -1,0 +1,70 @@
+while (step) {
+    // Iterate over directory entries in the buffer while there is data to process.
+    while (p + DR_name_offset < b + step) {
+        size_t reclen = (size_t)p[DR_length_offset];
+        if (reclen < 34 || reclen > step) {
+            archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+                "Invalid length of directory record");
+            return (ARCHIVE_FATAL);
+        }
+        
+        // Parse the directory entry and handle special cases.
+        struct file_info *child = parse_file_info(a, file, p, reclen);
+        if (child == NULL) {
+            return (ARCHIVE_FATAL);
+        }
+        
+        // Skip entries for '.' and '..' directories.
+        if (child->name.s != NULL && (strcmp(child->name.s, ".") == 0 || strcmp(child->name.s, "..") == 0)) {
+            p += reclen;
+            step -= reclen;
+            continue;
+        }
+        
+        // Manage multi-extent files by collecting their contents into a list.
+        if (child->multi_extent) {
+            if (multi == NULL) {
+                multi = child;
+            } else {
+                child->contents.first = multi->contents.first;
+                child->contents.last = multi->contents.last;
+                multi->contents.first = child;
+                multi->contents.last = &(child->contents.next);
+            }
+        } else {
+            // For each valid directory entry, add it to the archive structure.
+            if (add_entry(a, iso9660, child) != ARCHIVE_OK) {
+                return (ARCHIVE_FATAL);
+            }
+        }
+        
+        p += reclen;
+        step -= reclen;
+    }
+    
+    // Handle memory allocation and error management for multi-extent file handling.
+    if (multi != NULL) {
+        struct content *con = malloc(sizeof(*con));
+        if (con == NULL) {
+            archive_set_error(&a->archive, ENOMEM, "No memory");
+            return (ARCHIVE_FATAL);
+        }
+        con->offset = multi->offset;
+        con->size = multi->size;
+        con->next = NULL;
+        *multi->contents.last = con;
+        multi->contents.last = &(con->next);
+        multi = NULL;
+    }
+    
+    // Read the next block of directory entries.
+    step = (size_t)(((file->size + iso9660->logical_block_size -1) / iso9660->logical_block_size) * iso9660->logical_block_size);
+    b = __archive_read_ahead(a, step, NULL);
+    if (b == NULL) {
+        archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+            "Failed to read full block when scanning "
+            "ISO9660 directory list");
+        return (ARCHIVE_FATAL);
+    }
+    iso9660->current_position += step;
+}

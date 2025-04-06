@@ -1,0 +1,495 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libavcodec/mpegvideo_dec.c
+static inline void MPV_motion_lowres(MpegEncContext *s,
+                                     uint8_t *dest_y, uint8_t *dest_cb,
+                                     uint8_t *dest_cr,
+                                     int dir, uint8_t *const *ref_picture,
+                                     const h264_chroma_mc_func *pix_op)
+{
+    int mx, my;
+    int mb_x, mb_y;
+    const int lowres  = s->avctx->lowres;
+    const int block_s = 8 >>lowres;
+
+    mb_x = s->mb_x;
+    mb_y = s->mb_y;
+
+    switch (s->mv_type) {
+    case MV_TYPE_16X16:
+        mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                           0, 0, 0,
+                           ref_picture, pix_op,
+                           s->mv[dir][0][0], s->mv[dir][0][1],
+                           2 * block_s, mb_y);
+        break;
+    case MV_TYPE_8X8:
+        mx = 0;
+        my = 0;
+        for (int i = 0; i < 4; i++) {
+            hpel_motion_lowres(s, dest_y + ((i & 1) + (i >> 1) *
+                               s->linesize) * block_s,
+                               ref_picture[0], 0, 0,
+                               (2 * mb_x + (i & 1)) * block_s,
+                               (2 * mb_y + (i >> 1)) * block_s,
+                               s->width, s->height, s->linesize,
+                               s->h_edge_pos >> lowres, s->v_edge_pos >> lowres,
+                               block_s, block_s, pix_op,
+                               s->mv[dir][i][0], s->mv[dir][i][1]);
+
+            mx += s->mv[dir][i][0];
+            my += s->mv[dir][i][1];
+        }
+
+        if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY))
+            chroma_4mv_motion_lowres(s, dest_cb, dest_cr, ref_picture,
+                                     pix_op, mx, my);
+        break;
+    case MV_TYPE_FIELD:
+        if (s->picture_structure == PICT_FRAME) {
+            /* top field */
+            mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                               1, 0, s->field_select[dir][0],
+                               ref_picture, pix_op,
+                               s->mv[dir][0][0], s->mv[dir][0][1],
+                               block_s, mb_y);
+            /* bottom field */
+            mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                               1, 1, s->field_select[dir][1],
+                               ref_picture, pix_op,
+                               s->mv[dir][1][0], s->mv[dir][1][1],
+                               block_s, mb_y);
+        } else {
+            if (s->picture_structure != s->field_select[dir][0] + 1 &&
+                s->pict_type != AV_PICTURE_TYPE_B && !s->first_field) {
+                ref_picture = s->current_picture_ptr->f->data;
+
+            }
+            mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                               0, 0, s->field_select[dir][0],
+                               ref_picture, pix_op,
+                               s->mv[dir][0][0],
+                               s->mv[dir][0][1], 2 * block_s, mb_y >> 1);
+            }
+        break;
+    case MV_TYPE_16X8:
+        for (int i = 0; i < 2; i++) {
+            uint8_t *const *ref2picture;
+
+            if (s->picture_structure == s->field_select[dir][i] + 1 ||
+                s->pict_type == AV_PICTURE_TYPE_B || s->first_field) {
+                ref2picture = ref_picture;
+            } else {
+                ref2picture = s->current_picture_ptr->f->data;
+            }
+
+            mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                               0, 0, s->field_select[dir][i],
+                               ref2picture, pix_op,
+                               s->mv[dir][i][0], s->mv[dir][i][1] +
+                               2 * block_s * i, block_s, mb_y >> 1);
+
+            dest_y  +=  2 * block_s *  s->linesize;
+            dest_cb += (2 * block_s >> s->chroma_y_shift) * s->uvlinesize;
+            dest_cr += (2 * block_s >> s->chroma_y_shift) * s->uvlinesize;
+        }
+        break;
+    case MV_TYPE_DMV:
+        if (s->picture_structure == PICT_FRAME) {
+            for (int i = 0; i < 2; i++) {
+                for (int j = 0; j < 2; j++) {
+                    mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                                       1, j, j ^ i,
+                                       ref_picture, pix_op,
+                                       s->mv[dir][2 * i + j][0],
+                                       s->mv[dir][2 * i + j][1],
+                                       block_s, mb_y);
+                }
+                pix_op = s->h264chroma.avg_h264_chroma_pixels_tab;
+            }
+        } else {
+            for (int i = 0; i < 2; i++) {
+                mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                                   0, 0, s->picture_structure != i + 1,
+                                   ref_picture, pix_op,
+                                   s->mv[dir][2 * i][0],s->mv[dir][2 * i][1],
+                                   2 * block_s, mb_y >> 1);
+
+                // after put we make avg of the same block
+                pix_op = s->h264chroma.avg_h264_chroma_pixels_tab;
+
+                // opposite parity is always in the same
+                // frame if this is second field
+                if (!s->first_field) {
+                    ref_picture = s->current_picture_ptr->f->data;
+                }
+            }
+        }
+        break;
+    default:
+        av_assert2(0);
+    }
+}
+
+// the below code fragment can be found in:
+// libavcodec/mpegvideo_dec.c
+static inline void chroma_4mv_motion_lowres(MpegEncContext *s,
+                                            uint8_t *dest_cb, uint8_t *dest_cr,
+                                            uint8_t *const *ref_picture,
+                                            const h264_chroma_mc_func * pix_op,
+                                            int mx, int my)
+{
+    const int lowres     = s->avctx->lowres;
+    const int op_index   = FFMIN(lowres, 3);
+    const int block_s    = 8 >> lowres;
+    const int s_mask     = (2 << lowres) - 1;
+    const int h_edge_pos = s->h_edge_pos >> lowres + 1;
+    const int v_edge_pos = s->v_edge_pos >> lowres + 1;
+    int emu = 0, src_x, src_y, sx, sy;
+    ptrdiff_t offset;
+    const uint8_t *ptr;
+
+    if (s->quarter_sample) {
+        mx /= 2;
+        my /= 2;
+    }
+
+    /* In case of 8X8, we construct a single chroma motion vector
+       with a special rounding */
+    mx = ff_h263_round_chroma(mx);
+    my = ff_h263_round_chroma(my);
+
+    sx = mx & s_mask;
+    sy = my & s_mask;
+    src_x = s->mb_x * block_s + (mx >> lowres + 1);
+    src_y = s->mb_y * block_s + (my >> lowres + 1);
+
+    offset = src_y * s->uvlinesize + src_x;
+    ptr = ref_picture[1] + offset;
+    if ((unsigned) src_x > FFMAX(h_edge_pos - (!!sx) - block_s, 0) ||
+        (unsigned) src_y > FFMAX(v_edge_pos - (!!sy) - block_s, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr,
+                                 s->uvlinesize, s->uvlinesize,
+                                 9, 9,
+                                 src_x, src_y, h_edge_pos, v_edge_pos);
+        ptr = s->sc.edge_emu_buffer;
+        emu = 1;
+    }
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+    pix_op[op_index](dest_cb, ptr, s->uvlinesize, block_s, sx, sy);
+
+    ptr = ref_picture[2] + offset;
+    if (emu) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr,
+                                 s->uvlinesize, s->uvlinesize,
+                                 9, 9,
+                                 src_x, src_y, h_edge_pos, v_edge_pos);
+        ptr = s->sc.edge_emu_buffer;
+    }
+    pix_op[op_index](dest_cr, ptr, s->uvlinesize, block_s, sx, sy);
+}
+
+// the below code fragment can be found in:
+// libavcodec/mpegvideo_dec.c
+static inline int hpel_motion_lowres(MpegEncContext *s,
+                                     uint8_t *dest, const uint8_t *src,
+                                     int field_based, int field_select,
+                                     int src_x, int src_y,
+                                     int width, int height, ptrdiff_t stride,
+                                     int h_edge_pos, int v_edge_pos,
+                                     int w, int h, const h264_chroma_mc_func *pix_op,
+                                     int motion_x, int motion_y)
+{
+    const int lowres   = s->avctx->lowres;
+    const int op_index = FFMIN(lowres, 3);
+    const int s_mask   = (2 << lowres) - 1;
+    int emu = 0;
+    int sx, sy;
+
+    if (s->quarter_sample) {
+        motion_x /= 2;
+        motion_y /= 2;
+    }
+
+    sx = motion_x & s_mask;
+    sy = motion_y & s_mask;
+    src_x += motion_x >> lowres + 1;
+    src_y += motion_y >> lowres + 1;
+
+    src   += src_y * stride + src_x;
+
+    if ((unsigned)src_x > FFMAX( h_edge_pos - (!!sx) - w,                 0) ||
+        (unsigned)src_y > FFMAX((v_edge_pos >> field_based) - (!!sy) - h, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, src,
+                                 s->linesize, s->linesize,
+                                 w + 1, (h + 1) << field_based,
+                                 src_x, src_y * (1 << field_based),
+                                 h_edge_pos, v_edge_pos);
+        src = s->sc.edge_emu_buffer;
+        emu = 1;
+    }
+
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+    if (field_select)
+        src += s->linesize;
+    pix_op[op_index](dest, src, stride, h, sx, sy);
+    return emu;
+}
+
+// the below code fragment can be found in:
+// libavcodec/h263.c
+void ff_h263_update_motion_val(MpegEncContext * s){
+    const int mb_xy = s->mb_y * s->mb_stride + s->mb_x;
+               //FIXME a lot of that is only needed for !low_delay
+    const int wrap = s->b8_stride;
+    const int xy = s->block_index[0];
+
+    s->current_picture.mbskip_table[mb_xy] = s->mb_skipped;
+
+    if(s->mv_type != MV_TYPE_8X8){
+        int motion_x, motion_y;
+        if (s->mb_intra) {
+            motion_x = 0;
+            motion_y = 0;
+        } else if (s->mv_type == MV_TYPE_16X16) {
+            motion_x = s->mv[0][0][0];
+            motion_y = s->mv[0][0][1];
+        } else /*if (s->mv_type == MV_TYPE_FIELD)*/ {
+            int i;
+            motion_x = s->mv[0][0][0] + s->mv[0][1][0];
+            motion_y = s->mv[0][0][1] + s->mv[0][1][1];
+            motion_x = (motion_x>>1) | (motion_x&1);
+            for(i=0; i<2; i++){
+                s->p_field_mv_table[i][0][mb_xy][0]= s->mv[0][i][0];
+                s->p_field_mv_table[i][0][mb_xy][1]= s->mv[0][i][1];
+            }
+            s->current_picture.ref_index[0][4*mb_xy    ] =
+            s->current_picture.ref_index[0][4*mb_xy + 1] = s->field_select[0][0];
+            s->current_picture.ref_index[0][4*mb_xy + 2] =
+            s->current_picture.ref_index[0][4*mb_xy + 3] = s->field_select[0][1];
+        }
+
+        /* no update if 8X8 because it has been done during parsing */
+        s->current_picture.motion_val[0][xy][0]            = motion_x;
+        s->current_picture.motion_val[0][xy][1]            = motion_y;
+        s->current_picture.motion_val[0][xy + 1][0]        = motion_x;
+        s->current_picture.motion_val[0][xy + 1][1]        = motion_y;
+        s->current_picture.motion_val[0][xy + wrap][0]     = motion_x;
+        s->current_picture.motion_val[0][xy + wrap][1]     = motion_y;
+        s->current_picture.motion_val[0][xy + 1 + wrap][0] = motion_x;
+        s->current_picture.motion_val[0][xy + 1 + wrap][1] = motion_y;
+    }
+
+    if(s->encoding){ //FIXME encoding MUST be cleaned up
+        if (s->mv_type == MV_TYPE_8X8)
+            s->current_picture.mb_type[mb_xy] = MB_TYPE_L0 | MB_TYPE_8x8;
+        else if(s->mb_intra)
+            s->current_picture.mb_type[mb_xy] = MB_TYPE_INTRA;
+        else
+            s->current_picture.mb_type[mb_xy] = MB_TYPE_L0 | MB_TYPE_16x16;
+    }
+}
+
+// the below code fragment can be found in:
+// libavcodec/ituh263enc.c
+void ff_h263_encode_mb(MpegEncContext * s,
+                       int16_t block[6][64],
+                       int motion_x, int motion_y)
+{
+    int cbpc, cbpy, i, cbp, pred_x, pred_y;
+    int16_t pred_dc;
+    int16_t rec_intradc[6];
+    int16_t *dc_ptr[6];
+    const int interleaved_stats = s->avctx->flags & AV_CODEC_FLAG_PASS1;
+
+    if (!s->mb_intra) {
+        /* compute cbp */
+        cbp= get_p_cbp(s, block, motion_x, motion_y);
+
+        if ((cbp | motion_x | motion_y | s->dquant | (s->mv_type - MV_TYPE_16X16)) == 0) {
+            /* skip macroblock */
+            put_bits(&s->pb, 1, 1);
+            if(interleaved_stats){
+                s->misc_bits++;
+                s->last_bits++;
+            }
+            s->skip_count++;
+
+            return;
+        }
+        put_bits(&s->pb, 1, 0);         /* mb coded */
+
+        cbpc = cbp & 3;
+        cbpy = cbp >> 2;
+        if(s->alt_inter_vlc==0 || cbpc!=3)
+            cbpy ^= 0xF;
+        if(s->dquant) cbpc+= 8;
+        if(s->mv_type==MV_TYPE_16X16){
+            put_bits(&s->pb,
+                    ff_h263_inter_MCBPC_bits[cbpc],
+                    ff_h263_inter_MCBPC_code[cbpc]);
+
+            put_bits(&s->pb, ff_h263_cbpy_tab[cbpy][1], ff_h263_cbpy_tab[cbpy][0]);
+            if(s->dquant)
+                put_bits(&s->pb, 2, dquant_code[s->dquant+2]);
+
+            if(interleaved_stats){
+                s->misc_bits+= get_bits_diff(s);
+            }
+
+            /* motion vectors: 16x16 mode */
+            ff_h263_pred_motion(s, 0, 0, &pred_x, &pred_y);
+
+            if (!s->umvplus) {
+                ff_h263_encode_motion_vector(s, motion_x - pred_x,
+                                                motion_y - pred_y, 1);
+            }
+            else {
+                h263p_encode_umotion(&s->pb, motion_x - pred_x);
+                h263p_encode_umotion(&s->pb, motion_y - pred_y);
+                if (((motion_x - pred_x) == 1) && ((motion_y - pred_y) == 1))
+                    /* To prevent Start Code emulation */
+                    put_bits(&s->pb,1,1);
+            }
+        }else{
+            put_bits(&s->pb,
+                    ff_h263_inter_MCBPC_bits[cbpc+16],
+                    ff_h263_inter_MCBPC_code[cbpc+16]);
+            put_bits(&s->pb, ff_h263_cbpy_tab[cbpy][1], ff_h263_cbpy_tab[cbpy][0]);
+            if(s->dquant)
+                put_bits(&s->pb, 2, dquant_code[s->dquant+2]);
+
+            if(interleaved_stats){
+                s->misc_bits+= get_bits_diff(s);
+            }
+
+            for(i=0; i<4; i++){
+                /* motion vectors: 8x8 mode*/
+                ff_h263_pred_motion(s, i, 0, &pred_x, &pred_y);
+
+                motion_x = s->current_picture.motion_val[0][s->block_index[i]][0];
+                motion_y = s->current_picture.motion_val[0][s->block_index[i]][1];
+                if (!s->umvplus) {
+                    ff_h263_encode_motion_vector(s, motion_x - pred_x,
+                                                    motion_y - pred_y, 1);
+                }
+                else {
+                    h263p_encode_umotion(&s->pb, motion_x - pred_x);
+                    h263p_encode_umotion(&s->pb, motion_y - pred_y);
+                    if (((motion_x - pred_x) == 1) && ((motion_y - pred_y) == 1))
+                        /* To prevent Start Code emulation */
+                        put_bits(&s->pb,1,1);
+                }
+            }
+        }
+
+        if(interleaved_stats){
+            s->mv_bits+= get_bits_diff(s);
+        }
+    } else {
+        av_assert2(s->mb_intra);
+
+        cbp = 0;
+        if (s->h263_aic) {
+            /* Predict DC */
+            for(i=0; i<6; i++) {
+                int16_t level = block[i][0];
+                int scale;
+
+                if(i<4) scale= s->y_dc_scale;
+                else    scale= s->c_dc_scale;
+
+                pred_dc = h263_pred_dc(s, i, &dc_ptr[i]);
+                level -= pred_dc;
+                /* Quant */
+                if (level >= 0)
+                    level = (level + (scale>>1))/scale;
+                else
+                    level = (level - (scale>>1))/scale;
+
+                if(!s->modified_quant){
+                    if (level < -127)
+                        level = -127;
+                    else if (level > 127)
+                        level = 127;
+                }
+
+                block[i][0] = level;
+                /* Reconstruction */
+                rec_intradc[i] = scale*level + pred_dc;
+                /* Oddify */
+                rec_intradc[i] |= 1;
+                //if ((rec_intradc[i] % 2) == 0)
+                //    rec_intradc[i]++;
+                /* Clipping */
+                if (rec_intradc[i] < 0)
+                    rec_intradc[i] = 0;
+                else if (rec_intradc[i] > 2047)
+                    rec_intradc[i] = 2047;
+
+                /* Update AC/DC tables */
+                *dc_ptr[i] = rec_intradc[i];
+                /* AIC can change CBP */
+                if (s->block_last_index[i] > 0 ||
+                    (s->block_last_index[i] == 0 && level !=0))
+                    cbp |= 1 << (5 - i);
+            }
+        }else{
+            for(i=0; i<6; i++) {
+                /* compute cbp */
+                if (s->block_last_index[i] >= 1)
+                    cbp |= 1 << (5 - i);
+            }
+        }
+
+        cbpc = cbp & 3;
+        if (s->pict_type == AV_PICTURE_TYPE_I) {
+            if(s->dquant) cbpc+=4;
+            put_bits(&s->pb,
+                ff_h263_intra_MCBPC_bits[cbpc],
+                ff_h263_intra_MCBPC_code[cbpc]);
+        } else {
+            if(s->dquant) cbpc+=8;
+            put_bits(&s->pb, 1, 0);     /* mb coded */
+            put_bits(&s->pb,
+                ff_h263_inter_MCBPC_bits[cbpc + 4],
+                ff_h263_inter_MCBPC_code[cbpc + 4]);
+        }
+        if (s->h263_aic) {
+            /* XXX: currently, we do not try to use ac prediction */
+            put_bits(&s->pb, 1, 0);     /* no AC prediction */
+        }
+        cbpy = cbp >> 2;
+        put_bits(&s->pb, ff_h263_cbpy_tab[cbpy][1], ff_h263_cbpy_tab[cbpy][0]);
+        if(s->dquant)
+            put_bits(&s->pb, 2, dquant_code[s->dquant+2]);
+
+        if(interleaved_stats){
+            s->misc_bits+= get_bits_diff(s);
+        }
+    }
+
+    for(i=0; i<6; i++) {
+        /* encode each block */
+        h263_encode_block(s, block[i], i);
+
+        /* Update INTRADC for decoding */
+        if (s->h263_aic && s->mb_intra) {
+            block[i][0] = rec_intradc[i];
+
+        }
+    }
+
+    if(interleaved_stats){
+        if (!s->mb_intra) {
+            s->p_tex_bits+= get_bits_diff(s);
+        }else{
+            s->i_tex_bits+= get_bits_diff(s);
+            s->i_count++;
+        }
+    }
+}
+

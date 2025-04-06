@@ -1,0 +1,298 @@
+MLU*) Ptr);
+
+    cmsUNUSED_PARAMETER(n);
+    cmsUNUSED_PARAMETER(self);
+}
+
+static
+void Type_MLU_Free(struct _cms_typehandler_struct* self, void* Ptr)
+{
+    cmsMLU* mlu = (cmsMLU*) Ptr;
+
+    if (mlu ->MemPool != NULL)
+        _cmsFree(self ->ContextID, mlu ->MemPool);
+
+    cmsMLUfree(mlu);
+    return;
+
+    cmsUNUSED_PARAMETER(self);
+}
+
+
+// ********************************************************************************
+// Type cmsSigProfileSequenceDescTag
+// ********************************************************************************
+//
+//   Do NOT trust SizeOfTag as there is an issue on the definition of profileSequenceDescTag. See the TechNote from
+//   Max Derhak and Rohit Patil about this: basically the size of the string table should be guessed and cannot be
+//   taken from the size of tag if this tag is embedded as part of bigger structures (profileSequenceDescTag, for instance)
+//
+
+static
+void *Type_ProfileSequenceDesc_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cmsUInt32Number* nItems, cmsUInt32Number SizeOfTag)
+{
+    cmsProfileSequenceDesc* seq;
+    cmsUInt32Number Count, RecLen, NumOfWchar;
+    cmsUInt32Number SizeOfHeader;
+    cmsUInt32Number  Len, Offset;
+    cmsUInt32Number  i;
+    wchar_t*         Block;
+    cmsUInt32Number  BeginOfThisString, EndOfThisString, LargestPosition;
+
+    *nItems = 0;
+    if (!_cmsReadUInt32Number(io, &Count)) return NULL;
+    if (!_cmsReadUInt32Number(io, &RecLen)) return NULL;
+
+    if (RecLen != 12) {
+
+        cmsSignalError(self->ContextID, cmsERROR_UNKNOWN_EXTENSION, "profileSequenceDescType of len != 12 is not supported.");
+        return NULL;
+    }
+
+    seq = (cmsProfileSequenceDesc*) _cmsMalloc(self ->ContextID, sizeof(cmsProfileSequenceDesc));
+    if (seq == NULL) return NULL;
+
+    seq ->UsedEntries = Count;
+
+    SizeOfHeader = 12 * Count + sizeof(_cmsTagBase);
+    LargestPosition = 0;
+
+    for (i=0; i < Count; i++) {
+
+        if (!_cmsReadUInt16Number(io, &seq ->Entries[i].Language)) goto Error;
+        if (!_cmsReadUInt16Number(io, &seq ->Entries[i].Country))  goto Error;
+
+        // Now deal with Len and offset.
+        if (!_cmsReadUInt32Number(io, &Len)) goto Error;
+        if (!_cmsReadUInt32Number(io, &Offset)) goto Error;
+
+        // Check for overflow
+        if (Offset < (SizeOfHeader + 8)) goto Error;        
+        if (((Offset + Len) < Len) || ((Offset + Len) > SizeOfTag + 8)) goto Error;
+
+        // True begin of the string
+        BeginOfThisString = Offset - SizeOfHeader - 8;
+
+        // Adjust to wchar_t elements
+        seq ->Entries[i].Len = (Len * sizeof(wchar_t)) / sizeof(cmsUInt16Number);
+        seq ->Entries[i].StrW = (BeginOfThisString * sizeof(wchar_t)) / sizeof(cmsUInt16Number);
+
+        // To guess maximum size, add offset + len
+        EndOfThisString = BeginOfThisString + Len;
+        if (EndOfThisString > LargestPosition)
+            LargestPosition = EndOfThisString;
+    }
+
+    // Now read the remaining of tag and fill all strings. Subtract the directory
+    SizeOfTag   = (LargestPosition * sizeof(wchar_t)) / sizeof(cmsUInt16Number);
+    if (SizeOfTag == 0)
+    {
+        Block = NULL;
+        NumOfWchar = 0;
+
+    }
+    else
+    {
+        Block = (wchar_t*) _cmsMalloc(self ->ContextID, SizeOfTag);
+        if (Block == NULL) goto Error;
+        NumOfWchar = SizeOfTag / sizeof(wchar_t);
+        if (!_cmsReadWCharArray(io, NumOfWchar, Block)) goto Error;
+    }
+
+    seq ->MemPool  = Block;
+    seq ->PoolSize = SizeOfTag;
+    seq ->PoolUsed = SizeOfTag;
+
+    *nItems = 1;
+    return (void*) seq;
+
+Error:
+    if (seq) _cmsFree(self ->ContextID, seq);
+    return NULL;
+}
+
+static
+cmsBool  Type_ProfileSequenceDesc_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, void* Ptr, cmsUInt32Number nItems)
+{
+    cmsProfileSequenceDesc* seq =(cmsProfileSequenceDesc*) Ptr;
+    cmsUInt32Number HeaderSize;
+    cmsUInt32Number  Len, Offset;
+    cmsUInt32Number i;
+
+    if (Ptr == NULL) {
+
+          // Empty placeholder
+          if (!_cmsWriteUInt32Number(io, 0)) return FALSE;
+          if (!_cmsWriteUInt32Number(io, 12)) return FALSE;
+          return TRUE;
+    }
+
+    if (!_cmsWriteUInt32Number(io, seq ->UsedEntries)) return FALSE;
+    if (!_cmsWriteUInt32Number(io, 12)) return FALSE;
+
+    HeaderSize = 12 * seq ->UsedEntries + sizeof(_cmsTagBase);
+
+    for (i=0; i < seq ->UsedEntries; i++) {
+
+        Len    =  seq ->Entries[i].Len;
+        Offset =  seq ->Entries[i].StrW;
+
+        Len    = (Len * sizeof(cmsUInt16Number)) / sizeof(wchar_t);
+        Offset = (Offset * sizeof(cmsUInt16Number)) / sizeof(wchar_t) + HeaderSize + 8;
+
+        if (!_cmsWriteUInt16Number(io, seq ->Entries[i].Language)) return FALSE;
+        if (!_cmsWriteUInt16Number(io, seq ->Entries[i].Country))  return FALSE;
+        if (!_cmsWriteUInt32Number(io, Len)) return FALSE;
+        if (!_cmsWriteUInt32Number(io, Offset)) return FALSE;
+    }
+
+    if (!_cmsWriteWCharArray(io, seq ->PoolUsed / sizeof(wchar_t), (wchar_t*)  seq ->MemPool)) return FALSE;
+
+    return TRUE;
+
+    cmsUNUSED_PARAMETER(nItems);
+    cmsUNUSED_PARAMETER(self);
+}
+
+
+static
+void* Type_ProfileSequenceDesc_Dup(struct _cms_typehandler_struct* self, const void *Ptr, cmsUInt32Number n)
+{
+    return (void*) cmsDupProfileSequenceDesc((cmsProfileSequenceDesc*) Ptr);
+
+    cmsUNUSED_PARAMETER(n);
+    cmsUNUSED_PARAMETER(self);
+}
+
+static
+void Type_ProfileSequenceDesc_Free(struct _cms_typehandler_struct* self, void* Ptr)
+{
+    cmsProfileSequenceDesc* seq = (cmsProfileSequenceDesc*) Ptr;
+
+    if (seq ->MemPool != NULL)
+        _cmsFree(self ->ContextID, seq ->MemPool);
+
+    cmsFreeProfileSequenceDesc(seq);
+    return;
+
+    cmsUNUSED_PARAMETER(self);
+}
+
+
+// ********************************************************************************
+// Type cmsSigProfileDescriptionType
+// ********************************************************************************
+
+static
+void *Type_ProfileDescription_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cmsUInt32Number* nItems, cmsUInt32Number SizeOfTag)
+{
+    cmsProfileDescription* desc;
+    cmsUInt32Number Count, RecLen, NumOfWchar;
+    cmsUInt32Number SizeOfHeader;
+    cmsUInt32Number  Len, Offset;
+    cmsUInt32Number  i;
+    wchar_t*         Block;
+    cmsUInt32Number  BeginOfThisString, EndOfThisString, LargestPosition;
+
+    *nItems = 0;
+    if (!_cmsReadUInt32Number(io, &Count)) return NULL;
+    if (!_cmsReadUInt32Number(io, &RecLen)) return NULL;
+
+    if (RecLen != 12) {
+
+        cmsSignalError(self->ContextID, cmsERROR_UNKNOWN_EXTENSION, "profileDescriptionType of len != 12 is not supported.");
+        return NULL;
+    }
+
+    desc = (cmsProfileDescription*) _cmsMalloc(self ->ContextID, sizeof(cmsProfileDescription));
+    if (desc == NULL) return NULL;
+
+    desc ->UsedEntries = Count;
+
+    SizeOfHeader = 12 * Count + sizeof(_cmsTagBase);
+    LargestPosition = 0;
+
+    for (i=0; i < Count; i++) {
+
+        if (!_cmsReadUInt16Number(io, &desc ->Entries[i].Language)) goto Error;
+        if (!_cmsReadUInt16Number(io, &desc ->Entries[i].Country))  goto Error;
+
+        // Now deal with Len and offset.
+        if (!_cmsReadUInt32Number(io, &Len)) goto Error;
+        if (!_cmsReadUInt32Number(io, &Offset)) goto Error;
+
+        // Check for overflow
+        if (Offset < (SizeOfHeader + 8)) goto Error;        
+        if (((Offset + Len) < Len) || ((Offset + Len) > SizeOfTag + 8)) goto Error;
+
+        // True begin of the string
+        BeginOfThisString = Offset - SizeOfHeader - 8;
+
+        // Adjust to wchar_t elements
+        desc ->Entries[i].Len = (Len * sizeof(wchar_t)) / sizeof(cmsUInt16Number);
+        desc ->Entries[i].StrW = (BeginOfThisString * sizeof(wchar_t)) / sizeof(cmsUInt16Number);
+
+        // To guess maximum size, add offset + len
+        EndOfThisString = BeginOfThisString + Len;
+        if (EndOfThisString > LargestPosition)
+            LargestPosition = EndOfThisString;
+    }
+
+    // Now read the remaining of tag and fill all strings. Subtract the directory
+    SizeOfTag   = (LargestPosition * sizeof(wchar_t)) / sizeof(cmsUInt16Number);
+    if (SizeOfTag == 0)
+    {
+        Block = NULL;
+        NumOfWchar = 0;
+
+    }
+    else
+    {
+        Block = (wchar_t*) _cmsMalloc(self ->ContextID, SizeOfTag);
+        if (Block == NULL) goto Error;
+        NumOfWchar = SizeOfTag / sizeof(wchar_t);
+        if (!_cmsReadWCharArray(io, NumOfWchar, Block)) goto Error;
+    }
+
+    desc ->MemPool  = Block;
+    desc ->PoolSize = SizeOfTag;
+    desc ->PoolUsed = SizeOfTag;
+
+    *nItems = 1;
+    return (void*) desc;
+
+Error:
+    if (desc) _cmsFree(self ->ContextID, desc);
+    return NULL;
+}
+
+static
+cmsBool  Type_ProfileDescription_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, void* Ptr, cmsUInt32Number nItems)
+{
+    cmsProfileDescription* desc =(cmsProfileDescription*) Ptr;
+    cmsUInt32Number HeaderSize;
+    cmsUInt32Number  Len, Offset;
+    cmsUInt32Number i;
+
+    if (Ptr == NULL) {
+
+          // Empty placeholder
+          if (!_cmsWriteUInt32Number(io, 0)) return FALSE;
+          if (!_cmsWriteUInt32Number(io, 12)) return FALSE;
+          return TRUE;
+    }
+
+    if (!_cmsWriteUInt32Number(io, desc ->UsedEntries)) return FALSE;
+    if (!_cmsWriteUInt32Number(io, 12)) return FALSE;
+
+    HeaderSize = 12 * desc ->UsedEntries + sizeof(_cmsTagBase);
+
+    for (i=0; i < desc ->UsedEntries; i++) {
+
+        Len    =  desc ->Entries[i].Len;
+        Offset =  desc ->Entries[i].StrW;
+
+        Len    = (Len * sizeof(cmsUInt16Number)) / sizeof(wchar_t);
+        Offset = (Offset * sizeof(cmsUInt16Number)) / sizeof(wchar_t) + HeaderSize + 8;
+
+        if (!_cmsWriteUInt16Number(io, desc ->Entries[i].Language

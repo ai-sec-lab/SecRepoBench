@@ -1,0 +1,86 @@
+size_t expected_end = obj->address + obj->size;
+size_t current_pos = bit_chain->byte;
+
+if (current_pos != expected_end)
+{
+    if (bit_chain->version < R_11)
+    {
+        if (current_pos > expected_end)
+        {
+            LOG_ERROR("Object size exceeds expected size, adjusting from " FORMAT_RL " to %zu",
+                      obj->size, current_pos - obj->address);
+            obj->size = (BITCODE_RL)(current_pos - obj->address);
+            expected_end = current_pos;
+        }
+        else
+        {
+            size_t unknown_size = expected_end - current_pos;
+            if (unknown_size > 0)
+            {
+                obj->unknown_data = (unsigned char*)malloc(unknown_size);
+                if (!obj->unknown_data)
+                {
+                    LOG_ERROR("Out of memory");
+                    error |= DWG_ERR_OUTOFMEM;
+                }
+                else
+                {
+                    memcpy(obj->unknown_data, bit_chain->chain + current_pos, unknown_size);
+                    obj->unknown_size = unknown_size;
+                    LOG_TRACE("Extracted %zu bytes of unknown data for pre-R11 object", unknown_size);
+                    bit_chain->byte += unknown_size;
+                }
+            }
+        }
+    }
+    else
+    {
+        if (expected_end - current_pos == 1)
+        {
+            BITCODE_RC read_crc = bit_read_RC(bit_chain);
+            BITCODE_RC computed_crc = dwg_compute_crc8(bit_chain->chain + obj->address, obj->size - 1);
+            if (read_crc != computed_crc)
+            {
+                LOG_ERROR("CRC mismatch for object at 0x%zx: expected 0x%02x, got 0x%02x",
+                          obj->address, computed_crc, read_crc);
+                error |= DWG_ERR_CRC;
+            }
+            current_pos = bit_chain->byte;
+            if (current_pos != expected_end)
+            {
+                LOG_ERROR("Position after CRC read is 0x%zx, expected 0x%zx", current_pos, expected_end);
+                error |= DWG_ERR_INVALIDDWG;
+            }
+        }
+        else
+        {
+            LOG_ERROR("Size mismatch for R11+ object: expected end 0x%zx, current 0x%zx (difference %zd)",
+                      expected_end, current_pos, expected_end - current_pos);
+            error |= DWG_ERR_INVALIDDWG;
+        }
+    }
+}
+
+if (bit_chain->byte < expected_end)
+{
+    size_t unknown_size = expected_end - bit_chain->byte;
+    obj->unknown_data = (unsigned char*)malloc(unknown_size);
+    if (!obj->unknown_data)
+    {
+        LOG_ERROR("Out of memory");
+        error |= DWG_ERR_OUTOFMEM;
+    }
+    else
+    {
+        memcpy(obj->unknown_data, bit_chain->chain + bit_chain->byte, unknown_size);
+        obj->unknown_size = unknown_size;
+        LOG_TRACE("Extracted %zu bytes of trailing unknown data", unknown_size);
+        bit_chain->byte += unknown_size;
+    }
+}
+else if (bit_chain->byte > expected_end)
+{
+    LOG_ERROR("Buffer overflow: current position 0x%zx exceeds expected end 0x%zx",
+              bit_chain->byte, expected_end);
+    error |= DWG_ERR_INVALIDDWG;
+}

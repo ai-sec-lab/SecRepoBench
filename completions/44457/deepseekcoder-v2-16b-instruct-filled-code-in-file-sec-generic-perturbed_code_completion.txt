@@ -1,0 +1,307 @@
+/ QuantumRange;
+          dummy_exception = DestroyExceptionInfo (dummy_exception);
+          return (ssize_t) lenfun;
+        }
+      }
+    }
+    dummy_exception = DestroyExceptionInfo (dummy_exception);
+    return 0;
+  }
+
+  *v0 = colour.red   / QuantumRange;
+  *v1 = colour.green / QuantumRange;
+  *v2 = colour.blue  / QuantumRange;
+  dummy_exception = DestroyExceptionInfo (dummy_exception);
+  return (ssize_t) pfx->lenToken;
+}
+
+static MagickBooleanType GetConstant (FxInfo * pfx, fxFltType *val)
+{
+  ssize_t len;
+  len = GetConstantColour (pfx, val, val+1, val+2);
+  if (len < 0) return MagickFalse;
+  if (len == 0) {
+    len = GetToken (pfx);
+    if (len == 0) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected constant at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    if (LocaleCompare ("quantumrange", pfx->token)==0) {
+      *val = QuantumRange;
+      return MagickTrue;
+    }
+    if (LocaleCompare ("transparent", pfx->token)==0) {
+      *val = 0.0;
+      return MagickTrue;
+    }
+    if (LocaleCompare ("opaque", pfx->token)==0) {
+      *val = 1.0;
+      return MagickTrue;
+    }
+    if (LocaleCompare ("epsilon", pfx->token)==0) {
+      *val = MagickEpsilon;
+      return MagickTrue;
+    }
+    if (LocaleCompare ("pi", pfx->token)==0) {
+      *val = MagickPI;
+      return MagickTrue;
+    }
+    if (LocaleCompare ("phi", pfx->token)==0) {
+      *val = MagickPHI;
+      return MagickTrue;
+    }
+    if (LocaleCompare ("e", pfx->token)==0) {
+      *val = 2.7182818284590452354;
+      return MagickTrue;
+    }
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Unknown constant", "'%s' at '%s'",
+      pfx->token, SetShortExp(pfx));
+    return MagickFalse;
+  }
+  pfx->pex += len;
+  return MagickTrue;
+}
+
+static MagickBooleanType GetNumber (FxInfo * pfx, fxFltType *val)
+{
+  char * tailptr;
+  char * text;
+  text = pfx->pex;
+  *val = strtold (text, &tailptr);
+  if (text == tailptr) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Number", "'%s' is not a number at '%s'",
+      text, SetShortExp(pfx));
+    return MagickFalse;
+  }
+  pfx->pex = tailptr;
+  return MagickTrue;
+}
+
+static MagickBooleanType GetSymbol (FxInfo * pfx, fxFltType *val)
+{
+  int ndx;
+  if (!TokenMaybeUserSymbol (pfx)) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Expected symbol at", "'%s'",
+      SetShortExp(pfx));
+    return MagickFalse;
+  }
+  ndx = FindUserSymbol (pfx, pfx->token);
+  if (ndx == NULL_ADDRESS) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Unknown symbol", "'%s' at '%s'",
+      pfx->token, SetShortExp(pfx));
+    return MagickFalse;
+  }
+  *val = pfx->UserSymVals[ndx];
+  pfx->pex += pfx->lenToken;
+  return MagickTrue;
+}
+
+static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
+{
+  int i;
+  if (fe == fNull) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Expected function at", "'%s'",
+      SetShortExp(pfx));
+    return MagickFalse;
+  }
+  for (i=0; i < Functions[fe-FirstFunc].nArgs; i++) {
+    if (!GetExpression (pfx, NULL)) return MagickFalse;
+  }
+  pfx->pex += strlen (Functions[fe-FirstFunc].str);
+  return AddElement (pfx, (fxFltType) 0, fe);
+}
+
+static MagickBooleanType GetExpression (FxInfo * pfx, MagickBooleanType * needPopAll)
+{
+  MagickBooleanType
+    needPopAllLocal;
+
+  if (needPopAll == (MagickBooleanType *) NULL) needPopAll = &needPopAllLocal;
+  *needPopAll = MagickFalse;
+
+  SkipSpaces (pfx);
+
+  if (PeekStr (pfx, "ifzerogoto")) {
+    pfx->pex += 10;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, '(')) return MagickFalse;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    return AddAddressingElement (pfx, rIfZeroGoto, -1);
+  }
+
+  if (PeekStr (pfx, "ifnotzerogoto")) {
+    pfx->pex += 14;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, '(')) return MagickFalse;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    return AddAddressingElement (pfx, rIfNotZeroGoto, -1);
+  }
+
+  if (PeekStr (pfx, "copyfrom")) {
+    pfx->pex += 7;
+    return AddAddressingElement (pfx, rCopyFrom, -1);
+  }
+
+  if (PeekStr (pfx, "copyto")) {
+    pfx->pex += 6;
+    return AddElement (pfx, (fxFltType) 0, rCopyTo);
+  }
+
+  if (PeekStr (pfx, "zerstk")) {
+    pfx->pex += 7;
+    return AddElement (pfx, (fxFltType) 0, rZerStk);
+  }
+
+  if (PeekStr (pfx, "goto")) {
+    pfx->pex += 5;
+    return AddAddressingElement (pfx, rGoto, -1);
+  }
+
+  if (PeekChar (pfx) == '(') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != ')') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected ')' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return MagickTrue;
+  }
+
+  if (PeekChar (pfx) == '[') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != ']') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected ']' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx, (fxFltType) 0, rCopyFrom);
+  }
+
+  if (PeekChar (pfx) == '{') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != '}') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected '}' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx, (fxFltType) 0, rCopyFrom);
+  }
+
+  if (PeekChar (pfx) == '\'') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != '\'') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected ''' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx, (fxFltType) 0, rCopyFrom);
+  }
+
+  if (PeekChar (pfx) == '"') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != '"') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected '\"' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx, (fxFltType) 0, rCopyFrom);
+  }
+
+  if (PeekChar (pfx) == '`') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != '`') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected '`' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx, (fxFltType) 0, rCopyFrom);
+  }
+
+  if (PeekChar (pfx) == '|') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != '|') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected '|' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx, (fxFltType) 0, rCopyFrom);
+  }
+
+  if (PeekChar (pfx) == '&') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != '&') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected '&' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx, (fxFltType) 0, rCopyFrom);
+  }
+
+  if (PeekChar (pfx) == '!') {
+    pfx->pex++;
+    if (!GetExpression (pfx, needPopAll)) return MagickFalse;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) != '=') {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected '=' at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    pfx->pex++;
+    return AddElement (pfx,

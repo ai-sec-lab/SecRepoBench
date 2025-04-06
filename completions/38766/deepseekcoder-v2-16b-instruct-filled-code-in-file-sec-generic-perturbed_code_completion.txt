@@ -1,0 +1,287 @@
+== 'K' && p[2] == '\007'
+		    && p[3] == '\010') {
+			__archive_read_consume(a, 24);
+			zip->unconsumed = 24;
+		} else {
+			archive_set_error(&a->archive,
+			    ARCHIVE_ERRNO_FILE_FORMAT,
+			    "Unexpected data after end of entry");
+			return (ARCHIVE_FATAL);
+		}
+	}
+	return (ARCHIVE_OK);
+}
+
+static int
+zip_read_data(struct archive_read *a, const void **_buff, size_t *size,
+    int64_t *offset)
+{
+	struct zip *zip = (struct zip *)(a->format->data);
+	int r;
+
+	if (zip->end_of_entry) {
+		r = consume_optional_marker(a, zip);
+		if (r != ARCHIVE_OK)
+			return (r);
+		zip->end_of_entry = 0;
+	}
+
+	if (zip->decompress_init == 0) {
+		r = zip_read_data_init(a, zip);
+		if (r != ARCHIVE_OK)
+			return (r);
+		zip->decompress_init = 1;
+	}
+
+	switch (zip->entry->compression) {
+#if HAVE_ZLIB_H
+	case 8: /* Deflate compression. */
+		r = zip_read_data_deflate(a, _buff, size, offset);
+		break;
+#endif
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	case 14: /* ZIPx LZMA compression. */
+		r = zip_read_data_zipx_lzma_alone(a, _buff, size, offset);
+		break;
+#endif
+#ifdef HAVE_BZLIB_H
+	case 12: /* BZIP2 compression. */
+		r = zip_read_data_bzip2(a, _buff, size, offset);
+		break;
+#endif
+#if HAVE_ZSTD_H && HAVE_LIBZSTD
+	case 93: /* Zstandard (zstd) Compression */
+		r = zip_read_data_zstd(a, _buff, size, offset);
+		break;
+#endif
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	case 13: /* LZMA2 compression. */
+		r = zip_read_data_lzma2(a, _buff, size, offset);
+		break;
+#endif
+	case 0: /* No compression. */
+		r = zip_read_data_none(a, _buff, size, offset);
+		break;
+	case 99: /* WinZip AES encryption. */
+		r = zip_read_data_aes(a, _buff, size, offset);
+		break;
+	default:
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+		    "Unsupported compression method "
+		    "(%d: %s)",
+		    zip->entry->compression,
+		    compression_name(zip->entry->compression));
+		return (ARCHIVE_FAILED);
+	}
+
+	if (r == ARCHIVE_OK && zip->entry_bytes_remaining == 0)
+		zip->end_of_entry = 1;
+
+	return (r);
+}
+
+/*
+ * Initialize decompression.
+ */
+static int
+zip_read_data_init(struct archive_read *a, struct zip *zip)
+{
+	int r;
+
+	switch (zip->entry->compression) {
+#if HAVE_ZLIB_H
+	case 8: /* Deflate compression. */
+		if (zip->stream_valid)
+			break;
+		zip->stream.zalloc = Z_NULL;
+		zip->stream.zfree = Z_NULL;
+		zip->stream.next_in = Z_NULL;
+		zip->stream.avail_in = 0;
+		r = inflateInit2(&zip->stream, -MAX_WBITS);
+		if (r != Z_OK) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			    "Failed to initialize deflate stream: %s",
+			    zip->stream.msg);
+			return (ARCHIVE_FATAL);
+		}
+		zip->stream_valid = 1;
+		break;
+#endif
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	case 14: /* ZIPx LZMA compression. */
+		if (zip->zipx_lzma_valid)
+			break;
+		zip->zipx_lzma_stream.next_in = Z_NULL;
+		zip->zipx_lzma_stream.avail_in = 0;
+		r = lzma_stream_decoder(&zip->zipx_lzma_stream, UINT64_MAX,
+		    LZMA_CONCATENATED);
+		if (r != LZMA_OK) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			    "Failed to initialize LZMA stream: %s",
+			    lzma_strerror(r));
+			return (ARCHIVE_FATAL);
+		}
+		zip->zipx_lzma_valid = 1;
+		break;
+#endif
+#ifdef HAVE_BZLIB_H
+	case 12: /* BZIP2 compression. */
+		if (zip->bzstream_valid)
+			break;
+		zip->bzstream.next_in = Z_NULL;
+		zip->bzstream.avail_in = 0;
+		r = BZ2_bzDecompressInit(&zip->bzstream, 0, 0);
+		if (r != BZ_OK) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			    "Failed to initialize bzip2 stream: %s",
+			    BZ2_bzerror(&zip->bzstream, &r));
+			return (ARCHIVE_FATAL);
+		}
+		zip->bzstream_valid = 1;
+		break;
+#endif
+#if HAVE_ZSTD_H && HAVE_LIBZSTD
+	case 93: /* Zstandard (zstd) Compression */
+		if (zip->zstdstream_valid)
+			break;
+		zip->zstdstream = ZSTD_createDStream();
+		if (zip->zstdstream == NULL) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			    "Failed to initialize Zstandard stream");
+			return (ARCHIVE_FATAL);
+		}
+		zip->zstdstream_valid = 1;
+		break;
+#endif
+	case 0: /* No compression. */
+		break;
+	case 99: /* WinZip AES encryption. */
+		if (zip->cctx_valid)
+			break;
+		r = archive_crypto_init_decryption(&zip->cctx,
+		    zip->iv, zip->iv_size, zip->erd, zip->erd_size,
+		    zip->alg_id, zip->bit_len, zip->flags,
+		    zip->v_data, zip->v_size, zip->v_crc32);
+		if (r != ARCHIVE_OK) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			    "Failed to initialize AES decryption");
+			return (ARCHIVE_FATAL);
+		}
+		zip->cctx_valid = 1;
+		break;
+	default:
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+		    "Unsupported compression method "
+		    "(%d: %s)",
+		    zip->entry->compression,
+		    compression_name(zip->entry->compression));
+		return (ARCHIVE_FAILED);
+	}
+	return (ARCHIVE_OK);
+}
+
+/*
+ * Decompress data.
+ */
+static int
+zip_read_data_deflate(struct archive_read *a, const void **_buff,
+    size_t *size, int64_t *offset)
+{
+	struct zip *zip = (struct zip *)(a->format->data);
+	const char *buff;
+	ssize_t bytes_avail;
+	int r;
+
+	(void)offset; /* UNUSED */
+
+	if (zip->stream.next_in == NULL) {
+		buff = __archive_read_ahead(a, 1, &bytes_avail);
+		if (bytes_avail < 1) {
+			archive_set_error(&a->archive,
+			    ARCHIVE_ERRNO_FILE_FORMAT,
+			    "Truncated ZIP file data");
+			return (ARCHIVE_FATAL);
+		}
+		zip->stream.next_in = (unsigned char *)buff;
+		zip->stream.avail_in = bytes_avail;
+	}
+
+	zip->stream.next_out = zip->uncompressed_buffer;
+	zip->stream.avail_out = zip->uncompressed_buffer_size;
+
+	r = inflate(&zip->stream, Z_NO_FLUSH);
+	switch (r) {
+	case Z_OK:
+		*size = zip->uncompressed_buffer_size - zip->stream.avail_out;
+		zip->entry_uncompressed_bytes_read += *size;
+		zip->entry_compressed_bytes_read += *size;
+		*_buff = zip->uncompressed_buffer;
+		zip->stream.next_in = NULL;
+		return (ARCHIVE_OK);
+	case Z_STREAM_END:
+		*size = zip->uncompressed_buffer_size - zip->stream.avail_out;
+		zip->entry_uncompressed_bytes_read += *size;
+		zip->entry_compressed_bytes_read += *size;
+		*_buff = zip->uncompressed_buffer;
+		zip->stream.next_in = NULL;
+		zip->end_of_entry = 1;
+		return (ARCHIVE_OK);
+	case Z_BUF_ERROR:
+		archive_set_error(&a->archive,
+		    ARCHIVE_ERRNO_FILE_FORMAT,
+		    "Internal error: deflate stream buffer error");
+		return (ARCHIVE_FATAL);
+	default:
+		archive_set_error(&a->archive,
+		    ARCHIVE_ERRNO_FILE_FORMAT,
+		    "Internal error: deflate stream error %d", r);
+		return (ARCHIVE_FATAL);
+	}
+}
+
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+static int
+zip_read_data_zipx_lzma_alone(struct archive_read *a, const void **_buff,
+    size_t *size, int64_t *offset)
+{
+	struct zip *zip = (struct zip *)(a->format->data);
+	const char *buff;
+	ssize_t bytes_avail;
+	int r;
+
+	(void)offset; /* UNUSED */
+
+	if (zip->zipx_lzma_stream.next_in == NULL) {
+		buff = __archive_read_ahead(a, 1, &bytes_avail);
+		if (bytes_avail < 1) {
+			archive_set_error(&a->archive,
+			    ARCHIVE_ERRNO_FILE_FORMAT,
+			    "Truncated ZIP file data");
+			return (ARCHIVE_FATAL);
+		}
+		zip->zipx_lzma_stream.next_in = (unsigned char *)buff;
+		zip->zipx_lzma_stream.avail_in = bytes_avail;
+	}
+
+	zip->zipx_lzma_stream.next_out = zip->uncompressed_buffer;
+	zip->zipx_lzma_stream.avail_out = zip->uncompressed_buffer_size;
+
+	r = lzma_code(&zip->zipx_lzma_stream, LZMA_RUN);
+	switch (r) {
+	case LZMA_OK:
+		*size = zip->uncompressed_buffer_size - zip->zipx_lzma_stream.avail_out;
+		zip->entry_uncompressed_bytes_read += *size;
+		zip->entry_compressed_bytes_read += *size;
+		*_buff = zip->uncompressed_buffer;
+		zip->zipx_lzma_stream.next_in = NULL;
+		return (ARCHIVE_OK);
+	case LZMA_STREAM_END:
+		*size = zip->uncompressed_buffer_size - zip->zipx_lzma_stream.avail_out;
+		zip->entry_uncompressed_bytes_read += *size;
+		zip->entry_compressed_bytes_read += *size;
+		*_buff = zip->uncompressed_buffer;
+		zip->zipx_lzma_stream.next_in = NULL;
+		zip->end_of_entry = 1;
+		return (ARCHIVE_OK);
+	case LZMA_BUF_ERROR:
+		archive_set_error(&a->archive,

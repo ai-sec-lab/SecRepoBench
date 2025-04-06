@@ -1,0 +1,305 @@
+// This struct holds the memory block currently being write
+typedef struct {
+    _cmsStageCLutData* Pipeline;
+    cmsIOHANDLER* m;
+
+    int FirstComponent;
+    int SecondComponent;
+
+    const char* PreMaj;
+    const char* PostMaj;
+    const char* PreMin;
+    const char* PostMin;
+
+    int  FixWhite;    // Force mapping of pure white
+
+    cmsColorSpaceSignature  ColorSpace;  // ColorSpace of profile
+
+
+} cmsPsSamplerCargo;
+
+static int _cmsPSActualColumn = 0;
+
+
+// Convert to byte
+static
+cmsUInt8Number Word2Byte(cmsUInt16Number w)
+{
+    return (cmsUInt8Number) floor((cmsFloat64Number) w / 257.0 + 0.5);
+}
+
+
+// Write a cooked byte
+static
+void WriteByte(cmsIOHANDLER* m, cmsUInt8Number b)
+{
+    _cmsIOPrintf(m, "%02x", b);
+    _cmsPSActualColumn += 2;
+
+    if (_cmsPSActualColumn > MAXPSCOLS) {
+
+        _cmsIOPrintf(m, "\n");
+        _cmsPSActualColumn = 0;
+    }
+}
+
+// ----------------------------------------------------------------- PostScript generation
+
+
+// Removes offending carriage returns
+
+static
+char* RemoveCR(const char* txt)
+{
+    static char Buffer[2048];
+    char* pt;
+
+    strncpy(Buffer, txt, 2047);
+    Buffer[2047] = 0;
+    for (pt = Buffer; *pt; pt++)
+            if (*pt == '\n' || *pt == '\r') *pt = ' ';
+
+    return Buffer;
+
+}
+
+static
+void EmitHeader(cmsIOHANDLER* m, const char* Title, cmsHPROFILE hProfile)
+{
+    time_t timer;
+    cmsMLU *Description, *Copyright;
+    char DescASCII[256], CopyrightASCII[256];
+
+    time(&timer);
+
+    Description = (cmsMLU*) cmsReadTag(hProfile, cmsSigProfileDescriptionTag);
+    Copyright   = (cmsMLU*) cmsReadTag(hProfile, cmsSigCopyrightTag);
+
+    DescASCII[0] = DescASCII[255] = 0;
+    CopyrightASCII[0] = CopyrightASCII[255] = 0;
+
+    if (Description != NULL) cmsMLUgetASCII(Description,  cmsNoLanguage, cmsNoCountry, DescASCII,       255);
+    if (Copyright != NULL)   cmsMLUgetASCII(Copyright,    cmsNoLanguage, cmsNoCountry, CopyrightASCII,  255);
+
+    _cmsIOPrintf(m, "%%!PS-Adobe-3.0\n");
+    _cmsIOPrintf(m, "%%\n");
+    _cmsIOPrintf(m, "%% %s\n", Title);
+    _cmsIOPrintf(m, "%% Source: %s\n", RemoveCR(DescASCII));
+    _cmsIOPrintf(m, "%%         %s\n", RemoveCR(CopyrightASCII));
+    _cmsIOPrintf(m, "%% Created: %s", ctime(&timer)); // ctime appends a \n!!!
+    _cmsIOPrintf(m, "%%\n");
+    _cmsIOPrintf(m, "%%%%BeginResource\n");
+
+}
+
+
+// Emits White & Black point. White point is always D50, Black point is the device
+// Black point adapted to D50.
+
+static
+void EmitWhiteBlackD50(cmsIOHANDLER* m, cmsCIEXYZ* BlackPoint)
+{
+
+    _cmsIOPrintf(m, "/BlackPoint [%f %f %f]\n", BlackPoint -> X,
+                                          BlackPoint -> Y,
+                                          BlackPoint -> Z);
+
+    _cmsIOPrintf(m, "/WhitePoint [%f %f %f]\n", cmsD50_XYZ()->X,
+                                          cmsD50_XYZ()->Y,
+                                          cmsD50_XYZ()->Z);
+}
+
+
+static
+void EmitRangeCheck(cmsIOHANDLER* m)
+{
+    _cmsIOPrintf(m, "dup 0.0 lt { pop 0.0 } if "
+                    "dup 1.0 gt { pop 1.0 } if ");
+
+}
+
+// Does write the intent
+
+static
+void EmitIntent(cmsIOHANDLER* m, cmsUInt32Number RenderingIntent)
+{
+    const char *intent;
+
+    switch (RenderingIntent) {
+
+        case INTENT_PERCEPTUAL:            intent = "Perceptual"; break;
+        case INTENT_RELATIVE_COLORIMETRIC: intent = "RelativeColorimetric"; break;
+        case INTENT_ABSOLUTE_COLORIMETRIC: intent = "AbsoluteColorimetric"; break;
+        case INTENT_SATURATION:            intent = "Saturation"; break;
+
+        default: intent = "Undefined"; break;
+    }
+
+    _cmsIOPrintf(m, "/RenderingIntent (%s)\n", intent );
+}
+
+//
+//  Convert L* to Y
+//
+//      Y = Yn*[ (L* + 16) / 116] ^ 3   if (L*) >= 6 / 29
+//        = Yn*( L* / 116) / 7.787      if (L*) < 6 / 29
+//
+
+// Lab -> XYZ, see the discussion above
+
+static
+void EmitLab2XYZ(cmsIOHANDLER* m)
+{
+    _cmsIOPrintf(m, "/RangeABC [ 0 1 0 1 0 1]\n");
+    _cmsIOPrintf(m, "/DecodeABC [\n");
+    _cmsIOPrintf(m, "{100 mul  16 add 116 div  } bind\n");
+    _cmsIOPrintf(m, "{255 mul 128 sub 500 div } bind\n");
+    _cmsIOPrintf(m, "{255 mul 128 sub 200 div } bind\n");
+    _cmsIOPrintf(m, "]\n");
+    _cmsIOPrintf(m, "/MatrixABC [ 1 1 1 1 0 0 0 0 -1]\n");
+    _cmsIOPrintf(m, "/RangeLMN [ -0.236 1.254 0 1 -0.635 1.640 ]\n");
+    _cmsIOPrintf(m, "/DecodeLMN [\n");
+    _cmsIOPrintf(m, "{dup 6 29 div ge {dup dup mul mul} {4 29 div sub 108 841 div mul} ifelse 0.964200 mul} bind\n");
+    _cmsIOPrintf(m, "{dup 6 29 div ge {dup dup mul mul} {4 29 div sub 108 841 div mul} ifelse } bind\n");
+    _cmsIOPrintf(m, "{dup 6 29 div ge {dup dup mul mul} {4 29 div sub 108 841 div mul} ifelse 0.824900 mul} bind\n");
+    _cmsIOPrintf(m, "]\n");
+}
+
+
+
+// Outputs a table of words. It does use 16 bits
+
+static
+void Emit1Gamma(cmsIOHANDLER* m, cmsToneCurve* Table)
+{
+    cmsUInt32Number i;
+    cmsFloat64Number gamma;
+
+    /**
+    * On error, empty tables or lienar assume gamma 1.0
+    */
+    if (Table == NULL ||
+        Table->nEntries <= 0 ||
+        cmsIsToneCurveLinear(Table)) {
+
+        _cmsIOPrintf(m, "{ 1 } bind ");
+        return;
+    }
+
+
+    // Check if is really an exponential. If so, emit "exp"
+    gamma = cmsEstimateGamma(Table, 0.001);
+     if (gamma > 0) {
+            _cmsIOPrintf(m, "{ %g exp } bind ", gamma);
+            return;
+     }
+
+    _cmsIOPrintf(m, "{ ");
+
+    // Bounds check
+    EmitRangeCheck(m);
+
+    // Emit interpolation code
+
+    // PostScript code                      Stack
+    // ===============                      ========================
+                                            // v
+    _cmsIOPrintf(m, " [");
+
+    for (i=0; i < Table->nEntries; i++) {
+    if (i % 10 == 0)
+            _cmsIOPrintf(m, "\n  ");
+        _cmsIOPrintf(m, "%d ", Table->Table16[i]);
+    }
+
+    _cmsIOPrintf(m, "] ");                        // v tab
+
+    _cmsIOPrintf(m, "dup ");                      // v tab tab
+    _cmsIOPrintf(m, "length 1 sub ");             // v tab dom
+    _cmsIOPrintf(m, "3 -1 roll ");                // tab dom v
+    _cmsIOPrintf(m, "mul ");                      // tab val2
+    _cmsIOPrintf(m, "dup ");                      // tab val2 val2
+    _cmsIOPrintf(m, "dup ");                      // tab val2 val2 val2
+    _cmsIOPrintf(m, "floor cvi ");                // tab val2 val2 cell0
+    _cmsIOPrintf(m, "exch ");                     // tab val2 cell0 val2
+    _cmsIOPrintf(m, "ceiling cvi ");              // tab val2 cell0 cell1
+    _cmsIOPrintf(m, "3 index ");                  // tab val2 cell0 cell1 tab
+    _cmsIOPrintf(m, "exch ");                     // tab val2 cell0 tab cell1
+    _cmsIOPrintf(m, "get\n  ");                   // tab val2 cell0 y1
+    _cmsIOPrintf(m, "4 -1 roll ");                // val2 cell0 y1 tab
+    _cmsIOPrintf(m, "3 -1 roll ");                // val2 y1 tab cell0
+    _cmsIOPrintf(m, "get ");                      // val2 y1 y0
+    _cmsIOPrintf(m, "dup ");                      // val2 y1 y0 y0
+    _cmsIOPrintf(m, "3 1 roll ");                 // val2 y0 y1 y0
+    _cmsIOPrintf(m, "sub ");                      // val2 y0 (y1-y0)
+    _cmsIOPrintf(m, "3 -1 roll ");                // y0 (y1-y0) val2
+    _cmsIOPrintf(m, "dup ");                      // y0 (y1-y0) val2 val2
+    _cmsIOPrintf(m, "floor cvi ");                // y0 (y1-y0) val2 floor(val2)
+    _cmsIOPrintf(m, "sub ");                      // y0 (y1-y0) rest
+    _cmsIOPrintf(m, "mul ");                      // y0 t1
+    _cmsIOPrintf(m, "add ");                      // y
+    _cmsIOPrintf(m, "65535 div\n");               // result
+
+    _cmsIOPrintf(m, " } bind ");
+}
+
+
+// Compare gamma table
+
+static
+cmsBool GammaTableEquals(cmsUInt16Number* g1, cmsUInt16Number* g2, cmsUInt32Number nG1, cmsUInt32Number nG2)
+{
+    if (nG1 != nG2) return FALSE;
+    return memcmp(g1, g2, nG1 * sizeof(cmsUInt16Number)) == 0;
+}
+
+
+// Does write a set of gamma curves
+
+static
+void EmitNGamma(cmsIOHANDLER* m, cmsUInt32Number n, cmsToneCurve* g[])
+{
+    cmsUInt32Number i;
+
+
+    for( i=0; i < n; i++ )
+    {
+        if (g[i] == NULL) return; // Error
+
+        if (i > 0 && GammaTableEquals(g[i-1]->Table16, g[i]->Table16, g[i-1]->nEntries, g[i]->nEntries)) {
+
+            _cmsIOPrintf(m, "dup ");
+        }
+        else {
+            Emit1Gamma(m, g[i]);
+        }
+    }
+
+}
+
+
+// Following code dumps a LUT onto memory stream
+
+
+// This is the sampler. Intended to work in SAMPLER_INSPECT mode,
+// that is, the callback will be called for each knot with
+//
+//          In[]  The grid location coordinates, normalized to 0..ffff
+//          Out[] The Pipeline values, normalized to 0..ffff
+//
+//  Returning a value other than 0 does terminate the sampling process
+//
+//  Each row contains Pipeline values for all but first component. So, I
+//  detect row changing by keeping a copy of last value of first
+//  component. -1 is used to mark beginning of whole block.
+
+static
+int OutputValueSampler(CMSREGISTER const cmsUInt16Number In[], CMSREGISTER cmsUInt16Number Out[], CMSREGISTER void* Cargo)
+{
+    cmsPsSamplerCargo* sc = (cmsPsSamplerCargo*) Cargo;
+    cmsUInt32Number i;
+
+
+    if (sc -> FixWhite) {
+
+        if (In[0] == 0xFFF

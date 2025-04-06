@@ -1,0 +1,64 @@
+if(packet->payload_packet_len < 20) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_UNKNOWN)
+    return;
+
+  if(packet->detected_protocol != NDPI_PROTOCOL_UNKNOWN)
+    return;
+
+  if(packet->tcp != NULL) {
+    if(packet->payload_packet_len < 40) {
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+      return;
+    }
+    ovpn_payload += 2;
+  }
+
+  operationcode = ovpn_payload[0] & P_OPCODE_MASK;
+
+  if(packet->udp != NULL) {
+    if(flow->packet_counter == 1) {
+      if(packet->payload_packet_len == 58 && 
+         (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || 
+          operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+        flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+        return;
+      }
+    }
+
+    if(flow->packet_counter < P_HARD_RESET_CLIENT_MAX_COUNT &&
+       (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || 
+        operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if(hmac_size == -1) {
+        failed = 1;
+      } else {
+        session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size);
+        flow->openvpn_session_id = *(u_int32_t*)session_remote;
+      }
+    } else if(flow->packet_counter >= P_HARD_RESET_CLIENT_MAX_COUNT &&
+              (operationcode == P_CONTROL_HARD_RESET_SERVER_V1 || 
+               operationcode == P_CONTROL_HARD_RESET_SERVER_V2)) {
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if(hmac_size == -1) {
+        failed = 1;
+      } else {
+        session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size);
+        if(flow->openvpn_session_id == *(u_int32_t*)session_remote) {
+          flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+          return;
+        } else {
+          failed = 1;
+        }
+      }
+    }
+  }
+
+  flow->packet_counter++;
+
+  if(failed) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  }

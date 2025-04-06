@@ -1,0 +1,188 @@
+switch (tag)
+{
+    case ID_SCE:
+    case ID_LFE:
+        // mono or LFE channel
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1 << elementInstanceTag);
+
+        // read the 12 unused header bits
+        unusedHeader = (uint16_t) BitBufferRead(bits, 12);
+        RequireAction(unusedHeader == 0, status = kALAC_ParamError; goto Exit;);
+
+        // read the 1-bit "partial frame" flag, 2-bit "shift-off" flag, and 1-bit "escape" flag
+        headerByte = (uint8_t) BitBufferRead(bits, 4);
+        partialFrame = headerByte >> 3;
+        bytesShifted = (headerByte >> 1) & 3;
+        escapeFlag = headerByte & 1;
+
+        if (escapeFlag == 0)
+        {
+            shift = bytesShifted * 8;
+            chanBits = p->mConfig.bitDepth - shift;
+        }
+        else
+        {
+            shift = BitBufferRead(bits, 16);
+            chanBits = BitBufferRead(bits, 16);
+        }
+
+        RequireAction(channelIndex < numChannels, status = kALAC_TooManyChannels; goto NoMoreChannels;);
+
+        if (partialFrame)
+        {
+            numSamples = BitBufferRead(bits, 16);
+            *outNumSamples = numSamples;
+            RequireAction(numSamples > 0, status = kALAC_ZeroSampleCount; goto Exit;);
+        }
+
+        if (!BitBufferReadOne(bits))
+        {
+            // compressed frame
+            BitBufferRead(bits, 16);
+            BitBufferRead(bits, 16);
+            BitBufferRead(bits, 16);
+            agParams.mb = (uint8_t) BitBufferRead(bits, 8);
+            agParams.pb = pb;
+            agParams.kb = (uint8_t) BitBufferRead(bits, 8);
+            agParams.wb = (uint8_t) BitBufferRead(bits, 8);
+            BitBufferRead(bits, 16);
+
+            // read coefs
+            numU = BitBufferRead(bits, 8);
+            for (i = 0; i < numU; i++)
+                coefsU[i] = (int16_t) BitBufferRead(bits, 16);
+
+            status = dyn_decomp(&agParams, bits, p->u.mPredictor, numSamples, chanBits, &bits1);
+            RequireNoErr(status, goto Exit;);
+
+            if (bytesShifted == 0)
+                status = unpc_block(p->u.mPredictor, p->mMixBufferU, numSamples, &coefsU[0], numU, chanBits, pb);
+            else
+                status = unpc_block(p->u.mPredictor, p->mMixBufferU, numSamples, &coefsU[0], numU, chanBits, pb);
+
+            RequireNoErr(status, goto Exit;);
+        }
+        else
+        {
+            // uncompressed frame
+            if (chanBits <= 16)
+            {
+                for (i = 0; i < numSamples; i++)
+                    p->mMixBufferU[i] = (int32_t) BitBufferRead(bits, (uint8_t) chanBits);
+            }
+            else
+            {
+                for (i = 0; i < numSamples; i++)
+                    p->mMixBufferU[i] = (int32_t) BitBufferRead(bits, (uint8_t) chanBits);
+            }
+        }
+
+        shift32(&p->mMixBufferU[0], &sampleBuffer[channelIndex], numSamples, chanBits, shift, numChannels);
+        channelIndex++;
+        break;
+
+    case ID_CPE:
+        // stereo channel pair
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1 << elementInstanceTag);
+
+        // read the 12 unused header bits
+        unusedHeader = (uint16_t) BitBufferRead(bits, 12);
+        RequireAction(unusedHeader == 0, status = kALAC_ParamError; goto Exit;);
+
+        // read the 1-bit "partial frame" flag, 2-bit "shift-off" flag, and 1-bit "escape" flag
+        headerByte = (uint8_t) BitBufferRead(bits, 4);
+        partialFrame = headerByte >> 3;
+        bytesShifted = (headerByte >> 1) & 3;
+        escapeFlag = headerByte & 1;
+
+        if (escapeFlag == 0)
+        {
+            shift = bytesShifted * 8;
+            chanBits = p->mConfig.bitDepth - shift;
+        }
+        else
+        {
+            shift = BitBufferRead(bits, 16);
+            chanBits = BitBufferRead(bits, 16);
+        }
+
+        RequireAction(channelIndex + 2 <= numChannels, status = kALAC_TooManyChannels; goto NoMoreChannels;);
+
+        if (partialFrame)
+        {
+            numSamples = BitBufferRead(bits, 16);
+            *outNumSamples = numSamples;
+            RequireAction(numSamples > 0, status = kALAC_ZeroSampleCount; goto Exit;);
+        }
+
+        // read mixing parameters
+        mixBits = (uint8_t) BitBufferRead(bits, 8);
+        mixResiduals = (int8_t) BitBufferRead(bits, 8);
+        headerByte = (uint8_t) BitBufferRead(bits, 8);
+        modeU = headerByte >> 4;
+        modeV = headerByte & 0xf;
+        denShiftU = (uint32_t) BitBufferRead(bits, 4);
+        denShiftV = (uint32_t) BitBufferRead(bits, 4);
+        pbFactorU = (uint16_t) BitBufferRead(bits, 4);
+        pbFactorV = (uint16_t) BitBufferRead(bits, 4);
+        numU = (uint8_t) BitBufferRead(bits, 8);
+        numV = (uint8_t) BitBufferRead(bits, 8);
+
+        for (i = 0; i < numU; i++)
+            coefsU[i] = (int16_t) BitBufferRead(bits, 16);
+
+        for (i = 0; i < numV; i++)
+            coefsV[i] = (int16_t) BitBufferRead(bits, 16);
+
+        // decompress and run predictor for "left" channel
+        status = dyn_decomp(&agParams, bits, p->u.mPredictor, numSamples, chanBits, &bits1);
+        RequireNoErr(status, goto Exit;);
+
+        if (bytesShifted == 0)
+            status = unpc_block(p->u.mPredictor, p->mMixBufferU, numSamples, &coefsU[0], numU, chanBits, pbFactorU * pb);
+        else
+            status = unpc_block(p->u.mPredictor, p->mMixBufferU, numSamples, &coefsU[0], numU, chanBits, pbFactorU * pb);
+
+        RequireNoErr(status, goto Exit;);
+
+        // decompress and run predictor for "right" channel
+        status = dyn_decomp(&agParams, bits, p->u.mPredictor, numSamples, chanBits, &bits2);
+        RequireNoErr(status, goto Exit;);
+
+        if (bytesShifted == 0)
+            status = unpc_block(p->u.mPredictor, p->mMixBufferV, numSamples, &coefsV[0], numV, chanBits, pbFactorV * pb);
+        else
+            status = unpc_block(p->u.mPredictor, p->mMixBufferV, numSamples, &coefsV[0], numV, chanBits, pbFactorV * pb);
+
+        RequireNoErr(status, goto Exit;);
+
+        // unmix the data
+        unmix_stereo(p->mMixBufferU, p->mMixBufferV, numSamples, mixBits, mixResiduals);
+
+        // handle shift and output data
+        shift32(&p->mMixBufferU[0], &sampleBuffer[channelIndex + 0], numSamples, chanBits, shift, numChannels);
+        shift32(&p->mMixBufferV[0], &sampleBuffer[channelIndex + 1], numSamples, chanBits, shift, numChannels);
+
+        channelIndex += 2;
+        break;
+
+    case ID_CCE:
+    case ID_PCE:
+    case ID_DSE:
+    case ID_FIL:
+    case ID_END:
+        status = kALAC_UnsupportedElement;
+        break;
+}
+
+if (tag == ID_END)
+{
+    // we're done
+    BitBufferByteAlign(bits, false);
+    goto NoMoreChannels;
+}
+
+if (status == ALAC_noErr)
+    continue;

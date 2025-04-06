@@ -1,0 +1,384 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_classifier.h
+static inline uint64_t
+Classifier_write (const Classifier* me, uint8_t** ptr)
+{
+    uint8_t* outptr    = *ptr;
+    uint8_t  value     = 0;
+    uint64_t sizeBytes = strlen (me->_suffix) + 1;
+
+    memcpy (outptr, me->_suffix, sizeBytes);
+    outptr += sizeBytes;
+
+    value |= ((uint8_t) (me->_cscIdx + 1) & 15) << 4;
+    value |= ((uint8_t) me->_scheme & 3) << 2;
+    value |= (uint8_t) me->_caseInsensitive & 1;
+
+    outptr[0] = value;
+    outptr[1] = (uint8_t) me->_type;
+    outptr += 2;
+    *ptr = outptr;
+    return sizeBytes + 2;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXR/ImfDwaCompressor.cpp
+Classifier (const char*& ptr, int size)
+    {
+        if (size <= 0)
+            throw IEX_NAMESPACE::InputExc ("Error uncompressing DWA data"
+                                           " (truncated rule).");
+
+        {
+            // maximum length of string plus one byte for terminating NULL
+            char suffix[Name::SIZE + 1];
+            memset (suffix, 0, Name::SIZE + 1);
+            Xdr::read<CharPtrIO> (ptr, std::min (size, Name::SIZE - 1), suffix);
+            _suffix = std::string (suffix);
+        }
+
+        if (static_cast<size_t> (size) <
+            _suffix.length () + 1 + 2 * Xdr::size<char> ())
+            throw IEX_NAMESPACE::InputExc ("Error uncompressing DWA data"
+                                           " (truncated rule).");
+
+        char value;
+        Xdr::read<CharPtrIO> (ptr, value);
+
+        _cscIdx = (int) (value >> 4) - 1;
+        if (_cscIdx < -1 || _cscIdx >= 3)
+            throw IEX_NAMESPACE::InputExc ("Error uncompressing DWA data"
+                                           " (corrupt cscIdx rule).");
+
+        _scheme = (CompressorScheme) ((value >> 2) & 3);
+        if (_scheme < 0 || _scheme >= NUM_COMPRESSOR_SCHEMES)
+            throw IEX_NAMESPACE::InputExc ("Error uncompressing DWA data"
+                                           " (corrupt scheme rule).");
+
+        _caseInsensitive = (value & 1 ? true : false);
+
+        Xdr::read<CharPtrIO> (ptr, value);
+        if (value < 0 || value >= NUM_PIXELTYPES)
+            throw IEX_NAMESPACE::InputExc ("Error uncompressing DWA data"
+                                           " (corrupt rule).");
+        _type = (PixelType) value;
+    }
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_compressor.h
+exr_result_t
+DwaCompressor_readChannelRules (
+    DwaCompressor*  me,
+    const uint8_t** inPtr,
+    uint64_t*       nAvail,
+    uint64_t*       outRuleSize)
+{
+    exr_result_t   rv;
+    const uint8_t* readPtr = *inPtr;
+
+    *outRuleSize = 0;
+    if (*nAvail > sizeof (uint16_t))
+    {
+        size_t ruleSize = one_to_native16 (*((const uint16_t*) readPtr));
+        size_t nRules   = 0, dataSize;
+        const uint8_t* tmpPtr;
+
+        if (ruleSize < sizeof (uint16_t)) { return EXR_ERR_CORRUPT_CHUNK; }
+
+        *outRuleSize = ruleSize;
+        if (*nAvail < ruleSize) { return EXR_ERR_CORRUPT_CHUNK; }
+
+        readPtr += sizeof (uint16_t);
+        *inPtr += ruleSize;
+        *nAvail -= ruleSize;
+
+        ruleSize -= sizeof (uint16_t);
+        // annoying, don't know how many there are yet...
+        tmpPtr   = readPtr;
+        dataSize = ruleSize;
+        rv       = EXR_ERR_SUCCESS;
+        while (rv == EXR_ERR_SUCCESS && dataSize > 0)
+        {
+            Classifier tmpc;
+            memset (&tmpc, 0, sizeof (Classifier));
+            rv = Classifier_read (me->alloc_fn, &tmpc, &tmpPtr, &dataSize);
+            Classifier_destroy (me->free_fn, &tmpc);
+            ++nRules;
+        }
+
+        // now (if we succeed) we can allocate and fill
+        if (rv == EXR_ERR_SUCCESS)
+        {
+            me->_channelRuleCount = nRules;
+            me->_channelRules     = me->alloc_fn (sizeof (Classifier) * nRules);
+
+            dataSize = ruleSize;
+            if (me->_channelRules)
+            {
+                memset (me->_channelRules, 0, sizeof (Classifier) * nRules);
+                for (size_t i = 0; i < nRules; ++i)
+                {
+                    Classifier_read (
+                        me->alloc_fn,
+                        &(me->_channelRules[i]),
+                        &readPtr,
+                        &dataSize);
+                }
+            }
+            else
+                rv = EXR_ERR_OUT_OF_MEMORY;
+        }
+    }
+    else
+        rv = EXR_ERR_CORRUPT_CHUNK;
+    return rv;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_structs.c
+exr_result_t
+internal_exr_alloc_context (
+    struct _internal_exr_context**   out,
+    const exr_context_initializer_t* initializers,
+    enum _INTERNAL_EXR_CONTEXT_MODE  mode,
+    size_t                           default_size)
+{
+    void*                         memptr;
+    exr_result_t                  rv;
+    struct _internal_exr_context* ret;
+    int                           gmaxw, gmaxh;
+    size_t                        extra_data;
+
+    *out = NULL;
+    if (initializers->read_fn || initializers->write_fn)
+        extra_data = 0;
+    else
+        extra_data = default_size;
+
+    memptr = (initializers->alloc_fn) (
+        sizeof (struct _internal_exr_context) + extra_data);
+    if (memptr)
+    {
+        memset (memptr, 0, sizeof (struct _internal_exr_context));
+
+        ret       = memptr;
+        ret->mode = (uint8_t) mode;
+        /* stash this separately so when a user queries they don't see
+         * any of our internal hijinx */
+        ret->real_user_data = initializers->user_data;
+        if (initializers->read_fn || initializers->write_fn)
+            ret->user_data = initializers->user_data;
+        else if (extra_data > 0)
+            ret->user_data =
+                (((uint8_t*) memptr) + sizeof (struct _internal_exr_context));
+
+        ret->standard_error   = &dispatch_standard_error;
+        ret->report_error     = &dispatch_error;
+        ret->print_error      = &dispatch_print_error;
+        ret->error_handler_fn = initializers->error_handler_fn;
+        ret->alloc_fn         = initializers->alloc_fn;
+        ret->free_fn          = initializers->free_fn;
+
+        exr_get_default_maximum_image_size (&gmaxw, &gmaxh);
+        if (initializers->max_image_width <= 0)
+            ret->max_image_w = gmaxw;
+        else
+            ret->max_image_w = initializers->max_image_width;
+        if (ret->max_image_w > 0 && gmaxw > 0 && ret->max_image_w &&
+            ret->max_image_w > gmaxw)
+            ret->max_image_w = gmaxw;
+
+        if (initializers->max_image_height <= 0)
+            ret->max_image_h = gmaxh;
+        else
+            ret->max_image_h = initializers->max_image_height;
+        if (ret->max_image_h > 0 && gmaxh > 0 && ret->max_image_h &&
+            ret->max_image_h > gmaxh)
+            ret->max_image_h = gmaxh;
+
+        exr_get_default_maximum_tile_size (&gmaxw, &gmaxh);
+        if (initializers->max_tile_width <= 0)
+            ret->max_tile_w = gmaxw;
+        else
+            ret->max_tile_w = initializers->max_tile_width;
+        if (ret->max_tile_w > 0 && gmaxw > 0 && ret->max_tile_w &&
+            ret->max_tile_w > gmaxw)
+            ret->max_tile_w = gmaxw;
+
+        if (initializers->max_tile_height <= 0)
+            ret->max_tile_h = gmaxh;
+        else
+            ret->max_tile_h = initializers->max_tile_height;
+        if (ret->max_tile_h > 0 && gmaxh > 0 && ret->max_tile_h &&
+            ret->max_tile_h > gmaxh)
+            ret->max_tile_h = gmaxh;
+
+        exr_get_default_zip_compression_level (&ret->default_zip_level);
+        exr_get_default_dwa_compression_quality (&ret->default_dwa_quality);
+        if (initializers->zip_level >= 0)
+            ret->default_zip_level = initializers->zip_level;
+        if (initializers->dwa_quality >= 0.f)
+            ret->default_dwa_quality = initializers->dwa_quality;
+
+        if (initializers->flags & EXR_CONTEXT_FLAG_STRICT_HEADER)
+            ret->strict_header = 1;
+        if (initializers->flags & EXR_CONTEXT_FLAG_SILENT_HEADER_PARSE)
+            ret->silent_header = 1;
+        ret->disable_chunk_reconstruct =
+            (initializers->flags &
+             EXR_CONTEXT_FLAG_DISABLE_CHUNK_RECONSTRUCTION);
+        ret->legacy_header =
+            (initializers->flags & EXR_CONTEXT_FLAG_WRITE_LEGACY_HEADER);
+
+        ret->file_size       = -1;
+        ret->max_name_length = EXR_SHORTNAME_MAXLEN;
+
+        ret->destroy_fn = initializers->destroy_fn;
+        ret->read_fn    = initializers->read_fn;
+        ret->write_fn   = initializers->write_fn;
+
+#ifdef ILMTHREAD_THREADING_ENABLED
+#    ifdef _WIN32
+        InitializeCriticalSection (&(ret->mutex));
+#    else
+        rv = pthread_mutex_init (&(ret->mutex), NULL);
+        if (rv != 0)
+        {
+            /* fairly unlikely... */
+            (initializers->free_fn) (memptr);
+            *out = NULL;
+            return EXR_ERR_OUT_OF_MEMORY;
+        }
+#    endif
+#endif
+
+        *out = ret;
+        rv   = EXR_ERR_SUCCESS;
+
+        /* if we are reading the file, go ahead and set up the first
+         * part to make parsing logic easier */
+        if (mode != EXR_CONTEXT_WRITE)
+        {
+            struct _internal_exr_part* part;
+            rv = internal_exr_add_part (ret, &part, NULL);
+            if (rv != EXR_ERR_SUCCESS)
+            {
+                /* this should never happen since we reserve space for
+                 * one in the struct, but maybe we changed
+                 * something */
+                (initializers->free_fn) (memptr);
+                *out = NULL;
+            }
+        }
+    }
+    else
+    {
+        (initializers->error_handler_fn) (
+            NULL,
+            EXR_ERR_OUT_OF_MEMORY,
+            exr_get_default_error_message (EXR_ERR_OUT_OF_MEMORY));
+        rv = EXR_ERR_OUT_OF_MEMORY;
+    }
+
+    return rv;
+}
+
+// the below code fragment can be found in:
+// src/lib/OpenEXRCore/internal_dwa_compressor.h
+exr_result_t
+DwaCompressor_classifyChannels (DwaCompressor* me)
+{
+    CscPrefixMapItem* prefixMap;
+    //
+    // prefixMap used to map channel name prefixes to
+    // potential CSC-able sets of channels.
+    //
+
+    me->_cscChannelSets =
+        me->alloc_fn (sizeof (CscChannelSet) * (size_t) me->_numChannels);
+    if (!me->_cscChannelSets) return EXR_ERR_OUT_OF_MEMORY;
+
+    //
+    // Try and figure out which channels should be
+    // compressed by which means.
+    //
+    prefixMap =
+        me->alloc_fn (sizeof (CscPrefixMapItem) * (size_t) me->_numChannels);
+    if (!prefixMap) return EXR_ERR_OUT_OF_MEMORY;
+
+    memset (
+        prefixMap, 0, sizeof (CscPrefixMapItem) * (size_t) me->_numChannels);
+    for (int c = 0; c < me->_numChannels; ++c)
+    {
+        const exr_coding_channel_info_t* curc = me->_channelData[c].chan;
+        const char*       suffix = Classifier_find_suffix (curc->channel_name);
+        CscPrefixMapItem* mapi   = CscPrefixMap_find (
+            prefixMap,
+            me->_numChannels,
+            curc->channel_name,
+            (size_t) (curc->channel_name - suffix));
+
+        for (size_t i = 0; i < me->_channelRuleCount; ++i)
+        {
+            if (Classifier_match (
+                    &(me->_channelRules[i]),
+                    suffix,
+                    (exr_pixel_type_t) curc->data_type))
+            {
+                me->_channelData[c].compression = me->_channelRules[i]._scheme;
+
+                if (me->_channelRules[i]._cscIdx >= 0)
+                    mapi->idx[me->_channelRules[i]._cscIdx] = c;
+            }
+        }
+    }
+
+    //
+    // Finally, try and find RGB sets of channels which
+    // can be CSC'ed to a Y'CbCr space prior to loss, for
+    // better compression.
+    //
+    // Walk over our set of candidates, and see who has
+    // all three channels defined (and has common sampling
+    // patterns, etc).
+    //
+
+    for (int c = 0; c < me->_numChannels; ++c)
+    {
+        const exr_coding_channel_info_t *redc, *grnc, *bluc;
+        CscChannelSet*                   cset;
+        int                              red = prefixMap[c].idx[0];
+        int                              grn = prefixMap[c].idx[1];
+        int                              blu = prefixMap[c].idx[2];
+
+        if (prefixMap[c].name == NULL) break;
+
+        if ((red < 0) || (grn < 0) || (blu < 0)) continue;
+
+        redc = me->_channelData[red].chan;
+        grnc = me->_channelData[grn].chan;
+        bluc = me->_channelData[blu].chan;
+
+        if ((redc->x_samples != grnc->x_samples) ||
+            (redc->x_samples != bluc->x_samples) ||
+            (grnc->x_samples != bluc->x_samples) ||
+            (redc->y_samples != grnc->y_samples) ||
+            (redc->y_samples != bluc->y_samples) ||
+            (grnc->y_samples != bluc->y_samples))
+        {
+            continue;
+        }
+
+        cset         = me->_cscChannelSets + me->_numCscChannelSets;
+        cset->idx[0] = red;
+        cset->idx[1] = grn;
+        cset->idx[2] = blu;
+        ++(me->_numCscChannelSets);
+    }
+    me->free_fn (prefixMap);
+
+    return EXR_ERR_SUCCESS;
+}
+

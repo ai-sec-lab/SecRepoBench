@@ -1,0 +1,97 @@
+incomplete_msbs:
+			if (val < end) {
+				br->consumed_bits = FLAC__BITS_PER_WORD - ucbits;
+				br->consumed_words = cwords;
+				if(!FLAC__bitreader_read_unary_unsigned(br, &msbs))
+					return false;
+				msbs += x;
+			} else
+				goto last_msbs;
+			goto process_lsbs;
+
+incomplete_lsbs:
+			if (val < end) {
+				br->consumed_bits = FLAC__BITS_PER_WORD - ucbits;
+				br->consumed_words = cwords;
+				if(!FLAC__bitreader_read_raw_uint32(br, &lsbs, parameter - (FLAC__BITS_PER_WORD - ucbits)))
+					return false;
+				lsbs |= x << (parameter - (FLAC__BITS_PER_WORD - ucbits));
+			} else
+				goto last_lsbs;
+			goto compose_value;
+
+			if(br->bytes*8 > br->consumed_bits) {
+				const uint32_t end = br->bytes * 8;
+				b = (br->buffer[br->consumed_words] & (FLAC__WORD_ALL_ONES << (FLAC__BITS_PER_WORD - end))) << br->consumed_bits;
+
+				/* read the unary MSBs and end bit */
+				x = y = COUNT_ZERO_MSBS2(b);
+				if(x == FLAC__BITS_PER_WORD) {
+					x = end - br->consumed_bits;
+					do {
+						/* didn't find stop bit yet, have to keep going... */
+						cwords++;
+						if(cwords >= wordcount)
+							goto incomplete_msbs;
+						if(cwords < wordcount) {
+							end = br->bytes * 8;
+							b = (br->buffer[cwords] & (FLAC__WORD_ALL_ONES << (FLAC__BITS_PER_WORD - end)));
+						} else
+							b = 0;
+						y = COUNT_ZERO_MSBS2(b);
+						x += y;
+					} while(y == FLAC__BITS_PER_WORD);
+				}
+				b <<= y;
+				b <<= 1; /* account for stop bit */
+				ucbits = (end - br->consumed_bits - x - 1) % FLAC__BITS_PER_WORD;
+				msbs = x;
+
+process_lsbs:
+				/* read the binary LSBs */
+				x = (FLAC__uint32)(b >> (FLAC__BITS_PER_WORD - parameter)); /* parameter < 32, so we can cast to 32-bit uint32_t */
+				if(parameter <= ucbits) {
+					ucbits -= parameter;
+					b <<= parameter;
+				} else {
+					/* there are still bits left to read, they will all be in the next word */
+					cwords++;
+					if(cwords >= wordcount)
+						goto incomplete_lsbs;
+					if(cwords < wordcount) {
+						end = br->bytes * 8;
+						b = (br->buffer[cwords] & (FLAC__WORD_ALL_ONES << (FLAC__BITS_PER_WORD - end)));
+					} else
+						b = 0;
+					ucbits += FLAC__BITS_PER_WORD - parameter;
+					x |= (FLAC__uint32)(b >> ucbits);
+					b <<= FLAC__BITS_PER_WORD - ucbits;
+				}
+				lsbs = x;
+
+compose_value:
+				/* compose the value */
+				x = (msbs << parameter) | lsbs;
+				*val++ = (int)(x >> 1) ^ -(int)(x & 1);
+
+				br->consumed_bits = FLAC__BITS_PER_WORD - ucbits;
+				br->consumed_words = cwords;
+				goto process_tail;
+			} else if(!bitreader_read_from_client_(br))
+				return false;
+			wordcount = br->words;
+			goto process_tail;
+
+last_msbs:
+			br->consumed_bits = FLAC__BITS_PER_WORD - ucbits;
+			br->consumed_words = cwords;
+			if(!FLAC__bitreader_read_unary_unsigned(br, &msbs))
+				return false;
+			msbs += x;
+last_lsbs:
+			if(!FLAC__bitreader_read_raw_uint32(br, &lsbs, parameter - (FLAC__BITS_PER_WORD - ucbits)))
+				return false;
+			lsbs |= x << (parameter - (FLAC__BITS_PER_WORD - ucbits));
+			x = (msbs << parameter) | lsbs;
+			*val++ = (int)(x >> 1) ^ -(int)(x & 1);
+			return true;

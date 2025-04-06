@@ -1,0 +1,248 @@
+MagickBooleanType
+    status;
+
+  MagickSizeType
+    length;
+
+  RectangleInfo
+    page;
+
+  register ssize_t
+    i;
+
+  short int
+    hex_digits[256];
+
+  ssize_t
+    columns,
+    rows,
+    y;
+
+  unsigned char
+    *pixels;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Initialize hex values.
+  */
+  for (i=0; i < 256; i++)
+    hex_digits[i]=(-1);
+  for (i=0; i < 10; i++)
+    hex_digits['0'+i]=i;
+  for (i=0; i < 6; i++)
+    {
+      hex_digits['a'+i]=10+i;
+      hex_digits['A'+i]=10+i;
+    }
+  /*
+    Set the page density.
+  */
+  delta.x=DefaultResolution;
+  delta.y=DefaultResolution;
+  if ((image->resolution.x == 0.0) || (image->resolution.y == 0.0))
+    {
+      flags=ParseGeometry(PSDensityGeometry,&geometry_info);
+      image->resolution.x=geometry_info.rho;
+      image->resolution.y=geometry_info.sigma;
+      if ((flags & SigmaValue) == 0)
+        image->resolution.y=image->resolution.x;
+    }
+  if (image_info->density != (char *) NULL)
+    {
+      flags=ParseGeometry(image_info->density,&geometry_info);
+      image->resolution.x=geometry_info.rho;
+      image->resolution.y=geometry_info.sigma;
+      if ((flags & SigmaValue) == 0)
+        image->resolution.y=image->resolution.x;
+    }
+  if (image->units == PixelsPerCentimeterResolution)
+    {
+      image->resolution.x=(double) ((size_t) (100.0*2.54*image->resolution.x+
+        0.5)/100.0);
+      image->resolution.y=(double) ((size_t) (100.0*2.54*image->resolution.y+
+        0.5)/100.0);
+    }
+  /*
+    Determine page geometry from the Postscript bounding box comments.
+  */
+  (void) ResetMagickMemory(&page,0,sizeof(page));
+  columns=0;
+  rows=0;
+  (void) ResetMagickMemory(command,0,sizeof(command));
+  c=ReadBlobByte(image);
+  for ( ; c != EOF; c=ReadBlobByte(image))
+  {
+    register char
+      *p;
+
+    if (c == '\n')
+      c=ReadBlobByte(image);
+    if (c == '\r')
+      c=ReadBlobByte(image);
+    if ((isspace(c) == 0) && (c != '%'))
+      continue;
+    *command='\0';
+    p=command;
+    do
+    {
+      *p++=(char) c;
+      c=ReadBlobByte(image);
+    } while ((c != EOF) && (c != '\n') && (c != '\r'));
+    *p='\0';
+    if (c == '\r')
+      c=ReadBlobByte(image);
+    /*
+      Skip %%BeginDocument, %%EndDocument, %%Page: comments.
+    */
+    if (LocaleNCompare(BeginDocument,command,strlen(BeginDocument)) == 0)
+      break;
+    if (LocaleNCompare(EndDocument,command,strlen(EndDocument)) == 0)
+      break;
+    if (LocaleNCompare(BoundingBox,command,strlen(BoundingBox)) == 0)
+      {
+        (void) sscanf(command,BoundingBox " %lf %lf %lf %lf",&bounds.x1,
+          &bounds.y1,&bounds.x2,&bounds.y2);
+        if ((bounds.x1 > bounds.x2) || (bounds.y1 > bounds.y2))
+          (void) ResetMagickMemory(&bounds,0,sizeof(bounds));
+      }
+    if (LocaleNCompare(HiResBoundingBox,command,strlen(HiResBoundingBox)) == 0)
+      {
+        (void) sscanf(command,HiResBoundingBox " %lf %lf %lf %lf",&bounds.x1,
+          &bounds.y1,&bounds.x2,&bounds.y2);
+        if ((bounds.x1 > bounds.x2) || (bounds.y1 > bounds.y2))
+          (void) ResetMagickMemory(&bounds,0,sizeof(bounds));
+      }
+    if (LocaleNCompare(ImageData,command,strlen(ImageData)) == 0)
+      break;
+    if (LocaleNCompare(LanguageLevel,command,strlen(LanguageLevel)) == 0)
+      {
+        ssize_t
+          level;
+
+        level=(ssize_t) strtol(command+strlen(LanguageLevel),
+          (char **) NULL,10);
+        if (level > 1)
+          (void) ThrowMagickException(exception,GetMagickModule(),CoderError,
+            "DataEncodingSchemeIsNotSupported","`%s'",image->filename);
+      }
+    if (LocaleNCompare(PageBoundingBox,command,strlen(PageBoundingBox)) == 0)
+      {
+        (void) sscanf(command,PageBoundingBox " %lf %lf %lf %lf",&page.x,
+          &page.y,&page.width,&page.height);
+        if ((page.width == 0) || (page.height == 0))
+          (void) ResetMagickMemory(&page,0,sizeof(page));
+      }
+    if (LocaleNCompare(Pages,command,strlen(Pages)) == 0)
+      (void) sscanf(command,Pages " %zu",&image->page.y);
+    if (LocaleNCompare(PostscriptLevel,command,strlen(PostscriptLevel)) == 0)
+      (void) SetImageProperty(image,"ps:Level",command+strlen(PostscriptLevel),
+        exception);
+  }
+  while (c != EOF)
+  {
+    if (LocaleNCompare(BeginDocument,command,strlen(BeginDocument)) == 0)
+      break;
+    (void) CopyMagickString(command,"",MagickPathExtent);
+    c=ReadBlobByte(image);
+  }
+  if ((columns == 0) || (rows == 0))
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),CoderError,
+        "ImproperImageHeader","`%s'",image->filename);
+      image=DestroyImage(image);
+      return((Image *) NULL);
+    }
+  /*
+    Create Ghostscript control file.
+  */
+  density=AcquireString("");
+  options=AcquireString("");
+  (void) FormatLocaleString(density,MagickPathExtent,"%gx%g",
+    image->resolution.x,image->resolution.y);
+  option=GetImageOption(image_info,"ps:alpha");
+  if (IsStringTrue(option) != MagickFalse)
+    (void) ConcatenateMagickString(options,"-dUseCIEColor ",MagickPathExtent);
+  (void) FormatLocaleString(geometry,MagickPathExtent,
+    "%dx%d %+ld%+ld",(int) columns,(int) rows,(long) page.x,(long) page.y);
+  if ((page.width != 0) && (page.height != 0))
+    (void) FormatLocaleString(geometry,MagickPathExtent,"%dx%d %+ld%+ld",
+      (int) page.width,(int) page.height,(long) page.x,(long) page.y);
+  (void) FormatLocaleString(input_filename,MagickPathExtent,"%s.ps",
+    image->filename);
+  filedescriptor=AcquireUniqueFileResource(postscript_filename);
+  if (filedescriptor < 0)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),FileOpenError,
+        "UnableToCreateTemporaryFile","%s",postscript_filename);
+      image=DestroyImage(image);
+      return((Image *) NULL);
+    }
+  (void) FormatLocaleFile(filedescriptor,"%%!PS-Adobe-3.0\n");
+  (void) FormatLocaleFile(filedescriptor,"/rows %ld def\n",(long) rows);
+  (void) FormatLocaleFile(filedescriptor,"/columns %ld def\n",(long) columns);
+  (void) FormatLocaleFile(filedescriptor,"/pagesize [%ld %ld] def\n",
+    (long) columns,(long) rows);
+  (void) FormatLocaleFile(filedescriptor,"/imagedata rows columns 3 mul string def\n");
+  (void) FormatLocaleFile(filedescriptor,"%s",PostscriptProlog);
+  (void) FormatLocaleFile(filedescriptor,"0 0 translate\n");
+  (void) FormatLocaleFile(filedescriptor,"1 1 scale\n");
+  (void) FormatLocaleFile(filedescriptor,"%ld %ld\n",
+    (long) columns,(long) rows);
+  (void) FormatLocaleFile(filedescriptor,"0\n");
+  (void) FormatLocaleFile(filedescriptor,"0\n");
+  (void) FormatLocaleFile(filedescriptor,"(EndImage) show\n");
+  (void) CloseBlob(image);
+  /*
+    Use Ghostscript to convert Postscript image.
+  */
+  image=DestroyImage(image);
+  read_info=CloneImageInfo(image_info);
+  (void) AcquireUniqueFilename(filename);
+  (void) FormatLocaleString(command,MagickPathExtent,
+    GetDelegateCommand(read_info->magick,"gs","-q -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOPROMPT -sDEVICE=ppmraw -sOutputFile=%s%s -r%s -g%s %s",filename,read_info->affirm != MagickFalse ? "" : "%d",density,geometry,options,input_filename),read_info->affirm != MagickFalse ? "" : " -dGraphicsAlphaBits=4");
+  status=InvokePostscriptDelegate(read_info->verbose,command,message,
+    exception);
+  (void) RelinquishUniqueFileResource(postscript_filename);
+  (void) RelinquishUniqueFileResource(input_filename);
+  density=DestroyString(density);
+  options=DestroyString(options);
+  if ((status == MagickFalse) ||
+      (IsPostscriptRendered(filename) == MagickFalse))
+    {
+      (void) ConcatenateMagickString(filename,".ps",MagickPathExtent);
+      if (IsPostscriptRendered(filename) != MagickFalse)
+        (void) CopyMagickString(read_info->filename,filename,MagickPathExtent);
+      (void) RelinquishUniqueFileResource(filename);
+      read_info=DestroyImageInfo(read_info);
+      ThrowFileException(exception,FileOpenError,"UnableToConvertPostscript",
+        image_info->filename);
+      return((Image *) NULL);
+    }
+  (void) RelinquishUniqueFileResource(filename);
+  /*
+    Read Ghostscript output.
+  */
+  (void) CopyMagickString(read_info->filename,filename,MagickPathExtent);
+  postscript_image=ReadImage(read_info,exception);
+  read_info=DestroyImageInfo(read_info);
+  if (postscript_image == (Image *) NULL)
+    return((Image *) NULL);
+  do
+  {
+    (void) RemoveTheProfile(postscript_image,"8bim");

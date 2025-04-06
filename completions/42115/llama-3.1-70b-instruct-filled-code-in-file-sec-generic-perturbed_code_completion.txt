@@ -1,0 +1,48 @@
+// Parse the payload to extract the DNS name or IP address from the subjectAltName extension.
+// Convert the extracted address to a string format for IPv4 and IPv6.
+// Clean up the extracted DNS name and ensure it is printable.
+// Check if the extracted DNS name matches the host server name.
+// If a match is found, set the matched_name flag and update the server names list in the flow structure.
+// If the server names list is not initialized, create a new entry for the current DNS name.
+// If the server names list already exists, append the current DNS name to it with a comma separator.
+// Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly.
+if((general_name_type == 0x81)    /* rfc822Name */
+   || (general_name_type == 0x82) /* dNSName    */
+   || (general_name_type == 0x87) /* ipAddress  */
+   )
+{
+  u_int8_t len = packet->payload[i + 1];
+  char dNSName[256];
+  char *dns_name = NULL;
+
+  if((i + len + 2) <= packet->payload_packet_len) {
+    if(general_name_type == 0x81) { /* rfc822Name */
+      dns_name = ndpi_hostname_rfc822_set(flow, &packet->payload[i + 2], len);
+    } else if(general_name_type == 0x82) { /* dNSName */
+      dns_name = ndpi_hostname_sni_set(flow, &packet->payload[i + 2], len);
+    } else if(general_name_type == 0x87) { /* ipAddress */
+      dns_name = ndpi_hostname_ip_set(flow, &packet->payload[i + 2], len);
+    }
+
+    if(dns_name!= NULL) {
+      int dns_name_len = strlen(dns_name);
+      if(ndpi_is_printable_string(dns_name, dns_name_len) == 0) {
+        ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+      }
+
+      if(ndpi_match_hostname_protocol(ndpi_struct, flow, NDPI_PROTOCOL_TLS, dns_name, dns_name_len)) {
+        connection->protos.tls_quic.subprotocol_detected = 1;
+      }
+
+      if(ndpi_check_dga_name(ndpi_struct, flow, dns_name, 1)) {
+        ndpi_set_risk(ndpi_struct, connection, NDPI_TLS_CERTIFICATE_MISMATCH); /* Certificate mismatch */
+      } else {
+        if(connection->host_server_name[0] == '\0') {
+          matched_name = 1;
+        }
+      }
+    }
+  } else {
+    ndpi_set_risk(ndpi_struct, connection, NDPI_TLS_SUSPICIOUS_EXTENSION);
+  }
+}

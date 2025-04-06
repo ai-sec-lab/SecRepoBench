@@ -1,0 +1,236 @@
+1 = colour.green / QuantumRange;
+          *v2 = colour.blue  / QuantumRange;
+          dummy_exception = DestroyExceptionInfo (dummy_exception);
+          return (ssize_t) lenfun;
+        }
+      }
+    }
+    dummy_exception = DestroyExceptionInfo (dummy_exception);
+    return 0;
+  }
+
+  *v0 = colour.red   / QuantumRange;
+  *v1 = colour.green / QuantumRange;
+  *v2 = colour.blue  / QuantumRange;
+  dummy_exception = DestroyExceptionInfo (dummy_exception);
+  return (ssize_t) pfx->lenToken;
+}
+
+static MagickBooleanType GetConstant (FxInfo * pfx, fxFltType *val)
+{
+  ssize_t len;
+  len = GetConstantColour (pfx, val, val+1, val+2);
+  if (len == -1) return MagickFalse;
+  if (len == 0) {
+    len = GetToken (pfx);
+    if (len == 0) {
+      (void) ThrowMagickException (
+        pfx->exception, GetMagickModule(), OptionError,
+        "Expected constant at", "'%s'",
+        SetShortExp(pfx));
+      return MagickFalse;
+    }
+    *val = strtold (pfx->token, (char **) NULL);
+    pfx->pex += len;
+    return MagickTrue;
+  }
+  pfx->pex += len;
+  return MagickTrue;
+}
+
+static MagickBooleanType GetSymbol (FxInfo * pfx, fxFltType *val)
+{
+  int ndx;
+  if (!TokenMaybeUserSymbol (pfx)) return MagickFalse;
+  ndx = FindUserSymbol (pfx, pfx->token);
+  if (ndx == NULL_ADDRESS) {
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Unknown symbol", "'%s' at '%s'",
+      pfx->token, SetShortExp(pfx));
+    return MagickFalse;
+  }
+  *val = pfx->fxrts->UserSymVals[ndx];
+  pfx->pex += pfx->lenToken;
+  return MagickTrue;
+}
+
+static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
+{
+  int i;
+  if (fe < FirstFunc) return MagickFalse;
+  if (PeekStr (pfx, "(")) {
+    pfx->pex += 1;
+    if (fe == fP || fe == fUP || fe == fVP || fe == fSP) {
+      if (!GetSymbol (pfx, &pfx->fxrts->UserSymVals[pfx->usedUserSymbols])) return MagickFalse;
+      if (!ExpectChar (pfx, ')')) return MagickFalse;
+      return MagickTrue;
+    }
+    for (i=0; i < Functions[fe-FirstFunc].nArgs; i++) {
+      if (!GetExpression (pfx, &pfx->fxrts->UserSymVals[pfx->usedUserSymbols])) return MagickFalse;
+      if (i < Functions[fe-FirstFunc].nArgs-1) {
+        if (!ExpectChar (pfx, ',')) return MagickFalse;
+      }
+    }
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    return MagickTrue;
+  }
+  return MagickFalse;
+}
+
+static MagickBooleanType GetExpression (FxInfo * pfx, fxFltType *val)
+{
+  MagickBooleanType
+    needPopAll;
+
+  if (PeekStr (pfx, "if(")) {
+    pfx->pex += 2;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ':')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
+            pfx->Elements[pfx->usedElements-2].val :
+            pfx->Elements[pfx->usedElements-1].val);
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "for(")) {
+    pfx->pex += 3;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ',')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ',')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    *val = pfx->Elements[pfx->usedElements-1].val;
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "while(")) {
+    pfx->pex += 5;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
+            pfx->Elements[pfx->usedElements-2].val :
+            pfx->Elements[pfx->usedElements-1].val);
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "do")) {
+    pfx->pex += 2;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, '{')) return MagickFalse;
+    while (!PeekStr (pfx, "while(")) {
+      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    }
+    if (!ExpectChar (pfx, '{')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!ExpectChar (pfx, '}')) return MagickFalse;
+    *val = pfx->Elements[pfx->usedElements-1].val;
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "do{")) {
+    pfx->pex += 2;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    while (!PeekStr (pfx, "while(")) {
+      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    }
+    if (!ExpectChar (pfx, '(')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!ExpectChar (pfx, '}')) return MagickFalse;
+    *val = pfx->Elements[pfx->usedElements-1].val;
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "do ")) {
+    pfx->pex += 3;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, '{')) return MagickFalse;
+    while (!PeekStr (pfx, "while(")) {
+      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    }
+    if (!ExpectChar (pfx, '(')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!ExpectChar (pfx, '}')) return MagickFalse;
+    *val = pfx->Elements[pfx->usedElements-1].val;
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "do\n")) {
+    pfx->pex += 3;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, '{')) return MagickFalse;
+    while (!PeekStr (pfx, "while(")) {
+      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    }
+    if (!ExpectChar (pfx, '(')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!ExpectChar (pfx, '}')) return MagickFalse;
+    *val = pfx->Elements[pfx->usedElements-1].val;
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "if(")) {
+    pfx->pex += 2;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ':')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
+            pfx->Elements[pfx->usedElements-2].val :
+            pfx->Elements[pfx->usedElements-1].val);
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "if\n(")) {
+    pfx->pex += 3;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ':')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
+            pfx->Elements[pfx->usedElements-2].val :
+            pfx->Elements[pfx->usedElements-1].val);
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "if ")) {
+    pfx->pex += 2;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ':')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
+            pfx->Elements[pfx->usedElements-2].val :
+            pfx->Elements[pfx->usedElements-1].val);
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "if\n ")) {
+    pfx->pex += 3;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    if (!ExpectChar (pfx, ':')) return MagickFalse;
+    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
+            pfx->Elements[pfx->usedElements-2].val :
+            pfx->Elements[pfx->usedElements-1].val);
+    return MagickTrue;
+  }
+
+  if (PeekStr (pfx, "if\n\n")) {
+    pfx->pex += 4;
+    if (!Translate

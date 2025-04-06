@@ -1,0 +1,863 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// parser.c
+static xmlParserErrors
+xmlParseExternalEntityPrivate(xmlDocPtr doc, xmlParserCtxtPtr oldctxt,
+	              xmlSAXHandlerPtr sax,
+		      void *user_data, int depth, const xmlChar *URL,
+		      const xmlChar *ID, xmlNodePtr *list) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr newDoc;
+    xmlNodePtr newRoot;
+    xmlSAXHandlerPtr oldsax = NULL;
+    xmlParserErrors ret = XML_ERR_OK;
+    xmlChar start[4];
+    xmlCharEncoding enc;
+
+    if (((depth > 40) &&
+	((oldctxt == NULL) || (oldctxt->options & XML_PARSE_HUGE) == 0)) ||
+	(depth > 1024)) {
+	return(XML_ERR_ENTITY_LOOP);
+    }
+
+    if (list != NULL)
+        *list = NULL;
+    if ((URL == NULL) && (ID == NULL))
+	return(XML_ERR_INTERNAL_ERROR);
+    if (doc == NULL)
+	return(XML_ERR_INTERNAL_ERROR);
+
+
+    ctxt = xmlCreateEntityParserCtxtInternal(URL, ID, NULL, oldctxt);
+    if (ctxt == NULL) return(XML_WAR_UNDECLARED_ENTITY);
+    ctxt->userData = ctxt;
+    if (sax != NULL) {
+	oldsax = ctxt->sax;
+        ctxt->sax = sax;
+	if (user_data != NULL)
+	    ctxt->userData = user_data;
+    }
+    xmlDetectSAX2(ctxt);
+    newDoc = xmlNewDoc(BAD_CAST "1.0");
+    if (newDoc == NULL) {
+	xmlFreeParserCtxt(ctxt);
+	return(XML_ERR_INTERNAL_ERROR);
+    }
+    newDoc->properties = XML_DOC_INTERNAL;
+    if (doc) {
+        newDoc->intSubset = doc->intSubset;
+        newDoc->extSubset = doc->extSubset;
+        if (doc->dict) {
+            newDoc->dict = doc->dict;
+            xmlDictReference(newDoc->dict);
+        }
+        if (doc->URL != NULL) {
+            newDoc->URL = xmlStrdup(doc->URL);
+        }
+    }
+    newRoot = xmlNewDocNode(newDoc, NULL, BAD_CAST "pseudoroot", NULL);
+    if (newRoot == NULL) {
+	if (sax != NULL)
+	    ctxt->sax = oldsax;
+	xmlFreeParserCtxt(ctxt);
+	newDoc->intSubset = NULL;
+	newDoc->extSubset = NULL;
+        xmlFreeDoc(newDoc);
+	return(XML_ERR_INTERNAL_ERROR);
+    }
+    xmlAddChild((xmlNodePtr) newDoc, newRoot);
+    nodePush(ctxt, newDoc->children);
+    if (doc == NULL) {
+        ctxt->myDoc = newDoc;
+    } else {
+        ctxt->myDoc = doc;
+        newRoot->doc = doc;
+    }
+
+    /*
+     * Get the 4 first bytes and decode the charset
+     * if enc != XML_CHAR_ENCODING_NONE
+     * plug some encoding conversion routines.
+     */
+    GROW;
+    if ((ctxt->input->end - ctxt->input->cur) >= 4) {
+	start[0] = RAW;
+	start[1] = NXT(1);
+	start[2] = NXT(2);
+	start[3] = NXT(3);
+	enc = xmlDetectCharEncoding(start, 4);
+	if (enc != XML_CHAR_ENCODING_NONE) {
+	    xmlSwitchEncoding(ctxt, enc);
+	}
+    }
+
+    /*
+     * Parse a possible text declaration first
+     */
+    if ((CMP5(CUR_PTR, '<', '?', 'x', 'm', 'l')) && (IS_BLANK_CH(NXT(5)))) {
+	xmlParseTextDecl(ctxt);
+        /*
+         * An XML-1.0 document can't reference an entity not XML-1.0
+         */
+        if ((xmlStrEqual(oldctxt->version, BAD_CAST "1.0")) &&
+            (!xmlStrEqual(ctxt->input->version, BAD_CAST "1.0"))) {
+            xmlFatalErrMsg(ctxt, XML_ERR_VERSION_MISMATCH,
+                           "Version mismatch between document and entity\n");
+        }
+    }
+
+    ctxt->instate = XML_PARSER_CONTENT;
+    ctxt->depth = depth;
+    if (oldctxt != NULL) {
+	ctxt->_private = oldctxt->_private;
+	ctxt->loadsubset = oldctxt->loadsubset;
+	ctxt->validate = oldctxt->validate;
+	ctxt->valid = oldctxt->valid;
+	ctxt->replaceEntities = oldctxt->replaceEntities;
+        if (oldctxt->validate) {
+            ctxt->vctxt.error = oldctxt->vctxt.error;
+            ctxt->vctxt.warning = oldctxt->vctxt.warning;
+            ctxt->vctxt.userData = oldctxt->vctxt.userData;
+        }
+	ctxt->external = oldctxt->external;
+        if (ctxt->dict) xmlDictFree(ctxt->dict);
+        ctxt->dict = oldctxt->dict;
+        ctxt->str_xml = xmlDictLookup(ctxt->dict, BAD_CAST "xml", 3);
+        ctxt->str_xmlns = xmlDictLookup(ctxt->dict, BAD_CAST "xmlns", 5);
+        ctxt->str_xml_ns = xmlDictLookup(ctxt->dict, XML_XML_NAMESPACE, 36);
+        ctxt->dictNames = oldctxt->dictNames;
+        ctxt->attsDefault = oldctxt->attsDefault;
+        ctxt->attsSpecial = oldctxt->attsSpecial;
+        ctxt->linenumbers = oldctxt->linenumbers;
+	ctxt->record_info = oldctxt->record_info;
+	ctxt->node_seq.maximum = oldctxt->node_seq.maximum;
+	ctxt->node_seq.length = oldctxt->node_seq.length;
+	ctxt->node_seq.buffer = oldctxt->node_seq.buffer;
+    } else {
+	/*
+	 * Doing validity checking on chunk without context
+	 * doesn't make sense
+	 */
+	ctxt->_private = NULL;
+	ctxt->validate = 0;
+	ctxt->external = 2;
+	ctxt->loadsubset = 0;
+    }
+
+    xmlParseContent(ctxt);
+
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW != 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if (ctxt->node != newDoc->children) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    }
+
+    if (!ctxt->wellFormed) {
+        if (ctxt->errNo == 0)
+	    ret = XML_ERR_INTERNAL_ERROR;
+	else
+	    ret = (xmlParserErrors)ctxt->errNo;
+    } else {
+	if (list != NULL) {
+	    xmlNodePtr cur;
+
+	    /*
+	     * Return the newly created nodeset after unlinking it from
+	     * they pseudo parent.
+	     */
+	    cur = newDoc->children->children;
+	    *list = cur;
+	    while (cur != NULL) {
+		cur->parent = NULL;
+		cur = cur->next;
+	    }
+            newDoc->children->children = NULL;
+	}
+	ret = XML_ERR_OK;
+    }
+
+    /*
+     * Record in the parent context the number of entities replacement
+     * done when parsing that reference.
+     */
+    if (oldctxt != NULL)
+        oldctxt->nbentities += ctxt->nbentities;
+
+    /*
+     * Also record the size of the entity parsed
+     */
+    if (ctxt->input != NULL && oldctxt != NULL) {
+	oldctxt->sizeentities += ctxt->input->consumed;
+	oldctxt->sizeentities += (ctxt->input->cur - ctxt->input->base);
+    }
+    /*
+     * And record the last error if any
+     */
+    if ((oldctxt != NULL) && (ctxt->lastError.code != XML_ERR_OK))
+        xmlCopyError(&ctxt->lastError, &oldctxt->lastError);
+
+    if (sax != NULL)
+	ctxt->sax = oldsax;
+    if (oldctxt != NULL) {
+        ctxt->dict = NULL;
+        ctxt->attsDefault = NULL;
+        ctxt->attsSpecial = NULL;
+        oldctxt->validate = ctxt->validate;
+        oldctxt->valid = ctxt->valid;
+        oldctxt->node_seq.maximum = ctxt->node_seq.maximum;
+        oldctxt->node_seq.length = ctxt->node_seq.length;
+        oldctxt->node_seq.buffer = ctxt->node_seq.buffer;
+    }
+    ctxt->node_seq.maximum = 0;
+    ctxt->node_seq.length = 0;
+    ctxt->node_seq.buffer = NULL;
+    xmlFreeParserCtxt(ctxt);
+    newDoc->intSubset = NULL;
+    newDoc->extSubset = NULL;
+    xmlFreeDoc(newDoc);
+
+    return(ret);
+}
+
+// the below code fragment can be found in:
+// parser.c
+xmlEntityPtr
+xmlParseEntityRef(xmlParserCtxtPtr ctxt) {
+    const xmlChar *name;
+    xmlEntityPtr ent = NULL;
+
+    GROW;
+    if (ctxt->instate == XML_PARSER_EOF)
+        return(NULL);
+
+    if (RAW != '&')
+        return(NULL);
+    NEXT;
+    name = xmlParseName(ctxt);
+    if (name == NULL) {
+	xmlFatalErrMsg(ctxt, XML_ERR_NAME_REQUIRED,
+		       "xmlParseEntityRef: no name\n");
+        return(NULL);
+    }
+    if (RAW != ';') {
+	xmlFatalErr(ctxt, XML_ERR_ENTITYREF_SEMICOL_MISSING, NULL);
+	return(NULL);
+    }
+    NEXT;
+
+    /*
+     * Predefined entities override any extra definition
+     */
+    if ((ctxt->options & XML_PARSE_OLDSAX) == 0) {
+        ent = xmlGetPredefinedEntity(name);
+        if (ent != NULL)
+            return(ent);
+    }
+
+    /*
+     * Increase the number of entity references parsed
+     */
+    ctxt->nbentities++;
+
+    /*
+     * Ask first SAX for entity resolution, otherwise try the
+     * entities which may have stored in the parser context.
+     */
+    if (ctxt->sax != NULL) {
+	if (ctxt->sax->getEntity != NULL)
+	    ent = ctxt->sax->getEntity(ctxt->userData, name);
+	if ((ctxt->wellFormed == 1 ) && (ent == NULL) &&
+	    (ctxt->options & XML_PARSE_OLDSAX))
+	    ent = xmlGetPredefinedEntity(name);
+	if ((ctxt->wellFormed == 1 ) && (ent == NULL) &&
+	    (ctxt->userData==ctxt)) {
+	    ent = xmlSAX2GetEntity(ctxt, name);
+	}
+    }
+    if (ctxt->instate == XML_PARSER_EOF)
+	return(NULL);
+    /*
+     * [ WFC: Entity Declared ]
+     * In a document without any DTD, a document with only an
+     * internal DTD subset which contains no parameter entity
+     * references, or a document with "standalone='yes'", the
+     * Name given in the entity reference must match that in an
+     * entity declaration, except that well-formed documents
+     * need not declare any of the following entities: amp, lt,
+     * gt, apos, quot.
+     * The declaration of a parameter entity must precede any
+     * reference to it.
+     * Similarly, the declaration of a general entity must
+     * precede any reference to it which appears in a default
+     * value in an attribute-list declaration. Note that if
+     * entities are declared in the external subset or in
+     * external parameter entities, a non-validating processor
+     * is not obligated to read and process their declarations;
+     * for such documents, the rule that an entity must be
+     * declared is a well-formedness constraint only if
+     * standalone='yes'.
+     */
+    if (ent == NULL) {
+	if ((ctxt->standalone == 1) ||
+	    ((ctxt->hasExternalSubset == 0) &&
+	     (ctxt->hasPErefs == 0))) {
+	    xmlFatalErrMsgStr(ctxt, XML_ERR_UNDECLARED_ENTITY,
+		     "Entity '%s' not defined\n", name);
+	} else {
+	    xmlErrMsgStr(ctxt, XML_WAR_UNDECLARED_ENTITY,
+		     "Entity '%s' not defined\n", name);
+	    if ((ctxt->inSubset == 0) &&
+		(ctxt->sax != NULL) &&
+		(ctxt->sax->reference != NULL)) {
+		ctxt->sax->reference(ctxt->userData, name);
+	    }
+	}
+	xmlParserEntityCheck(ctxt, 0, ent, 0);
+	ctxt->valid = 0;
+    }
+
+    /*
+     * [ WFC: Parsed Entity ]
+     * An entity reference must not contain the name of an
+     * unparsed entity
+     */
+    else if (ent->etype == XML_EXTERNAL_GENERAL_UNPARSED_ENTITY) {
+	xmlFatalErrMsgStr(ctxt, XML_ERR_UNPARSED_ENTITY,
+		 "Entity reference to unparsed entity %s\n", name);
+    }
+
+    /*
+     * [ WFC: No External Entity References ]
+     * Attribute values cannot contain direct or indirect
+     * entity references to external entities.
+     */
+    else if ((ctxt->instate == XML_PARSER_ATTRIBUTE_VALUE) &&
+	     (ent->etype == XML_EXTERNAL_GENERAL_PARSED_ENTITY)) {
+	xmlFatalErrMsgStr(ctxt, XML_ERR_ENTITY_IS_EXTERNAL,
+	     "Attribute references external entity '%s'\n", name);
+    }
+    /*
+     * [ WFC: No < in Attribute Values ]
+     * The replacement text of any entity referred to directly or
+     * indirectly in an attribute value (other than "&lt;") must
+     * not contain a <.
+     */
+    else if ((ctxt->instate == XML_PARSER_ATTRIBUTE_VALUE) &&
+	     (ent != NULL) && 
+	     (ent->etype != XML_INTERNAL_PREDEFINED_ENTITY)) {
+	if (((ent->checked & 1) || (ent->checked == 0)) &&
+	     (ent->content != NULL) && (xmlStrchr(ent->content, '<'))) {
+	    xmlFatalErrMsgStr(ctxt, XML_ERR_LT_IN_ATTRIBUTE,
+	"'<' in entity '%s' is not allowed in attributes values\n", name);
+        }
+    }
+
+    /*
+     * Internal check, no parameter entities here ...
+     */
+    else {
+	switch (ent->etype) {
+	    case XML_INTERNAL_PARAMETER_ENTITY:
+	    case XML_EXTERNAL_PARAMETER_ENTITY:
+	    xmlFatalErrMsgStr(ctxt, XML_ERR_ENTITY_IS_PARAMETER,
+	     "Attempt to reference the parameter entity '%s'\n",
+			      name);
+	    break;
+	    default:
+	    break;
+	}
+    }
+
+    /*
+     * [ WFC: No Recursion ]
+     * A parsed entity must not contain a recursive reference
+     * to itself, either directly or indirectly.
+     * Done somewhere else
+     */
+    return(ent);
+}
+
+// the below code fragment can be found in:
+// parser.c
+static xmlEntityPtr
+xmlParseStringEntityRef(xmlParserCtxtPtr ctxt, const xmlChar ** str) {
+    xmlChar *name;
+    const xmlChar *ptr;
+    xmlChar cur;
+    xmlEntityPtr ent = NULL;
+
+    if ((str == NULL) || (*str == NULL))
+        return(NULL);
+    ptr = *str;
+    cur = *ptr;
+    if (cur != '&')
+	return(NULL);
+
+    ptr++;
+    name = xmlParseStringName(ctxt, &ptr);
+    if (name == NULL) {
+	xmlFatalErrMsg(ctxt, XML_ERR_NAME_REQUIRED,
+		       "xmlParseStringEntityRef: no name\n");
+	*str = ptr;
+	return(NULL);
+    }
+    if (*ptr != ';') {
+	xmlFatalErr(ctxt, XML_ERR_ENTITYREF_SEMICOL_MISSING, NULL);
+        xmlFree(name);
+	*str = ptr;
+	return(NULL);
+    }
+    ptr++;
+
+
+    /*
+     * Predefined entities override any extra definition
+     */
+    if ((ctxt->options & XML_PARSE_OLDSAX) == 0) {
+        ent = xmlGetPredefinedEntity(name);
+        if (ent != NULL) {
+            xmlFree(name);
+            *str = ptr;
+            return(ent);
+        }
+    }
+
+    /*
+     * Increase the number of entity references parsed
+     */
+    ctxt->nbentities++;
+
+    /*
+     * Ask first SAX for entity resolution, otherwise try the
+     * entities which may have stored in the parser context.
+     */
+    if (ctxt->sax != NULL) {
+	if (ctxt->sax->getEntity != NULL)
+	    ent = ctxt->sax->getEntity(ctxt->userData, name);
+	if ((ent == NULL) && (ctxt->options & XML_PARSE_OLDSAX))
+	    ent = xmlGetPredefinedEntity(name);
+	if ((ent == NULL) && (ctxt->userData==ctxt)) {
+	    ent = xmlSAX2GetEntity(ctxt, name);
+	}
+    }
+    if (ctxt->instate == XML_PARSER_EOF) {
+	xmlFree(name);
+	return(NULL);
+    }
+
+    /*
+     * [ WFC: Entity Declared ]
+     * In a document without any DTD, a document with only an
+     * internal DTD subset which contains no parameter entity
+     * references, or a document with "standalone='yes'", the
+     * Name given in the entity reference must match that in an
+     * entity declaration, except that well-formed documents
+     * need not declare any of the following entities: amp, lt,
+     * gt, apos, quot.
+     * The declaration of a parameter entity must precede any
+     * reference to it.
+     * Similarly, the declaration of a general entity must
+     * precede any reference to it which appears in a default
+     * value in an attribute-list declaration. Note that if
+     * entities are declared in the external subset or in
+     * external parameter entities, a non-validating processor
+     * is not obligated to read and process their declarations;
+     * for such documents, the rule that an entity must be
+     * declared is a well-formedness constraint only if
+     * standalone='yes'.
+     */
+    if (ent == NULL) {
+	if ((ctxt->standalone == 1) ||
+	    ((ctxt->hasExternalSubset == 0) &&
+	     (ctxt->hasPErefs == 0))) {
+	    xmlFatalErrMsgStr(ctxt, XML_ERR_UNDECLARED_ENTITY,
+		     "Entity '%s' not defined\n", name);
+	} else {
+	    xmlErrMsgStr(ctxt, XML_WAR_UNDECLARED_ENTITY,
+			  "Entity '%s' not defined\n",
+			  name);
+	}
+	xmlParserEntityCheck(ctxt, 0, ent, 0);
+	/* TODO ? check regressions ctxt->valid = 0; */
+    }
+
+    /*
+     * [ WFC: Parsed Entity ]
+     * An entity reference must not contain the name of an
+     * unparsed entity
+     */
+    else if (ent->etype == XML_EXTERNAL_GENERAL_UNPARSED_ENTITY) {
+	xmlFatalErrMsgStr(ctxt, XML_ERR_UNPARSED_ENTITY,
+		 "Entity reference to unparsed entity %s\n", name);
+    }
+
+    /*
+     * [ WFC: No External Entity References ]
+     * Attribute values cannot contain direct or indirect
+     * entity references to external entities.
+     */
+    else if ((ctxt->instate == XML_PARSER_ATTRIBUTE_VALUE) &&
+	     (ent->etype == XML_EXTERNAL_GENERAL_PARSED_ENTITY)) {
+	xmlFatalErrMsgStr(ctxt, XML_ERR_ENTITY_IS_EXTERNAL,
+	 "Attribute references external entity '%s'\n", name);
+    }
+    /*
+     * [ WFC: No < in Attribute Values ]
+     * The replacement text of any entity referred to directly or
+     * indirectly in an attribute value (other than "&lt;") must
+     * not contain a <.
+     */
+    else if ((ctxt->instate == XML_PARSER_ATTRIBUTE_VALUE) &&
+	     (ent != NULL) && (ent->content != NULL) &&
+	     (ent->etype != XML_INTERNAL_PREDEFINED_ENTITY) &&
+	     (xmlStrchr(ent->content, '<'))) {
+	xmlFatalErrMsgStr(ctxt, XML_ERR_LT_IN_ATTRIBUTE,
+     "'<' in entity '%s' is not allowed in attributes values\n",
+			  name);
+    }
+
+    /*
+     * Internal check, no parameter entities here ...
+     */
+    else {
+	switch (ent->etype) {
+	    case XML_INTERNAL_PARAMETER_ENTITY:
+	    case XML_EXTERNAL_PARAMETER_ENTITY:
+		xmlFatalErrMsgStr(ctxt, XML_ERR_ENTITY_IS_PARAMETER,
+	     "Attempt to reference the parameter entity '%s'\n",
+				  name);
+	    break;
+	    default:
+	    break;
+	}
+    }
+
+    /*
+     * [ WFC: No Recursion ]
+     * A parsed entity must not contain a recursive reference
+     * to itself, either directly or indirectly.
+     * Done somewhere else
+     */
+
+    xmlFree(name);
+    *str = ptr;
+    return(ent);
+}
+
+// the below code fragment can be found in:
+// parser.c
+static xmlParserErrors
+xmlParseBalancedChunkMemoryInternal(xmlParserCtxtPtr oldctxt,
+	const xmlChar *string, void *user_data, xmlNodePtr *lst) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr newDoc = NULL;
+    xmlNodePtr newRoot;
+    xmlSAXHandlerPtr oldsax = NULL;
+    xmlNodePtr content = NULL;
+    xmlNodePtr last = NULL;
+    int size;
+    xmlParserErrors ret = XML_ERR_OK;
+#ifdef SAX2
+    int i;
+#endif
+
+    if (((oldctxt->depth > 40) && ((oldctxt->options & XML_PARSE_HUGE) == 0)) ||
+        (oldctxt->depth >  1024)) {
+	return(XML_ERR_ENTITY_LOOP);
+    }
+
+
+    if (lst != NULL)
+        *lst = NULL;
+    if (string == NULL)
+        return(XML_ERR_INTERNAL_ERROR);
+
+    size = xmlStrlen(string);
+
+    ctxt = xmlCreateMemoryParserCtxt((char *) string, size);
+    if (ctxt == NULL) return(XML_WAR_UNDECLARED_ENTITY);
+    if (user_data != NULL)
+	ctxt->userData = user_data;
+    else
+	ctxt->userData = ctxt;
+    if (ctxt->dict != NULL) xmlDictFree(ctxt->dict);
+    ctxt->dict = oldctxt->dict;
+    ctxt->input_id = oldctxt->input_id + 1;
+    ctxt->str_xml = xmlDictLookup(ctxt->dict, BAD_CAST "xml", 3);
+    ctxt->str_xmlns = xmlDictLookup(ctxt->dict, BAD_CAST "xmlns", 5);
+    ctxt->str_xml_ns = xmlDictLookup(ctxt->dict, XML_XML_NAMESPACE, 36);
+
+#ifdef SAX2
+    /* propagate namespaces down the entity */
+    for (i = 0;i < oldctxt->nsNr;i += 2) {
+        nsPush(ctxt, oldctxt->nsTab[i], oldctxt->nsTab[i+1]);
+    }
+#endif
+
+    oldsax = ctxt->sax;
+    ctxt->sax = oldctxt->sax;
+    xmlDetectSAX2(ctxt);
+    ctxt->replaceEntities = oldctxt->replaceEntities;
+    ctxt->options = oldctxt->options;
+
+    ctxt->_private = oldctxt->_private;
+    if (oldctxt->myDoc == NULL) {
+	newDoc = xmlNewDoc(BAD_CAST "1.0");
+	if (newDoc == NULL) {
+	    ctxt->sax = oldsax;
+	    ctxt->dict = NULL;
+	    xmlFreeParserCtxt(ctxt);
+	    return(XML_ERR_INTERNAL_ERROR);
+	}
+	newDoc->properties = XML_DOC_INTERNAL;
+	newDoc->dict = ctxt->dict;
+	xmlDictReference(newDoc->dict);
+	ctxt->myDoc = newDoc;
+    } else {
+	ctxt->myDoc = oldctxt->myDoc;
+        content = ctxt->myDoc->children;
+	last = ctxt->myDoc->last;
+    }
+    newRoot = xmlNewDocNode(ctxt->myDoc, NULL, BAD_CAST "pseudoroot", NULL);
+    if (newRoot == NULL) {
+	ctxt->sax = oldsax;
+	ctxt->dict = NULL;
+	xmlFreeParserCtxt(ctxt);
+	if (newDoc != NULL) {
+	    xmlFreeDoc(newDoc);
+	}
+	return(XML_ERR_INTERNAL_ERROR);
+    }
+    ctxt->myDoc->children = NULL;
+    ctxt->myDoc->last = NULL;
+    xmlAddChild((xmlNodePtr) ctxt->myDoc, newRoot);
+    nodePush(ctxt, ctxt->myDoc->children);
+    ctxt->instate = XML_PARSER_CONTENT;
+    ctxt->depth = oldctxt->depth + 1;
+
+    ctxt->validate = 0;
+    ctxt->loadsubset = oldctxt->loadsubset;
+    if ((oldctxt->validate) || (oldctxt->replaceEntities != 0)) {
+	/*
+	 * ID/IDREF registration will be done in xmlValidateElement below
+	 */
+	ctxt->loadsubset |= XML_SKIP_IDS;
+    }
+    ctxt->dictNames = oldctxt->dictNames;
+    ctxt->attsDefault = oldctxt->attsDefault;
+    ctxt->attsSpecial = oldctxt->attsSpecial;
+
+    xmlParseContent(ctxt);
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW != 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if (ctxt->node != ctxt->myDoc->children) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    }
+
+    if (!ctxt->wellFormed) {
+        if (ctxt->errNo == 0)
+	    ret = XML_ERR_INTERNAL_ERROR;
+	else
+	    ret = (xmlParserErrors)ctxt->errNo;
+    } else {
+      ret = XML_ERR_OK;
+    }
+
+    if ((lst != NULL) && (ret == XML_ERR_OK)) {
+	xmlNodePtr cur;
+
+	/*
+	 * Return the newly created nodeset after unlinking it from
+	 * they pseudo parent.
+	 */
+	cur = ctxt->myDoc->children->children;
+	*lst = cur;
+	while (cur != NULL) {
+#ifdef LIBXML_VALID_ENABLED
+	    if ((oldctxt->validate) && (oldctxt->wellFormed) &&
+		(oldctxt->myDoc) && (oldctxt->myDoc->intSubset) &&
+		(cur->type == XML_ELEMENT_NODE)) {
+		oldctxt->valid &= xmlValidateElement(&oldctxt->vctxt,
+			oldctxt->myDoc, cur);
+	    }
+#endif /* LIBXML_VALID_ENABLED */
+	    cur->parent = NULL;
+	    cur = cur->next;
+	}
+	ctxt->myDoc->children->children = NULL;
+    }
+    if (ctxt->myDoc != NULL) {
+	xmlFreeNode(ctxt->myDoc->children);
+        ctxt->myDoc->children = content;
+        ctxt->myDoc->last = last;
+    }
+
+    /*
+     * Record in the parent context the number of entities replacement
+     * done when parsing that reference.
+     */
+    if (oldctxt != NULL)
+        oldctxt->nbentities += ctxt->nbentities;
+
+    /*
+     * Also record the last error if any
+     */
+    if (ctxt->lastError.code != XML_ERR_OK)
+        xmlCopyError(&ctxt->lastError, &oldctxt->lastError);
+
+    ctxt->sax = oldsax;
+    ctxt->dict = NULL;
+    ctxt->attsDefault = NULL;
+    ctxt->attsSpecial = NULL;
+    xmlFreeParserCtxt(ctxt);
+    if (newDoc != NULL) {
+	xmlFreeDoc(newDoc);
+    }
+
+    return(ret);
+}
+
+// the below code fragment can be found in:
+// parser.c
+static int
+xmlParserEntityCheck(xmlParserCtxtPtr ctxt, size_t size,
+                     xmlEntityPtr ent, size_t replacement)
+{
+    size_t consumed = 0;
+    int i;
+
+    if ((ctxt == NULL) || (ctxt->options & XML_PARSE_HUGE))
+        return (0);
+    if (ctxt->lastError.code == XML_ERR_ENTITY_LOOP)
+        return (1);
+
+    /*
+     * This may look absurd but is needed to detect
+     * entities problems
+     */
+    if ((ent != NULL) && (ent->etype != XML_INTERNAL_PREDEFINED_ENTITY) &&
+	(ent->content != NULL) && (ent->checked == 0) &&
+	(ctxt->errNo != XML_ERR_ENTITY_LOOP)) {
+	unsigned long oldnbent = ctxt->nbentities, diff;
+	xmlChar *rep;
+
+	ent->checked = 1;
+
+        ++ctxt->depth;
+	rep = xmlStringDecodeEntities(ctxt, ent->content,
+				  XML_SUBSTITUTE_REF, 0, 0, 0);
+        --ctxt->depth;
+	if ((rep == NULL) || (ctxt->errNo == XML_ERR_ENTITY_LOOP)) {
+	    ent->content[0] = 0;
+	}
+
+        diff = ctxt->nbentities - oldnbent + 1;
+        if (diff > INT_MAX / 2)
+            diff = INT_MAX / 2;
+	ent->checked = diff * 2;
+	if (rep != NULL) {
+	    if (xmlStrchr(rep, '<'))
+		ent->checked |= 1;
+	    xmlFree(rep);
+	    rep = NULL;
+	}
+    }
+
+    /*
+     * Prevent entity exponential check, not just replacement while
+     * parsing the DTD
+     * The check is potentially costly so do that only once in a thousand
+     */
+    if ((ctxt->instate == XML_PARSER_DTD) && (ctxt->nbentities > 10000) &&
+        (ctxt->nbentities % 1024 == 0)) {
+	for (i = 0;i < ctxt->inputNr;i++) {
+	    consumed += ctxt->inputTab[i]->consumed +
+	               (ctxt->inputTab[i]->cur - ctxt->inputTab[i]->base);
+	}
+	if (ctxt->nbentities > consumed * XML_PARSER_NON_LINEAR) {
+	    xmlFatalErr(ctxt, XML_ERR_ENTITY_LOOP, NULL);
+	    ctxt->instate = XML_PARSER_EOF;
+	    return (1);
+	}
+	consumed = 0;
+    }
+
+
+
+    if (replacement != 0) {
+	if (replacement < XML_MAX_TEXT_LENGTH)
+	    return(0);
+
+        /*
+	 * If the volume of entity copy reaches 10 times the
+	 * amount of parsed data and over the large text threshold
+	 * then that's very likely to be an abuse.
+	 */
+        if (ctxt->input != NULL) {
+	    consumed = ctxt->input->consumed +
+	               (ctxt->input->cur - ctxt->input->base);
+	}
+        consumed += ctxt->sizeentities;
+
+        if (replacement < XML_PARSER_NON_LINEAR * consumed)
+	    return(0);
+    } else if (size != 0) {
+        /*
+         * Do the check based on the replacement size of the entity
+         */
+        if (size < XML_PARSER_BIG_ENTITY)
+	    return(0);
+
+        /*
+         * A limit on the amount of text data reasonably used
+         */
+        if (ctxt->input != NULL) {
+            consumed = ctxt->input->consumed +
+                (ctxt->input->cur - ctxt->input->base);
+        }
+        consumed += ctxt->sizeentities;
+
+        if ((size < XML_PARSER_NON_LINEAR * consumed) &&
+	    (ctxt->nbentities * 3 < XML_PARSER_NON_LINEAR * consumed))
+            return (0);
+    } else if (ent != NULL) {
+        /*
+         * use the number of parsed entities in the replacement
+         */
+        size = ent->checked / 2;
+
+        /*
+         * The amount of data parsed counting entities size only once
+         */
+        if (ctxt->input != NULL) {
+            consumed = ctxt->input->consumed +
+                (ctxt->input->cur - ctxt->input->base);
+        }
+        consumed += ctxt->sizeentities;
+
+        /*
+         * Check the density of entities for the amount of data
+	 * knowing an entity reference will take at least 3 bytes
+         */
+        if (size * 3 < consumed * XML_PARSER_NON_LINEAR)
+            return (0);
+    } else {
+        /*
+         * strange we got no data for checking
+         */
+	if (((ctxt->lastError.code != XML_ERR_UNDECLARED_ENTITY) &&
+	     (ctxt->lastError.code != XML_WAR_UNDECLARED_ENTITY)) ||
+	    (ctxt->nbentities <= 10000))
+	    return (0);
+    }
+    xmlFatalErr(ctxt, XML_ERR_ENTITY_LOOP, NULL);
+    return (1);
+}
+

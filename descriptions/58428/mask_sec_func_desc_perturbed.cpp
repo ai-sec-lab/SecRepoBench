@@ -1,0 +1,23 @@
+bool get_contour_points (contour_point_vector_t &contour_points /* OUT */,
+			   bool phantom_only = false) const
+  {
+    // Initialize the contour points based on the end points of the contours.
+    // Retrieve the end points of the contours from the header and validate the range.
+    // Allocate memory for the contour points, including space for phantom points.
+    // Set the end points of each contour in the points array.
+    // If phantom_only is true, skip the process of reading the actual points.
+    // <MASK>
+    const HBUINT8 *p = &StructAtOffset<HBUINT8> (&endPtsOfContours[num_contours + 1],
+						 endPtsOfContours[num_contours]);
+
+    if (unlikely ((const char *) p < bytes.arrayZ)) return false; /* Unlikely overflow */
+    const HBUINT8 *end = (const HBUINT8 *) (bytes.arrayZ + bytes.length);
+    if (unlikely (p >= end)) return false;
+
+    /* Read x & y coordinates */
+    return read_flags (p, contour_points, end)
+        && read_points (p, contour_points, end, &contour_point_t::x,
+			FLAG_X_SHORT, FLAG_X_SAME)
+	&& read_points (p, contour_points, end, &contour_point_t::y,
+			FLAG_Y_SHORT, FLAG_Y_SAME);
+  }

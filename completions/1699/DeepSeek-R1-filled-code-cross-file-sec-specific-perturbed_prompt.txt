@@ -1,0 +1,403 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static int read_matrix_params(MLPDecodeContext *m, unsigned int substr, GetBitContext *bit_context)
+{
+    SubStream *s = &m->substream[substr];
+    unsigned int mat, ch;
+    // Determine the maximum number of primitive matrices allowed based on the codec type.
+    // Check if the matrix configuration has been changed more than once per access unit.
+    // Retrieve the number of primitive matrices from the bitstream.
+    // Validate that the number of primitive matrices does not exceed the allowed maximum.
+    // If validation fails, log an error message and return an error code.
+    // <MASK>
+
+    for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+        int frac_bits, max_chan;
+        s->matrix_out_ch[mat] = get_bits(bit_context, 4);
+        frac_bits             = get_bits(bit_context, 4);
+        s->lsb_bypass   [mat] = get_bits1(bit_context);
+
+        if (s->matrix_out_ch[mat] > s->max_matrix_channel) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                    "Invalid channel %d specified as output from matrix.\n",
+                    s->matrix_out_ch[mat]);
+            return AVERROR_INVALIDDATA;
+        }
+        if (frac_bits > 14) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                    "Too many fractional bits specified.\n");
+            return AVERROR_INVALIDDATA;
+        }
+
+        max_chan = s->max_matrix_channel;
+        if (!s->noise_type)
+            max_chan+=2;
+
+        for (ch = 0; ch <= max_chan; ch++) {
+            int coeff_val = 0;
+            if (get_bits1(bit_context))
+                coeff_val = get_sbits(bit_context, frac_bits + 2);
+
+            s->matrix_coeff[mat][ch] = coeff_val * (1 << (14 - frac_bits));
+        }
+
+        if (s->noise_type)
+            s->matrix_noise_shift[mat] = get_bits(bit_context, 4);
+        else
+            s->matrix_noise_shift[mat] = 0;
+    }
+
+    return 0;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libavcodec/mlpdec.c
+static int read_access_unit(AVCodecContext *avctx, void* data,
+                            int *got_frame_ptr, AVPacket *avpkt)
+{
+    const uint8_t *buf = avpkt->data;
+    int buf_size = avpkt->size;
+    MLPDecodeContext *m = avctx->priv_data;
+    GetBitContext gb;
+    unsigned int length, substr;
+    unsigned int substream_start;
+    unsigned int header_size = 4;
+    unsigned int substr_header_size = 0;
+    uint8_t substream_parity_present[MAX_SUBSTREAMS];
+    uint16_t substream_data_len[MAX_SUBSTREAMS];
+    uint8_t parity_bits;
+    int ret;
+
+    if (buf_size < 4)
+        return AVERROR_INVALIDDATA;
+
+    length = (AV_RB16(buf) & 0xfff) * 2;
+
+    if (length < 4 || length > buf_size)
+        return AVERROR_INVALIDDATA;
+
+    init_get_bits(&gb, (buf + 4), (length - 4) * 8);
+
+    m->is_major_sync_unit = 0;
+    if (show_bits_long(&gb, 31) == (0xf8726fba >> 1)) {
+        if (read_major_sync(m, &gb) < 0)
+            goto error;
+        m->is_major_sync_unit = 1;
+        header_size += m->major_sync_header_size;
+    }
+
+    if (!m->params_valid) {
+        av_log(m->avctx, AV_LOG_WARNING,
+               "Stream parameters not seen; skipping frame.\n");
+        *got_frame_ptr = 0;
+        return length;
+    }
+
+    substream_start = 0;
+
+    for (substr = 0; substr < m->num_substreams; substr++) {
+        int extraword_present, checkdata_present, end, nonrestart_substr;
+
+        extraword_present = get_bits1(&gb);
+        nonrestart_substr = get_bits1(&gb);
+        checkdata_present = get_bits1(&gb);
+        skip_bits1(&gb);
+
+        end = get_bits(&gb, 12) * 2;
+
+        substr_header_size += 2;
+
+        if (extraword_present) {
+            if (m->avctx->codec_id == AV_CODEC_ID_MLP) {
+                av_log(m->avctx, AV_LOG_ERROR, "There must be no extraword for MLP.\n");
+                goto error;
+            }
+            skip_bits(&gb, 16);
+            substr_header_size += 2;
+        }
+
+        if (length < header_size + substr_header_size) {
+            av_log(m->avctx, AV_LOG_ERROR, "Insuffient data for headers\n");
+            goto error;
+        }
+
+        if (!(nonrestart_substr ^ m->is_major_sync_unit)) {
+            av_log(m->avctx, AV_LOG_ERROR, "Invalid nonrestart_substr.\n");
+            goto error;
+        }
+
+        if (end + header_size + substr_header_size > length) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Indicated length of substream %d data goes off end of "
+                   "packet.\n", substr);
+            end = length - header_size - substr_header_size;
+        }
+
+        if (end < substream_start) {
+            av_log(avctx, AV_LOG_ERROR,
+                   "Indicated end offset of substream %d data "
+                   "is smaller than calculated start offset.\n",
+                   substr);
+            goto error;
+        }
+
+        if (substr > m->max_decoded_substream)
+            continue;
+
+        substream_parity_present[substr] = checkdata_present;
+        substream_data_len[substr] = end - substream_start;
+        substream_start = end;
+    }
+
+    parity_bits  = ff_mlp_calculate_parity(buf, 4);
+    parity_bits ^= ff_mlp_calculate_parity(buf + header_size, substr_header_size);
+
+    if ((((parity_bits >> 4) ^ parity_bits) & 0xF) != 0xF) {
+        av_log(avctx, AV_LOG_ERROR, "Parity check failed.\n");
+        goto error;
+    }
+
+    buf += header_size + substr_header_size;
+
+    for (substr = 0; substr <= m->max_decoded_substream; substr++) {
+        SubStream *s = &m->substream[substr];
+        init_get_bits(&gb, buf, substream_data_len[substr] * 8);
+
+        m->matrix_changed = 0;
+        memset(m->filter_changed, 0, sizeof(m->filter_changed));
+
+        s->blockpos = 0;
+        do {
+            if (get_bits1(&gb)) {
+                if (get_bits1(&gb)) {
+                    /* A restart header should be present. */
+                    if (read_restart_header(m, &gb, buf, substr) < 0)
+                        goto next_substr;
+                    s->restart_seen = 1;
+                }
+
+                if (!s->restart_seen)
+                    goto next_substr;
+                if (read_decoding_params(m, &gb, substr) < 0)
+                    goto next_substr;
+            }
+
+            if (!s->restart_seen)
+                goto next_substr;
+
+            if ((ret = read_block_data(m, &gb, substr)) < 0)
+                return ret;
+
+            if (get_bits_count(&gb) >= substream_data_len[substr] * 8)
+                goto substream_length_mismatch;
+
+        } while (!get_bits1(&gb));
+
+        skip_bits(&gb, (-get_bits_count(&gb)) & 15);
+
+        if (substream_data_len[substr] * 8 - get_bits_count(&gb) >= 32) {
+            int shorten_by;
+
+            if (get_bits(&gb, 16) != 0xD234)
+                return AVERROR_INVALIDDATA;
+
+            shorten_by = get_bits(&gb, 16);
+            if      (m->avctx->codec_id == AV_CODEC_ID_TRUEHD && shorten_by  & 0x2000)
+                s->blockpos -= FFMIN(shorten_by & 0x1FFF, s->blockpos);
+            else if (m->avctx->codec_id == AV_CODEC_ID_MLP    && shorten_by != 0xD234)
+                return AVERROR_INVALIDDATA;
+
+            if (substr == m->max_decoded_substream)
+                av_log(m->avctx, AV_LOG_INFO, "End of stream indicated.\n");
+        }
+
+        if (substream_parity_present[substr]) {
+            uint8_t parity, checksum;
+
+            if (substream_data_len[substr] * 8 - get_bits_count(&gb) != 16)
+                goto substream_length_mismatch;
+
+            parity   = ff_mlp_calculate_parity(buf, substream_data_len[substr] - 2);
+            checksum = ff_mlp_checksum8       (buf, substream_data_len[substr] - 2);
+
+            if ((get_bits(&gb, 8) ^ parity) != 0xa9    )
+                av_log(m->avctx, AV_LOG_ERROR, "Substream %d parity check failed.\n", substr);
+            if ( get_bits(&gb, 8)           != checksum)
+                av_log(m->avctx, AV_LOG_ERROR, "Substream %d checksum failed.\n"    , substr);
+        }
+
+        if (substream_data_len[substr] * 8 != get_bits_count(&gb))
+            goto substream_length_mismatch;
+
+next_substr:
+        if (!s->restart_seen)
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "No restart header present in substream %d.\n", substr);
+
+        buf += substream_data_len[substr];
+    }
+
+    if ((ret = output_data(m, m->max_decoded_substream, data, got_frame_ptr)) < 0)
+        return ret;
+
+    return length;
+
+substream_length_mismatch:
+    av_log(m->avctx, AV_LOG_ERROR, "substream %d length mismatch\n", substr);
+    return AVERROR_INVALIDDATA;
+
+error:
+    m->params_valid = 0;
+    return AVERROR_INVALIDDATA;
+}
+
+// the below code fragment can be found in:
+// libavcodec/mlpdec.c
+static av_cold int mlp_decode_init(AVCodecContext *avctx)
+{
+    MLPDecodeContext *m = avctx->priv_data;
+    int substr;
+
+    init_static();
+    m->avctx = avctx;
+    for (substr = 0; substr < MAX_SUBSTREAMS; substr++)
+        m->substream[substr].lossless_check_data = 0xffffffff;
+    ff_mlpdsp_init(&m->dsp);
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// libavcodec/mlpenc.c
+static void write_filter_params(MLPEncodeContext *ctx, PutBitContext *pb,
+                                unsigned int channel, unsigned int filter)
+{
+    FilterParams *fp = &ctx->cur_channel_params[channel].filter_params[filter];
+
+    put_bits(pb, 4, fp->order);
+
+    if (fp->order > 0) {
+        int i;
+        int32_t *fcoeff = ctx->cur_channel_params[channel].coeff[filter];
+
+        put_bits(pb, 4, fp->shift      );
+        put_bits(pb, 5, fp->coeff_bits );
+        put_bits(pb, 3, fp->coeff_shift);
+
+        for (i = 0; i < fp->order; i++) {
+            put_sbits(pb, fp->coeff_bits, fcoeff[i] >> fp->coeff_shift);
+        }
+
+        /* TODO state data for IIR filter. */
+        put_bits(pb, 1, 0);
+    }
+}
+
+// the below code fragment can be found in:
+// libavcodec/mlpdec.c
+static void filter_channel(MLPDecodeContext *m, unsigned int substr,
+                           unsigned int channel)
+{
+    SubStream *s = &m->substream[substr];
+    const int32_t *fircoeff = s->channel_params[channel].coeff[FIR];
+    int32_t state_buffer[NUM_FILTERS][MAX_BLOCKSIZE + MAX_FIR_ORDER];
+    int32_t *firbuf = state_buffer[FIR] + MAX_BLOCKSIZE;
+    int32_t *iirbuf = state_buffer[IIR] + MAX_BLOCKSIZE;
+    FilterParams *fir = &s->channel_params[channel].filter_params[FIR];
+    FilterParams *iir = &s->channel_params[channel].filter_params[IIR];
+    unsigned int filter_shift = fir->shift;
+    int32_t mask = MSB_MASK(s->quant_step_size[channel]);
+
+    memcpy(firbuf, fir->state, MAX_FIR_ORDER * sizeof(int32_t));
+    memcpy(iirbuf, iir->state, MAX_IIR_ORDER * sizeof(int32_t));
+
+    m->dsp.mlp_filter_channel(firbuf, fircoeff,
+                              fir->order, iir->order,
+                              filter_shift, mask, s->blocksize,
+                              &m->sample_buffer[s->blockpos][channel]);
+
+    memcpy(fir->state, firbuf - s->blocksize, MAX_FIR_ORDER * sizeof(int32_t));
+    memcpy(iir->state, iirbuf - s->blocksize, MAX_IIR_ORDER * sizeof(int32_t));
+}
+
+// the below code fragment can be found in:
+// libavcodec/mlpdec.c
+static int read_filter_params(MLPDecodeContext *m, GetBitContext *gbp,
+                              unsigned int substr, unsigned int channel,
+                              unsigned int filter)
+{
+    SubStream *s = &m->substream[substr];
+    FilterParams *fp = &s->channel_params[channel].filter_params[filter];
+    const int max_order = filter ? MAX_IIR_ORDER : MAX_FIR_ORDER;
+    const char fchar = filter ? 'I' : 'F';
+    int i, order;
+
+    // Filter is 0 for FIR, 1 for IIR.
+    av_assert0(filter < 2);
+
+    if (m->filter_changed[channel][filter]++ > 1) {
+        av_log(m->avctx, AV_LOG_ERROR, "Filters may change only once per access unit.\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    order = get_bits(gbp, 4);
+    if (order > max_order) {
+        av_log(m->avctx, AV_LOG_ERROR,
+               "%cIR filter order %d is greater than maximum %d.\n",
+               fchar, order, max_order);
+        return AVERROR_INVALIDDATA;
+    }
+    fp->order = order;
+
+    if (order > 0) {
+        int32_t *fcoeff = s->channel_params[channel].coeff[filter];
+        int coeff_bits, coeff_shift;
+
+        fp->shift = get_bits(gbp, 4);
+
+        coeff_bits  = get_bits(gbp, 5);
+        coeff_shift = get_bits(gbp, 3);
+        if (coeff_bits < 1 || coeff_bits > 16) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "%cIR filter coeff_bits must be between 1 and 16.\n",
+                   fchar);
+            return AVERROR_INVALIDDATA;
+        }
+        if (coeff_bits + coeff_shift > 16) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Sum of coeff_bits and coeff_shift for %cIR filter must be 16 or less.\n",
+                   fchar);
+            return AVERROR_INVALIDDATA;
+        }
+
+        for (i = 0; i < order; i++)
+            fcoeff[i] = get_sbits(gbp, coeff_bits) * (1 << coeff_shift);
+
+        if (get_bits1(gbp)) {
+            int state_bits, state_shift;
+
+            if (filter == FIR) {
+                av_log(m->avctx, AV_LOG_ERROR,
+                       "FIR filter has state data specified.\n");
+                return AVERROR_INVALIDDATA;
+            }
+
+            state_bits  = get_bits(gbp, 4);
+            state_shift = get_bits(gbp, 4);
+
+            /* TODO: Check validity of state data. */
+
+            for (i = 0; i < order; i++)
+                fp->state[i] = state_bits ? get_sbits(gbp, state_bits) * (1 << state_shift) : 0;
+        }
+    }
+
+    return 0;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

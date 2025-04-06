@@ -1,0 +1,193 @@
+switch (tag)
+		{
+			case 0: // mono element
+			case 1: // stereo element
+				// mono and stereo elements are almost the same except for the interleaving
+				// of the output samples
+
+				// read the 12-bit predictor tag
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+
+				// must check to make sure there are enough bits left in the buffer
+				if (bits->cur + 12 > bits->end)
+				{
+					status = kALAC_ParamError ;
+					break ;
+				}
+
+				// read the predictor parameters
+				// - note that the number of predictor coefficients is determined by the predictor mode
+				// - only the number of coefficients needed are read
+				modeU = BitBufferReadSmall (bits, 4) ;
+				denShiftU = BitBufferReadSmall (bits, 4) ;
+				pbFactorU = BitBufferReadSmall (bits, 4) ;
+
+				numU = numPredictors [modeU] ;
+				for (i = 0 ; i < numU ; i++)
+					coefsU [i] = (int16_t) BitBufferReadSigned (bits, 16) ;
+
+				if (tag == 1) // stereo case
+				{
+					modeV = BitBufferReadSmall (bits, 4) ;
+					denShiftV = BitBufferReadSmall (bits, 4) ;
+					pbFactorV = BitBufferReadSmall (bits, 4) ;
+
+					numV = numPredictors [modeV] ;
+					for (i = 0 ; i < numV ; i++)
+						coefsV [i] = (int16_t) BitBufferReadSigned (bits, 16) ;
+				}
+				else
+				{
+					// in the mono case, copy the U channel values to the V channel
+					modeV = modeU ;
+					denShiftV = denShiftU ;
+					pbFactorV = pbFactorU ;
+					numV = numU ;
+					for (i = 0 ; i < numU ; i++)
+						coefsV [i] = coefsU [i] ;
+				}
+
+				// read the compressed frame information
+				mixBits = BitBufferReadSmall (bits, 3) ;
+				mixResiduals = BitBufferReadOne (bits) ;
+				escapeFlag = BitBufferReadOne (bits) ;
+
+				// must check to make sure there are enough bits left in the buffer
+				if (bits->cur + 16 > bits->end)
+				{
+					status = kALAC_ParamError ;
+					break ;
+				}
+
+				// if we use escape buffers, there are extra bits to read
+				extraBits = 0 ;
+				if (escapeFlag == 1)
+					extraBits = mixBits + 1 ;
+
+				// determine which output buffer to use and set the correct number of channels
+				if (channelIndex + (tag + 1) > numChannels)
+				{
+					status = kALAC_TooManyChannels ;
+					break ;
+				}
+
+				// check to make sure we can handle this bit depth and that the frame length is not too big
+				RequireAction (p->mConfig.bitDepth <= kMaxBitDepth, status = kALAC_BadBitWidth ; goto Exit ;) ;
+				RequireAction (p->mConfig.frameLength <= ALAC_FRAME_LENGTH, status = fALAC_FrameLengthError ; goto Exit ;) ;
+
+				// setup the predictor
+				if (tag == 0) // mono
+					status = PredictorSetupDecode (p->u.mPredictor, p->mConfig.frameLength, modeU, mixBits, mixResiduals, coefsU, numU, denShiftU, pbFactorU, pb, p->mConfig.bitDepth, extraBits) ;
+				else // stereo
+				{
+					status = PredictorSetupDecode (p->u.mPredictor, p->mConfig.frameLength, modeU, mixBits, mixResiduals, coefsU, numU, denShiftU, pbFactorU, pb, p->mConfig.bitDepth, extraBits) ;
+					status = PredictorSetupDecode (p->v.mPredictor, p->mConfig.frameLength, modeV, mixBits, mixResiduals, coefsV, numV, denShiftV, pbFactorV, pb, p->mConfig.bitDepth, extraBits) ;
+				}
+
+				if (status != ALAC_noErr)
+					break ;
+
+				// check if the frame is compressed or not (i.e. has prediction bits)
+				if (mixBits == 0)
+				{
+					// uncompressed case
+					// - read the samples directly into the output buffer
+
+					if (tag == 0) // mono
+					{
+						out32 = sampleBuffer + channelIndex ;
+
+						for (i = 0 ; i < p->mConfig.frameLength ; i++)
+						{
+							val = BitBufferReadSigned (bits, p->mConfig.bitDepth) ;
+							*out32 = val ;
+							out32 += numChannels ;
+						}
+					}
+					else // stereo
+					{
+						out32 = sampleBuffer + channelIndex ;
+						int32_t * out32_2 = sampleBuffer + channelIndex + 1 ;
+
+						for (i = 0 ; i < p->mConfig.frameLength ; i++)
+						{
+							val = BitBufferReadSigned (bits, p->mConfig.bitDepth) ;
+							*out32 = val ;
+							out32 += numChannels ;
+
+							val = BitBufferReadSigned (bits, p->mConfig.bitDepth) ;
+							*out32_2 = val ;
+							out32_2 += numChannels ;
+						}
+					}
+				}
+				else
+				{
+					// compressed case
+					// - read the compressed frame into the appropriate predictor buffer
+					// - apply the prediction and interleave the samples into the output buffer
+
+					if (tag == 0) // mono
+					{
+						status = PredictorDecode (p->u.mPredictor, bits, p->mMixBufferU, p->mConfig.frameLength) ;
+
+						out32 = sampleBuffer + channelIndex ;
+						for (i = 0 ; i < p->mConfig.frameLength ; i++)
+						{
+							*out32 = p->mMixBufferU [i] ;
+							out32 += numChannels ;
+						}
+					}
+					else // stereo
+					{
+						status = PredictorDecode (p->u.mPredictor, bits, p->mMixBufferU, p->mConfig.frameLength) ;
+						status = PredictorDecode (p->v.mPredictor, bits, p->mMixBufferV, p->mConfig.frameLength) ;
+
+						out32 = sampleBuffer + channelIndex ;
+						int32_t * out32_2 = sampleBuffer + channelIndex + 1 ;
+
+						for (i = 0 ; i < p->mConfig.frameLength ; i++)
+						{
+							*out32 = p->mMixBufferU [i] ;
+							out32 += numChannels ;
+
+							*out32_2 = p->mMixBufferV [i] ;
+							out32_2 += numChannels ;
+						}
+					}
+				}
+
+				if (status != ALAC_noErr)
+					break ;
+
+				channelIndex += (tag + 1) ;
+				break ;
+
+			case 2: // data stream element
+				status = alac_data_stream_element (bits) ;
+				break ;
+
+			case 3: // fill element
+				status = alac_fill_element (bits) ;
+				break ;
+
+			case 4: // reserved
+			case 5: // reserved
+			case 6: // reserved
+			case 7: // reserved
+				status = kALAC_UnsupportedElement ;
+				break ;
+
+			default:
+				status = kALAC_InvalidElement ;
+				break ;
+		}
+
+		if (status != ALAC_noErr)
+			break ;
+
+		// byte align the bitstream
+		BitBufferByteAlign (bits, false) ;
+
+		if (channelIndex == numChannels)
+			goto NoMoreChannels ;

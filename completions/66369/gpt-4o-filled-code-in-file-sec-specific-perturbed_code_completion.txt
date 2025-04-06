@@ -1,0 +1,113 @@
+if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+            char *rg = &aux[3];
+            if (!(brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, rg))) {
+                hts_log_warning("Read group %s not found in header", rg);
+            }
+        }
+
+        // MD:Z
+        if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
+            if (verbatim_MD) {
+                BLOCK_APPEND(s->aux_blk, aux, 3);
+                aux += 3;
+                while (aux < aux_end && *aux) {
+                    BLOCK_APPEND_CHAR(s->aux_blk, *aux++);
+                }
+                BLOCK_APPEND_CHAR(s->aux_blk, 0);
+            }
+            aux += 3;
+            while (aux < aux_end && *aux) {
+                aux++;
+            }
+            aux++;
+            continue;
+        }
+
+        // NM:i
+        if (aux[0] == 'N' && aux[1] == 'M' && aux[2] == 'i') {
+            if (verbatim_NM) {
+                BLOCK_APPEND(s->aux_blk, aux, 3);
+                aux += 3;
+                BLOCK_APPEND(s->aux_blk, aux, 4);
+                aux += 4;
+            } else {
+                aux += 7;
+            }
+            continue;
+        }
+
+        // Append key to TD block
+        BLOCK_APPEND(td_b, aux, 3);
+
+        // Add key to tag map
+        int key = (aux[0] << 16) | (aux[1] << 8) | aux[2];
+        k = kh_put(m_s2i, c->tags_used, key, &r);
+        if (-1 == r) goto err;
+        if (r) {
+            cram_tag_map *tm = malloc(sizeof(*tm));
+            if (!tm) goto err;
+            kh_val(c->tags_used, k) = tm;
+            tm->codec = NULL;
+            tm->m = 0;
+            tm->blk = cram_new_block(EXTERNAL, c->tags_used->n_occupied * 2);
+            if (!tm->blk) goto err;
+            tm->blk2 = NULL;
+        }
+        cram_tag_map *tm = kh_val(c->tags_used, k);
+
+        // Create codec if needed
+        if (!tm->codec) {
+            switch (aux[2]) {
+            case 'A': case 'C': case 'c':
+                tm->codec = cram_encoder_init(E_EXTERNAL, NULL, E_BYTE,
+                                              (void *)(intptr_t)tm->blk->content_id,
+                                              filedescriptor->version, &filedescriptor->vv);
+                break;
+            case 'S': case 's':
+                tm->codec = cram_encoder_init(E_EXTERNAL, NULL, E_INT,
+                                              (void *)(intptr_t)tm->blk->content_id,
+                                              filedescriptor->version, &filedescriptor->vv);
+                break;
+            case 'I': case 'i': case 'f':
+                tm->codec = cram_encoder_init(E_EXTERNAL, NULL, E_LONG,
+                                              (void *)(intptr_t)tm->blk->content_id,
+                                              filedescriptor->version, &filedescriptor->vv);
+                break;
+            case 'Z': case 'H':
+                tm->codec = cram_encoder_init(E_BYTE_ARRAY_STOP, NULL, E_BYTE_ARRAY,
+                                              (void *)(intptr_t)tm->blk->content_id,
+                                              filedescriptor->version, &filedescriptor->vv);
+                break;
+            default:
+                hts_log_warning("Unknown aux type '%c'", aux[2]);
+                goto err;
+            }
+        }
+
+        // Append value to aux block
+        BLOCK_APPEND(s->aux_blk, aux, 3);
+        aux += 3;
+        switch (aux[-1]) {
+        case 'A': case 'C': case 'c':
+            BLOCK_APPEND_CHAR(s->aux_blk, *aux++);
+            break;
+        case 'S': case 's':
+            BLOCK_APPEND(s->aux_blk, aux, 2);
+            aux += 2;
+            break;
+        case 'I': case 'i': case 'f':
+            BLOCK_APPEND(s->aux_blk, aux, 4);
+            aux += 4;
+            break;
+        case 'Z': case 'H':
+            while (aux < aux_end && *aux) {
+                BLOCK_APPEND_CHAR(s->aux_blk, *aux++);
+            }
+            BLOCK_APPEND_CHAR(s->aux_blk, 0);
+            aux++;
+            break;
+        default:
+            hts_log_warning("Unknown aux type '%c'", aux[-1]);
+            goto err;
+        }
+    }

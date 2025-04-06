@@ -1,0 +1,386 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+cram_block_slice_hdr *cram_decode_slice_header(cram_fd *fd, cram_block *b) {
+    cram_block_slice_hdr *slice_header;
+    unsigned char *cp;
+    unsigned char *cp_end;
+    int i;
+
+    if (b->method != RAW) {
+        /* Spec. says slice header should be RAW, but we can future-proof
+           by trying to decode it if it isn't. */
+        if (cram_uncompress_block(b) < 0)
+            return NULL;
+    }
+    cp =  (unsigned char *)BLOCK_DATA(b);
+    cp_end = cp + b->uncomp_size;
+
+    if (b->content_type != MAPPED_SLICE &&
+        b->content_type != UNMAPPED_SLICE)
+        return NULL;
+
+    if (!(slice_header  = calloc(1, sizeof(*slice_header))))
+        return NULL;
+
+    slice_header->content_type = b->content_type;
+
+    if (b->content_type == MAPPED_SLICE) {
+        // Extract reference sequence ID, start, and span from the slice header.
+        // This includes special handling for the LARGE_POS macro, which uses
+        // larger data types for positions and spans. If LARGE_POS is defined,
+        // use safe_ltf8_get to extract 64-bit values for ref_seq_start and
+        // ref_seq_span; otherwise, use safe_itf8_get for standard 32-bit values.
+        // <MASK>
+    }
+    cp += safe_itf8_get((char *)cp,  (char *)cp_end, &slice_header->num_records);
+    slice_header->record_counter = 0;
+    if (CRAM_MAJOR_VERS(fd->version) == 2) {
+        int32_t i32 = 0;
+        cp += safe_itf8_get((char *)cp, (char *)cp_end, &i32);
+        slice_header->record_counter = i32;
+    } else if (CRAM_MAJOR_VERS(fd->version) >= 3) {
+        cp += safe_ltf8_get((char *)cp, (char *)cp_end, &slice_header->record_counter);
+    }
+
+    cp += safe_itf8_get((char *)cp, (char *)cp_end, &slice_header->num_blocks);
+
+    cp += safe_itf8_get((char *)cp, (char *)cp_end, &slice_header->num_content_ids);
+    if (slice_header->num_content_ids < 1 ||
+        slice_header->num_content_ids >= SIZE_MAX / sizeof(int32_t)) {
+        /* Slice must have at least one data block,
+           and malloc'd size shouldn't wrap. */
+        free(slice_header);
+        return NULL;
+    }
+    slice_header->block_content_ids = malloc(slice_header->num_content_ids * sizeof(int32_t));
+    if (!slice_header->block_content_ids) {
+        free(slice_header);
+        return NULL;
+    }
+
+    for (i = 0; i < slice_header->num_content_ids; i++) {
+        int l = safe_itf8_get((char *)cp, (char *)cp_end,
+                              &slice_header->block_content_ids[i]);
+        if (l <= 0) {
+            free(slice_header->block_content_ids);
+            free(slice_header);
+            return NULL;
+        }
+        cp += l;
+    }
+
+    if (b->content_type == MAPPED_SLICE) {
+        cp += safe_itf8_get((char *)cp, (char *) cp_end, &slice_header->ref_base_id);
+    }
+
+    if (CRAM_MAJOR_VERS(fd->version) != 1) {
+        if (cp_end - cp < 16) {
+            free(slice_header->block_content_ids);
+            free(slice_header);
+            return NULL;
+        }
+        memcpy(slice_header->md5, cp, 16);
+    } else {
+        memset(slice_header->md5, 0, 16);
+    }
+
+    return slice_header;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// cram/cram_encode.c
+static int cram_encode_slice_read(cram_fd *fd,
+                                  cram_container *c,
+                                  cram_block_compression_hdr *h,
+                                  cram_slice *s,
+                                  cram_record *cr,
+                                  int64_t *last_pos) {
+    int r = 0;
+    int32_t i32;
+    unsigned char uc;
+
+    //fprintf(stderr, "Encode seq %d, %d/%d FN=%d, %s\n", rec, core->byte, core->bit, cr->nfeature, s->name_ds->str + cr->name);
+
+    //printf("BF=0x%x\n", cr->flags);
+    //      bf = cram_flag_swap[cr->flags];
+    i32 = fd->cram_flag_swap[cr->flags & 0xfff];
+    r |= h->codecs[DS_BF]->encode(s, h->codecs[DS_BF], (char *)&i32, 1);
+
+    i32 = cr->cram_flags & CRAM_FLAG_MASK;
+    r |= h->codecs[DS_CF]->encode(s, h->codecs[DS_CF], (char *)&i32, 1);
+
+    if (CRAM_MAJOR_VERS(fd->version) != 1 && s->hdr->ref_seq_id == -2)
+        r |= h->codecs[DS_RI]->encode(s, h->codecs[DS_RI], (char *)&cr->ref_id, 1);
+
+    r |= h->codecs[DS_RL]->encode(s, h->codecs[DS_RL], (char *)&cr->len, 1);
+
+    if (c->pos_sorted) {
+#ifdef LARGE_POS
+        int64_t i64;
+        i64 = cr->apos - *last_pos;
+        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
+#else
+        i32 = cr->apos - *last_pos;
+        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
+#endif
+        *last_pos = cr->apos;
+    } else {
+#ifdef LARGE_POS
+        int64_t i64;
+        i64 = cr->apos;
+        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
+#else
+        i32 = cr->apos;
+        r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
+#endif
+    }
+
+    r |= h->codecs[DS_RG]->encode(s, h->codecs[DS_RG], (char *)&cr->rg, 1);
+
+    if (cr->cram_flags & CRAM_FLAG_DETACHED) {
+        i32 = cr->mate_flags;
+        r |= h->codecs[DS_MF]->encode(s, h->codecs[DS_MF], (char *)&i32, 1);
+
+        r |= h->codecs[DS_NS]->encode(s, h->codecs[DS_NS],
+                                      (char *)&cr->mate_ref_id, 1);
+
+#ifdef LARGE_POS
+        r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
+                                      (char *)&cr->mate_pos, 1);
+
+        r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
+                                      (char *)&cr->tlen, 1);
+#else
+        i32 = cr->mate_pos;
+        r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
+                                      (char *)&i32, 1);
+        i32 = cr->tlen;
+        r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
+                                      (char *)&i32, 1);
+#endif
+    } else if (cr->cram_flags & CRAM_FLAG_MATE_DOWNSTREAM) {
+        r |= h->codecs[DS_NF]->encode(s, h->codecs[DS_NF],
+                                      (char *)&cr->mate_line, 1);
+    }
+
+    /* Aux tags */
+    if (CRAM_MAJOR_VERS(fd->version) == 1) {
+        int j;
+        uc = cr->ntags;
+        r |= h->codecs[DS_TC]->encode(s, h->codecs[DS_TC], (char *)&uc, 1);
+
+        for (j = 0; j < cr->ntags; j++) {
+            uint32_t i32 = s->TN[cr->TN_idx + j]; // id
+            r |= h->codecs[DS_TN]->encode(s, h->codecs[DS_TN], (char *)&i32, 1);
+        }
+    } else {
+        r |= h->codecs[DS_TL]->encode(s, h->codecs[DS_TL], (char *)&cr->TL, 1);
+    }
+
+    // qual
+    // QS codec : Already stored in block[2].
+
+    // features (diffs)
+    if (!(cr->flags & BAM_FUNMAP)) {
+        int prev_pos = 0, j;
+
+        r |= h->codecs[DS_FN]->encode(s, h->codecs[DS_FN],
+                                      (char *)&cr->nfeature, 1);
+        for (j = 0; j < cr->nfeature; j++) {
+            cram_feature *f = &s->features[cr->feature + j];
+
+            uc = f->X.code;
+            r |= h->codecs[DS_FC]->encode(s, h->codecs[DS_FC], (char *)&uc, 1);
+            i32 = f->X.pos - prev_pos;
+            r |= h->codecs[DS_FP]->encode(s, h->codecs[DS_FP], (char *)&i32, 1);
+            prev_pos = f->X.pos;
+
+            switch(f->X.code) {
+                //char *seq;
+
+            case 'X':
+                //fprintf(stderr, "    FC=%c FP=%d base=%d\n", f->X.code, i32, f->X.base);
+
+                uc = f->X.base;
+                r |= h->codecs[DS_BS]->encode(s, h->codecs[DS_BS],
+                                              (char *)&uc, 1);
+                break;
+            case 'S':
+                // Already done
+                //r |= h->codecs[DS_SC]->encode(s, h->codecs[DS_SC],
+                //                              BLOCK_DATA(s->soft_blk) + f->S.seq_idx,
+                //                              f->S.len);
+
+                //if (IS_CRAM_3_VERS(fd)) {
+                //    r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
+                //                                  BLOCK_DATA(s->seqs_blk) + f->S.seq_idx,
+                //                                  f->S.len);
+                //}
+                break;
+            case 'I':
+                //seq = DSTRING_STR(s->seqs_ds) + f->S.seq_idx;
+                //r |= h->codecs[DS_IN]->encode(s, h->codecs[DS_IN],
+                //                           seq, f->S.len);
+                //if (IS_CRAM_3_VERS(fd)) {
+                //    r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
+                //                                  BLOCK_DATA(s->seqs_blk) + f->I.seq_idx,
+                //                                  f->I.len);
+                //}
+                break;
+            case 'i':
+                uc = f->i.base;
+                r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA],
+                                              (char *)&uc, 1);
+                //seq = DSTRING_STR(s->seqs_ds) + f->S.seq_idx;
+                //r |= h->codecs[DS_IN]->encode(s, h->codecs[DS_IN],
+                //                           seq, 1);
+                break;
+            case 'D':
+                i32 = f->D.len;
+                r |= h->codecs[DS_DL]->encode(s, h->codecs[DS_DL],
+                                              (char *)&i32, 1);
+                break;
+
+            case 'B':
+                //                  // Used when we try to store a non ACGTN base or an N
+                //                  // that aligns against a non ACGTN reference
+
+                uc  = f->B.base;
+                r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA],
+                                              (char *)&uc, 1);
+
+                //                  Already added
+                //                  uc  = f->B.qual;
+                //                  r |= h->codecs[DS_QS]->encode(s, h->codecs[DS_QS],
+                //                                           (char *)&uc, 1);
+                break;
+
+            case 'b':
+                // string of bases
+                r |= h->codecs[DS_BB]->encode(s, h->codecs[DS_BB],
+                                              (char *)BLOCK_DATA(s->seqs_blk)
+                                                      + f->b.seq_idx,
+                                              f->b.len);
+                break;
+
+            case 'Q':
+                //                  Already added
+                //                  uc  = f->B.qual;
+                //                  r |= h->codecs[DS_QS]->encode(s, h->codecs[DS_QS],
+                //                                           (char *)&uc, 1);
+                break;
+
+            case 'N':
+                i32 = f->N.len;
+                r |= h->codecs[DS_RS]->encode(s, h->codecs[DS_RS],
+                                              (char *)&i32, 1);
+                break;
+
+            case 'P':
+                i32 = f->P.len;
+                r |= h->codecs[DS_PD]->encode(s, h->codecs[DS_PD],
+                                              (char *)&i32, 1);
+                break;
+
+            case 'H':
+                i32 = f->H.len;
+                r |= h->codecs[DS_HC]->encode(s, h->codecs[DS_HC],
+                                              (char *)&i32, 1);
+                break;
+
+
+            default:
+                hts_log_error("Unhandled feature code %c", f->X.code);
+                return -1;
+            }
+        }
+
+        r |= h->codecs[DS_MQ]->encode(s, h->codecs[DS_MQ],
+                                      (char *)&cr->mqual, 1);
+    } else {
+        char *seq = (char *)BLOCK_DATA(s->seqs_blk) + cr->seq;
+        if (cr->len)
+            r |= h->codecs[DS_BA]->encode(s, h->codecs[DS_BA], seq, cr->len);
+    }
+
+    return r ? -1 : 0;
+}
+
+// the below code fragment can be found in:
+// cram/cram_codecs.c
+void cram_byte_array_stop_decode_free(cram_codec *c) {
+    if (!c) return;
+
+    free(c);
+}
+
+// the below code fragment can be found in:
+// cram/cram_io.c
+void cram_free_block(cram_block *b) {
+    if (!b)
+        return;
+    if (b->data)
+        free(b->data);
+    free(b);
+}
+
+// the below code fragment can be found in:
+// cram/cram_io.c
+static int cram_flush_container2(cram_fd *fd, cram_container *c) {
+    int i, j;
+
+    if (c->curr_slice > 0 && !c->slices)
+        return -1;
+
+    //fprintf(stderr, "Writing container %d, sum %u\n", c->record_counter, sum);
+
+    off_t c_offset = htell(fd->fp); // File offset of container
+
+    /* Write the container struct itself */
+    if (0 != cram_write_container(fd, c))
+        return -1;
+
+    off_t hdr_size = htell(fd->fp) - c_offset;
+
+    /* And the compression header */
+    if (0 != cram_write_block(fd, c->comp_hdr_block))
+        return -1;
+
+    /* Followed by the slice blocks */
+    off_t file_offset = htell(fd->fp);
+    for (i = 0; i < c->curr_slice; i++) {
+        cram_slice *s = c->slices[i];
+        off_t spos = file_offset - c_offset - hdr_size;
+
+        if (0 != cram_write_block(fd, s->hdr_block))
+            return -1;
+
+        for (j = 0; j < s->hdr->num_blocks; j++) {
+            if (0 != cram_write_block(fd, s->block[j]))
+                return -1;
+        }
+
+        file_offset = htell(fd->fp);
+        off_t sz = file_offset - c_offset - hdr_size - spos;
+
+        if (fd->idxfp) {
+            if (cram_index_slice(fd, c, s, fd->idxfp, c_offset, spos, sz) < 0)
+                return -1;
+        }
+    }
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// sam.c
+static void *sam_parse_eof(void *arg) {
+    return NULL;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

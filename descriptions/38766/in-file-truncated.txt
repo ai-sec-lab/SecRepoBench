@@ -1,0 +1,859 @@
+<｜begin▁of▁sentence｜>/*-
+ * Copyright (c) 2004-2013 Tim Kientzle
+ * Copyright (c) 2011-2012,2014 Michihiro NAKAJIMA
+ * Copyright (c) 2013 Konrad Kleine
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "archive_platform.h"
+__FBSDID("$FreeBSD: head/lib/libarchive/archive_read_support_format_zip.c 201102 2009-12-28 03:11:36Z kientzle $");
+
+/*
+ * The definitive documentation of the Zip file format is:
+ *   http://www.pkware.com/documents/casestudies/APPNOTE.TXT
+ *
+ * The Info-Zip project has pioneered various extensions to better
+ * support Zip on Unix, including the 0x5455 "UT", 0x5855 "UX", 0x7855
+ * "Ux", and 0x7875 "ux" extensions for time and ownership
+ * information.
+ *
+ * History of this code: The streaming Zip reader was first added to
+ * libarchive in January 2005.  Support for seekable input sources was
+ * added in Nov 2011.  Zip64 support (including a significant code
+ * refactoring) was added in 2014.
+ */
+
+#ifdef HAVE_ERRNO_H
+#include <errno.h>
+#endif
+#ifdef HAVE_STDLIB_H
+#include <stdlib.h>
+#endif
+#ifdef HAVE_ZLIB_H
+#include <zlib.h>
+#endif
+#ifdef HAVE_BZLIB_H
+#include <bzlib.h>
+#endif
+#ifdef HAVE_LZMA_H
+#include <lzma.h>
+#endif
+#ifdef HAVE_ZSTD_H
+#include <zstd.h>
+#endif
+
+#include "archive.h"
+#include "archive_digest_private.h"
+#include "archive_cryptor_private.h"
+#include "archive_endian.h"
+#include "archive_entry.h"
+#include "archive_entry_locale.h"
+#include "archive_hmac_private.h"
+#include "archive_private.h"
+#include "archive_rb.h"
+#include "archive_read_private.h"
+#include "archive_ppmd8_private.h"
+
+#ifndef HAVE_ZLIB_H
+#include "archive_crc32.h"
+#endif
+
+struct zip_entry {
+	struct archive_rb_node	node;
+	struct zip_entry	*next;
+	int64_t			local_header_offset;
+	int64_t			compressed_size;
+	int64_t			uncompressed_size;
+	int64_t			gid;
+	int64_t			uid;
+	struct archive_string	rsrcname;
+	time_t			mtime;
+	time_t			atime;
+	time_t			ctime;
+	uint32_t		crc32;
+	uint16_t		mode;
+	uint16_t		zip_flags; /* From GP Flags Field */
+	unsigned char		compression;
+	unsigned char		system; /* From "version written by" */
+	unsigned char		flags; /* Our extra markers. */
+	unsigned char		decdat;/* Used for Decryption check */
+
+	/* WinZip AES encryption extra field should be available
+	 * when compression is 99. */
+	struct {
+		/* Vendor version: AE-1 - 0x0001, AE-2 - 0x0002 */
+		unsigned	vendor;
+#define AES_VENDOR_AE_1	0x0001
+#define AES_VENDOR_AE_2	0x0002
+		/* AES encryption strength:
+		 * 1 - 128 bits, 2 - 192 bits, 2 - 256 bits. */
+		unsigned	strength;
+		/* Actual compression method. */
+		unsigned char	compression;
+	}			aes_extra;
+};
+
+struct trad_enc_ctx {
+	uint32_t	keys[3];
+};
+
+/* Bits used in zip_flags. */
+#define ZIP_ENCRYPTED	(1 << 0)
+#define ZIP_LENGTH_AT_END	(1 << 3)
+#define ZIP_STRONG_ENCRYPTED	(1 << 6)
+#define ZIP_UTF8_NAME	(1 << 11)
+/* See "7.2 Single Password Symmetric Encryption Method"
+   in http://www.pkware.com/documents/casestudies/APPNOTE.TXT */
+#define ZIP_CENTRAL_DIRECTORY_ENCRYPTED	(1 << 13)
+
+/* Bits used in flags. */
+#define LA_USED_ZIP64	(1 << 0)
+#define LA_FROM_CENTRAL_DIRECTORY (1 << 1)
+
+/*
+ * See "WinZip - AES Encryption Information"
+ *     http://www.winzip.com/aes_info.htm
+ */
+/* Value used in compression method. */
+#define WINZIP_AES_ENCRYPTION	99
+/* Authentication code size. */
+#define AUTH_CODE_SIZE	10
+/**/
+#define MAX_DERIVED_KEY_BUF_SIZE	(AES_MAX_KEY_SIZE * 2 + 2)
+
+struct zip {
+	/* Structural information about the archive. */
+	struct archive_string	format_name;
+	int64_t			central_directory_offset;
+	int64_t			central_directory_offset_adjusted;
+	size_t			central_directory_entries_total;
+	size_t			central_directory_entries_on_this_disk;
+	int			has_encrypted_entries;
+
+	/* List of entries (seekable Zip only) */
+	struct zip_entry	*zip_entries;
+	struct archive_rb_tree	tree;
+	struct archive_rb_tree	tree_rsrc;
+
+	/* Bytes read but not yet consumed via __archive_read_consume() */
+	size_t			unconsumed;
+
+	/* Information about entry we're currently reading. */
+	struct zip_entry	*entry;
+	int64_t			entry_bytes_remaining;
+
+	/* These count the number of bytes actually read for the entry. */
+	int64_t			entry_compressed_bytes_read;
+	int64_t			entry_uncompressed_bytes_read;
+
+	/* Running CRC32 of the decompressed data */
+	unsigned long		entry_crc32;
+	unsigned long		(*crc32func)(unsigned long, const void *,
+				    size_t);
+	char			ignore_crc32;
+
+	/* Flags to mark progress of decompression. */
+	char			decompress_init;
+	char			end_of_entry;
+
+	unsigned char 		*uncompressed_buffer;
+	size_t 			uncompressed_buffer_size;
+
+#ifdef HAVE_ZLIB_H
+	z_stream		stream;
+	char			stream_valid;
+#endif
+
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	lzma_stream		zipx_lzma_stream;
+	char            zipx_lzma_valid;
+#endif
+
+#ifdef HAVE_BZLIB_H
+	bz_stream		bzstream;
+	char            bzstream_valid;
+#endif
+
+#if HAVE_ZSTD_H && HAVE_LIBZSTD
+	ZSTD_DStream	*zstdstream;
+	char            zstdstream_valid;
+#endif
+
+	IByteIn			zipx_ppmd_stream;
+	ssize_t			zipx_ppmd_read_compressed;
+	CPpmd8			ppmd8;
+	char			ppmd8_valid;
+	char			ppmd8_stream_failed;
+
+	struct archive_string_conv *sconv;
+	struct archive_string_conv *sconv_default;
+	struct archive_string_conv *sconv_utf8;
+	int			init_default_conversion;
+	int			process_mac_extensions;
+
+	char			init_decryption;
+
+	/* Decryption buffer. */
+	/*
+	 * The decrypted data starts at decrypted_ptr and
+	 * extends for decrypted_bytes_remaining.  Decryption
+	 * adds new data to the end of this block, data is returned
+	 * to clients from the beginning.  When the block hits the
+	 * end of decrypted_buffer, it has to be shuffled back to
+	 * the beginning of the buffer.
+	 */
+	unsigned char 		*decrypted_buffer;
+	unsigned char 		*decrypted_ptr;
+	size_t 			decrypted_buffer_size;
+	size_t 			decrypted_bytes_remaining;
+	size_t 			decrypted_unconsumed_bytes;
+
+	/* Traditional PKWARE decryption. */
+	struct trad_enc_ctx	tctx;
+	char			tctx_valid;
+
+	/* WinZip AES decryption. */
+	/* Contexts used for AES decryption. */
+	archive_crypto_ctx	cctx;
+	char			cctx_valid;
+	archive_hmac_sha1_ctx	hctx;
+	char			hctx_valid;
+
+	/* Strong encryption's decryption header information. */
+	unsigned		iv_size;
+	unsigned		alg_id;
+	unsigned		bit_len;
+	unsigned		flags;
+	unsigned		erd_size;
+	unsigned		v_size;
+	unsigned		v_crc32;
+	uint8_t			*iv;
+	uint8_t			*erd;
+	uint8_t			*v_data;
+};
+
+/* Many systems define min or MIN, but not all. */
+#define	zipmin(a,b) ((a) < (b) ? (a) : (b))
+
+#ifdef HAVE_ZLIB_H
+static int
+zip_read_data_deflate(struct archive_read *a, const void **buff,
+	size_t *size, int64_t *offset);
+#endif
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+static int
+zip_read_data_zipx_lzma_alone(struct archive_read *a, const void **buff,
+	size_t *size, int64_t *offset);
+#endif
+
+/* This function is used by Ppmd8_DecodeSymbol during decompression of Ppmd8
+ * streams inside ZIP files. It has 2 purposes: one is to fetch the next
+ * compressed byte from the stream, second one is to increase the counter how
+ * many compressed bytes were read. */
+static Byte
+ppmd_read(void* p) {
+	/* Get the handle to current decompression context. */
+	struct archive_read *a = ((IByteIn*)p)->a;
+	struct zip *zip = (struct zip*) a->format->data;
+	ssize_t bytes_avail = 0;
+
+	/* Fetch next byte. */
+	const uint8_t* data = __archive_read_ahead(a, 1, &bytes_avail);
+	if(bytes_avail < 1) {
+		zip->ppmd8_stream_failed = 1;
+		return 0;
+	}
+
+	__archive_read_consume(a, 1);
+
+	/* Increment the counter. */
+	++zip->zipx_ppmd_read_compressed;
+
+	/* Return the next compressed byte. */
+	return data[0];
+}
+
+/* ------------------------------------------------------------------------ */
+
+/*
+  Traditional PKWARE Decryption functions.
+ */
+
+static void
+trad_enc_update_keys(struct trad_enc_ctx *ctx, uint8_t c)
+{
+	uint8_t t;
+#define CRC32(c, b) (crc32(c ^ 0xffffffffUL, &b, 1) ^ 0xffffffffUL)
+
+	ctx->keys[0] = CRC32(ctx->keys[0], c);
+	ctx->keys[1] = (ctx->keys[1] + (ctx->keys[0] & 0xff)) * 134775813L + 1;
+	t = (ctx->keys[1] >> 24) & 0xff;
+	ctx->keys[2] = CRC32(ctx->keys[2], t);
+#undef CRC32
+}
+
+static uint8_t
+trad_enc_decrypt_byte(struct trad_enc_ctx *ctx)
+{
+	unsigned temp = ctx->keys[2] | 2;
+	return (uint8_t)((temp * (temp ^ 1)) >> 8) & 0xff;
+}
+
+static void
+trad_enc_decrypt_update(struct trad_enc_ctx *ctx, const uint8_t *in,
+    size_t in_len, uint8_t *out, size_t out_len)
+{
+	unsigned i, max;
+
+	max = (unsigned)((in_len < out_len)? in_len: out_len);
+
+	for (i = 0; i < max; i++) {
+		uint8_t t = in[i] ^ trad_enc_decrypt_byte(ctx);
+		out[i] = t;
+		trad_enc_update_keys(ctx, t);
+	}
+}
+
+static int
+trad_enc_init(struct trad_enc_ctx *ctx, const char *pw, size_t pw_len,
+    const uint8_t *key, size_t key_len, uint8_t *crcchk)
+{
+	uint8_t header[12];
+
+	if (key_len < 12) {
+		*crcchk = 0xff;
+		return -1;
+	}
+
+	ctx->keys[0] = 305419896L;
+	ctx->keys[1] = 591751049L;
+	ctx->keys[2] = 878082192L;
+
+	for (;pw_len; --pw_len)
+		trad_enc_update_keys(ctx, *pw++);
+
+	trad_enc_decrypt_update(ctx, key, 12, header, 12);
+	/* Return the last byte for CRC check. */
+	*crcchk = header[11];
+	return 0;
+}
+
+#if 0
+static void
+crypt_derive_key_sha1(const void *p, int size, unsigned char *key,
+    int key_size)
+{
+#define MD_SIZE 20
+	archive_sha1_ctx ctx;
+	unsigned char md1[MD_SIZE];
+	unsigned char md2[MD_SIZE * 2];
+	unsigned char mkb[64];
+	int i;
+
+	archive_sha1_init(&ctx);
+	archive_sha1_update(&ctx, p, size);
+	archive_sha1_final(&ctx, md1);
+
+	memset(mkb, 0x36, sizeof(mkb));
+	for (i = 0; i < MD_SIZE; i++)
+		mkb[i] ^= md1[i];
+	archive_sha1_init(&ctx);
+	archive_sha1_update(&ctx, mkb, sizeof(mkb));
+	archive_sha1_final(&ctx, md2);
+
+	memset(mkb, 0x5C, sizeof(mkb));
+	for (i = 0; i < MD_SIZE; i++)
+		mkb[i] ^= md1[i];
+	archive_sha1_init(&ctx);
+	archive_sha1_update(&ctx, mkb, sizeof(mkb));
+	archive_sha1_final(&ctx, md2 + MD_SIZE);
+
+	if (key_size > 32)
+		key_size = 32;
+	memcpy(key, md2, key_size);
+#undef MD_SIZE
+}
+#endif
+
+/*
+ * Common code for streaming or seeking modes.
+ *
+ * Includes code to read local file headers, decompress data
+ * from entry bodies, and common API.
+ */
+
+static unsigned long
+real_crc32(unsigned long crc, const void *buff, size_t len)
+{
+	return crc32(crc, buff, (unsigned int)len);
+}
+
+/* Used by "ignorecrc32" option to speed up tests. */
+static unsigned long
+fake_crc32(unsigned long crc, const void *buff, size_t len)
+{
+	(void)crc; /* UNUSED */
+	(void)buff; /* UNUSED */
+	(void)len; /* UNUSED */
+	return 0;
+}
+
+static const struct {
+	int id;
+	const char * name;
+} compression_methods[] = {
+	{0, "uncompressed"}, /* The file is stored (no compression) */
+	{1, "shrinking"}, /* The file is Shrunk */
+	{2, "reduced-1"}, /* The file is Reduced with compression factor 1 */
+	{3, "reduced-2"}, /* The file is Reduced with compression factor 2 */
+	{4, "reduced-3"}, /* The file is Reduced with compression factor 3 */
+	{5, "reduced-4"}, /* The file is Reduced with compression factor 4 */
+	{6, "imploded"},  /* The file is Imploded */
+	{7, "reserved"},  /* Reserved for Tokenizing compression algorithm */
+	{8, "deflation"}, /* The file is Deflated */
+	{9, "deflation-64-bit"}, /* Enhanced Deflating using Deflate64(tm) */
+	{10, "ibm-terse"},/* PKWARE Data Compression Library Imploding
+			   * (old IBM TERSE) */
+	{11, "reserved"}, /* Reserved by PKWARE */
+	{12, "bzip"},     /* File is compressed using BZIP2 algorithm */
+	{13, "reserved"}, /* Reserved by PKWARE */
+	{14, "lzma"},     /* LZMA (EFS) */
+	{15, "reserved"}, /* Reserved by PKWARE */
+	{16, "reserved"}, /* Reserved by PKWARE */
+	{17, "reserved"}, /* Reserved by PKWARE */
+	{18, "ibm-terse-new"}, /* File is compressed using IBM TERSE (new) */
+	{19, "ibm-lz777"},/* IBM LZ77 z Architecture (PFS) */
+	{93, "zstd"},     /*  Zstandard (zstd) Compression */
+	{95, "xz"},       /* XZ compressed data */
+	{96, "jpeg"},     /* JPEG compressed data */
+	{97, "wav-pack"}, /* WavPack compressed data */
+	{98, "ppmd-1"},   /* PPMd version I, Rev 1 */
+	{99, "aes"}       /* WinZip AES encryption  */
+};
+
+static const char *
+compression_name(const int compression)
+{
+	static const int num_compression_methods =
+		sizeof(compression_methods)/sizeof(compression_methods[0]);
+	int i=0;
+
+	while(compression >= 0 && i < num_compression_methods) {
+		if (compression_methods[i].id == compression)
+			return compression_methods[i].name;
+		i++;
+	}
+	return "??";
+}
+
+/* Convert an MSDOS-style date/time into Unix-style time. */
+static time_t
+zip_time(const char *p)
+{
+	int msTime, msDate;
+	struct tm ts;
+
+	msTime = (0xff & (unsigned)p[0]) + 256 * (0xff & (unsigned)p[1]);
+	msDate = (0xff & (unsigned)p[2]) + 256 * (0xff & (unsigned)p[3]);
+
+	memset(&ts, 0, sizeof(ts));
+	ts.tm_year = ((msDate >> 9) & 0x7f) + 80; /* Years since 1900. */
+	ts.tm_mon = ((msDate >> 5) & 0x0f) - 1; /* Month number. */
+	ts.tm_mday = msDate & 0x1f; /* Day of month. */
+	ts.tm_hour = (msTime >> 11) & 0x1f;
+	ts.tm_min = (msTime >> 5) & 0x3f;
+	ts.tm_sec = (msTime << 1) & 0x3e;
+	ts.tm_isdst = -1;
+	return mktime(&ts);
+}
+
+/*
+ * The extra data is stored as a list of
+ *	id1+size1+data1 + id2+size2+data2 ...
+ *  triplets.  id and size are 2 bytes each.
+ */
+static int
+process_extra(struct archive_read *a, struct archive_entry *entry,
+     const char *p, size_t extra_length, struct zip_entry* zip_entry)
+{
+	unsigned offset = 0;
+	struct zip *zip = (struct zip *)(a->format->data);
+
+	if (extra_length == 0) {
+		return ARCHIVE_OK;
+	}
+
+	if (extra_length < 4) {
+		size_t i = 0;
+		/* Some ZIP files may have trailing 0 bytes. Let's check they
+		 * are all 0 and ignore them instead of returning an error.
+		 *
+		 * This is not technically correct, but some ZIP files look
+		 * like this and other tools support those files - so let's
+		 * also  support them.
+		 */
+		for (; i < extra_length; i++) {
+			if (p[i] != 0) {
+				archive_set_error(&a->archive,
+				    ARCHIVE_ERRNO_FILE_FORMAT,
+				    "Too-small extra data: "
+				    "Need at least 4 bytes, "
+				    "but only found %d bytes",
+				    (int)extra_length);
+				return ARCHIVE_FAILED;
+			}
+		}
+
+		return ARCHIVE_OK;
+	}
+
+	while (offset <= extra_length - 4) {
+		unsigned short headerid = archive_le16dec(p + offset);
+		unsigned short datasize = archive_le16dec(p + offset + 2);
+
+		offset += 4;
+		if (offset + datasize > extra_length) {
+			archive_set_error(&a->archive,
+			    ARCHIVE_ERRNO_FILE_FORMAT, "Extra data overflow: "
+			    "Need %d bytes but only found %d bytes",
+			    (int)datasize, (int)(extra_length - offset));
+			return ARCHIVE_FAILED;
+		}
+#ifdef DEBUG
+		fprintf(stderr, "Header id 0x%04x, length %d\n",
+		    headerid, datasize);
+#endif
+		switch (headerid) {
+		case 0x0001:
+			/* Zip64 extended information extra field. */
+			zip_entry->flags |= LA_USED_ZIP64;
+			if (zip_entry->uncompressed_size == 0xffffffff) {
+				uint64_t t = 0;
+				if (datasize < 8
+				    || (t = archive_le64dec(p + offset)) >
+				    INT64_MAX) {
+					archive_set_error(&a->archive,
+					    ARCHIVE_ERRNO_FILE_FORMAT,
+					    "Malformed 64-bit "
+					    "uncompressed size");
+					return ARCHIVE_FAILED;
+				}
+				zip_entry->uncompressed_size = t;
+				offset += 8;
+				datasize -= 8;
+			}
+			if (zip_entry->compressed_size == 0xffffffff) {
+				uint64_t t = 0;
+				if (datasize < 8
+				    || (t = archive_le64dec(p + offset)) >
+				    INT64_MAX) {
+					archive_set_error(&a->archive,
+					    ARCHIVE_ERRNO_FILE_FORMAT,
+					    "Malformed 64-bit "
+					    "compressed size");
+					return ARCHIVE_FAILED;
+				}
+				zip_entry->compressed_size = t;
+				offset += 8;
+				datasize -= 8;
+			}
+			if (zip_entry->local_header_offset == 0xffffffff) {
+				uint64_t t = 0;
+				if (datasize < 8
+				    || (t = archive_le64dec(p + offset)) >
+				    INT64_MAX) {
+					archive_set_error(&a->archive,
+					    ARCHIVE_ERRNO_FILE_FORMAT,
+					    "Malformed 64-bit "
+					    "local header offset");
+					return ARCHIVE_FAILED;
+				}
+				zip_entry->local_header_offset = t;
+				offset += 8;
+				datasize -= 8;
+			}
+			/* archive_le32dec(p + offset) gives disk
+			 * on which file starts, but we don't handle
+			 * multi-volume Zip files. */
+			break;
+#ifdef DEBUG
+		case 0x0017:
+		{
+			/* Strong encryption field. */
+			if (archive_le16dec(p + offset) == 2) {
+				unsigned algId =
+					archive_le16dec(p + offset + 2);
+				unsigned bitLen =
+					archive_le16dec(p + offset + 4);
+				int	 flags =
+					archive_le16dec(p + offset + 6);
+				fprintf(stderr, "algId=0x%04x, bitLen=%u, "
+				    "flgas=%d\n", algId, bitLen,flags);
+			}
+			break;
+		}
+#endif
+		case 0x5455:
+		{
+			/* Extended time field "UT". */
+			int flags;
+			if (datasize == 0) {
+				archive_set_error(&a->archive,
+				    ARCHIVE_ERRNO_FILE_FORMAT,
+				    "Incomplete extended time field");
+				return ARCHIVE_FAILED;
+			}
+			flags = p[offset];
+			offset++;
+			datasize--;
+			/* Flag bits indicate which dates are present. */
+			if (flags & 0x01)
+			{
+#ifdef DEBUG
+				fprintf(stderr, "mtime: %lld -> %d\n",
+				    (long long)zip_entry->mtime,
+				    archive_le32dec(p + offset));
+#endif
+				if (datasize < 4)
+					break;
+				zip_entry->mtime = archive_le32dec(p + offset);
+				offset += 4;
+				datasize -= 4;
+			}
+			if (flags & 0x02)
+			{
+				if (datasize < 4)
+					break;
+				zip_entry->atime = archive_le32dec(p + offset);
+				offset += 4;
+				datasize -= 4;
+			}
+			if (flags & 0x04)
+			{
+				if (datasize < 4)
+					break;
+				zip_entry->ctime = archive_le32dec(p + offset);
+				offset += 4;
+				datasize -= 4;
+			}
+			break;
+		}
+		case 0x5855:
+		{
+			/* Info-ZIP Unix Extra Field (old version) "UX". */
+			if (datasize >= 8) {
+				zip_entry->atime = archive_le32dec(p + offset);
+				zip_entry->mtime =
+				    archive_le32dec(p + offset + 4);
+			}
+			if (datasize >= 12) {
+				zip_entry->uid =
+				    archive_le16dec(p + offset + 8);
+				zip_entry->gid =
+				    archive_le16dec(p + offset + 10);
+			}
+			break;
+		}
+		case 0x6c78:
+		{
+			/* Experimental 'xl' field */
+			/*
+			 * Introduced Dec 2013 to provide a way to
+			 * include external file attributes (and other
+			 * fields that ordinarily appear only in
+			 * central directory) in local file header.
+			 * This provides file type and permission
+			 * information necessary to support full
+			 * streaming extraction.  Currently being
+			 * discussed with other Zip developers
+			 * ... subject to change.
+			 *
+			 * Format:
+			 *  The field starts with a bitmap that specifies
+			 *  which additional fields are included.  The
+			 *  bitmap is variable length and can be extended in
+			 *  the future.
+			 *
+			 *  n bytes - feature bitmap: first byte has low-order
+			 *    7 bits.  If high-order bit is set, a subsequent
+			 *    byte holds the next 7 bits, etc.
+			 *
+			 *  if bitmap & 1, 2 byte "version made by"
+			 *  if bitmap & 2, 2 byte "internal file attributes"
+			 *  if bitmap & 4, 4 byte "external file attributes"
+			 *  if bitmap & 8, 2 byte comment length + n byte
+			 *  comment
+			 */
+			int bitmap, bitmap_last;
+
+			if (datasize < 1)
+				break;
+			bitmap_last = bitmap = 0xff & p[offset];
+			offset += 1;
+			datasize -= 1;
+
+			/* We only support first 7 bits of bitmap; skip rest. */
+			while ((bitmap_last & 0x80) != 0
+			    && datasize >= 1) {
+				bitmap_last = p[offset];
+				offset += 1;
+				datasize -= 1;
+			}
+
+			if (bitmap & 1) {
+				/* 2 byte "version made by" */
+				if (datasize < 2)
+					break;
+				zip_entry->system
+				    = archive_le16dec(p + offset) >> 8;
+				offset += 2;
+				datasize -
+
+// --- CODE TRUNCATED HERE ---
+
+static int
+zipx_lzma_alone_init(struct archive_read *a, struct zip *zip)
+{
+	lzma_ret r;
+	const uint8_t* lzma_stream_pointer;
+
+#pragma pack(push)
+#pragma pack(1)
+	struct _alone_header {
+	    uint8_t bytes[5];
+	    uint64_t uncompressed_size;
+	} alone_header;
+#pragma pack(pop)
+
+	if(zip->zipx_lzma_valid) {
+		lzma_end(&zip->zipx_lzma_stream);
+		zip->zipx_lzma_valid = 0;
+	}
+
+	/* To unpack ZIPX's "LZMA" (id 14) stream we can use standard liblzma
+	 * that is a part of XZ Utils. The stream format stored inside ZIPX
+	 * file is a modified "lzma alone" file format, that was used by the
+	 * `lzma` utility which was later deprecated in favour of `xz` utility.
+ 	 * Since those formats are nearly the same, we can use a standard
+	 * "lzma alone" decoder from XZ Utils. */
+
+	memset(&zip->zipx_lzma_stream, 0, sizeof(zip->zipx_lzma_stream));
+	r = lzma_alone_decoder(&zip->zipx_lzma_stream, UINT64_MAX);
+	if (r != LZMA_OK) {
+		archive_set_error(&(a->archive), ARCHIVE_ERRNO_MISC,
+		    "lzma initialization failed(%d)", r);
+
+		return (ARCHIVE_FAILED);
+	}
+
+	/* Flag the cleanup function that we want our lzma-related structures
+	 * to be freed later. */
+	zip->zipx_lzma_valid = 1;
+
+	/* The "lzma alone" file format and the stream format inside ZIPx are
+	 * almost the same. Here's an example of a structure of "lzma alone"
+	 * format:
+	 *
+	 * $ cat /bin/ls | lzma | xxd | head -n 1
+	 * 00000000: 5d00 0080 00ff ffff ffff ffff ff00 2814
+	 *
+	 *    5 bytes        8 bytes        n bytes
+	 * <lzma_params><uncompressed_size><data...>
+	 *
+	 * lzma_params is a 5-byte blob that has to be decoded to extract
+	 * parameters of this LZMA stream. The uncompressed_size field is an
+	 * uint64_t value that contains information about the size of the
+	 * uncompressed file, or UINT64_MAX if this value is unknown.
+	 * The <data...> part is the actual lzma-compressed data stream.
+	 *
+	 * Now here's the structure of the stream inside the ZIPX file:
+	 *
+	 * $ cat stream_inside_zipx | xxd | head -n 1
+	 * 00000000: 0914 0500 5d00 8000 0000 2814 .... ....
+	 *
+	 *  2byte   2byte    5 bytes     n bytes
+	 * <magic1><magic2><lzma_params><data...>
+	 *
+	 * This means that the ZIPX file contains an additional magic1 and
+	 * magic2 headers, the lzma_params field contains the same parameter
+	 * set as in the "lzma alone" format, and the <data...> field is the
+	 * same as in the "lzma alone" format as well. Note that also the zipx
+	 * format is missing the uncompressed_size field.
+	 *
+	 * So, in order to use the "lzma alone" decoder for the zipx lzma
+	 * stream, we simply need to shuffle around some fields, prepare a new
+	 * lzma alone header, feed it into lzma alone decoder so it will
+	 * initialize itself properly, and then we can start feeding normal
+	 * zipx lzma stream into the decoder.
+	 */
+
+	// Read the initial part of the ZIPX stream to extract the magic numbers
+	// and LZMA parameters. Ensure that the data format is as expected by
+	// validating specific byte values. If the format is incorrect or the data
+	// is truncated, set an appropriate error and return a failure code.
+	// Prepare an LZMA 'alone' header by copying the LZMA parameters from
+	// the ZIPX stream to the appropriate location in the header.
+	// <MASK>
+	memcpy(&alone_header.bytes[0], lzma_stream_pointer + 4, 5);
+
+	/* Initialize the 'uncompressed size' field to unknown; we'll manually
+	 * monitor how many bytes there are still to be uncompressed. */
+	alone_header.uncompressed_size = UINT64_MAX;
+
+	if(!zip->uncompressed_buffer) {
+		zip->uncompressed_buffer_size = 256 * 1024;
+		zip->uncompressed_buffer =
+			(uint8_t*) malloc(zip->uncompressed_buffer_size);
+
+		if (zip->uncompressed_buffer == NULL) {
+			archive_set_error(&a->archive, ENOMEM,
+			    "No memory for lzma decompression");
+			return (ARCHIVE_FATAL);
+		}
+	}
+
+	zip->zipx_lzma_stream.next_in = (void*) &alone_header;
+	zip->zipx_lzma_stream.avail_in = sizeof(alone_header);
+	zip->zipx_lzma_stream.total_in = 0;
+	zip->zipx_lzma_stream.next_out = zip->uncompressed_buffer;
+	zip->zipx_lzma_stream.avail_out = zip->uncompressed_buffer_size;
+	zip->zipx_lzma_stream.total_out = 0;
+
+	/* Feed only the header into the lzma alone decoder. This will
+	 * effectively initialize the decoder, and will not produce any
+	 * output bytes yet. */
+	r = lzma_code(&zip->zipx_lzma_stream, LZMA_RUN);
+	if (r != LZMA_OK) {
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_PROGRAMMER,
+		    "lzma stream initialization error");
+		return ARCHIVE_FATAL;
+	}
+
+	/* We've already consumed some bytes, so take this into account. */
+	__archive_read_consume(a, 9);
+	zip->entry_bytes_remaining -= 9;
+	zip->entry_compressed_bytes_read += 9;
+
+	zip->decompress_init = 1;
+	return (ARCHIVE_OK);
+}

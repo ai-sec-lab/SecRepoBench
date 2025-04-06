@@ -1,0 +1,116 @@
+// <MASK>
+  if(handshake_type == 0x02 /* Server Hello */) {
+    offset += session_id_len;
+    ja3.num_cipher = (packet->payload[offset] << 8) + packet->payload[offset+1];
+    offset += 2;
+
+    for(i=0; i<ja3.num_cipher; i++) {
+      ja3.cipher[i] = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+    }
+
+    ja3.num_tls_extension = (packet->payload[offset] << 8) + packet->payload[offset+1];
+    offset += 2;
+
+    for(i=0; i<ja3.num_tls_extension; i++) {
+      ja3.tls_extension[i] = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+      extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2 + extension_len;
+    }
+  } else if(handshake_type == 0x01 /* Client Hello */) {
+    offset = base_offset + session_id_len;
+    ja3.num_cipher = (packet->payload[offset] << 8) + packet->payload[offset+1];
+    offset += 2;
+
+    for(i=0; i<ja3.num_cipher; i++) {
+      u_int16_t cipher = ntohs(*((u_int16_t*)&packet->payload[offset]));
+
+      /* GREASE values are used to improve TLS extensibility, we skip them */
+      if((cipher & 0x0F0F) != 0x0A0A)
+	ja3.cipher[ja3.num_cipher++] = cipher;
+
+      offset += 2;
+    }
+
+    ja3.num_tls_extension = (packet->payload[offset] << 8) + packet->payload[offset+1];
+    offset += 2;
+
+    for(i=0; i<ja3.num_tls_extension; i++) {
+      u_int16_t ext = ntohs(*((u_int16_t*)&packet->payload[offset]));
+
+      /* GREASE values are used to improve TLS extensibility, we skip them */
+      if((ext & 0x0F0F) != 0x0A0A)
+	ja3.tls_extension[ja3.num_tls_extension++] = ext;
+
+      offset += 2;
+      extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2 + extension_len;
+    }
+
+    ja3.num_elliptic_curve = (packet->payload[offset] << 8) + packet->payload[offset+1];
+    offset += 2;
+
+    for(i=0; i<ja3.num_elliptic_curve; i++) {
+      u_int16_t curve = ntohs(*((u_int16_t*)&packet->payload[offset]));
+
+      /* GREASE values are used to improve TLS extensibility, we skip them */
+      if((curve & 0x0F0F) != 0x0A0A)
+	ja3.elliptic_curve[ja3.num_elliptic_curve++] = curve;
+
+      offset += 2;
+    }
+
+    ja3.num_elliptic_curve_point_format = packet->payload[offset];
+    offset++;
+
+    for(i=0; i<ja3.num_elliptic_curve_point_format; i++) {
+      ja3.elliptic_curve_point_format[i] = packet->payload[offset++];
+    }
+  } else {
+    jainvalid = 1;
+  }
+
+  if(!jainvalid) {
+    ndpi_MD5Init(&ctx);
+    ja3_str_len = snprintf(ja3_str, sizeof(ja3_str)-1, "%u,", ja3.tls_handshake_version);
+
+    for(i=0; i<ja3.num_cipher; i++)
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str)-ja3_str_len-1, "%u%s",
+			     ja3.cipher[i], (i == (ja3.num_cipher-1)) ? "," : "-");
+
+    for(i=0; i<ja3.num_tls_extension; i++)
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str)-ja3_str_len-1, "%u%s",
+			     ja3.tls_extension[i], (i == (ja3.num_tls_extension-1)) ? "," : "-");
+
+    for(i=0; i<ja3.num_elliptic_curve; i++)
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str)-ja3_str_len-1, "%u%s",
+			     ja3.elliptic_curve[i], (i == (ja3.num_elliptic_curve-1)) ? "," : "-");
+
+    for(i=0; i<ja3.num_elliptic_curve_point_format; i++)
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str)-ja3_str_len-1, "%u%s",
+			     ja3.elliptic_curve_point_format[i], (i == (ja3.num_elliptic_curve_point_format-1)) ? "" : "-");
+
+    ndpi_MD5Update(&ctx, (unsigned char*)ja3_str, strlen(ja3_str));
+    ndpi_MD5Final(md5_hash, &ctx);
+
+    if(handshake_type == 0x02 /* Server Hello */) {
+      snprintf(flow->protos.stun_ssl.ssl.ja3_server, sizeof(flow->protos.stun_ssl.ssl.ja3_server), "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+	       md5_hash[0], md5_hash[1], md5_hash[2], md5_hash[3],
+	       md5_hash[4], md5_hash[5], md5_hash[6], md5_hash[7],
+	       md5_hash[8], md5_hash[9], md5_hash[10], md5_hash[11],
+	       md5_hash[12], md5_hash[13], md5_hash[14], md5_hash[15]);
+    } else {
+      snprintf(flow->protos.stun_ssl.ssl.ja3, sizeof(flow->protos.stun_ssl.ssl.ja3), "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+	       md5_hash[0], md5_hash[1], md5_hash[2], md5_hash[3],
+	       md5_hash[4], md5_hash[5], md5_hash[6], md5_hash[7],
+	       md5_hash[8], md5_hash[9], md5_hash[10], md5_hash[11],
+	       md5_hash[12], md5_hash[13], md5_hash[14], md5_hash[15]);
+    }
+
+#ifdef DEBUG_TLS
+    printf("[TLS] JA3 [%s]\n", ja3_str);
+#endif
+  }
+
+  return(handshake_type);

@@ -1,0 +1,120 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/hb-subset-plan.cc
+static void
+_gsub_closure (hb_face_t *face, hb_set_t *gids_to_retain)
+{
+  hb_set_t lookup_indices;
+  hb_ot_layout_collect_lookups (face,
+				HB_OT_TAG_GSUB,
+				nullptr,
+				nullptr,
+				nullptr,
+				&lookup_indices);
+  hb_ot_layout_lookups_substitute_closure (face,
+					   &lookup_indices,
+					   gids_to_retain);
+}
+
+// the below code fragment can be found in:
+// src/hb-ot-layout.cc
+void
+hb_ot_layout_lookup_collect_glyphs (hb_face_t    *face,
+				    hb_tag_t      table_tag,
+				    unsigned int  lookup_index,
+				    hb_set_t     *glyphs_before, /* OUT.  May be NULL */
+				    hb_set_t     *glyphs_input,  /* OUT.  May be NULL */
+				    hb_set_t     *glyphs_after,  /* OUT.  May be NULL */
+				    hb_set_t     *glyphs_output  /* OUT.  May be NULL */)
+{
+  OT::hb_collect_glyphs_context_t c (face,
+				     glyphs_before,
+				     glyphs_input,
+				     glyphs_after,
+				     glyphs_output);
+
+  switch (table_tag)
+  {
+    case HB_OT_TAG_GSUB:
+    {
+      const OT::SubstLookup& l = face->table.GSUB->table->get_lookup (lookup_index);
+      l.collect_glyphs (&c);
+      return;
+    }
+    case HB_OT_TAG_GPOS:
+    {
+      const OT::PosLookup& l = face->table.GPOS->table->get_lookup (lookup_index);
+      l.collect_glyphs (&c);
+      return;
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/hb-subset-plan.cc
+static void
+_add_gid_and_children (const OT::glyf::accelerator_t &glyf,
+		       hb_codepoint_t gid,
+		       hb_set_t *gids_to_retain)
+{
+  if (hb_set_has (gids_to_retain, gid))
+    // Already visited this gid, ignore.
+    return;
+
+  hb_set_add (gids_to_retain, gid);
+
+  OT::glyf::CompositeGlyphHeader::Iterator composite;
+  if (glyf.get_composite (gid, &composite))
+  {
+    do
+    {
+      _add_gid_and_children (glyf, (hb_codepoint_t) composite.current->glyphIndex, gids_to_retain);
+    } while (composite.move_to_next());
+  }
+}
+
+// the below code fragment can be found in:
+// src/hb-ot-layout.cc
+void
+hb_ot_layout_lookups_substitute_closure (hb_face_t      *face,
+                                         const hb_set_t *lookups,
+                                         hb_set_t       *glyphs)
+{
+  hb_map_t done_lookups;
+  OT::hb_closure_context_t c (face, glyphs, &done_lookups);
+  const OT::GSUB& gsub = *face->table.GSUB->table;
+
+  unsigned int iteration_count = 0;
+  unsigned int glyphs_length;
+  do
+  {
+    glyphs_length = glyphs->get_population ();
+    if (lookups != nullptr)
+    {
+      for (hb_codepoint_t lookup_index = HB_SET_VALUE_INVALID; hb_set_next (lookups, &lookup_index);)
+        gsub.get_lookup (lookup_index).closure (&c, lookup_index);
+    }
+    else
+    {
+      for (unsigned int i = 0; i < gsub.get_lookup_count (); i++)
+        gsub.get_lookup (i).closure (&c, i);
+    }
+  } while (iteration_count++ <= HB_CLOSURE_MAX_STAGES &&
+	   glyphs_length != glyphs->get_population ());
+}
+
+// the below code fragment can be found in:
+// src/hb-subset-plan.cc
+static void
+_remove_invalid_gids (hb_set_t *glyphs,
+		      unsigned int num_glyphs)
+{
+  hb_codepoint_t gid = HB_SET_VALUE_INVALID;
+  while (glyphs->next (&gid))
+  {
+    if (gid >= num_glyphs)
+      glyphs->del (gid);
+  }
+}
+

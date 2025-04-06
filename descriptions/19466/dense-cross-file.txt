@@ -1,0 +1,785 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+void getSSLorganization(struct ndpi_detection_module_struct *ndpi_struct,
+			struct ndpi_flow_struct *flow,
+			char *buffer, int buffer_len) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  u_int16_t total_len;
+  u_int8_t handshake_protocol;
+  
+  if(packet->payload[0] != 0x16 /* Handshake */)
+    return;
+
+  total_len  = (packet->payload[3] << 8) + packet->payload[4] + 5 /* SSL Header */;
+  handshake_protocol = packet->payload[5]; /* handshake protocol a bit misleading, it is message type according TLS specs */
+  
+  if((handshake_protocol != 0x02)
+     && (handshake_protocol != 0xb) /* Server Hello and Certificate message types are interesting for us */)
+    return;
+
+#ifdef DEBUG_TLS
+  printf("=>> [TLS] Certificate [total_len: %u/%u]\n", ntohs(*(u_int16_t*)&packet->payload[3]), total_len);
+#endif
+  
+  /* Truncate total len, search at least in incomplete packet */
+  if(total_len > packet->payload_packet_len)
+    total_len = packet->payload_packet_len;
+
+  memset(buffer, 0, buffer_len);
+
+  /* Check after handshake protocol header (5 bytes) and message header (4 bytes) */
+  u_int num_found = 0;
+  u_int i, j;
+  for(i = 9; i < packet->payload_packet_len-4; i++) {
+    /* Organization OID: 2.5.4.10 */
+    if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0a)) {
+      u_int8_t server_len = packet->payload[i+4];
+
+      num_found++;
+      /* what we want is subject certificate, so we bypass the issuer certificate */
+      if(num_found != 2) continue;
+
+      // packet is truncated... further inspection is not needed
+      if(i+4+server_len >= packet->payload_packet_len) {
+	break;
+      }
+
+      char *server_org = (char*)&packet->payload[i+5];
+
+      u_int len = (u_int)ndpi_min(server_len, buffer_len-1);
+      strncpy(buffer, server_org, len);
+      buffer[len] = '\0';
+
+      // check if organization string are all printable
+      u_int8_t is_printable = 1;
+      for (j = 0; j < len; j++) {
+	if(!ndpi_isprint(buffer[j])) {
+	  is_printable = 0;
+	  break;
+	}
+      }
+
+      if(is_printable == 1) {
+	snprintf(flow->protos.stun_ssl.ssl.server_organization,
+		 sizeof(flow->protos.stun_ssl.ssl.server_organization), "%s", buffer);
+#ifdef DEBUG_TLS
+	printf("Certificate organization: %s\n", flow->protos.stun_ssl.ssl.server_organization);
+#endif
+      }
+    } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x1e) && (packet->payload[i+2] == 0x17)) {
+      u_int8_t len = packet->payload[i+3];
+      u_int offset = i+4;
+
+      if((offset+len) < packet->payload_packet_len) {
+	char utcDate[32];
+
+#ifdef DEBUG_TLS
+	printf("[CERTIFICATE] notBefore [len: %u][", len);
+	for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
+	printf("]\n");
+#endif
+
+	if(len < (sizeof(utcDate)-1)) {
+	  struct tm utc;
+	  utc.tm_isdst = -1; /* Not set by strptime */
+
+	  strncpy(utcDate, (const char*)&packet->payload[i+4], len);
+	  utcDate[len] = '\0';
+
+	  /* 141021000000Z */
+	  if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc) != NULL) {
+	    flow->protos.stun_ssl.ssl.notBefore = timegm(&utc);
+#ifdef DEBUG_TLS
+	    printf("[CERTIFICATE] notBefore %u [%s]\n",
+		   flow->protos.stun_ssl.ssl.notBefore, utcDate);
+#endif
+	  }
+	}
+
+	offset += len;
+
+	if((offset+1) < packet->payload_packet_len) {
+	  len = packet->payload[offset+1];
+
+	  offset += 2;
+
+	  if((offset+len) < packet->payload_packet_len) {
+#ifdef DEBUG_TLS
+	    printf("[CERTIFICATE] notAfter [len: %u][", len);
+	    for(j=0; j<len; j++) printf("%c", packet->payload[offset+j]);
+	    printf("]\n");
+#endif
+
+	    if(len < (sizeof(utcDate)-1)) {
+	      struct tm utc;
+	      utc.tm_isdst = -1; /* Not set by strptime */
+
+	      strncpy(utcDate, (const char*)&packet->payload[offset], len);
+	      utcDate[len] = '\0';
+
+	      /* 141021000000Z */
+	      if(strptime(utcDate, "%y%m%d%H%M%SZ", &utc) != NULL) {
+		flow->protos.stun_ssl.ssl.notAfter = timegm(&utc);
+#ifdef DEBUG_TLS
+		printf("[CERTIFICATE] notAfter %u [%s]\n",
+		       flow->protos.stun_ssl.ssl.notAfter, utcDate);
+#endif
+	      }
+	    }
+	  }
+	}
+      }
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+int getSSCertificateFingerprint(struct ndpi_detection_module_struct *ndpi_struct,
+				struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  u_int8_t multiple_messages;
+
+  if(flow->l4.tcp.tls_srv_cert_fingerprint_processed)
+    return(0); /* We're good */
+  
+#ifdef DEBUG_TLS
+  printf("=>> [TLS] %s() [tls_record_offset=%d][payload_packet_len=%u][direction: %u][%02X %02X %02X...]\n",
+	 __FUNCTION__, flow->l4.tcp.tls_record_offset, packet->payload_packet_len,
+	 packet->packet_direction,
+	 packet->payload[0], packet->payload[1], packet->payload[2]);
+#endif
+  
+  if((packet->packet_direction == 0) /* Client -> Server */
+     || (packet->payload_packet_len == 0))
+    return(1); /* More packets please */
+  else if(flow->l4.tcp.tls_srv_cert_fingerprint_processed)
+    return(0); /* We're good */
+
+  if(packet->payload_packet_len <= flow->l4.tcp.tls_record_offset) {
+    /* Avoid invalid memory accesses */
+    return(1);
+  }
+
+  if(flow->l4.tcp.tls_fingerprint_len > 0) {
+    unsigned int avail = packet->payload_packet_len - flow->l4.tcp.tls_record_offset;
+
+    if(avail > flow->l4.tcp.tls_fingerprint_len)
+      avail = flow->l4.tcp.tls_fingerprint_len;
+
+#ifdef DEBUG_TLS
+    printf("=>> [TLS] Certificate record [%02X %02X %02X...][missing: %u][offset: %u][avail: %u] (B)\n",
+	   packet->payload[flow->l4.tcp.tls_record_offset],
+	   packet->payload[flow->l4.tcp.tls_record_offset+1],
+	   packet->payload[flow->l4.tcp.tls_record_offset+2],
+	   flow->l4.tcp.tls_fingerprint_len, flow->l4.tcp.tls_record_offset, avail
+	   );
+#endif
+    
+#ifdef DEBUG_CERTIFICATE_HASH
+    for(i=0;i<avail;i++)
+      printf("%02X ", packet->payload[flow->l4.tcp.tls_record_offset+i]);
+    printf("\n");
+#endif
+    
+    SHA1Update(flow->l4.tcp.tls_srv_cert_fingerprint_ctx,
+	       &packet->payload[flow->l4.tcp.tls_record_offset],
+	       avail);
+      
+    flow->l4.tcp.tls_fingerprint_len -= avail;
+      
+    if(flow->l4.tcp.tls_fingerprint_len == 0) {
+      SHA1Final(flow->l4.tcp.tls_sha1_certificate_fingerprint, flow->l4.tcp.tls_srv_cert_fingerprint_ctx);
+
+#ifdef DEBUG_TLS
+      {
+	int i;
+	
+	printf("=>> [TLS] SHA-1: ");
+	for(i=0;i<20;i++)
+	  printf("%s%02X", (i > 0) ? ":" : "", flow->l4.tcp.tls_sha1_certificate_fingerprint[i]);
+	printf("\n");
+      }
+#endif
+      
+      flow->l4.tcp.tls_srv_cert_fingerprint_processed = 1;
+      return(0); /* We're good */
+    } else {
+      flow->l4.tcp.tls_record_offset = 0;
+#ifdef DEBUG_TLS
+      printf("=>> [TLS] Certificate record: still missing %u bytes\n", flow->l4.tcp.tls_fingerprint_len);
+#endif
+      return(1); /* More packets please */
+    }
+  }
+
+  if(packet->payload[flow->l4.tcp.tls_record_offset] == 0x15 /* Alert */) {
+    u_int len = ntohs(*(u_int16_t*)&packet->payload[flow->l4.tcp.tls_record_offset+3]) + 5 /* SSL header len */;
+
+    if(len < 10 /* Sanity check */) {
+      if((flow->l4.tcp.tls_record_offset+len) < packet->payload_packet_len)
+	flow->l4.tcp.tls_record_offset += len;
+    } else
+      goto invalid_len;
+  }
+  
+  multiple_messages = (packet->payload[flow->l4.tcp.tls_record_offset] == 0x16 /* Handshake */) ? 0 : 1;
+
+#ifdef DEBUG_TLS
+  printf("=>> [TLS] [multiple_messages: %d]\n", multiple_messages);
+#endif
+
+  if((!multiple_messages) && (packet->payload[flow->l4.tcp.tls_record_offset] != 0x16 /* Handshake */))
+    return(1);
+  else if(((!multiple_messages) && (packet->payload[flow->l4.tcp.tls_record_offset+5] == 0xb) /* Certificate */)
+	  || (packet->payload[flow->l4.tcp.tls_record_offset] == 0xb) /* Certificate */) {
+    /* TODO: Do not take into account all certificates but only the first one */
+#ifdef DEBUG_TLS
+    printf("=>> [TLS] Certificate found\n");
+#endif
+
+    if(flow->l4.tcp.tls_srv_cert_fingerprint_ctx == NULL)
+      flow->l4.tcp.tls_srv_cert_fingerprint_ctx = (void*)ndpi_malloc(sizeof(SHA1_CTX));
+    else {
+#ifdef DEBUG_TLS
+      printf("[TLS] Internal error: double allocation\n:");
+#endif
+    }
+    
+    if(flow->l4.tcp.tls_srv_cert_fingerprint_ctx) {
+      SHA1Init(flow->l4.tcp.tls_srv_cert_fingerprint_ctx);
+      flow->l4.tcp.tls_srv_cert_fingerprint_found = 1;
+      flow->l4.tcp.tls_record_offset += (!multiple_messages) ? 13 : 8;
+      flow->l4.tcp.tls_fingerprint_len = ntohs(*(u_int16_t*)&packet->payload[flow->l4.tcp.tls_record_offset]);
+      flow->l4.tcp.tls_record_offset = flow->l4.tcp.tls_record_offset+2;
+#ifdef DEBUG_TLS
+      printf("=>> [TLS] Certificate [total certificate len: %u][certificate initial offset: %u]\n",
+	     flow->l4.tcp.tls_fingerprint_len, flow->l4.tcp.tls_record_offset);
+#endif
+      return(getSSCertificateFingerprint(ndpi_struct, flow));        
+    } else
+      return(0); /* That's all */
+  } else if(flow->l4.tcp.tls_seen_certificate)
+    return(0); /* That's all */  
+  else if(packet->payload_packet_len > flow->l4.tcp.tls_record_offset+7+1/* +1 because we are going to read 2 bytes */) {
+    /* This is a handshake but not a certificate record */
+    u_int16_t len = ntohs(*(u_int16_t*)&packet->payload[flow->l4.tcp.tls_record_offset+7]);
+
+#ifdef DEBUG_TLS
+    printf("=>> [TLS] Found record %02X [len: %u]\n",
+	   packet->payload[flow->l4.tcp.tls_record_offset+5], len);
+#endif
+
+    if(len > 4096) {
+    invalid_len:
+      /* This looks an invalid len: we giveup */
+      flow->l4.tcp.tls_record_offset = 0, flow->l4.tcp.tls_srv_cert_fingerprint_processed = 1;
+#ifdef DEBUG_TLS
+      printf("=>> [TLS] Invalid fingerprint processing %u <-> %u\n",
+	     ntohs(packet->tcp->source), ntohs(packet->tcp->dest));
+#endif
+      return(0);
+    } else {
+      flow->l4.tcp.tls_record_offset += len + 9;
+      
+      if(flow->l4.tcp.tls_record_offset < packet->payload_packet_len)
+	return(getSSCertificateFingerprint(ndpi_struct, flow));
+      else {
+	flow->l4.tcp.tls_record_offset -= packet->payload_packet_len;      
+      }
+    }
+  }
+
+  flow->extra_packets_func = NULL; /* We're good now */
+  return(1);
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_utils.c
+int ndpi_flow2json(struct ndpi_detection_module_struct *ndpi_struct,
+		   struct ndpi_flow_struct *flow,
+		   u_int8_t ip_version,
+		   u_int8_t l4_protocol, u_int16_t vlan_id,
+		   u_int32_t src_v4, u_int32_t dst_v4,
+		   struct ndpi_in6_addr *src_v6, struct ndpi_in6_addr *dst_v6,
+		   u_int16_t src_port, u_int16_t dst_port,
+		   ndpi_protocol l7_protocol,
+		   ndpi_serializer *serializer) {
+  char buf[64], src_name[32], dst_name[32];
+
+  if(ndpi_init_serializer(serializer, ndpi_serialization_format_json) == -1)
+    return(-1);
+
+  if(ip_version == 4) {
+    inet_ntop(AF_INET, &src_v4, src_name, sizeof(src_name));
+    inet_ntop(AF_INET, &dst_v4, dst_name, sizeof(dst_name));
+  } else {
+    inet_ntop(AF_INET6, src_v6, src_name, sizeof(src_name));
+    inet_ntop(AF_INET6, dst_v6, dst_name, sizeof(dst_name));
+    /* For consistency across platforms replace :0: with :: */
+    ndpi_patchIPv6Address(src_name), ndpi_patchIPv6Address(dst_name);
+  }
+
+  ndpi_serialize_string_string(serializer, "src_ip", src_name);
+  ndpi_serialize_string_string(serializer, "dest_ip", dst_name);
+  if(src_port) ndpi_serialize_string_uint32(serializer, "src_port", src_port);
+  if(dst_port) ndpi_serialize_string_uint32(serializer, "dst_port", dst_port);
+
+  switch(l4_protocol) {
+  case IPPROTO_TCP:
+    ndpi_serialize_string_string(serializer, "proto", "TCP");
+    break;
+
+  case IPPROTO_UDP:
+    ndpi_serialize_string_string(serializer, "proto", "UDP");
+    break;
+
+  case IPPROTO_ICMP:
+    ndpi_serialize_string_string(serializer, "proto", "ICMP");
+    break;
+
+  default:
+    ndpi_serialize_string_uint32(serializer, "proto", l4_protocol);
+    break;
+  }
+
+  ndpi_serialize_start_of_block(serializer, "ndpi");
+  ndpi_serialize_string_string(serializer, "proto", ndpi_protocol2name(ndpi_struct, l7_protocol, buf, sizeof(buf)));
+  if(l7_protocol.category != NDPI_PROTOCOL_CATEGORY_UNSPECIFIED)
+    ndpi_serialize_string_string(serializer, "category", ndpi_category_get_name(ndpi_struct, l7_protocol.category));
+  ndpi_serialize_end_of_block(serializer);
+
+  if(flow == NULL) return(0);
+
+  switch(l7_protocol.master_protocol ? l7_protocol.master_protocol : l7_protocol.app_protocol) {
+  case NDPI_PROTOCOL_DHCP:
+    ndpi_serialize_start_of_block(serializer, "dhcp");
+    ndpi_serialize_string_string(serializer, "fingerprint", flow->protos.dhcp.fingerprint);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_BITTORRENT:
+    {
+      u_int i, j, n = 0;
+      char bittorent_hash[32];
+
+      for(i=0, j = 0; j < sizeof(bittorent_hash)-1; i++) {
+	sprintf(&bittorent_hash[j], "%02x",
+		flow->protos.bittorrent.hash[i]);
+
+	j += 2, n += flow->protos.bittorrent.hash[i];
+      }
+
+      if(n == 0) bittorent_hash[0] = '\0';
+
+      ndpi_serialize_start_of_block(serializer, "bittorrent");
+      ndpi_serialize_string_string(serializer, "hash", bittorent_hash);
+      ndpi_serialize_end_of_block(serializer);
+    }
+    break;
+
+  case NDPI_PROTOCOL_DNS:
+    ndpi_serialize_start_of_block(serializer, "dns");
+    if(flow->host_server_name[0] != '\0')
+      ndpi_serialize_string_string(serializer, "query", (const char*)flow->host_server_name);
+    ndpi_serialize_string_uint32(serializer, "num_queries", flow->protos.dns.num_queries);
+    ndpi_serialize_string_uint32(serializer, "num_answers", flow->protos.dns.num_answers);
+    ndpi_serialize_string_uint32(serializer, "reply_code",  flow->protos.dns.reply_code);
+    ndpi_serialize_string_uint32(serializer, "query_type",  flow->protos.dns.query_type);
+    ndpi_serialize_string_uint32(serializer, "rsp_type",    flow->protos.dns.rsp_type);
+
+    inet_ntop(AF_INET, &flow->protos.dns.rsp_addr, buf, sizeof(buf));
+    ndpi_serialize_string_string(serializer, "rsp_addr",    buf);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_MDNS:
+    ndpi_serialize_start_of_block(serializer, "mdns");
+    ndpi_serialize_string_string(serializer, "answer", flow->protos.mdns.answer);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_UBNTAC2:
+    ndpi_serialize_start_of_block(serializer, "ubntac2");
+    ndpi_serialize_string_string(serializer, "version", flow->protos.ubntac2.version);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_KERBEROS:
+    ndpi_serialize_start_of_block(serializer, "kerberos");    
+    ndpi_serialize_string_string(serializer, "hostname", flow->protos.kerberos.hostname);
+    ndpi_serialize_string_string(serializer, "domain", flow->protos.kerberos.domain);
+    ndpi_serialize_string_string(serializer, "username", flow->protos.kerberos.username);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_TELNET:
+    ndpi_serialize_start_of_block(serializer, "telnet");
+    ndpi_serialize_string_string(serializer, "username", flow->protos.telnet.username);
+    ndpi_serialize_string_string(serializer, "password", flow->protos.telnet.password);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_HTTP:
+    ndpi_serialize_start_of_block(serializer, "http");
+    if(flow->host_server_name[0] != '\0')
+      ndpi_serialize_string_string(serializer, "hostname", (const char*)flow->host_server_name);
+    ndpi_serialize_string_string(serializer,   "url", flow->http.url);
+    ndpi_serialize_string_uint32(serializer,   "code", flow->http.response_status_code);
+    ndpi_serialize_string_string(serializer,   "content_type", flow->http.content_type);
+    ndpi_serialize_string_string(serializer,   "user_agent", flow->http.user_agent);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_MAIL_IMAP:
+    ndpi_serialize_start_of_block(serializer, "imap");
+    ndpi_serialize_string_string(serializer,  "user", flow->protos.ftp_imap_pop_smtp.username);
+    ndpi_serialize_string_string(serializer,  "password", flow->protos.ftp_imap_pop_smtp.password);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_MAIL_POP:
+    ndpi_serialize_start_of_block(serializer, "pop");
+    ndpi_serialize_string_string(serializer,  "user", flow->protos.ftp_imap_pop_smtp.username);
+    ndpi_serialize_string_string(serializer,  "password", flow->protos.ftp_imap_pop_smtp.password);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_MAIL_SMTP:
+    ndpi_serialize_start_of_block(serializer, "smtp");
+    ndpi_serialize_string_string(serializer,  "user", flow->protos.ftp_imap_pop_smtp.username);
+    ndpi_serialize_string_string(serializer,  "password", flow->protos.ftp_imap_pop_smtp.password);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_FTP_CONTROL:
+    ndpi_serialize_start_of_block(serializer, "ftp");
+    ndpi_serialize_string_string(serializer,  "user", flow->protos.ftp_imap_pop_smtp.username);
+    ndpi_serialize_string_string(serializer,  "password", flow->protos.ftp_imap_pop_smtp.password);
+    ndpi_serialize_string_uint32(serializer,  "auth_failed", flow->protos.ftp_imap_pop_smtp.auth_failed);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_SSH:
+    ndpi_serialize_start_of_block(serializer, "ssh");
+    ndpi_serialize_string_string(serializer,  "client_signature", flow->protos.ssh.client_signature);
+    ndpi_serialize_string_string(serializer,  "server_signature", flow->protos.ssh.server_signature);
+    ndpi_serialize_string_string(serializer,  "hassh_client", flow->protos.ssh.hassh_client);
+    ndpi_serialize_string_string(serializer,  "hassh_server", flow->protos.ssh.hassh_server);
+    ndpi_serialize_end_of_block(serializer);
+    break;
+
+  case NDPI_PROTOCOL_TLS:
+    if(flow->protos.stun_ssl.ssl.ssl_version) {
+      char notBefore[32], notAfter[32];
+      struct tm a, b, *before = NULL, *after = NULL;
+      u_int i, off;
+      u_int8_t unknown_tls_version;
+      char *version = ndpi_ssl_version2str(flow->protos.stun_ssl.ssl.ssl_version, &unknown_tls_version);
+
+      if(flow->protos.stun_ssl.ssl.notBefore)
+        before = gmtime_r((const time_t *)&flow->protos.stun_ssl.ssl.notBefore, &a);
+      if(flow->protos.stun_ssl.ssl.notAfter)
+        after  = gmtime_r((const time_t *)&flow->protos.stun_ssl.ssl.notAfter, &b);
+
+      if(!unknown_tls_version) {
+	ndpi_serialize_start_of_block(serializer, "tls");
+	ndpi_serialize_string_string(serializer, "version", version);
+	ndpi_serialize_string_string(serializer, "client_cert", flow->protos.stun_ssl.ssl.client_certificate);
+	ndpi_serialize_string_string(serializer, "server_cert", flow->protos.stun_ssl.ssl.server_certificate);
+	ndpi_serialize_string_string(serializer, "issuer", flow->protos.stun_ssl.ssl.server_organization);
+
+	if(before) {
+          strftime(notBefore, sizeof(notBefore), "%F %T", before);
+          ndpi_serialize_string_string(serializer, "notbefore", notBefore);
+        }
+
+	if(after) {
+	  strftime(notAfter, sizeof(notAfter), "%F %T", after);
+          ndpi_serialize_string_string(serializer, "notafter", notAfter);
+        }
+	ndpi_serialize_string_string(serializer, "ja3", flow->protos.stun_ssl.ssl.ja3_client);
+	ndpi_serialize_string_string(serializer, "ja3s", flow->protos.stun_ssl.ssl.ja3_server);
+	ndpi_serialize_string_uint32(serializer, "unsafe_cipher", flow->protos.stun_ssl.ssl.server_unsafe_cipher);
+	ndpi_serialize_string_string(serializer, "cipher", ndpi_cipher2str(flow->protos.stun_ssl.ssl.server_cipher));
+
+	if(flow->l4.tcp.tls_sha1_certificate_fingerprint[0] != '\0') {
+	  for(i=0, off=0; i<20; i++) {
+	    int rc = snprintf(&buf[off], sizeof(buf)-off,"%s%02X", (i > 0) ? ":" : "",
+			      flow->l4.tcp.tls_sha1_certificate_fingerprint[i] & 0xFF);
+	    
+	    if(rc <= 0) break; else off += rc;
+	  }
+
+	  ndpi_serialize_string_string(serializer, "fingerprint", buf);
+	}
+
+	ndpi_serialize_end_of_block(serializer);
+      }
+    }
+    break;
+  } /* switch */
+
+  return(0);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+void ndpi_search_tls_tcp_udp(struct ndpi_detection_module_struct *ndpi_struct,
+			     struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+  u_int8_t ret, skip_cert_processing = 0;
+
+#ifdef DEBUG_TLS
+  printf("==>> %u [len: %u][version: %u]\n",
+	 flow->guessed_host_protocol_id,
+	 packet->payload_packet_len,
+	 flow->protos.stun_ssl.ssl.ssl_version);
+#endif
+  
+  if(packet->udp != NULL) {
+    /* DTLS dissector */
+    int rc = sslTryAndRetrieveServerCertificate(ndpi_struct, flow);
+    
+    if((rc == 0) && (flow->protos.stun_ssl.ssl.ssl_version != 0)) {
+      flow->guessed_protocol_id = NDPI_PROTOCOL_TLS;
+
+      if(flow->protos.stun_ssl.stun.num_udp_pkts > 0) {
+	if(ndpi_struct->stun_cache == NULL)
+	  ndpi_struct->stun_cache = ndpi_lru_cache_init(1024);
+
+	if(ndpi_struct->stun_cache) {
+#ifdef DEBUG_TLS
+	  printf("[LRU] Adding Signal cached keys\n");
+#endif
+	  
+	  ndpi_lru_add_to_cache(ndpi_struct->stun_cache, get_stun_lru_key(flow, 0), NDPI_PROTOCOL_SIGNAL);
+	  ndpi_lru_add_to_cache(ndpi_struct->stun_cache, get_stun_lru_key(flow, 1), NDPI_PROTOCOL_SIGNAL);
+	}
+		
+	/* In Signal protocol STUN turns into DTLS... */
+	ndpi_int_tls_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_SIGNAL);
+      } else if(flow->protos.stun_ssl.ssl.ja3_server[0] != '\0') {
+	/* Wait the server certificate the bless this flow as TLS */
+	ndpi_int_tls_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_TLS);
+      }
+    }
+
+    return;
+  }
+
+  if(packet->detected_protocol_stack[0] == NDPI_PROTOCOL_TLS) {
+    if(flow->l4.tcp.tls_stage == 3 && packet->payload_packet_len > 20 && flow->packet_counter < 5) {
+      /* this should only happen, when we detected SSL with a packet that had parts of the certificate in subsequent packets
+       * so go on checking for certificate patterns for a couple more packets
+       */
+      NDPI_LOG_DBG2(ndpi_struct,
+		    "ssl flow but check another packet for patterns\n");
+      tls_mark_and_payload_search(ndpi_struct, flow, skip_cert_processing);
+
+      if(packet->detected_protocol_stack[0] == NDPI_PROTOCOL_TLS) {
+	/* still ssl so check another packet */
+	return;
+      } else {
+	/* protocol has changed so we are done */
+	return;
+      }
+    }
+
+    return;
+  }
+
+  NDPI_LOG_DBG(ndpi_struct, "search ssl\n");
+
+  /* Check if this is whatsapp first (this proto runs over port 443) */
+  if((packet->payload_packet_len > 5)
+     && ((packet->payload[0] == 'W')
+	 && (packet->payload[1] == 'A')
+	 && (packet->payload[4] == 0)
+	 && (packet->payload[2] <= 9)
+	 && (packet->payload[3] <= 9))) {
+    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_WHATSAPP, NDPI_PROTOCOL_UNKNOWN);
+    return;
+  } else if((packet->payload_packet_len == 4)
+	    && (packet->payload[0] == 'W')
+	    && (packet->payload[1] == 'A')) {
+    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_WHATSAPP, NDPI_PROTOCOL_UNKNOWN);
+    return;
+  } else {
+    /* No whatsapp, let's try SSL */
+    if(tlsDetectProtocolFromCertificate(ndpi_struct, flow, skip_cert_processing) > 0)
+      return;
+    else
+      skip_cert_processing = 1;
+  }
+
+  if(packet->payload_packet_len > 40 && flow->l4.tcp.tls_stage == 0) {
+    NDPI_LOG_DBG2(ndpi_struct, "first ssl packet\n");
+    // SSLv2 Record
+    if(packet->payload[2] == 0x01 && packet->payload[3] == 0x03
+       && (packet->payload[4] == 0x00 || packet->payload[4] == 0x01 || packet->payload[4] == 0x02)
+       && (packet->payload_packet_len - packet->payload[1] == 2)) {
+      NDPI_LOG_DBG2(ndpi_struct, "sslv2 len match\n");
+      flow->l4.tcp.tls_stage = 1 + packet->packet_direction;
+      return;
+    }
+
+    if(packet->payload[0] == 0x16 && packet->payload[1] == 0x03
+       && (packet->payload[2] == 0x00 || packet->payload[2] == 0x01 || packet->payload[2] == 0x02)
+       && (packet->payload_packet_len - ntohs(get_u_int16_t(packet->payload, 3)) == 5)) {
+      // SSLv3 Record
+      NDPI_LOG_DBG2(ndpi_struct, "sslv3 len match\n");
+      flow->l4.tcp.tls_stage = 1 + packet->packet_direction;
+      return;
+    }
+
+    // Application Data pkt
+    if(packet->payload[0] == 0x17 && packet->payload[1] == 0x03
+       && (packet->payload[2] == 0x00 || packet->payload[2] == 0x01 ||
+           packet->payload[2] == 0x02 || packet->payload[2] == 0x03)) {
+      if(packet->payload_packet_len - ntohs(get_u_int16_t(packet->payload, 3)) == 5) {
+	NDPI_LOG_DBG2(ndpi_struct, "TLS len match\n");
+	flow->l4.tcp.tls_stage = 1 + packet->packet_direction;
+	return;
+      }
+    }
+  }
+
+  if(packet->payload_packet_len > 40 &&
+     flow->l4.tcp.tls_stage == 1 + packet->packet_direction
+     && flow->packet_direction_counter[packet->packet_direction] < 5) {
+    return;
+  }
+
+  if(packet->payload_packet_len > 40 && flow->l4.tcp.tls_stage == 2 - packet->packet_direction) {
+    NDPI_LOG_DBG2(ndpi_struct, "second ssl packet\n");
+    // SSLv2 Record
+    if(packet->payload[2] == 0x01 && packet->payload[3] == 0x03
+       && (packet->payload[4] == 0x00 || packet->payload[4] == 0x01 || packet->payload[4] == 0x02)
+       && (packet->payload_packet_len - 2) >= packet->payload[1]) {
+      NDPI_LOG_DBG2(ndpi_struct, "sslv2 server len match\n");
+      tls_mark_and_payload_search(ndpi_struct, flow, skip_cert_processing);
+      return;
+    }
+
+    ret = ndpi_search_tlsv3_direction1(ndpi_struct, flow);
+    if(ret == 1) {
+      NDPI_LOG_DBG2(ndpi_struct, "sslv3 server len match\n");
+      tls_mark_and_payload_search(ndpi_struct, flow, skip_cert_processing);
+      return;
+    } else if(ret == 2) {
+      NDPI_LOG_DBG2(ndpi_struct,
+		    "sslv3 server len match with split packet -> check some more packets for SSL patterns\n");
+      tls_mark_and_payload_search(ndpi_struct, flow, skip_cert_processing);
+      
+      if(packet->detected_protocol_stack[0] == NDPI_PROTOCOL_TLS)
+	flow->l4.tcp.tls_stage = 3;      
+      return;
+    }
+
+    if(packet->payload_packet_len > 40 && flow->packet_direction_counter[packet->packet_direction] < 5) {
+      NDPI_LOG_DBG2(ndpi_struct, "need next packet\n");
+      return;
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+
+  return;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+int tlsDetectProtocolFromCertificate(struct ndpi_detection_module_struct *ndpi_struct,
+				     struct ndpi_flow_struct *flow,
+				     u_int8_t skip_cert_processing) {
+  struct ndpi_packet_struct *packet = &flow->packet;
+
+  if((!skip_cert_processing) && packet->tcp) {
+    if(!flow->l4.tcp.tls_srv_cert_fingerprint_processed)
+      getSSCertificateFingerprint(ndpi_struct, flow);
+  }  
+
+  if((packet->payload_packet_len > 9)
+     && (packet->payload[0] == 0x16 /* consider only specific SSL packets (handshake) */)) {
+    if((packet->detected_protocol_stack[0] == NDPI_PROTOCOL_UNKNOWN)
+       || (packet->detected_protocol_stack[0] == NDPI_PROTOCOL_TLS)) {
+      char certificate[64];
+      int rc;
+
+      certificate[0] = '\0';
+      rc = getTLScertificate(ndpi_struct, flow, certificate, sizeof(certificate));
+      packet->tls_certificate_num_checks++;
+
+      if(rc > 0) {
+	packet->tls_certificate_detected++;
+#ifdef DEBUG_TLS
+	NDPI_LOG_DBG2(ndpi_struct, "***** [SSL] %s\n", certificate);
+#endif
+	ndpi_protocol_match_result ret_match;
+	u_int16_t subproto;
+
+	if(certificate[0] == '\0')
+	  subproto = NDPI_PROTOCOL_UNKNOWN;
+	else
+	  subproto = ndpi_match_host_subprotocol(ndpi_struct, flow, certificate,
+						 strlen(certificate),
+						 &ret_match,
+						 NDPI_PROTOCOL_TLS);
+	
+	if(subproto != NDPI_PROTOCOL_UNKNOWN) {
+	  /* If we've detected the subprotocol from client certificate but haven't had a chance
+	   * to see the server certificate yet, set up extra packet processing to wait
+	   * a few more packets. */
+	  if(((flow->l4.tcp.tls_seen_client_cert == 1) && (flow->protos.stun_ssl.ssl.client_certificate[0] != '\0'))
+	     && ((flow->l4.tcp.tls_seen_server_cert != 1) && (flow->protos.stun_ssl.ssl.server_certificate[0] == '\0'))) {
+	    sslInitExtraPacketProcessing(flow);
+	  }
+
+	  ndpi_set_detected_protocol(ndpi_struct, flow, subproto,
+				     ndpi_tls_refine_master_protocol(ndpi_struct, flow, NDPI_PROTOCOL_TLS));
+	  return(rc);
+	}
+
+	if(ndpi_is_tls_tor(ndpi_struct, flow, certificate) != 0)
+	  return(rc);
+      }
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [tls_certificate_num_checks: %u][tls_srv_cert_fingerprint_processed: %u][tls_certificate_detected: %u][%u/%u]",
+	     __FUNCTION__, packet->tls_certificate_num_checks, flow->l4.tcp.tls_srv_cert_fingerprint_processed,
+	     packet->tls_certificate_detected,
+	     flow->l4.tcp.tls_seen_client_cert,
+	     flow->l4.tcp.tls_seen_server_cert 
+	     );
+#endif
+
+
+      if(((packet->tls_certificate_num_checks >= 1)
+#if 0
+	  && (flow->l4.tcp.seen_syn /* User || to be tolerant */
+	      || flow->l4.tcp.seen_syn_ack
+	      || flow->l4.tcp.seen_ack /* We have seen the 3-way handshake */)
+#endif
+	  && (flow->l4.tcp.tls_srv_cert_fingerprint_processed
+	      || flow->l4.tcp.tls_seen_client_cert
+	      || flow->l4.tcp.tls_seen_server_cert 
+	      || packet->tls_certificate_detected)
+	  )
+	 /*
+	 || ((flow->l4.tcp.tls_seen_certificate == 1)
+	     && (flow->l4.tcp.tls_seen_server_cert == 1)
+	     && (flow->protos.stun_ssl.ssl.server_certificate[0] != '\0'))
+	 */
+	 /* || ((flow->l4.tcp.tls_seen_client_cert == 1) && (flow->protos.stun_ssl.ssl.client_certificate[0] != '\0')) */
+	 ) {
+	ndpi_int_tls_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_TLS);
+      }
+    }
+  }
+  
+  return(0);
+}
+

@@ -1,4 +1,4 @@
 mrb_int base = 10;
 
-  mrb_get_args(state, "|i", &base);
-  return mrb_integer_to_str(state, self, base);
+  mrb_get_args(mrb, "|i", &base);
+  return mrb_integer_to_str(mrb, obj, base);

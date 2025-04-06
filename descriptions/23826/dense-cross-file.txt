@@ -1,0 +1,329 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+int blosc2_decompress_ctx(blosc2_context* context, const void* src, int32_t srcsize,
+                          void* dest, int32_t destsize) {
+  int result;
+
+  if (context->do_compress != 0) {
+    fprintf(stderr, "Context is not meant for decompression.  Giving up.\n");
+    return -10;
+  }
+
+  result = blosc_run_decompression_with_context(context, src, srcsize, dest, destsize);
+
+  // Reset a possible block_maskout
+  if (context->block_maskout != NULL) {
+    free(context->block_maskout);
+    context->block_maskout = NULL;
+  }
+  context->block_maskout_nitems = 0;
+
+  return result;
+}
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+static int initialize_context_compression(
+  blosc2_context* context, const void* src, int32_t srcsize, void* dest,
+  int32_t destsize, int clevel, uint8_t const *filters,
+  uint8_t const *filters_meta, int32_t typesize, int compressor,
+  int32_t blocksize, int new_nthreads, int nthreads, blosc2_schunk* schunk) {
+
+  /* Set parameters */
+  context->do_compress = 1;
+  context->src = (const uint8_t*)src;
+  context->srcsize = srcsize;
+  context->dest = (uint8_t*)dest;
+  context->output_bytes = 0;
+  context->destsize = destsize;
+  context->sourcesize = srcsize;
+  context->typesize = (int32_t)typesize;
+  context->filter_flags = filters_to_flags(filters);
+  for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+    context->filters[i] = filters[i];
+    context->filters_meta[i] = filters_meta[i];
+  }
+  context->compcode = compressor;
+  context->nthreads = nthreads;
+  context->new_nthreads = new_nthreads;
+  context->end_threads = 0;
+  context->clevel = clevel;
+  context->schunk = schunk;
+
+  /* Tune some compression parameters */
+  context->blocksize = (int32_t)blocksize;
+  if (context->btune != NULL) {
+    btune_next_cparams(context);
+  } else {
+    btune_next_blocksize(context);
+  }
+
+  char* envvar = getenv("BLOSC_WARN");
+  int warnlvl = 0;
+  if (envvar != NULL) {
+    warnlvl = strtol(envvar, NULL, 10);
+  }
+
+  /* Check buffer size limits */
+  if (srcsize > BLOSC_MAX_BUFFERSIZE) {
+    if (warnlvl > 0) {
+      fprintf(stderr, "Input buffer size cannot exceed %d bytes\n",
+              BLOSC_MAX_BUFFERSIZE);
+    }
+    return 0;
+  }
+
+  if (destsize < BLOSC_MAX_OVERHEAD) {
+    if (warnlvl > 0) {
+      fprintf(stderr, "Output buffer size should be larger than %d bytes\n",
+              BLOSC_MAX_OVERHEAD);
+    }
+    return 0;
+  }
+
+  if (destsize < BLOSC_MAX_OVERHEAD) {
+    if (warnlvl > 0) {
+      fprintf(stderr, "Output buffer size should be larger than %d bytes\n",
+              BLOSC_MAX_OVERHEAD);
+    }
+    return -2;
+  }
+  if (destsize < BLOSC_MAX_OVERHEAD) {
+    fprintf(stderr, "Output buffer size should be larger than %d bytes\n",
+            BLOSC_MAX_OVERHEAD);
+    return -1;
+  }
+
+  /* Compression level */
+  if (clevel < 0 || clevel > 9) {
+    /* If clevel not in 0..9, print an error */
+    fprintf(stderr, "`clevel` parameter must be between 0 and 9!\n");
+    return -10;
+  }
+
+  /* Check typesize limits */
+  if (context->typesize > BLOSC_MAX_TYPESIZE) {
+    /* If typesize is too large, treat buffer as an 1-byte stream. */
+    context->typesize = 1;
+  }
+
+  /* Compute number of blocks in buffer */
+  context->nblocks = context->sourcesize / context->blocksize;
+  context->leftover = context->sourcesize % context->blocksize;
+  context->nblocks = (context->leftover > 0) ?
+                     (context->nblocks + 1) : context->nblocks;
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+int blosc_run_decompression_with_context(blosc2_context* context, const void* src, int32_t srcsize,
+                                         void* dest, int32_t destsize) {
+  int32_t ntbytes;
+  uint8_t* _src = (uint8_t*)src;
+  uint8_t version;
+  int error;
+
+  if (srcsize <= 0) {
+    /* Invalid argument */
+    return -1;
+  }
+  version = _src[0];                        /* blosc format version */
+  if (version > BLOSC_VERSION_FORMAT) {
+    /* Version from future */
+    return -1;
+  }
+
+  error = initialize_context_decompression(context, src, srcsize, dest, destsize);
+  if (error < 0) {
+    return error;
+  }
+
+  /* Check whether this buffer is memcpy'ed */
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+  if (memcpyed) {
+    // Check that sizes in header are compatible, otherwise there is a header corruption
+    ntbytes = context->sourcesize;
+    int32_t cbytes = sw32_(_src + 12);   /* compressed buffer size */
+    if (ntbytes + BLOSC_MAX_OVERHEAD != cbytes) {
+      return -1;
+    }
+    // Check that we have enough space in destination for the copy operation
+    if (destsize < (size_t)ntbytes) {
+      return -1;
+    }
+    memcpy(dest, _src + BLOSC_MAX_OVERHEAD, (unsigned int)ntbytes);
+  }
+  else {
+    /* Do the actual decompression */
+    ntbytes = do_job(context);
+    if (ntbytes < 0) {
+      return -1;
+    }
+  }
+
+  assert(ntbytes <= (int32_t)destsize);
+  return ntbytes;
+}
+
+// the below code fragment can be found in:
+// blosc/blosc2.c
+static int serial_blosc(struct thread_context* thread_context) {
+  blosc2_context* context = thread_context->parent_context;
+  int32_t j, bsize, leftoverblock;
+  int32_t cbytes;
+  int32_t ntbytes = (int32_t)context->output_bytes;
+  int32_t* bstarts = context->bstarts;
+  uint8_t* tmp = thread_context->tmp;
+  uint8_t* tmp2 = thread_context->tmp2;
+  int dict_training = context->use_dict && (context->dict_cdict == NULL);
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+
+  for (j = 0; j < context->nblocks; j++) {
+    if (context->do_compress && !memcpyed && !dict_training) {
+      _sw32(bstarts + j, ntbytes);
+    }
+    bsize = context->blocksize;
+    leftoverblock = 0;
+    if ((j == context->nblocks - 1) && (context->leftover > 0)) {
+      bsize = context->leftover;
+      leftoverblock = 1;
+    }
+    if (context->do_compress) {
+      if (memcpyed && !context->prefilter) {
+        /* We want to memcpy only */
+        memcpy(context->dest + BLOSC_MAX_OVERHEAD + j * context->blocksize,
+                 context->src + j * context->blocksize,
+                 (unsigned int)bsize);
+        cbytes = (int32_t)bsize;
+      }
+      else {
+        /* Regular compression */
+        cbytes = blosc_c(thread_context, bsize, leftoverblock, ntbytes,
+                         context->destsize, context->src, j * context->blocksize,
+                         context->dest + ntbytes, tmp, tmp2);
+        if (cbytes == 0) {
+          ntbytes = 0;              /* uncompressible data */
+          break;
+        }
+      }
+    }
+    else {
+      if (memcpyed) {
+        // Check that sizes in header are compatible, otherwise there is a header corruption
+        int32_t csize = sw32_(context->src + 12);   /* compressed buffer size */
+        if (context->sourcesize + BLOSC_MAX_OVERHEAD != csize) {
+          return -1;
+        }
+        if (context->srcsize < BLOSC_MAX_OVERHEAD + (j * context->blocksize) + bsize) {
+          /* Not enough input to copy block */
+          return -1;
+        }
+        memcpy(context->dest + j * context->blocksize,
+               context->src + BLOSC_MAX_OVERHEAD + j * context->blocksize,
+               (unsigned int)bsize);
+        cbytes = (int32_t)bsize;
+      }
+      else {
+        /* Regular decompression */
+        cbytes = blosc_d(thread_context, bsize, leftoverblock,
+                         context->src + sw32_(bstarts + j), context->srcsize,
+                         context->dest, j * context->blocksize, tmp, tmp2);
+      }
+    }
+
+    if (cbytes < 0) {
+      ntbytes = cbytes;         /* error in blosc_c or blosc_d */
+      break;
+    }
+    ntbytes += cbytes;
+  }
+
+  return ntbytes;
+}
+
+// the below code fragment can be found in:
+// tests/test_contexts.c
+int main(void) {
+  static int32_t data[SIZE];
+  static int32_t data_out[SIZE];
+  static int32_t data_dest[SIZE];
+  int32_t data_subset[5];
+  int32_t data_subset_ref[5] = {5, 6, 7, 8, 9};
+  size_t isize = SIZE * sizeof(int32_t), osize = SIZE * sizeof(int32_t);
+  int dsize = SIZE * sizeof(int32_t), csize;
+  int i, ret;
+  blosc2_cparams cparams = BLOSC2_CPARAMS_DEFAULTS;
+  blosc2_dparams dparams = BLOSC2_DPARAMS_DEFAULTS;
+  blosc2_context *cctx, *dctx;
+
+  /* Initialize dataset */
+  for (i = 0; i < SIZE; i++) {
+    data[i] = i;
+  }
+
+  printf("Blosc version info: %s (%s)\n",
+         BLOSC_VERSION_STRING, BLOSC_VERSION_DATE);
+
+  install_blosc_callback_test(); /* optionally install callback test */
+
+  /* Create a context for compression */
+  cparams.typesize = sizeof(int32_t);
+  cparams.compcode = BLOSC_BLOSCLZ;
+  cparams.filters[BLOSC2_MAX_FILTERS - 1] = BLOSC_SHUFFLE;
+  cparams.clevel = 5;
+  cparams.nthreads = NTHREADS;
+  cctx = blosc2_create_cctx(cparams);
+
+  /* Compress with clevel=5 and shuffle active  */
+  csize = blosc2_compress_ctx(cctx, data, isize, data_out, osize);
+  if (csize == 0) {
+    printf("Buffer is uncompressible.  Giving up.\n");
+    return EXIT_FAILURE;
+  }
+  if (csize < 0) {
+    printf("Compression error.  Error code: %d\n", csize);
+    return EXIT_FAILURE;
+  }
+
+  /* Create a context for decompression */
+  dparams.nthreads = NTHREADS;
+  dctx = blosc2_create_dctx(dparams);
+
+  ret = blosc2_getitem_ctx(dctx, data_out, csize, 5, 5, data_subset);
+  if (ret < 0) {
+    printf("Error in blosc2_getitem_ctx().  Giving up.\n");
+    return EXIT_FAILURE;
+  }
+
+  for (i = 0; i < 5; i++) {
+    if (data_subset[i] != data_subset_ref[i]) {
+      printf("blosc2_getitem_ctx() fetched data differs from original!\n");
+      return EXIT_FAILURE;
+    }
+  }
+
+  /* Decompress  */
+  dsize = blosc2_decompress_ctx(dctx, data_out, csize, data_dest, (size_t)dsize);
+  if (dsize < 0) {
+    printf("Decompression error.  Error code: %d\n", dsize);
+    return EXIT_FAILURE;
+  }
+
+  for (i = 0; i < SIZE; i++) {
+    if (data[i] != data_dest[i]) {
+      printf("Decompressed data differs from original!\n");
+      return EXIT_FAILURE;
+    }
+  }
+
+  /* Free resources */
+  blosc2_free_ctx(cctx);
+  blosc2_free_ctx(dctx);
+
+  return EXIT_SUCCESS;
+}
+

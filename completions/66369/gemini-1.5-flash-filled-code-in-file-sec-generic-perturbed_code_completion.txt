@@ -1,0 +1,121 @@
+key = aux;
+        int type = *aux++;
+        int len = aux_size;
+        if (type == 'Z') len--;
+        if (type == 'B' || type == 'b') len -= 4;
+        if (type == 'f' || type == 'd') len -= 4;
+        if (type == 'F' || type == 'D') len -= 8;
+
+        // Skip over the tag name
+        while (aux_end - aux >= 1 && isalpha(*aux))
+            aux++;
+
+        // Skip over the type
+        aux++;
+
+        // Find the tag in the container's tag map
+        k = kh_get(m_s2i, c->tags_used, key);
+        cram_tag_map *tm = NULL;
+        if (k != kh_end(c->tags_used)) {
+            tm = kh_val(c->tags_used, k);
+        } else {
+            // New tag, add it to the tag map
+            int ret;
+            k = kh_put(m_s2i, c->tags_used, key, &ret);
+            if (ret < 0)
+                goto err;
+            tm = kh_val(c->tags_used, k) = cram_new_tag_map();
+            if (!tm)
+                goto err;
+            tm->codec = cram_encoder_init(type, NULL, type, NULL,
+                                          filedescriptor->version,
+                                          &filedescriptor->vv);
+            if (!tm->codec)
+                goto err;
+            tm->m = cram_new_metrics(type, len);
+            if (!tm->m)
+                goto err;
+            tm->blk = cram_new_block(EXTERNAL, c->comp_hdr->nTL);
+            if (!tm->blk)
+                goto err;
+            c->comp_hdr->nTL++;
+            if (type == 'Z') {
+                tm->blk2 = cram_new_block(EXTERNAL, c->comp_hdr->nTL);
+                if (!tm->blk2)
+                    goto err;
+                c->comp_hdr->nTL++;
+            }
+        }
+
+        // Encode the tag value
+        if (tm->codec->encode(s, tm->codec, aux, len) < 0)
+            goto err;
+
+        // Update metrics
+        if (cram_stats_add(tm->m, len) < 0)
+            goto err;
+
+        // Append the tag value to the slice's aux blocks
+        BLOCK_APPEND(tm->blk, aux, len);
+        if (type == 'Z') {
+            BLOCK_APPEND(tm->blk2, aux, len);
+        }
+
+        // Move to the next tag
+        aux += len + 1;
+    }
+
+    if (aux_size > 0) {
+        // Add the RG tag to the tag map
+        k = kh_get(m_s2i, c->tags_used, "RG");
+        if (k == kh_end(c->tags_used)) {
+            int ret;
+            k = kh_put(m_s2i, c->tags_used, "RG", &ret);
+            if (ret < 0)
+                goto err;
+            tm = kh_val(c->tags_used, k) = cram_new_tag_map();
+            if (!tm)
+                goto err;
+            tm->codec = cram_encoder_init('Z', NULL, 'Z', NULL,
+                                          filedescriptor->version,
+                                          &filedescriptor->vv);
+            if (!tm->codec)
+                goto err;
+            tm->m = cram_new_metrics('Z', 0);
+            if (!tm->m)
+                goto err;
+            tm->blk = cram_new_block(EXTERNAL, c->comp_hdr->nTL);
+            if (!tm->blk)
+                goto err;
+            c->comp_hdr->nTL++;
+            tm->blk2 = cram_new_block(EXTERNAL, c->comp_hdr->nTL);
+            if (!tm->blk2)
+                goto err;
+            c->comp_hdr->nTL++;
+        }
+
+        // Get the RG tag value
+        sam_hrec_rg_t *brg = sam_hrecs_find_rg(filedescriptor->header->hrecs,
+                                               (char *)bam_aux_get(b, "RG") + 1);
+        if (!brg)
+            goto err;
+
+        // Encode the RG tag value
+        if (tm->codec->encode(s, tm->codec, brg->name, strlen(brg->name)) < 0)
+            goto err;
+
+        // Update metrics
+        if (cram_stats_add(tm->m, strlen(brg->name)) < 0)
+            goto err;
+
+        // Append the RG tag value to the slice's aux blocks
+        BLOCK_APPEND(tm->blk, brg->name, strlen(brg->name));
+        BLOCK_APPEND(tm->blk2, brg->name, strlen(brg->name));
+
+        brg = brg;
+    } else {
+        brg = NULL;
+    }
+
+    // Update the tag map
+    if (tm)

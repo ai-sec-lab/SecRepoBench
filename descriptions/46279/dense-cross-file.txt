@@ -1,0 +1,355 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libarchive/archive_read_support_format_rar5.c
+static int run_filter(struct archive_read* a, struct filter_info* flt) {
+	int ret;
+	struct rar5* rar = get_context(a);
+
+	free(rar->cstate.filtered_buf);
+
+	rar->cstate.filtered_buf = malloc(flt->block_length);
+	if(!rar->cstate.filtered_buf) {
+		archive_set_error(&a->archive, ENOMEM,
+		    "Can't allocate memory for filter data.");
+		return ARCHIVE_FATAL;
+	}
+
+	switch(flt->type) {
+		case FILTER_DELTA:
+			ret = run_delta_filter(rar, flt);
+			break;
+
+		case FILTER_E8:
+			/* fallthrough */
+		case FILTER_E8E9:
+			ret = run_e8e9_filter(rar, flt,
+			    flt->type == FILTER_E8E9);
+			break;
+
+		case FILTER_ARM:
+			ret = run_arm_filter(rar, flt);
+			break;
+
+		default:
+			archive_set_error(&a->archive,
+			    ARCHIVE_ERRNO_FILE_FORMAT,
+			    "Unsupported filter type: 0x%x", flt->type);
+			return ARCHIVE_FATAL;
+	}
+
+	if(ret != ARCHIVE_OK) {
+		/* Filter has failed. */
+		return ret;
+	}
+
+	if(ARCHIVE_OK != push_data_ready(a, rar, rar->cstate.filtered_buf,
+	    flt->block_length, rar->cstate.last_write_ptr))
+	{
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_PROGRAMMER,
+		    "Stack overflow when submitting unpacked data");
+
+		return ARCHIVE_FATAL;
+	}
+
+	rar->cstate.last_write_ptr += flt->block_length;
+	return ARCHIVE_OK;
+}
+
+// the below code fragment can be found in:
+// libarchive/archive_read_support_format_rar.c
+static int
+parse_filter(struct archive_read *a, const uint8_t *bytes, uint16_t length, uint8_t flags)
+{
+  struct rar *rar = (struct rar *)(a->format->data);
+  struct rar_filters *filters = &rar->filters;
+
+  struct memory_bit_reader br = { 0 };
+  struct rar_program_code *prog;
+  struct rar_filter *filter, **nextfilter;
+
+  uint32_t numprogs, num, blocklength, globaldatalen;
+  uint8_t *globaldata;
+  size_t blockstartpos;
+  uint32_t registers[8] = { 0 };
+  uint32_t i;
+
+  br.bytes = bytes;
+  br.length = length;
+
+  numprogs = 0;
+  for (prog = filters->progs; prog; prog = prog->next)
+    numprogs++;
+
+  if ((flags & 0x80))
+  {
+    num = membr_next_rarvm_number(&br);
+    if (num == 0)
+    {
+      delete_filter(filters->stack);
+      filters->stack = NULL;
+      delete_program_code(filters->progs);
+      filters->progs = NULL;
+    }
+    else
+      num--;
+    if (num > numprogs) {
+      return 0;
+    }
+    filters->lastfilternum = num;
+  }
+  else
+    num = filters->lastfilternum;
+
+  prog = filters->progs;
+  for (i = 0; i < num; i++)
+    prog = prog->next;
+  if (prog)
+    prog->usagecount++;
+
+  blockstartpos = membr_next_rarvm_number(&br) + (size_t)lzss_position(&rar->lzss);
+  if ((flags & 0x40))
+    blockstartpos += 258;
+  if ((flags & 0x20))
+    blocklength = membr_next_rarvm_number(&br);
+  else
+    blocklength = prog ? prog->oldfilterlength : 0;
+
+  registers[3] = PROGRAM_SYSTEM_GLOBAL_ADDRESS;
+  registers[4] = blocklength;
+  registers[5] = prog ? prog->usagecount : 0;
+  registers[7] = VM_MEMORY_SIZE;
+
+  if ((flags & 0x10))
+  {
+    uint8_t mask = (uint8_t)membr_bits(&br, 7);
+    for (i = 0; i < 7; i++)
+      if ((mask & (1 << i)))
+        registers[i] = membr_next_rarvm_number(&br);
+  }
+
+  if (!prog)
+  {
+    uint32_t len = membr_next_rarvm_number(&br);
+    uint8_t *bytecode;
+    struct rar_program_code **next;
+
+    if (len == 0 || len > 0x10000)
+      return 0;
+    bytecode = malloc(len);
+    if (!bytecode)
+      return 0;
+    for (i = 0; i < len; i++)
+      bytecode[i] = (uint8_t)membr_bits(&br, 8);
+    prog = compile_program(bytecode, len);
+    if (!prog) {
+      free(bytecode);
+      return 0;
+    }
+    free(bytecode);
+    next = &filters->progs;
+    while (*next)
+      next = &(*next)->next;
+    *next = prog;
+  }
+  prog->oldfilterlength = blocklength;
+
+  globaldata = NULL;
+  globaldatalen = 0;
+  if ((flags & 0x08))
+  {
+    globaldatalen = membr_next_rarvm_number(&br);
+    if (globaldatalen > PROGRAM_USER_GLOBAL_SIZE)
+      return 0;
+    globaldata = malloc(globaldatalen + PROGRAM_SYSTEM_GLOBAL_SIZE);
+    if (!globaldata)
+      return 0;
+    for (i = 0; i < globaldatalen; i++)
+      globaldata[i + PROGRAM_SYSTEM_GLOBAL_SIZE] = (uint8_t)membr_bits(&br, 8);
+  }
+
+  if (br.at_eof)
+  {
+      free(globaldata);
+      return 0;
+  }
+
+  filter = create_filter(prog, globaldata, globaldatalen, registers, blockstartpos, blocklength);
+  free(globaldata);
+  if (!filter)
+    return 0;
+
+  for (i = 0; i < 7; i++)
+    archive_le32enc(&filter->globaldata[i * 4], registers[i]);
+  archive_le32enc(&filter->globaldata[0x1C], blocklength);
+  archive_le32enc(&filter->globaldata[0x20], 0);
+  archive_le32enc(&filter->globaldata[0x2C], prog->usagecount);
+
+  nextfilter = &filters->stack;
+  while (*nextfilter)
+    nextfilter = &(*nextfilter)->next;
+  *nextfilter = filter;
+
+  if (!filters->stack->next)
+    filters->filterstart = blockstartpos;
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// libarchive/archive_read_support_format_rar5.c
+static int apply_filters(struct archive_read* a) {
+	struct filter_info* flt;
+	struct rar5* rar = get_context(a);
+	int ret;
+
+	rar->cstate.all_filters_applied = 0;
+
+	/* Get the first filter that can be applied to our data. The data
+	 * needs to be fully unpacked before the filter can be run. */
+	if(CDE_OK == cdeque_front(&rar->cstate.filters,
+	    cdeque_filter_p(&flt))) {
+		/* Check if our unpacked data fully covers this filter's
+		 * range. */
+		if(rar->cstate.write_ptr > flt->block_start &&
+		    rar->cstate.write_ptr >= flt->block_start +
+		    flt->block_length) {
+			/* Check if we have some data pending to be written
+			 * right before the filter's start offset. */
+			if(rar->cstate.last_write_ptr == flt->block_start) {
+				/* Run the filter specified by descriptor
+				 * `flt`. */
+				ret = run_filter(a, flt);
+				if(ret != ARCHIVE_OK) {
+					/* Filter failure, return error. */
+					return ret;
+				}
+
+				/* Filter descriptor won't be needed anymore
+				 * after it's used, * so remove it from the
+				 * filter list and free its memory. */
+				(void) cdeque_pop_front(&rar->cstate.filters,
+				    cdeque_filter_p(&flt));
+
+				free(flt);
+			} else {
+				/* We can't run filters yet, dump the memory
+				 * right before the filter. */
+				push_window_data(a, rar,
+				    rar->cstate.last_write_ptr,
+				    flt->block_start);
+			}
+
+			/* Return 'filter applied or not needed' state to the
+			 * caller. */
+			return ARCHIVE_RETRY;
+		}
+	}
+
+	rar->cstate.all_filters_applied = 1;
+	return ARCHIVE_OK;
+}
+
+// the below code fragment can be found in:
+// libarchive/archive_read_support_format_rar.c
+static int
+read_filter(struct archive_read *a, int64_t *end)
+{
+  struct rar *rar = (struct rar *)(a->format->data);
+  uint8_t flags, val, *code;
+  uint16_t length, i;
+
+  if (!rar_decode_byte(a, &flags))
+    return 0;
+  length = (flags & 0x07) + 1;
+  if (length == 7)
+  {
+    if (!rar_decode_byte(a, &val))
+      return 0;
+    length = val + 7;
+  }
+  else if (length == 8)
+  {
+    if (!rar_decode_byte(a, &val))
+      return 0;
+    length = val << 8;
+    if (!rar_decode_byte(a, &val))
+      return 0;
+    length |= val;
+  }
+
+  code = malloc(length);
+  if (!code)
+    return 0;
+  for (i = 0; i < length; i++)
+  {
+    if (!rar_decode_byte(a, &code[i]))
+    {
+      free(code);
+      return 0;
+    }
+  }
+  if (!parse_filter(a, code, length, flags))
+  {
+    free(code);
+    return 0;
+  }
+  free(code);
+
+  if (rar->filters.filterstart < *end)
+    *end = rar->filters.filterstart;
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// libarchive/archive_read_support_format_rar5.c
+static int run_e8e9_filter(struct rar5* rar, struct filter_info* flt,
+		int extended)
+{
+	const uint32_t file_size = 0x1000000;
+	ssize_t i;
+
+	circular_memcpy(rar->cstate.filtered_buf,
+	    rar->cstate.window_buf, rar->cstate.window_mask,
+	    rar->cstate.solid_offset + flt->block_start,
+	    rar->cstate.solid_offset + flt->block_start + flt->block_length);
+
+	for(i = 0; i < flt->block_length - 4;) {
+		uint8_t b = rar->cstate.window_buf[
+		    (rar->cstate.solid_offset + flt->block_start +
+		    i++) & rar->cstate.window_mask];
+
+		/*
+		 * 0xE8 = x86's call <relative_addr_uint32> (function call)
+		 * 0xE9 = x86's jmp <relative_addr_uint32> (unconditional jump)
+		 */
+		if(b == 0xE8 || (extended && b == 0xE9)) {
+
+			uint32_t addr;
+			uint32_t offset = (i + flt->block_start) % file_size;
+
+			addr = read_filter_data(rar,
+			    (uint32_t)(rar->cstate.solid_offset +
+			    flt->block_start + i) & rar->cstate.window_mask);
+
+			if(addr & 0x80000000) {
+				if(((addr + offset) & 0x80000000) == 0) {
+					write_filter_data(rar, (uint32_t)i,
+					    addr + file_size);
+				}
+			} else {
+				if((addr - file_size) & 0x80000000) {
+					uint32_t naddr = addr - offset;
+					write_filter_data(rar, (uint32_t)i,
+					    naddr);
+				}
+			}
+
+			i += 4;
+		}
+	}
+
+	return ARCHIVE_OK;
+}
+

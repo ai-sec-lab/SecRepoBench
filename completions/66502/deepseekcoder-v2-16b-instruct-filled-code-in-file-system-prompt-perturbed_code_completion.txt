@@ -1,0 +1,396 @@
+AttributeTableEntry);
+}
+
+#ifdef LIBXML_TREE_ENABLED
+/**
+ * xmlCopyAttribute:
+ * @attr:  An attribute
+ *
+ * Build a copy of an attribute.
+ *
+ * Returns the new xmlAttributePtr or NULL in case of error.
+ */
+static void *
+xmlCopyAttribute(void *payload, const xmlChar *name ATTRIBUTE_UNUSED) {
+    xmlAttributePtr attr = (xmlAttributePtr) payload;
+    xmlAttributePtr cur;
+
+    cur = (xmlAttributePtr) xmlMalloc(sizeof(xmlAttribute));
+    if (cur == NULL)
+	return(NULL);
+    memset(cur, 0, sizeof(xmlAttribute));
+    cur->type = XML_ATTRIBUTE_DECL;
+    cur->atype = attr->atype;
+    cur->def = attr->def;
+    cur->doc = attr->doc;
+    cur->name = xmlStrdup(attr->name);
+    if (cur->name == NULL)
+        goto error;
+    cur->elem = xmlStrdup(attr->elem);
+    if (cur->elem == NULL)
+        goto error;
+    if (attr->prefix != NULL) {
+	cur->prefix = xmlStrdup(attr->prefix);
+        if (cur->prefix == NULL)
+            goto error;
+    }
+    if (attr->tree != NULL)
+        cur->tree = xmlCopyEnumeration(attr->tree);
+    if (attr->defaultValue != NULL) {
+	cur->defaultValue = xmlStrdup(attr->defaultValue);
+        if (cur->defaultValue == NULL)
+            goto error;
+    }
+
+    return(cur);
+
+error:
+    xmlFreeAttribute(cur);
+    return(NULL);
+}
+
+/**
+ * xmlCopyAttributeTable:
+ * @table:  An attribute table
+ *
+ * Build a copy of an attribute table.
+ *
+ * Returns the new xmlAttributeTablePtr or NULL in case of error.
+ */
+xmlAttributeTablePtr
+xmlCopyAttributeTable(xmlAttributeTablePtr table) {
+    return(xmlHashCopySafe(table, xmlCopyAttribute, xmlFreeAttributeTableEntry));
+}
+#endif /* LIBXML_TREE_ENABLED */
+
+#ifdef LIBXML_OUTPUT_ENABLED
+/**
+ * xmlDumpAttributeDecl:
+ * @buf:  the XML buffer output
+ * @attr:  An attribute table
+ *
+ * This will dump the content of the attribute declaration as an XML
+ * DTD definition
+ */
+void
+xmlDumpAttributeDecl(xmlBufferPtr buf, xmlAttributePtr attr) {
+    xmlSaveCtxtPtr save;
+
+    if ((buf == NULL) || (attr == NULL))
+        return;
+
+    save = xmlSaveToBuffer(buf, NULL, 0);
+    xmlSaveTree(save, (xmlNodePtr) attr);
+    xmlSaveClose(save);
+}
+
+/**
+ * xmlDumpAttributeTable:
+ * @buf:  the XML buffer output
+ * @table:  An attribute table
+ *
+ * This will dump the content of the attribute table as an XML DTD definition
+ */
+void
+xmlDumpAttributeTable(xmlBufferPtr buf, xmlAttributeTablePtr table) {
+    if ((buf == NULL) || (table == NULL))
+        return;
+    xmlHashScan(table, xmlDumpAttributeDecl, buf);
+}
+#endif /* LIBXML_OUTPUT_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidateAttribute:
+ * @ctxt:  the validation context
+ * @elem:  the element name
+ * @attr:  the attribute name
+ * @value:  the attribute value
+ *
+ * Validate an attribute value against the DTD.
+ *
+ * Returns 1 if the value is valid, 0 otherwise.
+ */
+int
+xmlValidateAttribute(xmlValidCtxtPtr ctxt,
+                     xmlElementPtr elem, const xmlChar *attr,
+                     const xmlChar *value) {
+    xmlAttributePtr attrDef;
+    int ret = 0;
+
+    if ((ctxt == NULL) || (elem == NULL) || (attr == NULL) || (value == NULL))
+        return(0);
+
+    attrDef = xmlGetDtdElementDesc2(ctxt, elem->parent, elem->name);
+    if (attrDef == NULL)
+        return(0);
+
+    while (attrDef != NULL) {
+        if ((attrDef->name != NULL) && (xmlStrEqual(attrDef->name, attr))) {
+            if (attrDef->atype == XML_ATTRIBUTE_ENUMERATION) {
+                xmlEnumerationPtr cur = attrDef->tree;
+
+                while (cur != NULL) {
+                    if ((cur->name != NULL) && (xmlStrEqual(cur->name, value))) {
+                        ret = 1;
+                        break;
+                    }
+                    cur = cur->next;
+                }
+            } else if (attrDef->atype == XML_ATTRIBUTE_NOTATION) {
+                xmlDtdPtr dtd = (xmlDtdPtr) elem->parent;
+                xmlNotationPtr notation;
+
+                notation = xmlGetDtdNotationDesc(dtd, value);
+                if (notation != NULL)
+                    ret = 1;
+            } else {
+                ret = 1;
+            }
+            break;
+        }
+        attrDef = attrDef->nexth;
+    }
+
+    if (!ret) {
+        xmlErrValidNode(ctxt, (xmlNodePtr) elem, XML_ERR_ATTRIBUTE_NOT_FOUND,
+                        "Attribute %s of element %s not found\n",
+                        attr, elem->name);
+    }
+
+    return(ret);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_SCHEMAS_ENABLED
+/**
+ * xmlValidateAttributeAgainstSchema:
+ * @ctxt:  the validation context
+ * @elem:  the element name
+ * @attr:  the attribute name
+ * @value:  the attribute value
+ *
+ * Validate an attribute value against the schema.
+ *
+ * Returns 1 if the value is valid, 0 otherwise.
+ */
+int
+xmlValidateAttributeAgainstSchema(xmlValidCtxtPtr ctxt,
+                                  xmlElementPtr elem, const xmlChar *attr,
+                                  const xmlChar *value) {
+    xmlSchemaElementPtr schemaElem = NULL;
+    xmlSchemaAttributePtr schemaAttr = NULL;
+    int ret = 0;
+
+    if ((ctxt == NULL) || (elem == NULL) || (attr == NULL) || (value == NULL))
+        return(0);
+
+    schemaElem = xmlSchemaGetElementByName(ctxt->schema, elem->name);
+    if (schemaElem == NULL)
+        return(0);
+
+    schemaAttr = xmlSchemaGetAttributeByName(schemaElem, attr);
+    if (schemaAttr == NULL)
+        return(0);
+
+    if (schemaAttr->attrType == XML_SCHEMA_ATTRIBUTE_ENUMERATION) {
+        xmlSchemaValuePtr cur = schemaAttr->values;
+
+        while (cur != NULL) {
+            if ((cur->value != NULL) && (xmlStrEqual(cur->value, value))) {
+                ret = 1;
+                break;
+            }
+            cur = cur->next;
+        }
+    } else {
+        ret = 1;
+    }
+
+    if (!ret) {
+        xmlErrValidNode(ctxt, (xmlNodePtr) elem, XML_ERR_ATTRIBUTE_NOT_FOUND,
+                        "Attribute %s of element %s not found\n",
+                        attr, elem->name);
+    }
+
+    return(ret);
+}
+#endif /* LIBXML_SCHEMAS_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidateElement:
+ * @ctxt:  the validation context
+ * @elem:  the element name
+ *
+ * Validate an element against the DTD.
+ *
+ * Returns 1 if the element is valid, 0 otherwise.
+ */
+int
+xmlValidateElement(xmlValidCtxtPtr ctxt, xmlElementPtr elem) {
+    xmlDtdPtr dtd;
+    xmlElementPtr elemDef;
+    int ret = 0;
+
+    if ((ctxt == NULL) || (elem == NULL))
+        return(0);
+
+    dtd = (xmlDtdPtr) elem->parent;
+    if (dtd == NULL)
+        return(0);
+
+    elemDef = xmlGetDtdElementDesc2(ctxt, dtd, elem->name);
+    if (elemDef == NULL)
+        return(0);
+
+    if (elemDef->etype == XML_ELEMENT_TYPE_ANY) {
+        ret = 1;
+    } else if (elemDef->etype == XML_ELEMENT_TYPE_MIXED) {
+        xmlAttributePtr attr;
+
+        attr = elem->attributes;
+        while (attr != NULL) {
+            if (attr->atype == XML_ATTRIBUTE_CDATA) {
+                ret = 1;
+            } else {
+                ret = 0;
+                break;
+            }
+            attr = attr->nexth;
+        }
+    } else {
+        ret = 1;
+    }
+
+    if (!ret) {
+        xmlErrValidNode(ctxt, (xmlNodePtr) elem, XML_ERR_ELEMENT_NOT_FOUND,
+                        "Element %s not found\n", elem->name);
+    }
+
+    return(ret);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_SCHEMAS_ENABLED
+/**
+ * xmlValidateElementAgainstSchema:
+ * @ctxt:  the validation context
+ * @elem:  the element name
+ *
+ * Validate an element against the schema.
+ *
+ * Returns 1 if the element is valid, 0 otherwise.
+ */
+int
+xmlValidateElementAgainstSchema(xmlValidCtxtPtr ctxt, xmlElementPtr elem) {
+    xmlSchemaElementPtr schemaElem = NULL;
+    int ret = 0;
+
+    if ((ctxt == NULL) || (elem == NULL))
+        return(0);
+
+    schemaElem = xmlSchemaGetElementByName(ctxt->schema, elem->name);
+    if (schemaElem == NULL)
+        return(0);
+
+    if (schemaElem->contentModelType == XML_SCHEMA_CONTENT_SIMPLE) {
+        ret = 1;
+    } else {
+        ret = 0;
+    }
+
+    if (!ret) {
+        xmlErrValidNode(ctxt, (xmlNodePtr) elem, XML_ERR_ELEMENT_NOT_FOUND,
+                        "Element %s not found\n", elem->name);
+    }
+
+    return(ret);
+}
+#endif /* LIBXML_SCHEMAS_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ * xmlValidateOneElement:
+ * @ctxt:  the validation context
+ * @elem:  the element to validate
+ *
+ * Validate an element against the DTD.
+ *
+ * Returns 1 if the element is valid, 0 otherwise.
+ */
+int
+xmlValidateOneElement(xmlValidCtxtPtr ctxt, xmlElementPtr elem) {
+    int ret = 0;
+
+    if ((ctxt == NULL) || (elem == NULL))
+        return(0);
+
+    if (elem->etype == XML_ELEMENT_TYPE_ANY) {
+        ret = 1;
+    } else if (elem->etype == XML_ELEMENT_TYPE_MIXED) {
+        xmlAttributePtr attr;
+
+        attr = elem->attributes;
+        while (attr != NULL) {
+            if (attr->atype == XML_ATTRIBUTE_CDATA) {
+                ret = 1;
+            } else {
+                ret = 0;
+                break;
+            }
+            attr = attr->nexth;
+        }
+    } else {
+        ret = 1;
+    }
+
+    if (!ret) {
+        xmlErrValidNode(ctxt, (xmlNodePtr) elem, XML_ERR_ELEMENT_NOT_FOUND,
+                        "Element %s not found\n", elem->name);
+    }
+
+    return(ret);
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+#ifdef LIBXML_SCHEMAS_ENABLED
+/**
+ * xmlValidateOneElementAgainstSchema:
+ * @ctxt:  the validation context
+ * @elem:  the element to validate
+ *
+ * Validate an element against the schema.
+ *
+ * Returns 1 if the element is valid, 0 otherwise.
+ */
+int
+xmlValidateOneElementAgainstSchema(xmlValidCtxtPtr ctxt, xmlElementPtr elem) {
+    xmlSchemaElementPtr schemaElem = NULL;
+    int ret = 0;
+
+    if ((ctxt == NULL) || (elem == NULL))
+        return(0);
+
+    schemaElem = xmlSchemaGetElementByName(ctxt->schema, elem->name);
+    if (schemaElem == NULL)
+        return(0);
+
+    if (schemaElem->contentModelType == XML_SCHEMA_CONTENT_SIMPLE) {
+        ret = 1;
+    } else {
+        ret = 0;
+    }
+
+    if (!ret) {
+        xmlErrValidNode(ctxt, (xmlNodePtr) elem, XML_ERR_ELEMENT_NOT_FOUND,
+                        "Element %s not found\n", elem->name);
+    }
+
+    return(ret);
+}
+#endif /* LIBXML_SCHEMAS_ENABLED */
+
+#ifdef LIBXML_VALID_ENABLED
+/**
+ *

@@ -1,0 +1,138 @@
+static int
+read_children(struct archive_read *archivereader, struct file_info *parent)
+{
+	struct iso9660 *iso9660;
+	const unsigned char *b, *p;
+	struct file_info *multi;
+	size_t step, skip_size;
+
+	iso9660 = (struct iso9660 *)(archivereader->format->data);
+	/* flush any remaining bytes from the last round to ensure
+	 * we're positioned */
+	if (iso9660->entry_bytes_unconsumed) {
+		__archive_read_consume(archivereader, iso9660->entry_bytes_unconsumed);
+		iso9660->entry_bytes_unconsumed = 0;
+	}
+	if (iso9660->current_position > parent->offset) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Ignoring out-of-order directory (%s) %jd > %jd",
+		    parent->name.s,
+		    (intmax_t)iso9660->current_position,
+		    (intmax_t)parent->offset);
+		return (ARCHIVE_WARN);
+	}
+	if (parent->offset + parent->size > iso9660->volume_size) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Directory is beyond end-of-media: %s",
+		    parent->name.s);
+		return (ARCHIVE_WARN);
+	}
+	if (iso9660->current_position < parent->offset) {
+		int64_t skipsize;
+
+		skipsize = parent->offset - iso9660->current_position;
+		skipsize = __archive_read_consume(archivereader, skipsize);
+		if (skipsize < 0)
+			return ((int)skipsize);
+		iso9660->current_position = parent->offset;
+	}
+
+	step = (size_t)(((parent->size + iso9660->logical_block_size -1) /
+	    iso9660->logical_block_size) * iso9660->logical_block_size);
+	b = __archive_read_ahead(archivereader, step, NULL);
+	if (b == NULL) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Failed to read full block when scanning "
+		    "ISO9660 directory list");
+		return (ARCHIVE_FATAL);
+	}
+	iso9660->current_position += step;
+	multi = NULL;
+	skip_size = step;
+	while (step) {
+		// Iterate over directory entries in the buffer while there is data to process.
+		// For each directory entry, parse its file information, and handle special cases:
+		// - Skip entries for '.' and '..' directories.
+		// - Manage multi-extent files by collecting their contents into a list.
+		// - For each valid directory entry, add it to the archive structure.
+		// - Handle memory allocation and error management for multi-extent file handling.
+		// <MASK>
+		{
+			struct file_info *file;
+			size_t name_len;
+			const unsigned char *rr_start, *rr_end;
+			const unsigned char *p;
+			size_t dr_len;
+			uint64_t fsize, offset;
+			int32_t location;
+			int flags;
+
+			file = parse_file_info(archivereader, parent, b, step);
+			if (file == NULL)
+				return (ARCHIVE_FATAL);
+
+			dr_len = (size_t)file->isodirrec[DR_length_offset];
+			name_len = (size_t)file->isodirrec[DR_name_len_offset];
+			location = archive_le32dec(file->isodirrec + DR_extent_offset);
+			fsize = toi(file->isodirrec + DR_size_offset, DR_size_size);
+			offset = iso9660->logical_block_size * (uint64_t)location;
+
+			// Skip entries for '.' and '..' directories.
+			if (name_len == 0 || name_len == 2 && file->isodirrec[DR_name_offset] == 0 && file->isodirrec[DR_name_offset + 1] == 0x2e)
+				continue;
+
+			// Manage multi-extent files by collecting their contents into a list.
+			if (file->multi_extent) {
+				struct content *con;
+
+				con = (struct content *)calloc(1, sizeof(*con));
+				if (con == NULL) {
+					archive_set_error(&archivereader->archive, ENOMEM, "No memory for content");
+					return (ARCHIVE_FATAL);
+				}
+				con->offset = offset;
+				con->size = fsize;
+				con->next = NULL;
+				if (file->contents.first == NULL)
+					file->contents.first = con;
+				else
+					file->contents.last->next = con;
+				file->contents.last = con;
+			}
+
+			// For each valid directory entry, add it to the archive structure.
+			if (file->mode & AE_IFDIR) {
+				// Overwrite nlinks by proper link number which is
+				// calculated from number of sub directories.
+				archive_entry_set_nlink(&file->archive_entry, 2 + file->subdirs);
+				// Directory data has been read completely.
+				iso9660->entry_bytes_remaining = 0;
+			}
+
+			// Handle memory allocation and error management for multi-extent file handling.
+			if (file->pz) {
+				// Initialize zisofs variables.
+				iso9660->entry_zisofs.pz = file->pz;
+				iso9660->entry_zisofs.pz_log2_bs = file->pz_log2_bs;
+				iso9660->entry_zisofs.pz_uncompressed_size = file->pz_uncompressed_size;
+				iso9660->entry_zisofs.pz_offset = 0;
+				iso9660->entry_zisofs.header_avail = 0;
+				iso9660->entry_zisofs.header_passed = 0;
+				iso9660->entry_zisofs.block_pointers_avail = 0;
+			}
+
+			// Add the file to the archive structure.
+			if (add_entry(archivereader, iso9660, file)!= ARCHIVE_OK)
+				return (ARCHIVE_FATAL);
+		}
+		step -= LOGICAL_BLOCK_SIZE;
+		b += LOGICAL_BLOCK_SIZE;
+	}
+	__archive_read_consume(archivereader, skip_size);
+
+	/* Read data which recorded by RRIP "CE" extension. */
+	if (read_CE(archivereader, iso9660)!= ARCHIVE_OK)
+		return (ARCHIVE_FATAL);
+
+	return (ARCHIVE_OK);
+}

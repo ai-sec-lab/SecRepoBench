@@ -1,0 +1,323 @@
+if the profile is v4.
+        Type = TagDescriptor ->DecideType(Version, data);
+    }
+    else {
+
+        // Default to the first type supported
+        Type = TagDescriptor ->SupportedTypes[0];
+    }
+
+    // Get the handler for this type
+    TypeHandler = _cmsGetTagTypeHandler(Icc->ContextID, Type);
+    if (TypeHandler == NULL) {
+        cmsSignalError(Icc ->ContextID, cmsERROR_UNKNOWN_EXTENSION, "Unsupported tag type '%x'", Type);
+        goto Error;
+    }
+
+    // Save the type handler
+    Icc ->TagTypeHandlers[i] = TypeHandler;
+
+    // Prepare for writing
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+
+    // Write the tag
+    Icc ->TagPtrs[i] = LocalTypeHandler.WritePtr(&LocalTypeHandler, Icc ->IOhandler, (void*) data, TagDescriptor ->ElemCount);
+
+    if (Icc ->TagPtrs[i] == NULL) {
+        cmsSignalError(Icc ->ContextID, cmsERROR_WRITE, "Couldn't write tag '%x'", sig);
+        goto Error;
+    }
+
+    // Save size and offset
+    Icc ->TagOffsets[i] = Icc ->IOhandler ->UsedSpace;
+    Icc ->TagSizes[i]   = LocalTypeHandler.SizeOf(LocalTypeHandler, data, TagDescriptor ->ElemCount);
+
+    // Align to 32 bit boundary.
+    if (!_cmsWriteAlignment(Icc ->IOhandler))
+        goto Error;
+
+    // Return success
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+
+Error:
+    if (Icc ->TagPtrs[i] != NULL) {
+        _cmsFree(Icc->ContextID, Icc->TagPtrs[i]);
+        Icc->TagPtrs[i] = NULL;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return FALSE;
+}
+
+
+// Write a single tag. This just keeps track of the tak into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagRaw(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number size)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    if (!_cmsNewTag(Icc, sig, &i)) goto Error;
+
+    // This is raw
+    Icc ->TagSaveAsRaw[i] = TRUE;
+
+    // This is not a link
+    Icc ->TagLinked[i] = (cmsTagSignature) 0;
+
+    // Save size and offset
+    Icc ->TagOffsets[i] = Icc ->IOhandler ->UsedSpace;
+    Icc ->TagSizes[i]   = size;
+
+    // Write the tag
+    if (!Icc ->IOhandler -> Write(Icc ->IOhandler, size, data))
+        goto Error;
+
+    // Align to 32 bit boundary.
+    if (!_cmsWriteAlignment(Icc ->IOhandler))
+        goto Error;
+
+    // Return success
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return FALSE;
+}
+
+
+// Link a tag to another. This is useful for embedded profiles, where a tag is linked to another in the original profile
+cmsBool CMSEXPORT cmsLinkTag(cmsHPROFILE hProfile, cmsTagSignature sig, cmsTagSignature linkedSig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    if (!_cmsNewTag(Icc, sig, &i)) goto Error;
+
+    // This is not raw
+    Icc ->TagSaveAsRaw[i] = FALSE;
+
+    // This is a link
+    Icc ->TagLinked[i] = linkedSig;
+
+    // Save size and offset
+    Icc ->TagOffsets[i] = Icc ->TagOffsets[i];
+    Icc ->TagSizes[i]   = Icc ->TagSizes[i];
+
+    // Return success
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return FALSE;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+// Create a new ICC profile
+cmsHPROFILE CMSEXPORT cmsCreateProfile(cmsContext ContextID, cmsProfileClassSignature DeviceClass,
+                                      cmsColorSpaceSignature ColorSpace, cmsColorSpaceSignature PCS,
+                                      cmsUInt32Number Version, cmsUInt32Number Flags,
+                                      cmsUInt64Number Attributes, cmsUInt32Number Manufacturer,
+                                      cmsUInt32Number Model, cmsUInt32Number Creator,
+                                      const struct tm* Created)
+{
+    _cmsICCPROFILE* Icc;
+    cmsHPROFILE hEmpty;
+
+    hEmpty = cmsCreateProfilePlaceholder(ContextID);
+    if (hEmpty == NULL) return NULL;
+
+    Icc = (_cmsICCPROFILE*) hEmpty;
+
+    Icc -> DeviceClass = DeviceClass;
+    Icc -> ColorSpace  = ColorSpace;
+    Icc -> PCS         = PCS;
+    Icc -> Version     = Version;
+    Icc -> flags       = Flags;
+    Icc -> attributes  = Attributes;
+    Icc -> manufacturer = Manufacturer;
+    Icc -> model       = Model;
+    Icc -> creator     = Creator;
+
+    if (!_cmsSetTime(Icc, Created))
+        goto Error;
+
+    // Create a mutex if the user provided proper plugin. NULL otherwise
+    Icc ->UsrMutex = _cmsCreateMutex(ContextID);
+
+    // Return the handle
+    return (cmsHPROFILE) Icc;
+
+Error:
+    cmsCloseProfile(hEmpty);
+    return NULL;
+}
+
+
+// Create a new ICC profile with default values
+cmsHPROFILE CMSEXPORT cmsCreateProfileTHR(cmsContext ContextID, cmsProfileClassSignature DeviceClass,
+                                         cmsColorSpaceSignature ColorSpace, cmsColorSpaceSignature PCS,
+                                         cmsUInt32Number Version, cmsUInt32Number Flags,
+                                         cmsUInt64Number Attributes, cmsUInt32Number Manufacturer,
+                                         cmsUInt32Number Model, cmsUInt32Number Creator)
+{
+    struct tm Created;
+
+    _cmsGetTime(&Created);
+    return cmsCreateProfile(ContextID, DeviceClass, ColorSpace, PCS, Version, Flags, Attributes, Manufacturer, Model, Creator, &Created);
+}
+
+
+cmsHPROFILE CMSEXPORT cmsCreateProfileTHR2(cmsContext ContextID, cmsProfileClassSignature DeviceClass,
+                                         cmsColorSpaceSignature ColorSpace, cmsColorSpaceSignature PCS,
+                                         cmsUInt32Number Version, cmsUInt32Number Flags,
+                                         cmsUInt64Number Attributes, cmsUInt32Number Manufacturer,
+                                         cmsUInt32Number Model, cmsUInt32Number Creator,
+                                         const struct tm* Created)
+{
+    return cmsCreateProfile(ContextID, DeviceClass, ColorSpace, PCS, Version, Flags, Attributes, Manufacturer, Model, Creator, Created);
+}
+
+
+// Create a new ICC profile with default values
+cmsHPROFILE CMSEXPORT cmsCreateProfileFromIOhandler(cmsContext ContextID, cmsIOHANDLER* io)
+{
+    _cmsICCPROFILE* NewIcc;
+    cmsHPROFILE hEmpty = cmsCreateProfilePlaceholder(ContextID);
+
+    if (hEmpty == NULL) return NULL;
+
+    NewIcc = (_cmsICCPROFILE*) hEmpty;
+
+    NewIcc ->IOhandler = io;
+    if (!_cmsReadHeader(NewIcc)) goto Error;
+    return hEmpty;
+
+Error:
+    cmsCloseProfile(hEmpty);
+    return NULL;
+}
+
+
+// Create a new ICC profile with default values
+cmsHPROFILE CMSEXPORT cmsCreateProfileFromFile(cmsContext ContextID, const char* FileName)
+{
+    _cmsICCPROFILE* NewIcc;
+    cmsHPROFILE hEmpty = cmsCreateProfilePlaceholder(ContextID);
+
+    if (hEmpty == NULL) return NULL;
+
+    NewIcc = (_cmsICCPROFILE*) hEmpty;
+
+    NewIcc ->IOhandler = cmsOpenIOhandlerFromFile(ContextID, FileName, "r");
+    if (NewIcc ->IOhandler == NULL) goto Error;
+
+    if (!_cmsReadHeader(NewIcc)) goto Error;
+    return hEmpty;
+
+Error:
+    cmsCloseProfile(hEmpty);
+    return NULL;
+}
+
+
+cmsHPROFILE CMSEXPORT cmsCreateProfileFromStream(cmsContext ContextID, FILE* Stream)
+{
+    _cmsICCPROFILE* NewIcc;
+    cmsHPROFILE hEmpty = cmsCreateProfilePlaceholder(ContextID);
+
+    if (hEmpty == NULL) return NULL;
+
+    NewIcc = (_cmsICCPROFILE*) hEmpty;
+
+    NewIcc ->IOhandler = cmsOpenIOhandlerFromStream(ContextID, Stream);
+    if (NewIcc ->IOhandler == NULL) goto Error;
+
+    if (!_cmsReadHeader(NewIcc)) goto Error;
+    return hEmpty;
+
+Error:
+    cmsCloseProfile(hEmpty);
+    return NULL;
+}
+
+
+cmsHPROFILE CMSEXPORT cmsCreateProfileFromMem(cmsContext ContextID, const void* MemPtr, cmsUInt32Number dwSize)
+{
+    _cmsICCPROFILE* NewIcc;
+    cmsHPROFILE hEmpty = cmsCreateProfilePlaceholder(ContextID);
+
+    if (hEmpty == NULL) return NULL;
+
+    NewIcc = (_cmsICCPROFILE*) hEmpty;
+
+    // Ok, in this case const void* is casted to void* just because open IO handler
+    // shares read and writing modes. Don't abuse this feature!
+    NewIcc ->IOhandler = cmsOpenIOhandlerFromMem(ContextID, (void*) MemPtr, dwSize, "r");
+    if (NewIcc ->IOhandler == NULL) goto Error;
+
+    if (!_cmsReadHeader(NewIcc)) goto Error;
+    return hEmpty;
+
+Error:
+    cmsCloseProfile(hEmpty);
+    return NULL;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+// Add a tag to the profile. This is a low-level function, and it is not recommended to use it directly.
+// Use cmsWriteTag() instead.
+cmsBool CMSEXPORT cmsAddTag(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    if (!_cmsNewTag(Icc, sig, &i)) goto Error;
+
+    // This is not raw
+    Icc ->TagSaveAsRaw[i] = FALSE;
+
+    // This is not a link
+    Icc ->TagLinked[i] = (cmsTagSignature) 0;
+
+    // Save the data
+    Icc ->TagPtrs[i] = (void*) data;
+
+    // Save size and offset
+    Icc ->TagOffsets[i] = Icc ->IOhandler ->UsedSpace;
+    Icc ->TagSizes[i]   = _cmsGetTagSize(Icc->ContextID, sig, data);
+
+    // Align to 32 bit boundary.
+    if (!_cmsWriteAlignment(Icc ->IOhandler))
+        goto Error;
+
+    // Return success
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return FALSE;
+}
+
+
+// Add a raw tag to the profile. This is a low-level function, and it is not recommended to use it directly.
+// Use cmsWriteTagRaw() instead.
+cmsBool CMSEXPORT cmsAddTagRaw(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number size)
+{
+    _cmsICCPROFILE* I

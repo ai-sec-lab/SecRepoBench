@@ -1,0 +1,289 @@
+ntbytes += nbytes;
+    comp_buffer += nbytes;
+  }
+
+  if (last_filter_index >= 0) {
+    return pipeline_d(context, bsize, dest, dest_offset, tmp, tmp2, tmp3, last_filter_index);
+  }
+
+  return ntbytes;
+}
+
+
+/* Decompress a single block */
+static int blosc_decompress_block(blosc2_context* context, int32_t bsize,
+                                  int32_t leftoverblock, const uint8_t* src,
+                                  int32_t srcsize, int32_t src_offset,
+                                  int32_t nblock, uint8_t* dest,
+                                  int32_t dest_offset, uint8_t* tmp,
+                                  uint8_t* tmp2) {
+  int32_t typesize = context->typesize;
+  int32_t chunk_nbytes;
+  int32_t chunk_cbytes;
+  int rc = blosc2_cbuffer_sizes(src, &chunk_nbytes, &chunk_cbytes, NULL);
+  if (rc < 0) {
+    return rc;
+  }
+
+  if (context->block_maskout != NULL && context->block_maskout[nblock]) {
+    // Do not decompress, but act as if we successfully decompressed everything
+    return bsize;
+  }
+
+  if (src_offset <= 0 || src_offset >= srcsize) {
+    /* Invalid block src offset encountered */
+    return BLOSC2_ERROR_DATA;
+  }
+
+  src += src_offset;
+  srcsize -= src_offset;
+
+  int last_filter_index = last_filter(context->filters, 'd');
+
+  return pipeline_d(context, bsize, dest, dest_offset, tmp, tmp2, tmp3, last_filter_index);
+}
+
+
+/* Decompress a super-chunk */
+int blosc2_decompress_schunk(blosc2_schunk* schunk, uint8_t* dest,
+                             int32_t destsize, int32_t dest_offset) {
+  blosc2_context* context = schunk->context;
+  int32_t typesize = context->typesize;
+  int32_t blocksize = context->blocksize;
+  int32_t nblocks = context->nblocks;
+  int32_t leftoverblock = context->leftover;
+  int32_t nthreads = context->nthreads;
+  int32_t ntbytes = 0;
+  int32_t ctbytes = 0;
+  int32_t bsize = blocksize;
+  uint8_t* tmp = my_malloc(blocksize);
+  uint8_t* tmp2 = my_malloc(blocksize);
+  uint8_t* tmp3 = my_malloc(blocksize);
+  int32_t dest_index = dest_offset;
+  int32_t src_index = 0;
+  int32_t nblock;
+  int32_t errcode = 0;
+
+  if (tmp == NULL || tmp2 == NULL || tmp3 == NULL) {
+    BLOSC_TRACE_ERROR("Could not allocate temporary memory.");
+    my_free(tmp);
+    my_free(tmp2);
+    my_free(tmp3);
+    return BLOSC2_ERROR_MEMORY;
+  }
+
+  for (nblock = 0; nblock < nblocks; nblock++) {
+    if (dest_index + bsize > destsize) {
+      bsize = destsize - dest_index;
+    }
+    if (bsize <= 0) {
+      break;
+    }
+    errcode = blosc_decompress_block(context, bsize, leftoverblock,
+                                     schunk->src, schunk->srcsize, src_index,
+                                     nblock, dest + dest_index, 0, tmp, tmp2);
+    if (errcode < 0) {
+      BLOSC_TRACE_ERROR("Error decompressing block %d", nblock);
+      my_free(tmp);
+      my_free(tmp2);
+      my_free(tmp3);
+      return errcode;
+    }
+    ntbytes += errcode;
+    ctbytes += bsize;
+    src_index += bsize + context->header_overhead;
+    dest_index += bsize;
+  }
+
+  my_free(tmp);
+  my_free(tmp2);
+  my_free(tmp3);
+
+  return ntbytes;
+}
+
+
+/* Compress a super-chunk */
+int blosc2_compress_schunk(blosc2_schunk* schunk, uint8_t* dest,
+                           int32_t destsize, int32_t dest_offset) {
+  blosc2_context* context = schunk->context;
+  int32_t typesize = context->typesize;
+  int32_t blocksize = context->blocksize;
+  int32_t nblocks = context->nblocks;
+  int32_t leftoverblock = context->leftover;
+  int32_t nthreads = context->nthreads;
+  int32_t ntbytes = 0;
+  int32_t ctbytes = 0;
+  int32_t bsize = blocksize;
+  uint8_t* tmp = my_malloc(blocksize);
+  uint8_t* tmp2 = my_malloc(blocksize);
+  uint8_t* tmp3 = my_malloc(blocksize);
+  int32_t dest_index = dest_offset;
+  int32_t src_index = 0;
+  int32_t nblock;
+  int32_t errcode = 0;
+
+  if (tmp == NULL || tmp2 == NULL || tmp3 == NULL) {
+    BLOSC_TRACE_ERROR("Could not allocate temporary memory.");
+    my_free(tmp);
+    my_free(tmp2);
+    my_free(tmp3);
+    return BLOSC2_ERROR_MEMORY;
+  }
+
+  for (nblock = 0; nblock < nblocks; nblock++) {
+    if (dest_index + bsize > destsize) {
+      bsize = destsize - dest_index;
+    }
+    if (bsize <= 0) {
+      break;
+    }
+    errcode = blosc_c(NULL, bsize, leftoverblock, 0, bsize, schunk->src + src_index, 0,
+                       dest + dest_index, tmp, tmp2, tmp3);
+    if (errcode < 0) {
+      BLOSC_TRACE_ERROR("Error compressing block %d", nblock);
+      my_free(tmp);
+      my_free(tmp2);
+      my_free(tmp3);
+      return errcode;
+    }
+    ntbytes += errcode;
+    ctbytes += bsize;
+    src_index += bsize;
+    dest_index += bsize + context->header_overhead;
+  }
+
+  my_free(tmp);
+  my_free(tmp2);
+  my_free(tmp3);
+
+  return ntbytes;
+}
+
+
+/* Initialize the context for a super-chunk */
+int blosc2_init_schunk(blosc2_schunk* schunk, int32_t typesize, int32_t blocksize,
+                       int32_t nbytes, int32_t cbytes, int32_t clevel,
+                       int32_t nthreads, int compcode, int codec_format,
+                       int32_t filter_flags, const uint8_t* filters,
+                       const uint8_t* filters_meta, int32_t header_version,
+                       int32_t blosc2_flags) {
+  blosc2_context* context = schunk->context;
+  int rc;
+
+  if (context == NULL) {
+    context = (blosc2_context*)my_malloc(sizeof(blosc2_context));
+    if (context == NULL) {
+      BLOSC_TRACE_ERROR("Could not allocate memory for context.");
+      return BLOSC2_ERROR_MEMORY;
+    }
+    schunk->context = context;
+  }
+
+  memset(context, 0, sizeof(blosc2_context));
+
+  context->typesize = typesize;
+  context->blocksize = blocksize;
+  context->sourcesize = nbytes;
+  context->cbytes = cbytes;
+  context->clevel = clevel;
+  context->nthreads = nthreads;
+  context->compcode = compcode;
+  context->codec_format = codec_format;
+  context->header_flags = filter_flags;
+  memcpy(context->filters, filters, BLOSC2_MAX_FILTERS);
+  memcpy(context->filters_meta, filters_meta, BLOSC2_MAX_FILTERS);
+  context->filter_flags = filters_to_flags(filters);
+  context->header_version = header_version;
+  context->blosc2_flags = blosc2_flags;
+
+  blosc2_calculate_blocks(context);
+
+  if (context->nblocks == 0) {
+    BLOSC_TRACE_ERROR("Invalid block size.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->sourcesize % context->typesize != 0) {
+    BLOSC_TRACE_ERROR("Invalid source size.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->blocksize % context->typesize != 0) {
+    BLOSC_TRACE_ERROR("Invalid block size.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->sourcesize < context->blocksize) {
+    BLOSC_TRACE_ERROR("Invalid source size.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->blocksize > context->sourcesize) {
+    BLOSC_TRACE_ERROR("Invalid block size.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->clevel < 0 || context->clevel > 9) {
+    BLOSC_TRACE_ERROR("Invalid compression level.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->nthreads < 1 || context->nthreads > 1024) {
+    BLOSC_TRACE_ERROR("Invalid number of threads.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->compcode < 0 || context->compcode >= BLOSC_MAX_COMPCODES) {
+    BLOSC_TRACE_ERROR("Invalid compressor code.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->codec_format < 0 || context->codec_format >= BLOSC_MAX_CODECS) {
+    BLOSC_TRACE_ERROR("Invalid codec format.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->header_version < 0 || context->header_version > 255) {
+    BLOSC_TRACE_ERROR("Invalid header version.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->blosc2_flags < 0 || context->blosc2_flags > 255) {
+    BLOSC_TRACE_ERROR("Invalid Blosc2 flags.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->filters == NULL || context->filters_meta == NULL) {
+    BLOSC_TRACE_ERROR("Invalid filter pipeline.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->prefilter != NULL) {
+    rc = context->prefilter(context->pparams);
+    if (rc != 0) {
+      BLOSC_TRACE_ERROR("Prefilter initialization failed.");
+      return BLOSC2_ERROR_FILTER_PIPELINE;
+    }
+  }
+
+  return 0;
+}
+
+
+/* Release the context for a super-chunk */
+void blosc2_free_schunk(blosc2_schunk* schunk) {
+  blosc2_context* context = schunk->context;
+
+  if (context != NULL) {
+    if (context->prefilter != NULL) {
+      context->prefilter(NULL);
+    }
+    my_free(context);
+    schunk->context = NULL;
+  }
+}
+
+
+/* Initialize the context for a chunk */
+int blosc2_init_chunk(blosc2_chunk* chunk, int32_t typesize, int32

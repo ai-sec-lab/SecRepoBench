@@ -1,0 +1,60 @@
+if (packet->payload_length >= 10) {
+    ovpn_payload = (packet->tcp_payload_offset > 0) ? packet->payload + packet->tcp_payload_offset : packet->payload;
+    operationcode = ovpn_payload[0];
+    if (packet->tcp_payload_offset > 0) {
+      alen = ovpn_payload[1];
+      if (alen > packet->payload_length - 2) {
+        failed = 1;
+        goto end;
+      }
+      ovpn_payload += 2 + alen;
+    }
+    if (packet->udp_payload_offset > 0) {
+      if (packet->payload_length < 10) {
+        failed = 1;
+        goto end;
+      }
+      if (operationcode == 0x01 && packet->payload_length == 10) {
+        ndpi_set_detection_bitmask(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+        goto end;
+      }
+      if (flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT && operationcode == P_CONTROL_HARD_RESET_CLIENT_V1) {
+        hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+        if (hmac_size < 0) {
+          failed = 1;
+          goto end;
+        }
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(hmac_size);
+        if (session_remote[0] != 0x00) {
+          failed = 1;
+          goto end;
+        }
+        flow->openvpn_session_id = *(u_int32_t*)(session_remote + 1);
+        flow->openvpn_counter++;
+        goto end;
+      }
+      if (flow->openvpn_counter > 0 && flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT + 2 && operationcode == P_CONTROL_HARD_RESET_SERVER_V1) {
+        hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+        if (hmac_size < 0) {
+          failed = 1;
+          goto end;
+        }
+        session_remote = ovpn_payload + P_HARD_RESET_PACKET_ID_OFFSET(hmac_size);
+        if (session_remote[0] != 0x00) {
+          failed = 1;
+          goto end;
+        }
+        if (*(u_int32_t*)(session_remote + 1) == flow->openvpn_session_id) {
+          ndpi_set_detection_bitmask(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+          goto end;
+        }
+        failed = 1;
+      }
+    }
+  }
+  failed = 1;
+end:
+  if (failed) {
+    ndpi_remove_protocol_from_detection_bitmask(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+  }
+  flow->openvpn_counter++;

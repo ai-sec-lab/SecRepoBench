@@ -1,0 +1,142 @@
+#ifdef LIBXML_VALID_ENABLED
+static int
+xmlValidateElementType(xmlValidCtxtPtr ctxt) {
+    int ret = 1;
+#ifndef  LIBXML_REGEXP_ENABLED
+    xmlNodePtr repl = NULL, last = NULL, tmp;
+#endif
+    xmlNodePtr cur;
+    xmlElementContentPtr cont;
+    const xmlChar *name;
+
+    if ((ctxt == NULL) || (ctxt->vstate == NULL))
+        return(-1);
+    cont = ctxt->vstate->elemDecl->content;
+    name = ctxt->vstate->elemDecl->name;
+
+#ifdef LIBXML_REGEXP_ENABLED
+    if (ctxt->vstate->exec == NULL)
+        ret = xmlValidBuildContentModel(ctxt, ctxt->vstate->elemDecl);
+    if (ctxt->vstate->exec == NULL) {
+        return(-1);
+    } else {
+        xmlRegExecCtxtPtr exec;
+
+        if (!xmlRegexpIsDeterminist(ctxt->vstate->elemDecl->contModel)) {
+            return(-1);
+        }
+        ctxt->vstate->exec = xmlRegNewExecCtxt(ctxt->vstate->elemDecl->contModel, NULL, NULL);
+        if (ctxt->vstate->exec != NULL) {
+            cur = ctxt->vstate->node;
+            while (cur != NULL) {
+                switch (cur->type) {
+                    case XML_ENTITY_REF_NODE:
+                        if ((cur->children != NULL) &&
+                            (cur->children->children != NULL)) {
+                            nodeVPush(ctxt, cur);
+                            cur = cur->children->children;
+                            continue;
+                        }
+                        break;
+                    case XML_TEXT_NODE:
+                        if (xmlIsBlankNode(cur))
+                            break;
+                        ret = 0;
+                        goto fail;
+                    case XML_CDATA_SECTION_NODE:
+                        ret = 0;
+                        goto fail;
+                    case XML_ELEMENT_NODE:
+                        if ((cur->ns != NULL) && (cur->ns->prefix != NULL)) {
+                            xmlChar fn[50];
+                            xmlChar *fullname;
+
+                            fullname = xmlBuildQName(cur->name,
+                                                     cur->ns->prefix, fn, 50);
+                            if (fullname == NULL) {
+                                ret = -1;
+                                goto fail;
+                            }
+                            ret = xmlRegExecPushString(ctxt->vstate->exec, fullname, NULL);
+                            if ((fullname != fn) && (fullname != cur->name))
+                                xmlFree(fullname);
+                        } else {
+                            ret = xmlRegExecPushString(ctxt->vstate->exec, cur->name, NULL);
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                cur = cur->next;
+                while (cur == NULL) {
+                    cur = nodeVPop(ctxt);
+                    if (cur == NULL)
+                        break;
+                    cur = cur->next;
+                }
+            }
+            ret = xmlRegExecPushString(ctxt->vstate->exec, NULL, NULL);
+fail:
+            xmlRegFreeExecCtxt(ctxt->vstate->exec);
+        }
+    }
+#else  /* LIBXML_REGEXP_ENABLED */
+    if (ctxt->vstateTab == NULL) {
+        ctxt->vstateMax = 8;
+        ctxt->vstateTab = (xmlValidState *) xmlMalloc(
+                ctxt->vstateMax * sizeof(ctxt->vstateTab[0]));
+        if (ctxt->vstateTab == NULL) {
+            xmlVErrMemory(ctxt, "malloc failed");
+            return(-1);
+        }
+    }
+    ctxt->vstate = &ctxt->vstateTab[0];
+    ctxt->vstateNr = 1;
+    CONT = cont;
+    NODE = ctxt->vstate->node;
+    DEPTH = 0;
+    OCCURS = 0;
+    STATE = 0;
+    ret = xmlValidateElementType(ctxt);
+    if ((ret == -3) && (ctxt->valid == 1)) {
+        xmlErrValidWarning(ctxt, ctxt->vstate->node, XML_DTD_CONTENT_NOT_DETERMINIST,
+               "Content model for Element %s is ambiguous\n",
+                           ctxt->vstate->elemDecl->name, NULL, NULL);
+    } else if (ret == -2) {
+        xmlErrValidNode(ctxt, ctxt->vstate->node, XML_DTD_CONTENT_NOT_DETERMINIST,
+               "Content model for Element %s is ambiguous\n",
+                           ctxt->vstate->elemDecl->name, NULL, NULL);
+    }
+#endif /* LIBXML_REGEXP_ENABLED */
+    if ((ret != 1) && (ret != -3)) {
+        char expr[5000];
+        char list[5000];
+
+        expr[0] = 0;
+        xmlSnprintfElementContent(&expr[0], 5000, cont, 1);
+        list[0] = 0;
+        xmlSnprintfElements(&list[0], 5000, ctxt->vstate->node, 1);
+
+        xmlErrValidNode(ctxt, ctxt->vstate->node, XML_DTD_CONTENT_MODEL,
+               "Element content does not follow the DTD, expecting %s, got %s\n",
+               BAD_CAST expr, BAD_CAST list, NULL);
+        ret = 0;
+    }
+    if (ret == -3)
+        ret = 1;
+
+#ifndef  LIBXML_REGEXP_ENABLED
+    ctxt->vstateMax = 0;
+    if (ctxt->vstateTab != NULL) {
+        xmlFree(ctxt->vstateTab);
+        ctxt->vstateTab = NULL;
+    }
+#endif
+    ctxt->nodeMax = 0;
+    if (ctxt->nodeTab != NULL) {
+        xmlFree(ctxt->nodeTab);
+        ctxt->nodeTab = NULL;
+    }
+    return(ret);
+}
+#endif /* LIBXML_VALID_ENABLED */

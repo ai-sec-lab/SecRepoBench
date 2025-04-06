@@ -1,0 +1,256 @@
+if (encoding != (const char *) NULL)
+    {
+      if (LocaleCompare(encoding,"AdobeCustom") == 0)
+        encoding_type=FT_ENCODING_ADOBE_CUSTOM;
+      else
+        if (LocaleCompare(encoding,"AdobeExpert") == 0)
+          encoding_type=FT_ENCODING_ADOBE_EXPERT;
+        else
+          if (LocaleCompare(encoding,"AdobeStandard") == 0)
+            encoding_type=FT_ENCODING_ADOBE_STANDARD;
+          else
+            if (LocaleCompare(encoding,"AppleRoman") == 0)
+              encoding_type=FT_ENCODING_APPLE_ROMAN;
+            else
+              if (LocaleCompare(encoding,"Big5") == 0)
+                encoding_type=FT_ENCODING_BIG5;
+              else
+                if (LocaleCompare(encoding,"GB2312") == 0)
+                  encoding_type=FT_ENCODING_GB2312;
+                else
+                  if (LocaleCompare(encoding,"Johab") == 0)
+                    encoding_type=FT_ENCODING_JOHAB;
+                  else
+                    if (LocaleCompare(encoding,"SJIScode") == 0)
+                      encoding_type=FT_ENCODING_SJIS;
+                    else
+                      if (LocaleCompare(encoding,"Symbol") == 0)
+                        encoding_type=FT_ENCODING_MS_SYMBOL;
+                      else
+                        if (LocaleCompare(encoding,"Unicode") == 0)
+                          encoding_type=FT_ENCODING_UNICODE;
+      ft_status=FT_Select_Charmap(face,encoding_type);
+      if (ft_status != 0)
+        {
+          (void) FT_Done_Face(face);
+          (void) FT_Done_FreeType(library);
+          ThrowFreetypeErrorException("UnrecognizedFontEncoding",ft_status,
+            encoding);
+          (void) FTCloseStream(stream);
+          stream=DestroyStream(stream);
+          return(MagickFalse);
+        }
+    }
+  resolution.x=draw_info->density.x;
+  resolution.y=draw_info->density.y;
+  if ((resolution.x == 0.0) || (resolution.y == 0.0))
+    {
+      resolution.x=72.0;
+      resolution.y=72.0;
+    }
+  if (draw_info->render)
+    {
+      resolution.x=draw_info->resolution.x;
+      resolution.y=draw_info->resolution.y;
+    }
+  ft_status=FT_Set_Char_Size(face,(FT_F26Dot6)(64.0*draw_info->pointsize),
+    (FT_F26Dot6)(64.0*draw_info->pointsize),(FT_UInt) resolution.x,
+    (FT_UInt) resolution.y);
+  if (ft_status != 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToSetFreetypeCharacterSize",ft_status,
+        draw_info->font != (char *) NULL ? draw_info->font : "none");
+      (void) FTCloseStream(stream);
+      stream=DestroyStream(stream);
+      return(MagickFalse);
+    }
+  metrics->pixels_per_em.x=face->size->metrics.x_ppem;
+  metrics->pixels_per_em.y=face->size->metrics.y_ppem;
+  metrics->ascent=(double) face->size->metrics.ascender/64.0;
+  metrics->descent=(double) face->size->metrics.descender/64.0;
+  metrics->width=(double) face->size->metrics.max_advance/64.0;
+  metrics->height=(double) face->size->metrics.height/64.0;
+  metrics->max_advance=(double) face->size->metrics.max_advance/64.0;
+  if (metrics->ascent < (double) face->bbox.yMax/64.0)
+    metrics->ascent=(double) face->bbox.yMax/64.0;
+  if (metrics->descent > (double) face->bbox.yMin/64.0)
+    metrics->descent=(double) face->bbox.yMin/64.0;
+  metrics->underline_position=face->underline_position/64.0;
+  metrics->underline_thickness=face->underline_thickness/64.0;
+  value=draw_info->text;
+  if (value == (const char *) NULL)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      (void) FTCloseStream(stream);
+      stream=DestroyStream(stream);
+      return(MagickTrue);
+    }
+  if (*value == '\0')
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      (void) FTCloseStream(stream);
+      stream=DestroyStream(stream);
+      return(MagickTrue);
+    }
+  length=strlen(value);
+  if (face->num_glyphs == 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      (void) FTCloseStream(stream);
+      stream=DestroyStream(stream);
+      return(MagickTrue);
+    }
+
+  /*
+    Determine kerning and render each character in the text string.
+  */
+  annotate_info=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  flags=FT_LOAD_DEFAULT;
+  if (annotate_info->render == MagickFalse)
+    flags|=FT_LOAD_MONOCHROME;
+  if (annotate_info->antialias == MagickFalse)
+    flags|=FT_LOAD_TARGET_MONO;
+  if (img->matte == MagickFalse)
+    flags|=FT_LOAD_NO_BITMAP;
+  first_glyph_id=face->charmap->encoding != FT_ENCODING_NONE ?
+    face->charmap->encoding : FT_ENCODING_UNICODE;
+  last_glyph_id=face->charmap->encoding != FT_ENCODING_NONE ?
+    face->charmap->encoding : FT_ENCODING_UNICODE;
+  missing_glyph_id=0;
+  if (face->charmap->encoding == FT_ENCODING_UNICODE)
+    {
+      first_glyph_id=0;
+      last_glyph_id=0x10FFFF;
+      missing_glyph_id=0;
+    }
+  affine.xx=65536L;
+  affine.yx=0L;
+  affine.xy=0L;
+  affine.yy=65536L;
+  (void) memset(&glyph,0,sizeof(glyph));
+  (void) memset(&bounds,0,sizeof(bounds));
+  /*
+    Set text transformation matrix.
+  */
+  point=draw_info->origin;
+  point.x+=(resolution.x*offset->x)/72.0;
+  point.y+=(resolution.y*offset->y)/72.0;
+  if (draw_info->render)
+    {
+      point.x+=(resolution.x*draw_info->origin.x)/72.0;
+      point.y+=(resolution.y*draw_info->origin.y)/72.0;
+    }
+  origin.x=64.0*point.x;
+  origin.y=64.0*point.y;
+  status=MagickTrue;
+  for (i=0; i < (ssize_t) length; i+=GetUTFOctets(value+i))
+  {
+    code=GetUTFCode(value+i);
+    /*
+      Adjust origin to compensate for the character advance.
+    */
+    origin.x+=face->glyph->metrics.horiBearingX;
+    origin.y-=face->glyph->metrics.horiBearingY;
+    /*
+      Render the glyph.
+    */
+    glyph.id=FT_Get_Char_Index(face,(FT_ULong) code);
+    ft_status=FT_Load_Glyph(face,glyph.id,flags);
+    if (ft_status != 0)
+      continue;
+    ft_status=FT_Get_Glyph(face->glyph,&glyph.image);
+    if (ft_status != 0)
+      continue;
+    FT_Outline_Transform(&((FT_OutlineGlyph) glyph.image)->outline,&affine);
+    glyph.origin.x=origin.x;
+    glyph.origin.y=origin.y;
+    if (glyph.image->format == FT_GLYPH_FORMAT_OUTLINE)
+      {
+        /*
+          Trace the outline.
+        */
+        if (flags & FT_LOAD_NO_BITMAP)
+          ft_status=FT_Render_Glyph(face->glyph,ft_render_mode_normal);
+        if (ft_status == 0)
+          {
+            ft_status=FT_Outline_Decompose(&((FT_OutlineGlyph) glyph.image)->
+              outline,&OutlineMethods,(void *) img);
+            if (bounds.xMin > (FT_Pos) face->glyph->metrics.horiBearingX)
+              bounds.xMin=(FT_Pos) face->glyph->metrics.horiBearingX;
+            if (bounds.yMin > (FT_Pos) -face->glyph->metrics.horiBearingY)
+              bounds.yMin=(FT_Pos) -face->glyph->metrics.horiBearingY;
+            if (bounds.xMax < (FT_Pos) face->glyph->metrics.horiBearingX+
+                face->glyph->metrics.width)
+              bounds.xMax=(FT_Pos) face->glyph->metrics.horiBearingX+
+                face->glyph->metrics.width;
+            if (bounds.yMax < (FT_Pos) -face->glyph->metrics.horiBearingY+
+                face->glyph->metrics.height)
+              bounds.yMax=(FT_Pos) -face->glyph->metrics.horiBearingY+
+                face->glyph->metrics.height;
+          }
+      }
+    else
+      {
+        /*
+          Rasterize the glyph.
+        */
+        bitmap=(FT_BitmapGlyph) glyph.image;
+        for (y=0; y < (ssize_t) bitmap->bitmap.rows; y++)
+        {
+          p=(char *) bitmap->bitmap.buffer+y*bitmap->bitmap.pitch;
+          for (x=0; x < (ssize_t) bitmap->bitmap.width; x++)
+          {
+            if (p[x] != 0)
+              (void) SetImagePixels(img,bitmap->left+x,bitmap->top-y,1,1,
+                exception);
+          }
+        }
+        if (SyncImagePixels(img,exception) == MagickFalse)
+          status=MagickFalse;
+        if (bounds.xMin > (FT_Pos) bitmap->left)
+          bounds.xMin=(FT_Pos) bitmap->left;
+        if (bounds.yMin > (FT_Pos) -bitmap->top)
+          bounds.yMin=(FT_Pos) -bitmap->top;
+        if (bounds.xMax < (FT_Pos) bitmap->left+bitmap->bitmap.width)
+          bounds.xMax=(FT_Pos) bitmap->left+bitmap->bitmap.width;
+        if (bounds.yMax < (FT_Pos) -bitmap->top+bitmap->bitmap.rows)
+          bounds.yMax=(FT_Pos) -bitmap->top+bitmap->bitmap.rows;
+      }
+    FT_Done_Glyph(glyph.image);
+    /*
+      Adjust origin for next character.
+    */
+    if (last_character != 0)
+      {
+        if (FT_HAS_KERNING(face))
+          {
+            FT_Vector
+              kerning;
+
+            ft_status=FT_Get_Kerning(face,(FT_UInt) last_character,(FT_UInt)
+              glyph.id,ft_kerning_default,&kerning);
+            if (ft_status == 0)
+              origin.x+=(draw_info->direction == RightToLeftDirection ?
+                -kerning.x : kerning.x);
+          }
+      }
+    origin.x+=face->glyph->advance.x;
+    origin.y+=face->glyph->advance.y;
+    last_character=(ssize_t) glyph.id;
+  }
+  FT_Done_Face(face);
+  FT_Done_FreeType(library);
+  (void) FTCloseStream(stream);
+  stream=DestroyStream(stream);
+  /*
+    Determine font metrics.
+  */
+  metrics->bounds.x1=(double) bounds.xMin/64.0;
+  metrics->bounds.y1=(double) bounds.yMin/64.0;
+  metrics->bounds.x2=(double) bounds.xMax/64.0;
+  metrics->bounds.y2=(double) bounds

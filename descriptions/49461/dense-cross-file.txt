@@ -1,0 +1,188 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/cmstypes.c
+static
+cmsBool Write8bitTables(cmsContext ContextID, cmsIOHANDLER* io, cmsUInt32Number n, _cmsStageToneCurvesData* Tables)
+{
+    int j;
+    cmsUInt32Number i;
+    cmsUInt8Number val;
+
+    for (i=0; i < n; i++) {
+
+        if (Tables) {
+
+            // Usual case of identity curves
+            if ((Tables ->TheCurves[i]->nEntries == 2) && 
+                (Tables->TheCurves[i]->Table16[0] == 0) && 
+                (Tables->TheCurves[i]->Table16[1] == 65535)) {
+
+                    for (j=0; j < 256; j++) {
+                        if (!_cmsWriteUInt8Number(io, (cmsUInt8Number) j)) return FALSE;
+                    }
+            }
+            else 
+                if (Tables ->TheCurves[i]->nEntries != 256) {
+                    cmsSignalError(ContextID, cmsERROR_RANGE, "LUT8 needs 256 entries on prelinearization");
+                    return FALSE;                
+                }
+                else
+                    for (j=0; j < 256; j++) {
+
+                        val = (cmsUInt8Number) FROM_16_TO_8(Tables->TheCurves[i]->Table16[j]);
+
+                        if (!_cmsWriteUInt8Number(io, val)) return FALSE;
+                    }
+        }
+    }
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmstypes.c
+static
+cmsBool  Read16bitTables(cmsContext ContextID, cmsIOHANDLER* io, cmsPipeline* lut, 
+                                    cmsUInt32Number nChannels, cmsUInt32Number nEntries)
+{
+    cmsUInt32Number i;
+    cmsToneCurve* Tables[cmsMAXCHANNELS];
+
+    // Maybe an empty table? (this is a lcms extension)
+    if (nEntries <= 0) return TRUE;
+
+    // Check for malicious profiles
+    if (nEntries < 2) return FALSE;
+    if (nChannels > cmsMAXCHANNELS) return FALSE;
+
+    // Init table to zero
+    memset(Tables, 0, sizeof(Tables));
+
+    for (i=0; i < nChannels; i++) {
+
+        Tables[i] = cmsBuildTabulatedToneCurve16(ContextID, nEntries, NULL);
+        if (Tables[i] == NULL) goto Error;
+
+        if (!_cmsReadUInt16Array(io, nEntries, Tables[i]->Table16)) goto Error;
+    }
+
+
+    // Add the table (which may certainly be an identity, but this is up to the optimizer, not the reading code)
+    if (!cmsPipelineInsertStage(lut, cmsAT_END, cmsStageAllocToneCurves(ContextID, nChannels, Tables)))
+        goto Error;
+
+    for (i=0; i < nChannels; i++)
+        cmsFreeToneCurve(Tables[i]);
+
+    return TRUE;
+
+Error:
+    for (i=0; i < nChannels; i++) {
+        if (Tables[i]) cmsFreeToneCurve(Tables[i]);
+    }
+
+    return FALSE;
+}
+
+// the below code fragment can be found in:
+// src/cmstypes.c
+static
+cmsBool  Read8bitTables(cmsContext ContextID, cmsIOHANDLER* io, cmsPipeline* lut, cmsUInt32Number nChannels)
+{
+    cmsUInt8Number* Temp = NULL;
+    cmsUInt32Number i, j;
+    cmsToneCurve* Tables[cmsMAXCHANNELS];
+
+    if (nChannels > cmsMAXCHANNELS) return FALSE;
+    if (nChannels <= 0) return FALSE;
+
+    memset(Tables, 0, sizeof(Tables));
+
+    Temp = (cmsUInt8Number*) _cmsMalloc(ContextID, 256);
+    if (Temp == NULL) return FALSE;
+
+    for (i=0; i < nChannels; i++) {
+        Tables[i] = cmsBuildTabulatedToneCurve16(ContextID, 256, NULL);
+        if (Tables[i] == NULL) goto Error;
+    }
+
+    for (i=0; i < nChannels; i++) {
+
+        if (io ->Read(io, Temp, 256, 1) != 1) goto Error;
+
+        for (j=0; j < 256; j++)
+            Tables[i]->Table16[j] = (cmsUInt16Number) FROM_8_TO_16(Temp[j]);
+    }
+
+    _cmsFree(ContextID, Temp);
+    Temp = NULL;
+
+    if (!cmsPipelineInsertStage(lut, cmsAT_END, cmsStageAllocToneCurves(ContextID, nChannels, Tables)))
+        goto Error;
+
+    for (i=0; i < nChannels; i++)
+        cmsFreeToneCurve(Tables[i]);
+
+    return TRUE;
+
+Error:
+    for (i=0; i < nChannels; i++) {
+        if (Tables[i]) cmsFreeToneCurve(Tables[i]);
+    }
+
+    if (Temp) _cmsFree(ContextID, Temp);
+    return FALSE;
+}
+
+// the below code fragment can be found in:
+// src/cmstypes.c
+static
+cmsBool Type_U16Fixed16_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, void* Ptr, cmsUInt32Number nItems)
+{
+    cmsFloat64Number* Value = (cmsFloat64Number*) Ptr;
+    cmsUInt32Number i;
+
+    for (i=0; i < nItems; i++) {
+
+        cmsUInt32Number v = (cmsUInt32Number) floor(Value[i]*65536.0 + 0.5);
+
+        if (!_cmsWriteUInt32Number(io, v)) return FALSE;
+    }
+
+    return TRUE;
+
+    cmsUNUSED_PARAMETER(self);
+}
+
+// the below code fragment can be found in:
+// src/cmstypes.c
+static
+cmsBool  Type_ColorantTable_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, void* Ptr, cmsUInt32Number nItems)
+{
+    cmsNAMEDCOLORLIST* NamedColorList = (cmsNAMEDCOLORLIST*) Ptr;
+    cmsUInt32Number i, nColors;
+
+    nColors = cmsNamedColorCount(NamedColorList);
+
+    if (!_cmsWriteUInt32Number(io, nColors)) return FALSE;
+
+    for (i=0; i < nColors; i++) {
+
+        char root[cmsMAX_PATH];
+        cmsUInt16Number PCS[3];
+
+        memset(root, 0, sizeof(root));
+
+        if (!cmsNamedColorInfo(NamedColorList, i, root, NULL, NULL, PCS, NULL)) return 0;
+        root[32] = 0;
+
+        if (!io ->Write(io, 32, root)) return FALSE;
+        if (!_cmsWriteUInt16Array(io, 3, PCS)) return FALSE;
+    }
+
+    return TRUE;
+
+    cmsUNUSED_PARAMETER(nItems);
+    cmsUNUSED_PARAMETER(self);
+}
+

@@ -1,0 +1,370 @@
+InputPtr ret;
+
+    if (ctxt->inputNr <= 0)
+        return(NULL);
+    ret = ctxt->inputTab[--ctxt->inputNr];
+    if (ctxt->inputNr == 0) {
+        ctxt->input = NULL;
+    } else {
+        ctxt->input = ctxt->inputTab[ctxt->inputNr - 1];
+    }
+    return(ret);
+}
+
+/**
+ * xmlParseStringEntityRef:
+ * @ctxt:  an XML parser context
+ * @str:  the string to parse
+ *
+ * Parse a string entity reference.
+ *
+ * Returns the entity or NULL in case of error
+ */
+static xmlEntityPtr
+xmlParseStringEntityRef(xmlParserCtxtPtr ctxt, const xmlChar **str)
+{
+    xmlEntityPtr ret;
+    const xmlChar *cur;
+    int len;
+
+    if (ctxt == NULL)
+        return(NULL);
+    cur = *str;
+    if ((cur == NULL) || (*cur == 0))
+        return(NULL);
+
+    if ((cur[0] == '&') && (cur[1] == '#')) {
+        int base;
+        int value;
+        int c;
+
+        cur += 2;
+        base = 10;
+        if ((cur[0] == 'x') || (cur[0] == 'X')) {
+            base = 16;
+            cur++;
+        }
+        value = 0;
+        while ((c = cur[0]) != 0) {
+            if ((c >= '0') && (c <= '9'))
+                value = (value * base) + (c - '0');
+            else if ((c >= 'a') && (c <= 'f'))
+                value = (value * base) + (c - 'a' + 10);
+            else if ((c >= 'A') && (c <= 'F'))
+                value = (value * base) + (c - 'A' + 10);
+            else
+                break;
+            cur++;
+        }
+        if (c == ';')
+            cur++;
+        if (c == 0)
+            *str = NULL;
+        else
+            *str = (xmlChar *) cur;
+        ret = xmlNewEntity(ctxt->dict, NULL, value, 0, 0, 0, 0, 0, 0);
+        if (ret == NULL)
+            xmlErrMemory(ctxt, NULL);
+        return(ret);
+    } else {
+        xmlChar *name;
+        int len;
+
+        cur = xmlParseName(cur, &len);
+        if (cur == NULL)
+            return(NULL);
+        name = xmlDictLookup(ctxt->dict, cur, len);
+        if (name == NULL)
+            return(NULL);
+        *str = cur + len;
+        ret = xmlGetEntity(ctxt, name);
+        if (ret == NULL)
+            xmlErrMemory(ctxt, NULL);
+        return(ret);
+    }
+}
+
+/**
+ * xmlParseCharData:
+ * @ctxt:  an XML parser context
+ * @maxlen:  the maximum length of the data to parse
+ *
+ * Parse a chunk of character data.
+ *
+ * Returns the number of characters parsed or -1 in case of error
+ */
+static int
+xmlParseCharData(xmlParserCtxtPtr ctxt, int maxlen)
+{
+    int len;
+    const xmlChar *cur;
+
+    if (ctxt == NULL)
+        return(-1);
+    cur = ctxt->input->cur;
+    len = ctxt->input->end - cur;
+    if (len > maxlen)
+        len = maxlen;
+    if (len <= 0)
+        return(0);
+    ctxt->input->cur += len;
+    ctxt->input->consumed += len;
+    ctxt->input->length += len;
+    ctxt->totalChars += len;
+    return(len);
+}
+
+/**
+ * xmlParseChunk:
+ * @ctxt:  an XML parser context
+ * @chunk:  the chunk of data to parse
+ * @len:  the length of the chunk
+ *
+ * Parse a chunk of data.
+ *
+ * Returns the number of characters parsed or -1 in case of error
+ */
+static int
+xmlParseChunk(xmlParserCtxtPtr ctxt, const xmlChar *chunk, int len)
+{
+    int ret;
+
+    if (ctxt == NULL)
+        return(-1);
+    if (chunk == NULL)
+        return(0);
+    if (ctxt->input == NULL) {
+        xmlParserInputBufferPtr buffer;
+
+        buffer = xmlParserInputBufferCreateMem(chunk, len,
+                                               XML_CHAR_ENCODING_NONE);
+        if (buffer == NULL)
+            return(-1);
+        ret = inputPush(ctxt, buffer);
+        if (ret < 0) {
+            xmlFreeParserInputBuffer(buffer);
+            return(-1);
+        }
+    } else {
+        xmlParserInputBufferPtr buffer;
+
+        buffer = ctxt->input;
+        if (buffer->error)
+            return(-1);
+        if (buffer->base == NULL) {
+            buffer->base = (xmlChar *) chunk;
+            buffer->cur = buffer->base;
+            buffer->end = buffer->base + len;
+        } else {
+            int newlen;
+            xmlChar *newbuf;
+
+            newlen = buffer->end - buffer->base;
+            newbuf = (xmlChar *) xmlRealloc(buffer->base,
+                                            newlen + len + 1);
+            if (newbuf == NULL) {
+                buffer->error = 1;
+                return(-1);
+            }
+            buffer->base = newbuf;
+            buffer->cur = buffer->base + newlen;
+            buffer->end = buffer->base + newlen + len;
+            memcpy(buffer->cur, chunk, len);
+            buffer->cur += len;
+        }
+        buffer->consumed += len;
+        buffer->length += len;
+        ctxt->totalChars += len;
+        ret = 0;
+    }
+    return(ret);
+}
+
+/**
+ * xmlParseDocument:
+ * @ctxt:  an XML parser context
+ *
+ * Parse the document.
+ *
+ * Returns 0 if the document is well formed, -1 in case of error
+ */
+static int
+xmlParseDocument(xmlParserCtxtPtr ctxt)
+{
+    int ret;
+
+    if (ctxt == NULL)
+        return(-1);
+    ret = xmlParseXMLDecl(ctxt);
+    if (ret < 0)
+        return(-1);
+    if (ctxt->version == NULL) {
+        xmlFatalErr(ctxt, XML_ERR_XML_VERSION, NULL);
+        return(-1);
+    }
+    if (ctxt->encoding == NULL) {
+        xmlFatalErr(ctxt, XML_ERR_ENCODING_MISSING, NULL);
+        return(-1);
+    }
+    if (ctxt->standalone == NULL) {
+        xmlFatalErr(ctxt, XML_ERR_STANDALONE_MISSING, NULL);
+        return(-1);
+    }
+    if (ctxt->standalone[0] != 'y' && ctxt->standalone[0] != 'n' &&
+        ctxt->standalone[0] != 'Y' && ctxt->standalone[0] != 'N') {
+        xmlFatalErr(ctxt, XML_ERR_STANDALONE_VALUE, NULL);
+        return(-1);
+    }
+    if (ctxt->intSubset == NULL) {
+        xmlFatalErr(ctxt, XML_ERR_INTERNAL_ERROR, NULL);
+        return(-1);
+    }
+    if (ctxt->extSubset == NULL) {
+        xmlFatalErr(ctxt, XML_ERR_INTERNAL_ERROR, NULL);
+        return(-1);
+    }
+    if (ctxt->encoding != NULL) {
+        xmlCharEncoding enc;
+
+        enc = xmlFindCharEncodingHandler(ctxt->encoding);
+        if (enc == NULL) {
+            xmlFatalErr(ctxt, XML_ERR_ENCODING_NAME, NULL);
+            return(-1);
+        }
+        ctxt->inputEncoding = enc;
+    }
+    ret = xmlParseMarkupDecl(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseContentDecl(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElementContentDecl(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseDocTypeDecl(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseEndElement(ctxt);
+    if (ret < 0)
+        return(-1);
+    ret = xmlParseElement(ctxt);
+    if (ret < 0)
+        return(-1);

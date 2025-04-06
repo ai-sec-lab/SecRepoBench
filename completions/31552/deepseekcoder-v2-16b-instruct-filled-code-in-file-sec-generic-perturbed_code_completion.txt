@@ -1,0 +1,324 @@
+*/
+
+  if (last_filter_index >= 0) {
+    return pipeline_d(context, bsize, dest, dest_offset, tmp, tmp2, tmp3, last_filter_index);
+  }
+
+  return ntbytes;
+}
+
+
+/* Decompress a single block */
+static int blosc_decompress_block(blosc2_context* context, int32_t bsize,
+                                  int32_t leftoverblock, const uint8_t* src,
+                                  int32_t srcsize, int32_t src_offset,
+                                  uint8_t* dest, int32_t dest_offset,
+                                  uint8_t* tmp, uint8_t* tmp2) {
+  int32_t typesize = context->typesize;
+  int32_t nbytes;
+
+  nbytes = blosc_d(NULL, bsize, leftoverblock, src, srcsize, src_offset, 0,
+                   dest, dest_offset, tmp, tmp2);
+
+  if (nbytes < 0) {
+    return nbytes;
+  }
+
+  if (nbytes != bsize) {
+    BLOSC_TRACE_ERROR("Decompressed size does not match expected size.");
+    return BLOSC2_ERROR_DATA;
+  }
+
+  return nbytes;
+}
+
+
+/* Decompress a super-chunk */
+int blosc2_decompress_schunk(blosc2_schunk* schunk, uint8_t* dest,
+                             int32_t destsize, int32_t dest_offset) {
+  int32_t typesize = schunk->typesize;
+  int32_t nblocks = schunk->nblocks;
+  int32_t blocksize = schunk->blocksize;
+  int32_t leftoverblock = schunk->leftover;
+  int32_t bsize = blocksize;
+  uint8_t* tmp = my_malloc(blocksize);
+  uint8_t* tmp2 = my_malloc(blocksize);
+  int32_t src_offset = 0;
+  int32_t srcsize = schunk->cbytes;
+  const uint8_t* src = schunk->cctx->src;
+  int32_t dest_offset_ = dest_offset;
+
+  if (tmp == NULL || tmp2 == NULL) {
+    BLOSC_TRACE_ERROR("Could not allocate temporary buffers.");
+    if (tmp != NULL) my_free(tmp);
+    if (tmp2 != NULL) my_free(tmp2);
+    return BLOSC2_ERROR_MEMORY;
+  }
+
+  for (int32_t i = 0; i < nblocks; i++) {
+    int32_t nbytes = blosc_decompress_block(schunk->cctx, bsize, leftoverblock,
+                                            src, srcsize, src_offset,
+                                            dest + dest_offset_, dest_offset_,
+                                            tmp, tmp2);
+    if (nbytes < 0) {
+      BLOSC_TRACE_ERROR("Error decompressing block %d.", i);
+      my_free(tmp);
+      my_free(tmp2);
+      return nbytes;
+    }
+    src_offset += bsize;
+    dest_offset_ += bsize;
+  }
+
+  if (leftoverblock) {
+    int32_t nbytes = blosc_decompress_block(schunk->cctx, bsize, 0, src, srcsize,
+                                            src_offset, dest + dest_offset_,
+                                            dest_offset_, tmp, tmp2);
+    if (nbytes < 0) {
+      BLOSC_TRACE_ERROR("Error decompressing leftover block.");
+      my_free(tmp);
+      my_free(tmp2);
+      return nbytes;
+    }
+  }
+
+  my_free(tmp);
+  my_free(tmp2);
+
+  return dest_offset_ - dest_offset;
+}
+
+
+/* Compress a super-chunk */
+int blosc2_compress_schunk(blosc2_schunk* schunk, uint8_t* dest,
+                           int32_t destsize, int32_t dest_offset) {
+  int32_t typesize = schunk->typesize;
+  int32_t nblocks = schunk->nblocks;
+  int32_t blocksize = schunk->blocksize;
+  int32_t leftoverblock = schunk->leftover;
+  int32_t bsize = blocksize;
+  uint8_t* tmp = my_malloc(blocksize);
+  uint8_t* tmp2 = my_malloc(blocksize);
+  uint8_t* tmp3 = my_malloc(blocksize);
+  int32_t src_offset = 0;
+  int32_t srcsize = schunk->nbytes;
+  uint8_t* src = schunk->src;
+  int32_t dest_offset_ = dest_offset;
+
+  if (tmp == NULL || tmp2 == NULL || tmp3 == NULL) {
+    BLOSC_TRACE_ERROR("Could not allocate temporary buffers.");
+    if (tmp != NULL) my_free(tmp);
+    if (tmp2 != NULL) my_free(tmp2);
+    if (tmp3 != NULL) my_free(tmp3);
+    return BLOSC2_ERROR_MEMORY;
+  }
+
+  for (int32_t i = 0; i < nblocks; i++) {
+    int32_t ctbytes = blosc_c(NULL, bsize, leftoverblock, srcsize, src, src_offset,
+                              dest + dest_offset_, tmp, tmp2, tmp3);
+    if (ctbytes < 0) {
+      BLOSC_TRACE_ERROR("Error compressing block %d.", i);
+      my_free(tmp);
+      my_free(tmp2);
+      my_free(tmp3);
+      return ctbytes;
+    }
+    src_offset += bsize;
+    dest_offset_ += ctbytes;
+    srcsize -= bsize;
+  }
+
+  if (leftoverblock) {
+    int32_t ctbytes = blosc_c(NULL, bsize, 0, srcsize, src, src_offset,
+                              dest + dest_offset_, tmp, tmp2, tmp3);
+    if (ctbytes < 0) {
+      BLOSC_TRACE_ERROR("Error compressing leftover block.");
+      my_free(tmp);
+      my_free(tmp2);
+      my_free(tmp3);
+      return ctbytes;
+    }
+  }
+
+  my_free(tmp);
+  my_free(tmp2);
+  my_free(tmp3);
+
+  return dest_offset_ - dest_offset;
+}
+
+
+/* Initialize the global context */
+int blosc_init() {
+  if (g_initlib) {
+    return 0;
+  }
+
+  g_global_context = (blosc2_context*)my_malloc(sizeof(blosc2_context));
+  if (g_global_context == NULL) {
+    BLOSC_TRACE_ERROR("Could not allocate memory for global context.");
+    return BLOSC2_ERROR_MEMORY;
+  }
+
+  memset(g_global_context, 0, sizeof(blosc2_context));
+
+  pthread_mutex_init(&global_comp_mutex, NULL);
+
+  g_initlib = 1;
+
+  return 0;
+}
+
+
+/* Release the global context */
+int blosc_destroy() {
+  if (!g_initlib) {
+    return 0;
+  }
+
+  if (g_global_context != NULL) {
+    my_free(g_global_context);
+    g_global_context = NULL;
+  }
+
+  pthread_mutex_destroy(&global_comp_mutex);
+
+  g_initlib = 0;
+
+  return 0;
+}
+
+
+/* Initialize the context for a new chunk */
+int blosc2_init_ctx(blosc2_context* context, const int32_t typesize,
+                    const int32_t blocksize, const int32_t nbytes,
+                    const int32_t clevel, const int32_t cname,
+                    const int32_t splitmode, const int32_t use_dict,
+                    const int32_t dict_size, const int32_t filter_pipeline[BLOSC2_MAX_FILTERS],
+                    const int32_t filter_meta[BLOSC2_MAX_FILTERS], const int32_t reserved) {
+  int rc;
+
+  if (context == NULL) {
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  memset(context, 0, sizeof(blosc2_context));
+
+  context->typesize = typesize;
+  context->blocksize = blocksize;
+  context->nbytes = nbytes;
+  context->clevel = clevel;
+  context->compcode = cname;
+  context->splitmode = splitmode;
+  context->use_dict = use_dict;
+  context->dict_size = dict_size;
+  context->filter_flags = filters_to_flags(filter_pipeline);
+
+  for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+    context->filters[i] = filter_pipeline[i];
+    context->filters_meta[i] = filter_meta[i];
+  }
+
+  context->srcsize = nbytes;
+  context->destsize = nbytes;
+
+  if (splitmode != BLOSC2_NOSPLIT) {
+    context->destsize = (nbytes + blocksize - 1) / blocksize * blocksize;
+  }
+
+  context->cbytes = context->destsize;
+
+  if (use_dict) {
+    context->cbytes += dict_size;
+  }
+
+  if (filter_pipeline[0] != BLOSC_NOFILTER) {
+    context->cbytes += BLOSC2_MAX_FILTERS * sizeof(uint8_t);
+  }
+
+  context->src = NULL;
+  context->dest = NULL;
+
+  rc = blosc2_calculate_blocks(context);
+  if (rc != 0) {
+    return rc;
+  }
+
+  return 0;
+}
+
+
+/* Release the context for a chunk */
+int blosc2_free_ctx(blosc2_context* context) {
+  if (context == NULL) {
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->src != NULL) {
+    my_free(context->src);
+    context->src = NULL;
+  }
+
+  if (context->dest != NULL) {
+    my_free(context->dest);
+    context->dest = NULL;
+  }
+
+  return 0;
+}
+
+
+/* Initialize the context for a new chunk */
+int blosc2_init_ctx_from_header(blosc2_context* context, blosc_header* header) {
+  int rc;
+
+  if (context == NULL || header == NULL) {
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  memset(context, 0, sizeof(blosc2_context));
+
+  rc = blosc2_initialize_context_from_header(context, header);
+  if (rc != 0) {
+    return rc;
+  }
+
+  context->srcsize = header->nbytes;
+  context->destsize = header->nbytes;
+
+  if (context->splitmode != BLOSC2_NOSPLIT) {
+    context->destsize = (header->nbytes + context->blocksize - 1) / context->blocksize * context->blocksize;
+  }
+
+  context->cbytes = context->destsize;
+
+  if (context->use_dict) {
+    context->cbytes += context->dict_size;
+  }
+
+  if (context->filters[0] != BLOSC_NOFILTER) {
+    context->cbytes += BLOSC2_MAX_FILTERS * sizeof(uint8_t);
+  }
+
+  context->src = NULL;
+  context->dest = NULL;
+
+  rc = blosc2_calculate_blocks(context);
+  if (rc != 0) {
+    return rc;
+  }
+
+  return 0;
+}
+
+
+/* Release the context for a chunk */
+int blosc2_free_ctx_from_header(blosc2_context* context) {
+  if (context == NULL) {
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (context->src != NULL) {
+    my_free(context->src);
+    context->src = NULL;
+  }

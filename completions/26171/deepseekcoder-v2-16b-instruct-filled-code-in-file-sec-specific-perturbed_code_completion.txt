@@ -1,0 +1,343 @@
+);
+      context->dict_ddict = NULL;
+    }
+    if (context->dict_cdict != NULL) {
+      // Free the existing dictionary (probably from another chunk)
+      ZSTD_freeCDict(context->dict_cdict);
+      context->dict_cdict = NULL;
+    }
+    context->dict_ddict = ZSTD_loadDDict(context->dict_dict_data, context->dict_dict_size);
+    context->dict_cdict = ZSTD_createCDict(context->dict_dict_data, context->dict_dict_size, context->clevel);
+#else
+    fprintf(stderr, "Dictionary support not available in this build\n");
+    return -1;
+#endif
+  }
+
+  return 1;
+}
+
+
+/* Initialize the context for compression or decompression */
+int blosc2_init_ctx(blosc2_context* context, const void* src, int32_t srcsize,
+                    void* dest, int32_t destsize, int clevel, uint8_t const *filters,
+                    uint8_t const *filters_meta, int32_t typesize, int compressor,
+                    int32_t blocksize, int new_nthreads, int nthreads, blosc2_schunk* schunk) {
+  int ret;
+
+  if (src == NULL || dest == NULL || filters == NULL || filters_meta == NULL ||
+      srcsize <= 0 || destsize <= 0 || typesize <= 0 || blocksize <= 0) {
+    return -1;
+  }
+
+  /* Initialize the context */
+  memset(context, 0, sizeof(blosc2_context));
+
+  /* Initialize synchronization variables */
+  pthread_mutex_init(&context->count_threads_mutex, NULL);
+  pthread_cond_init(&context->count_threads_cv, NULL);
+  context->count_threads = 0;
+
+  /* Initialize mutex for delta filter */
+  pthread_mutex_init(&context->delta_mutex, NULL);
+  pthread_cond_init(&context->delta_cv, NULL);
+  context->dref_not_init = 1;
+
+  /* Initialize the thread pool */
+  context->thread_contexts = my_malloc(nthreads * sizeof(struct thread_context*));
+  context->nthreads = nthreads;
+  context->new_nthreads = new_nthreads;
+  context->threads_started = 0;
+
+  /* Initialize the thread pool */
+  for (int i = 0; i < nthreads; i++) {
+    context->thread_contexts[i] = create_thread_context(context, i);
+  }
+
+  /* Initialize the thread pool */
+  ret = init_threadpool(context);
+  if (ret != 0) {
+    return ret;
+  }
+
+  /* Initialize the context for compression or decompression */
+  if (src != NULL && srcsize > 0) {
+    ret = initialize_context_compression(context, src, srcsize, dest,
+                                         destsize, clevel, filters, filters_meta,
+                                         typesize, compressor, blocksize, new_nthreads,
+                                         nthreads, schunk);
+  }
+  else {
+    ret = initialize_context_decompression(context, src, srcsize, dest, destsize);
+  }
+
+  return ret;
+}
+
+
+/* Free the context for compression or decompression */
+void blosc2_free_ctx(blosc2_context* context) {
+  if (context == NULL) {
+    return;
+  }
+
+  /* Free the thread pool */
+  release_threadpool(context);
+
+  /* Free synchronization variables */
+  pthread_mutex_destroy(&context->count_threads_mutex);
+  pthread_cond_destroy(&context->count_threads_cv);
+  pthread_mutex_destroy(&context->delta_mutex);
+  pthread_cond_destroy(&context->delta_cv);
+
+  /* Free the thread contexts */
+  for (int i = 0; i < context->nthreads; i++) {
+    free_thread_context(context->thread_contexts[i]);
+  }
+  my_free(context->thread_contexts);
+
+  /* Free the serial context */
+  if (context->serial_context != NULL) {
+    free_thread_context(context->serial_context);
+  }
+
+  /* Free the dictionary */
+  if (context->use_dict) {
+#if defined(HAVE_ZSTD)
+    if (context->dict_cdict != NULL) {
+      ZSTD_freeCDict(context->dict_cdict);
+    }
+    if (context->dict_ddict != NULL) {
+      ZSTD_freeDDict(context->dict_ddict);
+    }
+#endif
+  }
+
+  /* Free the context */
+  memset(context, 0, sizeof(blosc2_context));
+}
+
+
+/* Perform compression or decompression */
+int blosc2_do_compress(blosc2_context* context) {
+  return do_job(context);
+}
+
+int blosc2_do_decompress(blosc2_context* context) {
+  return do_job(context);
+}
+
+
+/* Get the number of bytes (de-)compressed */
+int64_t blosc2_get_nbytes(blosc2_context* context) {
+  return context->output_bytes;
+}
+
+
+/* Get the number of bytes in the input buffer */
+int64_t blosc2_get_cbytes(blosc2_context* context) {
+  return context->sourcesize;
+}
+
+
+/* Get the number of bytes in the output buffer */
+int64_t blosc2_get_dbytes(blosc2_context* context) {
+  return context->output_bytes;
+}
+
+
+/* Get the number of blocks in the input buffer */
+int64_t blosc2_get_nblocks(blosc2_context* context) {
+  return context->nblocks;
+}
+
+
+/* Get the number of threads used */
+int64_t blosc2_get_nthreads(blosc2_context* context) {
+  return context->nthreads;
+}
+
+
+/* Get the compressor used */
+const char* blosc2_get_compressor(blosc2_context* context) {
+  const char* compname;
+  blosc_compcode_to_compname(context->compcode, &compname);
+  return compname;
+}
+
+
+/* Get the filter flags */
+uint8_t blosc2_get_filter_flags(blosc2_context* context) {
+  return context->filter_flags;
+}
+
+
+/* Get the filter pipeline */
+void blosc2_get_filter_pipeline(blosc2_context* context, uint8_t* filters) {
+  for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+    filters[i] = context->filters[i];
+  }
+}
+
+
+/* Get the filter metadata pipeline */
+void blosc2_get_filter_metadata(blosc2_context* context, uint8_t* filters_meta) {
+  for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+    filters_meta[i] = context->filters_meta[i];
+  }
+}
+
+
+/* Get the typesize */
+int32_t blosc2_get_typesize(blosc2_context* context) {
+  return context->typesize;
+}
+
+
+/* Get the blocksize */
+int32_t blosc2_get_blocksize(blosc2_context* context) {
+  return context->blocksize;
+}
+
+
+/* Get the compression level */
+int blosc2_get_clevel(blosc2_context* context) {
+  return context->clevel;
+}
+
+
+/* Get the compressor code */
+int blosc2_get_compcode(blosc2_context* context) {
+  return context->compcode;
+}
+
+
+/* Get the super-chunk */
+blosc2_schunk* blosc2_get_schunk(blosc2_context* context) {
+  return context->schunk;
+}
+
+
+/* Set the super-chunk */
+void blosc2_set_schunk(blosc2_context* context, blosc2_schunk* schunk) {
+  context->schunk = schunk;
+}
+
+
+/* Set the thread pool callback */
+void blosc2_set_threads_callback(blosc2_context* context, blosc_threads_callback callback, void* callback_data) {
+  context->threads_callback = callback;
+  context->threads_callback_data = callback_data;
+}
+
+
+/* Set the dictionary for compression and decompression */
+int blosc2_set_dictionary(blosc2_context* context, const void* dict_data, size_t dict_size, int clevel) {
+#if defined(HAVE_ZSTD)
+  if (dict_data == NULL || dict_size == 0) {
+    return -1;
+  }
+  if (context->use_dict) {
+    if (context->dict_cdict != NULL) {
+      ZSTD_freeCDict(context->dict_cdict);
+      context->dict_cdict = NULL;
+    }
+    if (context->dict_ddict != NULL) {
+      ZSTD_freeDDict(context->dict_ddict);
+      context->dict_ddict = NULL;
+    }
+  }
+  context->use_dict = 1;
+  context->dict_dict_data = dict_data;
+  context->dict_dict_size = dict_size;
+  context->clevel = clevel;
+  context->dict_cdict = ZSTD_createCDict(dict_data, dict_size, clevel);
+  context->dict_ddict = ZSTD_createDDict(dict_data, dict_size);
+  return 0;
+#else
+  fprintf(stderr, "Dictionary support not available in this build\n");
+  return -1;
+#endif
+}
+
+
+/* Clear the dictionary */
+void blosc2_clear_dictionary(blosc2_context* context) {
+#if defined(HAVE_ZSTD)
+  if (context->use_dict) {
+    if (context->dict_cdict != NULL) {
+      ZSTD_freeCDict(context->dict_cdict);
+      context->dict_cdict = NULL;
+    }
+    if (context->dict_ddict != NULL) {
+      ZSTD_freeDDict(context->dict_ddict);
+      context->dict_ddict = NULL;
+    }
+    context->use_dict = 0;
+    context->dict_dict_data = NULL;
+    context->dict_dict_size = 0;
+  }
+#endif
+}
+
+
+/* Get the dictionary for decompression */
+const void* blosc2_get_dictionary(blosc2_context* context, size_t* dict_size) {
+#if defined(HAVE_ZSTD)
+  if (context->use_dict && context->dict_ddict != NULL) {
+    *dict_size = context->dict_dict_size;
+    return context->dict_dict_data;
+  }
+#endif
+  return NULL;
+}
+
+
+/* Get the dictionary for compression */
+const void* blosc2_get_cdict(blosc2_context* context) {
+#if defined(HAVE_ZSTD)
+  if (context->use_dict && context->dict_cdict != NULL) {
+    return context->dict_cdict;
+  }
+#endif
+  return NULL;
+}
+
+
+/* Get the dictionary for decompression */
+const void* blosc2_get_ddict(blosc2_context* context) {
+#if defined(HAVE_ZSTD)
+  if (context->use_dict && context->dict_ddict != NULL) {
+    return context->dict_ddict;
+  }
+#endif
+  return NULL;
+}
+
+
+/* Get the number of bytes in the dictionary */
+size_t blosc2_get_dict_size(blosc2_context* context) {
+#if defined(HAVE_ZSTD)
+  if (context->use_dict) {
+    return context->dict_dict_size;
+  }
+#endif
+  return 0;
+}
+
+
+/* Get the compression level used for the dictionary */
+int blosc2_get_dict_clevel(blosc2_context* context) {
+#if defined(HAVE_ZSTD)
+  if (context->use_dict) {
+    return context->clevel;
+  }
+#endif
+  return 0;
+}
+
+
+/* Get the compressor code for the dictionary */
+int blosc2_get_dict_compcode(blosc2_context* context) {
+#if defined(HAVE_ZSTD)
+  if (context->

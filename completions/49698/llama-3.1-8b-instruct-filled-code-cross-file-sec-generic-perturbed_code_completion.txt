@@ -1,0 +1,72 @@
+// <MASK>
+exr_result_t
+internal_huf_decompress (
+    exr_decode_pipeline_t* decode,
+    const uint8_t*         compressed,
+    uint64_t               nCompressed,
+    uint16_t*              raw,
+    uint64_t               nRawSize,
+    void*                  spare,
+    uint64_t               sparebytes)
+{
+    // Retrieve the context from the decode structure if available.
+    const struct _internal_exr_context* pctxt = decode->context;
+
+    // Check if the compressed data size is at least 20 bytes for a valid header.
+    if (nCompressed < 20)
+    {
+        return EXR_ERR_CORRUPT_CHUNK;
+    }
+
+    // Validate that 'im' and 'iM' are within acceptable limits.
+    uint32_t im = readUInt (compressed);
+    uint32_t iM = readUInt (compressed + 4);
+    if (im < 0 || im >= HUF_ENCSIZE || iM < 0 || iM >= HUF_ENCSIZE)
+    {
+        return EXR_ERR_CORRUPT_CHUNK;
+    }
+
+    // Ensure there is enough data in the buffer to perform decompression.
+    uint8_t* ptr = compressed + 20;
+    uint64_t nBytes = (static_cast<uint64_t> (readUInt (compressed + 12)) + 7) / 8;
+    if (ptr + nBytes > compressed + nCompressed)
+    {
+        return EXR_ERR_CORRUPT_CHUNK;
+    }
+
+    // Check if fast Huffman decoding is enabled and applicable based on the data size.
+    if (FastHufDecoder::enabled () && readUInt (compressed + 12) > 128)
+    {
+        // Initialize and perform fast Huffman decoding.
+        FastHufDecoder fhd (ptr, nCompressed - (ptr - compressed), im, iM, iM);
+        fhd.decode ((unsigned char*) ptr, readUInt (compressed + 12), raw, nRawSize);
+    }
+    else
+    {
+        // Clear and unpack the Huffman encoding table for use in decoding.
+        AutoArray<uint64_t, HUF_ENCSIZE> freq;
+        AutoArray<HufDec, HUF_DECSIZE>   hdec;
+
+        hufClearDecTable (hdec);
+
+        hufUnpackEncTable (
+            &ptr, nCompressed - (ptr - compressed), im, iM, freq);
+
+        try
+        {
+            // Build the Huffman decoding table based on frequency data.
+            hufBuildDecTable (freq, im, iM, hdec);
+            // Execute the standard Huffman decoding function.
+            hufDecode (freq, hdec, ptr, readUInt (compressed + 12), iM, nRawSize, raw);
+        }
+        catch (...)
+        {
+            hufFreeDecTable (hdec);
+            throw;
+        }
+
+        hufFreeDecTable (hdec);
+    }
+
+    return EXR_ERR_SUCCESS;
+}

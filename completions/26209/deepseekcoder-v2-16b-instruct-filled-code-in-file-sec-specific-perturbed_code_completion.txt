@@ -1,0 +1,247 @@
+3*mb_x+c] = buffer[mb_x][i];
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
+                        AVPacket *avpkt)
+{
+    MJpegDecodeContext *s = avctx->priv_data;
+    const uint8_t *buf = avpkt->data;
+    int buf_size = avpkt->size;
+    int ret;
+
+    if (buf_size <= 0)
+        return AVERROR(EINVAL);
+
+    if (s->buffer_size < buf_size) {
+        av_freep(&s->buffer);
+        s->buffer = av_malloc(buf_size);
+        if (!s->buffer)
+            return AVERROR(ENOMEM);
+        s->buffer_size = buf_size;
+    }
+
+    memcpy(s->buffer, buf, buf_size);
+    init_get_bits(&s->gb, s->buffer, buf_size * 8);
+
+    if ((ret = decode_frame_header(s)) < 0)
+        return ret;
+
+    if ((ret = decode_frame_data(s)) < 0)
+        return ret;
+
+    *got_frame = s->got_picture;
+    if (*got_frame)
+        av_frame_ref(data, s->picture_ptr);
+
+    return buf_size;
+}
+
+static int decode_frame_header(MJpegDecodeContext *s)
+{
+    int len;
+
+    if (s->start_code == -1) {
+        s->start_code = get_bits(&s->gb, 16);
+        if (s->start_code != 0xFFD8) {
+            av_log(s->avctx, AV_LOG_ERROR, "start code is not 0xFFD8\n");
+            return AVERROR_INVALIDDATA;
+        }
+    }
+
+    while (get_bits_left(&s->gb) > 16) {
+        int marker = get_bits(&s->gb, 8);
+        if (marker == 0xFF) {
+            int marker2 = get_bits(&s->gb, 8);
+            if (marker2 == 0) {
+                av_log(s->avctx, AV_LOG_ERROR, "invalid marker 0xFF00\n");
+                return AVERROR_INVALIDDATA;
+            }
+            if (marker2 == 0xD9) { /* EOI */
+                av_log(s->avctx, AV_LOG_DEBUG, "end of image\n");
+                return 0;
+            }
+            if (marker2 == 0xD0 || marker2 == 0xD1 || marker2 == 0xD2 ||
+                marker2 == 0xD3 || marker2 == 0xD4 || marker2 == 0xD5 ||
+                marker2 == 0xD6 || marker2 == 0xD7 || marker2 == 0xD8) { /* RSTn */
+                av_log(s->avctx, AV_LOG_DEBUG, "restart marker %02X\n", marker2);
+                continue;
+            }
+            if (marker2 == 0xD9) { /* EOI */
+                av_log(s->avctx, AV_LOG_DEBUG, "end of image\n");
+                return 0;
+            }
+            len = get_bits(&s->gb, 16) - 2;
+            if (len < 0) {
+                av_log(s->avctx, AV_LOG_ERROR, "marker length is negative\n");
+                return AVERROR_INVALIDDATA;
+            }
+            if (len > get_bits_left(&s->gb)) {
+                av_log(s->avctx, AV_LOG_ERROR, "marker length is too large\n");
+                return AVERROR_INVALIDDATA;
+            }
+            if (marker2 == 0xE0 || marker2 == 0xE1 || marker2 == 0xE2 ||
+                marker2 == 0xE3 || marker2 == 0xE4 || marker2 == 0xE5 ||
+                marker2 == 0xE6 || marker2 == 0xE7 || marker2 == 0xE8 ||
+                marker2 == 0xE9 || marker2 == 0xEA || marker2 == 0xEB ||
+                marker2 == 0xEC || marker2 == 0xED || marker2 == 0xEE ||
+                marker2 == 0xEF) { /* APPn */
+                av_log(s->avctx, AV_LOG_DEBUG, "application marker %02X\n", marker2);
+                skip_bits(&s->gb, 8 * len);
+                continue;
+            }
+            if (marker2 == 0xFE) { /* COM */
+                av_log(s->avctx, AV_LOG_DEBUG, "comment marker\n");
+                skip_bits(&s->gb, 8 * len);
+                continue;
+            }
+            if (marker2 == 0x01) { /* TEM */
+                av_log(s->avctx, AV_LOG_DEBUG, "define restart interval\n");
+                s->restart_interval = get_bits(&s->gb, 16);
+                continue;
+            }
+            if (marker2 == 0xDB) { /* DQT */
+                av_log(s->avctx, AV_LOG_DEBUG, "define quantization table\n");
+                if ((ret = ff_mjpeg_decode_dqt(s)) < 0)
+                    return ret;
+                continue;
+            }
+            if (marker2 == 0xC4) { /* DHT */
+                av_log(s->avctx, AV_LOG_DEBUG, "define Huffman table\n");
+                if ((ret = ff_mjpeg_decode_dht(s)) < 0)
+                    return ret;
+                continue;
+            }
+            if (marker2 == 0xDA) { /* SOS */
+                av_log(s->avctx, AV_LOG_DEBUG, "start of scan\n");
+                if ((ret = decode_scan(s)) < 0)
+                    return ret;
+                continue;
+            }
+            if (marker2 == 0xC0 || marker2 == 0xC1 || marker2 == 0xC2 ||
+                marker2 == 0xC3 || marker2 == 0xC5 || marker2 == 0xC6 ||
+                marker2 == 0xC7 || marker2 == 0xC8 || marker2 == 0xC9 ||
+                marker2 == 0xCA || marker2 == 0xCB || marker2 == 0xCD ||
+                marker2 == 0xCE || marker2 == 0xCF) { /* SOF */
+                av_log(s->avctx, AV_LOG_DEBUG, "start of frame %02X\n", marker2);
+                if ((ret = ff_mjpeg_decode_sof(s)) < 0)
+                    return ret;
+                continue;
+            }
+            if (marker2 == 0xC) { /* JPG */
+                av_log(s->avctx, AV_LOG_DEBUG, "extension marker\n");
+                skip_bits(&s->gb, 8 * len);
+                continue;
+            }
+            av_log(s->avctx, AV_LOG_WARNING, "unknown marker %02X\n", marker2);
+            skip_bits(&s->gb, 8 * len);
+            continue;
+        }
+        len = get_bits(&s->gb, 16) - 2;
+        if (len < 0) {
+            av_log(s->avctx, AV_LOG_ERROR, "marker length is negative\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (len > get_bits_left(&s->gb)) {
+            av_log(s->avctx, AV_LOG_ERROR, "marker length is too large\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (marker == 0x00) { /* Start of Image */
+            av_log(s->avctx, AV_LOG_DEBUG, "start of image\n");
+            continue;
+        }
+        if (marker == 0xD9) { /* EOI */
+            av_log(s->avctx, AV_LOG_DEBUG, "end of image\n");
+            return 0;
+        }
+        if (marker == 0xD0 || marker == 0xD1 || marker == 0xD2 ||
+            marker == 0xD3 || marker == 0xD4 || marker == 0xD5 ||
+            marker == 0xD6 || marker == 0xD7 || marker == 0xD8) { /* RSTn */
+            av_log(s->avctx, AV_LOG_DEBUG, "restart marker %02X\n", marker);
+            continue;
+        }
+        if (marker == 0xFE) { /* COM */
+            av_log(s->avctx, AV_LOG_DEBUG, "comment marker\n");
+            skip_bits(&s->gb, 8 * len);
+            continue;
+        }
+        if (marker == 0x01) { /* TEM */
+            av_log(s->avctx, AV_LOG_DEBUG, "define restart interval\n");
+            s->restart_interval = get_bits(&s->gb, 16);
+            continue;
+        }
+        if (marker == 0xDB) { /* DQT */
+            av_log(s->avctx, AV_LOG_DEBUG, "define quantization table\n");
+            if ((ret = ff_mjpeg_decode_dqt(s)) < 0)
+                return ret;
+            continue;
+        }
+        if (marker == 0xC4) { /* DHT */
+            av_log(s->avctx, AV_LOG_DEBUG, "define Huffman table\n");
+            if ((ret = ff_mjpeg_decode_dht(s)) < 0)
+                return ret;
+            continue;
+        }
+        if (marker == 0xDA) { /* SOS */
+            av_log(s->avctx, AV_LOG_DEBUG, "start of scan\n");
+            if ((ret = decode_scan(s)) < 0)
+                return ret;
+            continue;
+        }
+        if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2 ||
+            marker == 0xC3 || marker == 0xC5 || marker == 0xC6 ||
+            marker == 0xC7 || marker == 0xC8 || marker == 0xC9 ||
+            marker == 0xCA || marker == 0xCB || marker == 0xCD ||
+            marker == 0xCE || marker == 0xCF) { /* SOF */
+            av_log(s->avctx, AV_LOG_DEBUG, "start of frame %02X\n", marker);
+            if ((ret = ff_mjpeg_decode_sof(s)) < 0)
+                return ret;
+            continue;
+        }
+        if (marker == 0xC) { /* JPG */
+            av_log(s->avctx, AV_LOG_DEBUG, "extension marker\n");
+            skip_bits(&s->gb, 8 * len);
+            continue;
+        }
+        av_log(s->avctx, AV_LOG_WARNING, "unknown marker %02X\n", marker);
+        skip_bits(&s->gb, 8 * len);
+    }
+
+    return AVERROR_INVALIDDATA;
+}
+
+static int decode_frame_data(MJpegDecodeContext *s)
+{
+    int ret;
+
+    if (s->first_picture) {
+        s->first_picture = 0;
+        if ((ret = decode_scan(s)) < 0)
+            return ret;
+    } else {
+        if ((ret = decode_scan(s)) < 0)
+            return ret;
+    }
+
+    return 0;
+}
+
+static int decode_scan(MJpegDecodeContext *s)
+{
+    int ret;
+
+    while (get_bits_left(&s->gb) > 16) {
+        int marker = get_bits(&s->gb, 8);
+        if (marker == 0xFF) {
+            int marker2 = get_bits(&s->gb, 8);
+            if (marker2 == 0) {
+                av_log(s->avctx, AV_LOG_ERROR, "invalid marker 0xFF00\n");
+                return AVERROR_INVALIDDATA;
+            }
+            if (marker2 == 0xD9) { /* EOI */
+                av_log(s->avctx, AV_LOG_DEBUG, "end of image\n");

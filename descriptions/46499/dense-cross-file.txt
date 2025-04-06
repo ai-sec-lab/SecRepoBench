@@ -1,0 +1,259 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/gtp.c
+static void ndpi_check_gtp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int32_t payload_len = packet->payload_packet_len;
+
+  if((packet->udp != NULL) && (payload_len > sizeof(struct gtp_header_generic))) {
+    u_int32_t gtp_u  = ntohs(2152);
+    u_int32_t gtp_c  = ntohs(2123);
+    u_int32_t gtp_prime = ntohs(3386);
+
+    struct gtp_header_generic *gtp = (struct gtp_header_generic *)packet->payload;
+    u_int8_t version = (gtp->flags & 0xE0) >> 5;
+    u_int8_t pt = (gtp->flags & 0x10) >> 4;
+    u_int16_t message_len = ntohs(gtp->message_len);
+
+    if((packet->udp->source == gtp_u) || (packet->udp->dest == gtp_u)) {
+      if((version == 1) && (pt == 1) &&
+         (payload_len >= HEADER_LEN_GTP_U) &&
+         (message_len <= (payload_len - HEADER_LEN_GTP_U))) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-u\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_U, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+    if((packet->udp->source == gtp_c) || (packet->udp->dest == gtp_c)) {
+      if(((version == 1) &&
+          (payload_len >= HEADER_LEN_GTP_C_V1) &&
+          (message_len == (payload_len - HEADER_LEN_GTP_C_V1)) &&
+          (message_len >= 4 * (!!(gtp->flags & 0x07))) &&
+          (gtp->message_type > 0 && gtp->message_type <= 129)) || /* Loose check based on TS 29.060 7.1 */
+         ((version == 2) &&
+          /* payload_len is always valid, because HEADER_LEN_GTP_C_V2 == sizeof(struct gtp_header_generic) */
+          (message_len == (payload_len - HEADER_LEN_GTP_C_V2)))) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-c\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_C, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+    if((packet->udp->source == gtp_prime) || (packet->udp->dest == gtp_prime)) {
+      if((pt == 0) &&
+         ((gtp->flags & 0x0E) >> 1 == 0x7) && /* Spare bits */
+         (payload_len >= HEADER_LEN_GTP_PRIME) &&
+         (message_len <= (payload_len - HEADER_LEN_GTP_PRIME)) &&
+         ((gtp->message_type > 0 && gtp->message_type <= 7) || /* Check based on TS 32.295 6.2.1 */
+          gtp->message_type == 240 || gtp->message_type == 241)) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-prime\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_PRIME, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  return;
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+void ndpi_connection_tracking(struct ndpi_detection_module_struct *ndpi_str,
+			      struct ndpi_flow_struct *flow) {
+  if(!flow) {
+    return;
+  } else {
+    /* const for gcc code optimization and cleaner code */
+    struct ndpi_packet_struct *packet = &ndpi_str->packet;
+    const struct ndpi_iphdr *iph = packet->iph;
+    const struct ndpi_ipv6hdr *iphv6 = packet->iphv6;
+    const struct ndpi_tcphdr *tcph = packet->tcp;
+    const struct ndpi_udphdr *udph = packet->udp;
+
+    packet->tcp_retransmission = 0, packet->packet_direction = 0;
+
+    if(ndpi_str->direction_detect_disable) {
+      packet->packet_direction = flow->packet_direction;
+    } else {
+      if(iph != NULL && ntohl(iph->saddr) < ntohl(iph->daddr))
+	packet->packet_direction = 1;
+
+      if((iphv6 != NULL)
+	 && NDPI_COMPARE_IPV6_ADDRESS_STRUCTS(&iphv6->ip6_src, &iphv6->ip6_dst) != 0)
+	packet->packet_direction = 1;
+    }
+
+    flow->is_ipv6 = (packet->iphv6 != NULL);
+    if(flow->is_ipv6 == 0)
+      flow->saddr = packet->iph->saddr, flow->daddr = packet->iph->daddr; /* See (*#*) */
+
+    flow->last_packet_time_ms = packet->current_time_ms;
+
+    packet->packet_lines_parsed_complete = 0;
+
+    if(flow->init_finished == 0) {
+      flow->init_finished = 1;
+      flow->setup_packet_direction = packet->packet_direction;
+    }
+
+    if(tcph != NULL) {
+
+      flow->sport = tcph->source, flow->dport = tcph->dest; /* (*#*) */
+
+      if(!ndpi_str->direction_detect_disable)
+	packet->packet_direction = (ntohs(tcph->source) < ntohs(tcph->dest)) ? 1 : 0;
+
+      if(tcph->syn != 0 && tcph->ack == 0 && flow->l4.tcp.seen_syn == 0 && flow->l4.tcp.seen_syn_ack == 0 &&
+	 flow->l4.tcp.seen_ack == 0) {
+	flow->l4.tcp.seen_syn = 1;
+      } else
+	if(tcph->syn != 0 && tcph->ack != 0 && flow->l4.tcp.seen_syn == 1 && flow->l4.tcp.seen_syn_ack == 0 &&
+	   flow->l4.tcp.seen_ack == 0) {
+	  flow->l4.tcp.seen_syn_ack = 1;
+	} else
+	  if(tcph->syn == 0 && tcph->ack == 1 && flow->l4.tcp.seen_syn == 1 && flow->l4.tcp.seen_syn_ack == 1 &&
+	     flow->l4.tcp.seen_ack == 0) {
+	    flow->l4.tcp.seen_ack = 1;
+	  }
+
+      if((flow->next_tcp_seq_nr[0] == 0 && flow->next_tcp_seq_nr[1] == 0) ||
+	 (flow->next_tcp_seq_nr[0] == 0 || flow->next_tcp_seq_nr[1] == 0)) {
+	/* initialize tcp sequence counters */
+	/* the ack flag needs to be set to get valid sequence numbers from the other
+	 * direction. Usually it will catch the second packet syn+ack but it works
+	 * also for asymmetric traffic where it will use the first data packet
+	 *
+	 * if the syn flag is set add one to the sequence number,
+	 * otherwise use the payload length.
+	 */
+	if(tcph->ack != 0) {
+	  flow->next_tcp_seq_nr[packet->packet_direction] =
+	    ntohl(tcph->seq) + (tcph->syn ? 1 : packet->payload_packet_len);
+
+	  /*
+	    Check to avoid discrepancies in case we analyze a flow that does not start with SYN...
+	    but that is already started when nDPI being to process it. See also (***) below
+	  */
+	  if(flow->num_processed_pkts > 1)
+	    flow->next_tcp_seq_nr[1 - packet->packet_direction] = ntohl(tcph->ack_seq);
+	}
+      } else if(packet->payload_packet_len > 0) {
+	/* check tcp sequence counters */
+	if(((u_int32_t)(ntohl(tcph->seq) - flow->next_tcp_seq_nr[packet->packet_direction])) >
+	   ndpi_str->tcp_max_retransmission_window_size) {
+	  packet->tcp_retransmission = 1;
+
+	  /* CHECK IF PARTIAL RETRY IS HAPPENING */
+	  if((flow->next_tcp_seq_nr[packet->packet_direction] - ntohl(tcph->seq) <
+	      packet->payload_packet_len)) {
+	    if(flow->num_processed_pkts > 1) /* See also (***) above */
+	      flow->next_tcp_seq_nr[packet->packet_direction] = ntohl(tcph->seq) + packet->payload_packet_len;
+	  }
+	}
+	else {
+	  flow->next_tcp_seq_nr[packet->packet_direction] = ntohl(tcph->seq) + packet->payload_packet_len;
+	}
+      }
+
+      if(tcph->rst) {
+	flow->next_tcp_seq_nr[0] = 0;
+	flow->next_tcp_seq_nr[1] = 0;
+      }
+    } else if(udph != NULL) {
+      flow->sport = udph->source, flow->dport = udph->dest; /* (*#*) */
+
+      if(!ndpi_str->direction_detect_disable)
+	packet->packet_direction = (htons(udph->source) < htons(udph->dest)) ? 1 : 0;
+    }
+
+    if(flow->packet_counter < MAX_PACKET_COUNTER && packet->payload_packet_len) {
+      flow->packet_counter++;
+    }
+
+    if(flow->packet_direction_counter[packet->packet_direction] < MAX_PACKET_COUNTER &&
+       packet->payload_packet_len) {
+      flow->packet_direction_counter[packet->packet_direction]++;
+    }
+
+    if(flow->byte_counter[packet->packet_direction] + packet->payload_packet_len >
+       flow->byte_counter[packet->packet_direction]) {
+      flow->byte_counter[packet->packet_direction] += packet->payload_packet_len;
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tinc.c
+void ndpi_search_tinc(struct ndpi_detection_module_struct* ndpi_struct, struct ndpi_flow_struct* flow) {
+  NDPI_LOG_DBG(ndpi_struct, "tinc detection\n");
+
+  if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_TINC) {
+    ndpi_check_tinc(ndpi_struct, flow);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/bjnp.c
+static void ndpi_check_bjnp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int32_t payload_len = packet->payload_packet_len;
+
+  if(packet->udp != NULL) {
+    if(payload_len > 4) {
+      if((memcmp((const char *)packet->payload, "BJNP", 4) == 0)
+	 || (memcmp((const char *)packet->payload, "BNJB", 4) == 0)
+	 || (memcmp((const char *)packet->payload, "BJNB", 4) == 0)
+	 || (memcmp((const char *)packet->payload, "MFNP", 4) == 0)
+	 ) {
+	    NDPI_LOG_INFO(ndpi_struct, "found bjnp\n");
+	    ndpi_int_bjnp_add_connection(ndpi_struct, flow, 0);
+	    return;
+	  }
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/lisp.c
+static void ndpi_check_lisp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int16_t lisp_port1 = htons(LISP_PORT1);
+  u_int16_t lisp_port = htons(LISP_PORT);
+
+  if(packet->udp != NULL) {
+    if((packet->udp->source == lisp_port && packet->udp->dest == lisp_port) ||
+       (packet->udp->source == lisp_port1 && packet->udp->dest == lisp_port1)) {
+      NDPI_LOG_INFO(ndpi_struct, "found lisp\n");
+      ndpi_int_lisp_add_connection(ndpi_struct, flow, 0);
+      return;
+    }
+  } else {
+    /* See draft-kouvelas-lisp-map-server-reliable-transport-07 */
+    if(packet->tcp->source == lisp_port1 ||
+       packet->tcp->dest == lisp_port1) {
+      if(packet->payload_packet_len >= 8) {
+        u_int16_t msg_len = ntohs(*(u_int16_t *)&packet->payload[2]);
+	if(msg_len >= packet->payload_packet_len &&
+	   /* End marker: we don't handle fragmented messages */
+	   packet->payload[packet->payload_packet_len - 1] == 0xE9 &&
+	   packet->payload[packet->payload_packet_len - 2] == 0xAD &&
+	   packet->payload[packet->payload_packet_len - 3] == 0xAC &&
+	   packet->payload[packet->payload_packet_len - 4] == 0x9F) {
+	  NDPI_LOG_INFO(ndpi_struct, "found lisp\n");
+	  ndpi_int_lisp_add_connection(ndpi_struct, flow, 0);
+          return;
+	}
+      }
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+

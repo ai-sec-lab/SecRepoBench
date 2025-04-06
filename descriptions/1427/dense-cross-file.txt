@@ -1,0 +1,573 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libavcodec/cdgraphics.c
+static int cdg_decode_frame(AVCodecContext *avctx,
+                            void *data, int *got_frame, AVPacket *avpkt)
+{
+    GetByteContext gb;
+    int buf_size       = avpkt->size;
+    int ret;
+    uint8_t command, inst;
+    uint8_t cdg_data[CDG_DATA_SIZE] = {0};
+    AVFrame *frame = data;
+    CDGraphicsContext *cc = avctx->priv_data;
+
+    if (buf_size < CDG_MINIMUM_PKT_SIZE) {
+        av_log(avctx, AV_LOG_ERROR, "buffer too small for decoder\n");
+        return AVERROR(EINVAL);
+    }
+    if (buf_size > CDG_HEADER_SIZE + CDG_DATA_SIZE) {
+        av_log(avctx, AV_LOG_ERROR, "buffer too big for decoder\n");
+        return AVERROR(EINVAL);
+    }
+
+    bytestream2_init(&gb, avpkt->data, avpkt->size);
+
+    if ((ret = ff_reget_buffer(avctx, cc->frame)) < 0)
+        return ret;
+    if (!avctx->frame_number) {
+        memset(cc->frame->data[0], 0, cc->frame->linesize[0] * avctx->height);
+        memset(cc->frame->data[1], 0, AVPALETTE_SIZE);
+    }
+
+    command = bytestream2_get_byte(&gb);
+    inst    = bytestream2_get_byte(&gb);
+    inst    &= CDG_MASK;
+    bytestream2_skip(&gb, 2);
+    bytestream2_get_buffer(&gb, cdg_data, sizeof(cdg_data));
+
+    if ((command & CDG_MASK) == CDG_COMMAND) {
+        switch (inst) {
+        case CDG_INST_MEMORY_PRESET:
+            if (!(cdg_data[1] & 0x0F))
+                memset(cc->frame->data[0], cdg_data[0] & 0x0F,
+                       cc->frame->linesize[0] * CDG_FULL_HEIGHT);
+            break;
+        case CDG_INST_LOAD_PAL_LO:
+        case CDG_INST_LOAD_PAL_HIGH:
+            if (buf_size - CDG_HEADER_SIZE < CDG_DATA_SIZE) {
+                av_log(avctx, AV_LOG_ERROR, "buffer too small for loading palette\n");
+                return AVERROR(EINVAL);
+            }
+
+            cdg_load_palette(cc, cdg_data, inst == CDG_INST_LOAD_PAL_LO);
+            break;
+        case CDG_INST_BORDER_PRESET:
+            cdg_border_preset(cc, cdg_data);
+            break;
+        case CDG_INST_TILE_BLOCK_XOR:
+        case CDG_INST_TILE_BLOCK:
+            if (buf_size - CDG_HEADER_SIZE < CDG_DATA_SIZE) {
+                av_log(avctx, AV_LOG_ERROR, "buffer too small for drawing tile\n");
+                return AVERROR(EINVAL);
+            }
+
+            ret = cdg_tile_block(cc, cdg_data, inst == CDG_INST_TILE_BLOCK_XOR);
+            if (ret) {
+                av_log(avctx, AV_LOG_ERROR, "tile is out of range\n");
+                return ret;
+            }
+            break;
+        case CDG_INST_SCROLL_PRESET:
+        case CDG_INST_SCROLL_COPY:
+            if (buf_size - CDG_HEADER_SIZE < CDG_MINIMUM_SCROLL_SIZE) {
+                av_log(avctx, AV_LOG_ERROR, "buffer too small for scrolling\n");
+                return AVERROR(EINVAL);
+            }
+
+            if ((ret = ff_get_buffer(avctx, frame, AV_GET_BUFFER_FLAG_REF)) < 0)
+                return ret;
+
+            cdg_scroll(cc, cdg_data, frame, inst == CDG_INST_SCROLL_COPY);
+            av_frame_unref(cc->frame);
+            ret = av_frame_ref(cc->frame, frame);
+            if (ret < 0)
+                return ret;
+            break;
+        case CDG_INST_TRANSPARENT_COL:
+            cc->transparency = cdg_data[0] & 0xF;
+            break;
+        default:
+            break;
+        }
+
+        if (!frame->data[0]) {
+            ret = av_frame_ref(frame, cc->frame);
+            if (ret < 0)
+                return ret;
+        }
+        *got_frame = 1;
+    } else {
+        *got_frame = 0;
+    }
+
+    return avpkt->size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/8bps.c
+static int decode_frame(AVCodecContext *avctx, void *data,
+                        int *got_frame, AVPacket *avpkt)
+{
+    AVFrame *frame = data;
+    const uint8_t *buf = avpkt->data;
+    int buf_size       = avpkt->size;
+    EightBpsContext * const c = avctx->priv_data;
+    const unsigned char *encoded = buf;
+    unsigned char *pixptr, *pixptr_end;
+    unsigned int height = avctx->height; // Real image height
+    unsigned int dlen, p, row;
+    const unsigned char *lp, *dp, *ep;
+    unsigned char count;
+    unsigned int px_inc;
+    unsigned int planes     = c->planes;
+    unsigned char *planemap = c->planemap;
+    int ret;
+
+    if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
+        return ret;
+
+    ep = encoded + buf_size;
+
+    /* Set data pointer after line lengths */
+    dp = encoded + planes * (height << 1);
+
+    px_inc = planes + (avctx->pix_fmt == AV_PIX_FMT_0RGB32);
+
+    for (p = 0; p < planes; p++) {
+        /* Lines length pointer for this plane */
+        lp = encoded + p * (height << 1);
+
+        /* Decode a plane */
+        for (row = 0; row < height; row++) {
+            pixptr = frame->data[0] + row * frame->linesize[0] + planemap[p];
+            pixptr_end = pixptr + frame->linesize[0];
+            if (ep - lp < row * 2 + 2)
+                return AVERROR_INVALIDDATA;
+            dlen = av_be2ne16(*(const unsigned short *)(lp + row * 2));
+            /* Decode a row of this plane */
+            while (dlen > 0) {
+                if (ep - dp <= 1)
+                    return AVERROR_INVALIDDATA;
+                if ((count = *dp++) <= 127) {
+                    count++;
+                    dlen -= count + 1;
+                    if (pixptr_end - pixptr < count * px_inc)
+                        break;
+                    if (ep - dp < count)
+                        return AVERROR_INVALIDDATA;
+                    while (count--) {
+                        *pixptr = *dp++;
+                        pixptr += px_inc;
+                    }
+                } else {
+                    count = 257 - count;
+                    if (pixptr_end - pixptr < count * px_inc)
+                        break;
+                    while (count--) {
+                        *pixptr = *dp;
+                        pixptr += px_inc;
+                    }
+                    dp++;
+                    dlen -= 2;
+                }
+            }
+        }
+    }
+
+    if (avctx->bits_per_coded_sample <= 8) {
+        int size;
+        const uint8_t *pal = av_packet_get_side_data(avpkt,
+                                                     AV_PKT_DATA_PALETTE,
+                                                     &size);
+        if (pal && size == AVPALETTE_SIZE) {
+            frame->palette_has_changed = 1;
+            memcpy(c->pal, pal, AVPALETTE_SIZE);
+        } else if (pal) {
+            av_log(avctx, AV_LOG_ERROR, "Palette size %d is wrong\n", size);
+        }
+
+        memcpy (frame->data[1], c->pal, AVPALETTE_SIZE);
+    }
+
+    *got_frame = 1;
+
+    /* always report that the buffer was completely consumed */
+    return buf_size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/c93.c
+static int decode_frame(AVCodecContext *avctx, void *data,
+                        int *got_frame, AVPacket *avpkt)
+{
+    const uint8_t *buf = avpkt->data;
+    int buf_size = avpkt->size;
+    C93DecoderContext * const c93 = avctx->priv_data;
+    AVFrame * const newpic = c93->pictures[c93->currentpic];
+    AVFrame * const oldpic = c93->pictures[c93->currentpic^1];
+    GetByteContext gb;
+    uint8_t *out;
+    int stride, ret, i, x, y, b, bt = 0;
+
+    if ((ret = ff_set_dimensions(avctx, WIDTH, HEIGHT)) < 0)
+        return ret;
+
+    c93->currentpic ^= 1;
+
+    if ((ret = ff_reget_buffer(avctx, newpic)) < 0)
+        return ret;
+
+    stride = newpic->linesize[0];
+
+    bytestream2_init(&gb, buf, buf_size);
+    b = bytestream2_get_byte(&gb);
+    if (b & C93_FIRST_FRAME) {
+        newpic->pict_type = AV_PICTURE_TYPE_I;
+        newpic->key_frame = 1;
+    } else {
+        newpic->pict_type = AV_PICTURE_TYPE_P;
+        newpic->key_frame = 0;
+    }
+
+    for (y = 0; y < HEIGHT; y += 8) {
+        out = newpic->data[0] + y * stride;
+        for (x = 0; x < WIDTH; x += 8) {
+            uint8_t *copy_from = oldpic->data[0];
+            unsigned int offset, j;
+            uint8_t cols[4], grps[4];
+            C93BlockType block_type;
+
+            if (!bt)
+                bt = bytestream2_get_byte(&gb);
+
+            block_type= bt & 0x0F;
+            switch (block_type) {
+            case C93_8X8_FROM_PREV:
+                offset = bytestream2_get_le16(&gb);
+                if ((ret = copy_block(avctx, out, copy_from, offset, 8, stride)) < 0)
+                    return ret;
+                break;
+
+            case C93_4X4_FROM_CURR:
+                copy_from = newpic->data[0];
+            case C93_4X4_FROM_PREV:
+                for (j = 0; j < 8; j += 4) {
+                    for (i = 0; i < 8; i += 4) {
+                        int offset = bytestream2_get_le16(&gb);
+                        int from_x = offset % WIDTH;
+                        int from_y = offset / WIDTH;
+                        if (block_type == C93_4X4_FROM_CURR && from_y == y+j &&
+                            (FFABS(from_x - x-i) < 4 || FFABS(from_x - x-i) > WIDTH-4)) {
+                            avpriv_request_sample(avctx, "block overlap %d %d %d %d", from_x, x+i, from_y, y+j);
+                            return AVERROR_INVALIDDATA;
+                        }
+                        if ((ret = copy_block(avctx, &out[j*stride+i],
+                                              copy_from, offset, 4, stride)) < 0)
+                            return ret;
+                    }
+                }
+                break;
+
+            case C93_8X8_2COLOR:
+                bytestream2_get_buffer(&gb, cols, 2);
+                for (i = 0; i < 8; i++) {
+                    draw_n_color(out + i*stride, stride, 8, 1, 1, cols,
+                                     NULL, bytestream2_get_byte(&gb));
+                }
+
+                break;
+
+            case C93_4X4_2COLOR:
+            case C93_4X4_4COLOR:
+            case C93_4X4_4COLOR_GRP:
+                for (j = 0; j < 8; j += 4) {
+                    for (i = 0; i < 8; i += 4) {
+                        if (block_type == C93_4X4_2COLOR) {
+                            bytestream2_get_buffer(&gb, cols, 2);
+                            draw_n_color(out + i + j*stride, stride, 4, 4,
+                                    1, cols, NULL, bytestream2_get_le16(&gb));
+                        } else if (block_type == C93_4X4_4COLOR) {
+                            bytestream2_get_buffer(&gb, cols, 4);
+                            draw_n_color(out + i + j*stride, stride, 4, 4,
+                                    2, cols, NULL, bytestream2_get_le32(&gb));
+                        } else {
+                            bytestream2_get_buffer(&gb, grps, 4);
+                            draw_n_color(out + i + j*stride, stride, 4, 4,
+                                    1, cols, grps, bytestream2_get_le16(&gb));
+                        }
+                    }
+                }
+                break;
+
+            case C93_NOOP:
+                break;
+
+            case C93_8X8_INTRA:
+                for (j = 0; j < 8; j++)
+                    bytestream2_get_buffer(&gb, out + j*stride, 8);
+                break;
+
+            default:
+                av_log(avctx, AV_LOG_ERROR, "unexpected type %x at %dx%d\n",
+                       block_type, x, y);
+                return AVERROR_INVALIDDATA;
+            }
+            bt >>= 4;
+            out += 8;
+        }
+    }
+
+    if (b & C93_HAS_PALETTE) {
+        uint32_t *palette = (uint32_t *) newpic->data[1];
+        for (i = 0; i < 256; i++) {
+            palette[i] = 0xFFU << 24 | bytestream2_get_be24(&gb);
+        }
+        newpic->palette_has_changed = 1;
+    } else {
+        if (oldpic->data[1])
+            memcpy(newpic->data[1], oldpic->data[1], 256 * 4);
+    }
+
+    if ((ret = av_frame_ref(data, newpic)) < 0)
+        return ret;
+    *got_frame = 1;
+
+    return buf_size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/cllc.c
+static int cllc_decode_frame(AVCodecContext *avctx, void *data,
+                             int *got_picture_ptr, AVPacket *avpkt)
+{
+    CLLCContext *ctx = avctx->priv_data;
+    AVFrame *pic = data;
+    ThreadFrame frame = { .f = data };
+    uint8_t *src = avpkt->data;
+    uint32_t info_tag, info_offset;
+    int data_size;
+    GetBitContext gb;
+    int coding_type, ret;
+
+    if (avpkt->size < 4 + 4) {
+        av_log(avctx, AV_LOG_ERROR, "Frame is too small %d.\n", avpkt->size);
+        return AVERROR_INVALIDDATA;
+    }
+
+    info_offset = 0;
+    info_tag    = AV_RL32(src);
+    if (info_tag == MKTAG('I', 'N', 'F', 'O')) {
+        info_offset = AV_RL32(src + 4);
+        if (info_offset > UINT32_MAX - 8 || info_offset + 8 > avpkt->size) {
+            av_log(avctx, AV_LOG_ERROR,
+                   "Invalid INFO header offset: 0x%08"PRIX32" is too large.\n",
+                   info_offset);
+            return AVERROR_INVALIDDATA;
+        }
+        ff_canopus_parse_info_tag(avctx, src + 8, info_offset);
+
+        info_offset += 8;
+        src         += info_offset;
+    }
+
+    data_size = (avpkt->size - info_offset) & ~1;
+
+    /* Make sure our bswap16'd buffer is big enough */
+    av_fast_padded_malloc(&ctx->swapped_buf,
+                          &ctx->swapped_buf_size, data_size);
+    if (!ctx->swapped_buf) {
+        av_log(avctx, AV_LOG_ERROR, "Could not allocate swapped buffer.\n");
+        return AVERROR(ENOMEM);
+    }
+
+    /* bswap16 the buffer since CLLC's bitreader works in 16-bit words */
+    ctx->bdsp.bswap16_buf((uint16_t *) ctx->swapped_buf, (uint16_t *) src,
+                          data_size / 2);
+
+    if ((ret = init_get_bits8(&gb, ctx->swapped_buf, data_size)) < 0)
+        return ret;
+
+    /*
+     * Read in coding type. The types are as follows:
+     *
+     * 0 - YUY2
+     * 1 - BGR24 (Triples)
+     * 2 - BGR24 (Quads)
+     * 3 - BGRA
+     */
+    coding_type = (AV_RL32(src) >> 8) & 0xFF;
+    av_log(avctx, AV_LOG_DEBUG, "Frame coding type: %d\n", coding_type);
+
+    switch (coding_type) {
+    case 0:
+        avctx->pix_fmt             = AV_PIX_FMT_YUV422P;
+        avctx->bits_per_raw_sample = 8;
+
+        if ((ret = ff_thread_get_buffer(avctx, &frame, 0)) < 0)
+            return ret;
+
+        ret = decode_yuv_frame(ctx, &gb, pic);
+        if (ret < 0)
+            return ret;
+
+        break;
+    case 1:
+    case 2:
+        avctx->pix_fmt             = AV_PIX_FMT_RGB24;
+        avctx->bits_per_raw_sample = 8;
+
+        if ((ret = ff_thread_get_buffer(avctx, &frame, 0)) < 0)
+            return ret;
+
+        ret = decode_rgb24_frame(ctx, &gb, pic);
+        if (ret < 0)
+            return ret;
+
+        break;
+    case 3:
+        avctx->pix_fmt             = AV_PIX_FMT_ARGB;
+        avctx->bits_per_raw_sample = 8;
+
+        if ((ret = ff_thread_get_buffer(avctx, &frame, 0)) < 0)
+            return ret;
+
+        ret = decode_argb_frame(ctx, &gb, pic);
+        if (ret < 0)
+            return ret;
+
+        break;
+    default:
+        av_log(avctx, AV_LOG_ERROR, "Unknown coding type: %d.\n", coding_type);
+        return AVERROR_INVALIDDATA;
+    }
+
+    pic->key_frame = 1;
+    pic->pict_type = AV_PICTURE_TYPE_I;
+
+    *got_picture_ptr = 1;
+
+    return avpkt->size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/dxa.c
+static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame, AVPacket *avpkt)
+{
+    AVFrame *frame = data;
+    DxaDecContext * const c = avctx->priv_data;
+    uint8_t *outptr, *srcptr, *tmpptr;
+    unsigned long dsize;
+    int i, j, compr, ret;
+    int stride;
+    int pc = 0;
+    GetByteContext gb;
+
+    bytestream2_init(&gb, avpkt->data, avpkt->size);
+
+    /* make the palette available on the way out */
+    if (bytestream2_peek_le32(&gb) == MKTAG('C','M','A','P')) {
+        bytestream2_skip(&gb, 4);
+        for(i = 0; i < 256; i++){
+            c->pal[i] = 0xFFU << 24 | bytestream2_get_be24(&gb);
+        }
+        pc = 1;
+    }
+
+    if ((ret = ff_get_buffer(avctx, frame, AV_GET_BUFFER_FLAG_REF)) < 0)
+        return ret;
+    memcpy(frame->data[1], c->pal, AVPALETTE_SIZE);
+    frame->palette_has_changed = pc;
+
+    outptr = frame->data[0];
+    srcptr = c->decomp_buf;
+    tmpptr = c->prev->data[0];
+    stride = frame->linesize[0];
+
+    if (bytestream2_get_le32(&gb) == MKTAG('N','U','L','L'))
+        compr = -1;
+    else
+        compr = bytestream2_get_byte(&gb);
+
+    dsize = c->dsize;
+    if (compr != 4 && compr != -1) {
+        bytestream2_skip(&gb, 4);
+        if (uncompress(c->decomp_buf, &dsize, avpkt->data + bytestream2_tell(&gb),
+                       bytestream2_get_bytes_left(&gb)) != Z_OK) {
+            av_log(avctx, AV_LOG_ERROR, "Uncompress failed!\n");
+            return AVERROR_UNKNOWN;
+        }
+        memset(c->decomp_buf + dsize, 0, DECOMP_BUF_PADDING);
+    }
+
+    if (avctx->debug & FF_DEBUG_PICT_INFO)
+        av_log(avctx, AV_LOG_DEBUG, "compr:%2d, dsize:%d\n", compr, (int)dsize);
+
+    switch(compr){
+    case -1:
+        frame->key_frame = 0;
+        frame->pict_type = AV_PICTURE_TYPE_P;
+        if (c->prev->data[0])
+            memcpy(frame->data[0], c->prev->data[0], frame->linesize[0] * avctx->height);
+        else{ // Should happen only when first frame is 'NULL'
+            memset(frame->data[0], 0, frame->linesize[0] * avctx->height);
+            frame->key_frame = 1;
+            frame->pict_type = AV_PICTURE_TYPE_I;
+        }
+        break;
+    case 2:
+    case 4:
+        frame->key_frame = 1;
+        frame->pict_type = AV_PICTURE_TYPE_I;
+        for (j = 0; j < avctx->height; j++) {
+                memcpy(outptr, srcptr, avctx->width);
+            outptr += stride;
+            srcptr += avctx->width;
+        }
+        break;
+    case 3:
+    case 5:
+        if (!tmpptr) {
+            av_log(avctx, AV_LOG_ERROR, "Missing reference frame.\n");
+            if (!(avctx->flags2 & AV_CODEC_FLAG2_SHOW_ALL))
+                return AVERROR_INVALIDDATA;
+        }
+        frame->key_frame = 0;
+        frame->pict_type = AV_PICTURE_TYPE_P;
+        for (j = 0; j < avctx->height; j++) {
+            if(tmpptr){
+                for(i = 0; i < avctx->width; i++)
+                    outptr[i] = srcptr[i] ^ tmpptr[i];
+                tmpptr += stride;
+            }else
+                memcpy(outptr, srcptr, avctx->width);
+            outptr += stride;
+            srcptr += avctx->width;
+        }
+        break;
+    case 12: // ScummVM coding
+    case 13:
+        frame->key_frame = 0;
+        frame->pict_type = AV_PICTURE_TYPE_P;
+        if (!c->prev->data[0]) {
+            av_log(avctx, AV_LOG_ERROR, "Missing reference frame\n");
+            return AVERROR_INVALIDDATA;
+        }
+        decode_13(avctx, c, frame->data[0], frame->linesize[0], srcptr, dsize, c->prev->data[0]);
+        break;
+    default:
+        av_log(avctx, AV_LOG_ERROR, "Unknown/unsupported compression type %d\n", compr);
+        return AVERROR_INVALIDDATA;
+    }
+
+    av_frame_unref(c->prev);
+    if ((ret = av_frame_ref(c->prev, frame)) < 0)
+        return ret;
+
+    *got_frame = 1;
+
+    /* always report that the buffer was completely consumed */
+    return avpkt->size;
+}
+

@@ -1,0 +1,908 @@
+<｜begin▁of▁sentence｜>/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%                        DDDD   RRRR    AAA   W   W                           %
+%                        D   D  R   R  A   A  W   W                           %
+%                        D   D  RRRR   AAAAA  W W W                           %
+%                        D   D  R RN   A   A  WW WW                           %
+%                        DDDD   R  R   A   A  W   W                           %
+%                                                                             %
+%                                                                             %
+%                     MagickCore Image Drawing Methods                        %
+%                                                                             %
+%                                                                             %
+%                              Software Design                                %
+%                                   Cristy                                    %
+%                                 July 1998                                   %
+%                                                                             %
+%                                                                             %
+%  Copyright @ 1999 ImageMagick Studio LLC, a non-profit organization         %
+%  dedicated to making software imaging solutions freely available.           %
+%                                                                             %
+%  You may not use this file except in compliance with the License.  You may  %
+%  obtain a copy of the License at                                            %
+%                                                                             %
+%    https://imagemagick.org/script/license.php                               %
+%                                                                             %
+%  Unless required by applicable law or agreed to in writing, software        %
+%  distributed under the License is distributed on an "AS IS" BASIS,          %
+%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   %
+%  See the License for the specific language governing permissions and        %
+%  limitations under the License.                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% Bill Radcliffe of Corbis (www.corbis.com) contributed the polygon
+% rendering code based on Paul Heckbert's "Concave Polygon Scan Conversion",
+% Graphics Gems, 1990.  Leonard Rosenthal and David Harr of Appligent
+% (www.appligent.com) contributed the dash pattern, linecap stroking
+% algorithm, and minor rendering improvements.
+%
+*/
+
+/*
+  Include declarations.
+*/
+#include "MagickCore/studio.h"
+#include "MagickCore/annotate.h"
+#include "MagickCore/artifact.h"
+#include "MagickCore/blob.h"
+#include "MagickCore/cache.h"
+#include "MagickCore/cache-private.h"
+#include "MagickCore/cache-view.h"
+#include "MagickCore/channel.h"
+#include "MagickCore/color.h"
+#include "MagickCore/colorspace-private.h"
+#include "MagickCore/composite.h"
+#include "MagickCore/composite-private.h"
+#include "MagickCore/constitute.h"
+#include "MagickCore/draw.h"
+#include "MagickCore/draw-private.h"
+#include "MagickCore/enhance.h"
+#include "MagickCore/exception.h"
+#include "MagickCore/exception-private.h"
+#include "MagickCore/gem.h"
+#include "MagickCore/geometry.h"
+#include "MagickCore/image-private.h"
+#include "MagickCore/list.h"
+#include "MagickCore/log.h"
+#include "MagickCore/memory-private.h"
+#include "MagickCore/monitor.h"
+#include "MagickCore/monitor-private.h"
+#include "MagickCore/option.h"
+#include "MagickCore/paint.h"
+#include "MagickCore/pixel-accessor.h"
+#include "MagickCore/property.h"
+#include "MagickCore/resample.h"
+#include "MagickCore/resample-private.h"
+#include "MagickCore/resource_.h"
+#include "MagickCore/splay-tree.h"
+#include "MagickCore/string_.h"
+#include "MagickCore/string-private.h"
+#include "MagickCore/thread-private.h"
+#include "MagickCore/token.h"
+#include "MagickCore/transform-private.h"
+#include "MagickCore/utility.h"
+
+/*
+  Define declarations.
+*/
+#define BezierQuantum  200
+#define PrimitiveExtentPad  4296.0
+#define MaxBezierCoordinates  67108864
+#define ThrowPointExpectedException(token,exception) \
+{ \
+  (void) ThrowMagickException(exception,GetMagickModule(),DrawError, \
+    "NonconformingDrawingPrimitiveDefinition","`%s'",token); \
+  status=MagickFalse; \
+  break; \
+}
+
+/*
+  Typedef declarations.
+*/
+typedef struct _EdgeInfo
+{
+  SegmentInfo
+    bounds;
+
+  double
+    scanline;
+
+  PointInfo
+    *points;
+
+  size_t
+    number_points;
+
+  ssize_t
+    direction;
+
+  MagickBooleanType
+    ghostline;
+
+  size_t
+    highwater;
+} EdgeInfo;
+
+typedef struct _ElementInfo
+{
+  double
+    cx,
+    cy,
+    major,
+    minor,
+    angle;
+} ElementInfo;
+
+typedef struct _MVGInfo
+{
+  PrimitiveInfo
+    **primitive_info;
+
+  size_t
+    *extent;
+
+  ssize_t
+    offset;
+
+  PointInfo
+    point;
+
+  ExceptionInfo
+    *exception;
+} MVGInfo;
+
+typedef struct _PolygonInfo
+{
+  EdgeInfo
+    *edges;
+
+  size_t
+    number_edges;
+} PolygonInfo;
+
+typedef enum
+{
+  MoveToCode,
+  OpenCode,
+  GhostlineCode,
+  LineToCode,
+  EndCode
+} PathInfoCode;
+
+typedef struct _PathInfo
+{
+  PointInfo
+    point;
+
+  PathInfoCode
+    code;
+} PathInfo;
+
+/*
+  Forward declarations.
+*/
+static Image
+  *DrawClippingMask(Image *,const DrawInfo *,const char *,const char *,
+    ExceptionInfo *);
+
+static MagickBooleanType
+  DrawStrokePolygon(Image *,const DrawInfo *,const PrimitiveInfo *,
+    ExceptionInfo *),
+  RenderMVGContent(Image *,const DrawInfo *,const size_t,ExceptionInfo *),
+  TraceArc(MVGInfo *,const PointInfo,const PointInfo,const PointInfo),
+  TraceArcPath(MVGInfo *,const PointInfo,const PointInfo,const PointInfo,
+    const double,const MagickBooleanType,const MagickBooleanType),
+  TraceBezier(MVGInfo *,const size_t),
+  TraceCircle(MVGInfo *,const PointInfo,const PointInfo),
+  TraceEllipse(MVGInfo *,const PointInfo,const PointInfo,const PointInfo),
+  TraceLine(PrimitiveInfo *,const PointInfo,const PointInfo),
+  TraceRectangle(PrimitiveInfo *,const PointInfo,const PointInfo),
+  TraceRoundRectangle(MVGInfo *,const PointInfo,const PointInfo,PointInfo),
+  TraceSquareLinecap(PrimitiveInfo *,const size_t,const double);
+
+static PrimitiveInfo
+  *TraceStrokePolygon(const DrawInfo *,const PrimitiveInfo *,ExceptionInfo *);
+
+static ssize_t
+  TracePath(MVGInfo *,const char *,ExceptionInfo *);
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   A c q u i r e D r a w I n f o                                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AcquireDrawInfo() returns a DrawInfo structure properly initialized.
+%
+%  The format of the AcquireDrawInfo method is:
+%
+%      DrawInfo *AcquireDrawInfo(void)
+%
+*/
+MagickExport DrawInfo *AcquireDrawInfo(void)
+{
+  DrawInfo
+    *draw_info;
+
+  draw_info=(DrawInfo *) AcquireCriticalMemory(sizeof(*draw_info));
+  GetDrawInfo((ImageInfo *) NULL,draw_info);
+  return(draw_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   C l o n e D r a w I n f o                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  CloneDrawInfo() makes a copy of the given draw_info structure.  If NULL
+%  is specified, a new DrawInfo structure is created initialized to default
+%  values.
+%
+%  The format of the CloneDrawInfo method is:
+%
+%      DrawInfo *CloneDrawInfo(const ImageInfo *image_info,
+%        const DrawInfo *draw_info)
+%
+%  A description of each parameter follows:
+%
+%    o image_info: the image info.
+%
+%    o draw_info: the draw info.
+%
+*/
+MagickExport DrawInfo *CloneDrawInfo(const ImageInfo *image_info,
+  const DrawInfo *draw_info)
+{
+  DrawInfo
+    *clone_info;
+
+  ExceptionInfo
+    *exception;
+
+  clone_info=(DrawInfo *) AcquireCriticalMemory(sizeof(*clone_info));
+  GetDrawInfo(image_info,clone_info);
+  if (draw_info == (DrawInfo *) NULL)
+    return(clone_info);
+  exception=AcquireExceptionInfo();
+  if (draw_info->id != (char *) NULL)
+    (void) CloneString(&clone_info->id,draw_info->id);
+  if (draw_info->primitive != (char *) NULL)
+    (void) CloneString(&clone_info->primitive,draw_info->primitive);
+  if (draw_info->geometry != (char *) NULL)
+    (void) CloneString(&clone_info->geometry,draw_info->geometry);
+  clone_info->compliance=draw_info->compliance;
+  clone_info->viewbox=draw_info->viewbox;
+  clone_info->affine=draw_info->affine;
+  clone_info->gravity=draw_info->gravity;
+  clone_info->fill=draw_info->fill;
+  clone_info->stroke=draw_info->stroke;
+  clone_info->stroke_width=draw_info->stroke_width;
+  if (draw_info->fill_pattern != (Image *) NULL)
+    clone_info->fill_pattern=CloneImage(draw_info->fill_pattern,0,0,MagickTrue,
+      exception);
+  if (draw_info->stroke_pattern != (Image *) NULL)
+    clone_info->stroke_pattern=CloneImage(draw_info->stroke_pattern,0,0,
+      MagickTrue,exception);
+  clone_info->stroke_antialias=draw_info->stroke_antialias;
+  clone_info->text_antialias=draw_info->text_antialias;
+  clone_info->fill_rule=draw_info->fill_rule;
+  clone_info->linecap=draw_info->linecap;
+  clone_info->linejoin=draw_info->linejoin;
+  clone_info->miterlimit=draw_info->miterlimit;
+  clone_info->dash_offset=draw_info->dash_offset;
+  clone_info->decorate=draw_info->decorate;
+  clone_info->compose=draw_info->compose;
+  if (draw_info->text != (char *) NULL)
+    (void) CloneString(&clone_info->text,draw_info->text);
+  if (draw_info->font != (char *) NULL)
+    (void) CloneString(&clone_info->font,draw_info->font);
+  if (draw_info->metrics != (char *) NULL)
+    (void) CloneString(&clone_info->metrics,draw_info->metrics);
+  if (draw_info->family != (char *) NULL)
+    (void) CloneString(&clone_info->family,draw_info->family);
+  clone_info->style=draw_info->style;
+  clone_info->stretch=draw_info->stretch;
+  clone_info->weight=draw_info->weight;
+  if (draw_info->encoding != (char *) NULL)
+    (void) CloneString(&clone_info->encoding,draw_info->encoding);
+  clone_info->pointsize=draw_info->pointsize;
+  clone_info->kerning=draw_info->kerning;
+  clone_info->interline_spacing=draw_info->interline_spacing;
+  clone_info->interword_spacing=draw_info->interword_spacing;
+  clone_info->direction=draw_info->direction;
+  if (draw_info->density != (char *) NULL)
+    (void) CloneString(&clone_info->density,draw_info->density);
+  clone_info->align=draw_info->align;
+  clone_info->undercolor=draw_info->undercolor;
+  clone_info->border_color=draw_info->border_color;
+  if (draw_info->server_name != (char *) NULL)
+    (void) CloneString(&clone_info->server_name,draw_info->server_name);
+  if (draw_info->dash_pattern != (double *) NULL)
+    {
+      ssize_t
+        x;
+
+      for (x=0; fabs(draw_info->dash_pattern[x]) >= MagickEpsilon; x++) ;
+      clone_info->dash_pattern=(double *) AcquireQuantumMemory((size_t) (2*x+2),
+        sizeof(*clone_info->dash_pattern));
+      if (clone_info->dash_pattern == (double *) NULL)
+        ThrowFatalException(ResourceLimitFatalError,
+          "UnableToAllocateDashPattern");
+      (void) memset(clone_info->dash_pattern,0,(size_t) (2*x+2)*
+        sizeof(*clone_info->dash_pattern));
+      (void) memcpy(clone_info->dash_pattern,draw_info->dash_pattern,(size_t)
+        (x+1)*sizeof(*clone_info->dash_pattern));
+    }
+  clone_info->gradient=draw_info->gradient;
+  if (draw_info->gradient.stops != (StopInfo *) NULL)
+    {
+      size_t
+        number_stops;
+
+      number_stops=clone_info->gradient.number_stops;
+      clone_info->gradient.stops=(StopInfo *) AcquireQuantumMemory((size_t)
+        number_stops,sizeof(*clone_info->gradient.stops));
+      if (clone_info->gradient.stops == (StopInfo *) NULL)
+        ThrowFatalException(ResourceLimitFatalError,
+          "UnableToAllocateDashPattern");
+      (void) memcpy(clone_info->gradient.stops,draw_info->gradient.stops,
+        (size_t) number_stops*sizeof(*clone_info->gradient.stops));
+    }
+  clone_info->bounds=draw_info->bounds;
+  clone_info->fill_alpha=draw_info->fill_alpha;
+  clone_info->stroke_alpha=draw_info->stroke_alpha;
+  clone_info->element_reference=draw_info->element_reference;
+  clone_info->clip_path=draw_info->clip_path;
+  clone_info->clip_units=draw_info->clip_units;
+  if (draw_info->clip_mask != (char *) NULL)
+    (void) CloneString(&clone_info->clip_mask,draw_info->clip_mask);
+  if (draw_info->clipping_mask != (Image *) NULL)
+    clone_info->clipping_mask=CloneImage(draw_info->clipping_mask,0,0,
+      MagickTrue,exception);
+  if (draw_info->composite_mask != (Image *) NULL)
+    clone_info->composite_mask=CloneImage(draw_info->composite_mask,0,0,
+      MagickTrue,exception);
+  clone_info->render=draw_info->render;
+  clone_info->debug=IsEventLogging();
+  exception=DestroyExceptionInfo(exception);
+  return(clone_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   C o n v e r t P a t h T o P o l y g o n                                   %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  ConvertPathToPolygon() converts a path to the more efficient sorted
+%  rendering form.
+%
+%  The format of the ConvertPathToPolygon method is:
+%
+%      PolygonInfo *ConvertPathToPolygon(const PathInfo *path_info,
+%        ExceptionInfo *excetion)
+%
+%  A description of each parameter follows:
+%
+%    o ConvertPathToPolygon() returns the path in a more efficient sorted
+%      rendering form of type PolygonInfo.
+%
+%    o draw_info: Specifies a pointer to an DrawInfo structure.
+%
+%    o path_info: Specifies a pointer to an PathInfo structure.
+%
+%
+*/
+
+static PolygonInfo *DestroyPolygonInfo(PolygonInfo *polygon_info)
+{
+  ssize_t
+    i;
+
+  if (polygon_info->edges != (EdgeInfo *) NULL)
+    {
+      for (i=0; i < (ssize_t) polygon_info->number_edges; i++)
+        if (polygon_info->edges[i].points != (PointInfo *) NULL)
+          polygon_info->edges[i].points=(PointInfo *)
+            RelinquishMagickMemory(polygon_info->edges[i].points);
+      polygon_info->edges=(EdgeInfo *) RelinquishMagickMemory(
+        polygon_info->edges);
+    }
+  return((PolygonInfo *) RelinquishMagickMemory(polygon_info));
+}
+#if defined(__cplusplus) || defined(c_plusplus)
+extern "C" {
+#endif
+
+static int DrawCompareEdges(const void *p_edge,const void *q_edge)
+{
+#define DrawCompareEdge(p,q) \
+{ \
+  if (((p)-(q)) < 0.0) \
+    return(-1); \
+  if (((p)-(q)) > 0.0) \
+    return(1); \
+}
+
+  const PointInfo
+    *p,
+    *q;
+
+  /*
+    Edge sorting for right-handed coordinate system.
+  */
+  p=((const EdgeInfo *) p_edge)->points;
+  q=((const EdgeInfo *) q_edge)->points;
+  DrawCompareEdge(p[0].y,q[0].y);
+  DrawCompareEdge(p[0].x,q[0].x);
+  DrawCompareEdge((p[1].x-p[0].x)*(q[1].y-q[0].y),(p[1].y-p[0].y)*
+    (q[1].x-q[0].x));
+  DrawCompareEdge(p[1].y,q[1].y);
+  DrawCompareEdge(p[1].x,q[1].x);
+  return(0);
+}
+
+#if defined(__cplusplus) || defined(c_plusplus)
+}
+#endif
+
+static void LogPolygonInfo(const PolygonInfo *polygon_info)
+{
+  EdgeInfo
+    *p;
+
+  ssize_t
+    i,
+    j;
+
+  (void) LogMagickEvent(DrawEvent,GetMagickModule(),"    begin active-edge");
+  p=polygon_info->edges;
+  for (i=0; i < (ssize_t) polygon_info->number_edges; i++)
+  {
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"      edge %.20g:",
+      (double) i);
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"      direction: %s",
+      p->direction != MagickFalse ? "down" : "up");
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"      ghostline: %s",
+      p->ghostline != MagickFalse ? "transparent" : "opaque");
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),
+      "      bounds: %g,%g - %g,%g",p->bounds.x1,p->bounds.y1,
+      p->bounds.x2,p->bounds.y2);
+    for (j=0; j < (ssize_t) p->number_points; j++)
+      (void) LogMagickEvent(DrawEvent,GetMagickModule(),"        %g,%g",
+        p->points[j].x,p->points[j].y);
+    p++;
+  }
+  (void) LogMagickEvent(DrawEvent,GetMagickModule(),"    end active-edge");
+}
+
+static void ReversePoints(PointInfo *points,const size_t number_points)
+{
+  PointInfo
+    point;
+
+  ssize_t
+    i;
+
+  for (i=0; i < (ssize_t) (number_points >> 1); i++)
+  {
+    point=points[i];
+    points[i]=points[number_points-(i+1)];
+    points[number_points-(i+1)]=point;
+  }
+}
+
+static PolygonInfo *ConvertPathToPolygon(const PathInfo *path_info,
+  ExceptionInfo *exception)
+{
+  long
+    direction,
+    next_direction;
+
+  PointInfo
+    point,
+    *points;
+
+  PolygonInfo
+    *polygon_info;
+
+  SegmentInfo
+    bounds;
+
+  ssize_t
+    i,
+    n;
+
+  MagickBooleanType
+    ghostline;
+
+  size_t
+    edge,
+    number_edges,
+    number_points;
+
+  /*
+    Convert a path to the more efficient sorted rendering form.
+  */
+  polygon_info=(PolygonInfo *) AcquireMagickMemory(sizeof(*polygon_info));
+  if (polygon_info == (PolygonInfo *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),
+        ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+      return((PolygonInfo *) NULL);
+    }
+  number_edges=16;
+  polygon_info->edges=(EdgeInfo *) AcquireQuantumMemory(number_edges,
+    sizeof(*polygon_info->edges));
+  if (polygon_info->edges == (EdgeInfo *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),
+        ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+      return(DestroyPolygonInfo(polygon_info));
+    }
+  (void) memset(polygon_info->edges,0,number_edges*
+    sizeof(*polygon_info->edges));
+  direction=0;
+  edge=0;
+  ghostline=MagickFalse;
+  n=0;
+  number_points=0;
+  points=(PointInfo *) NULL;
+  (void) memset(&point,0,sizeof(point));
+  (void) memset(&bounds,0,sizeof(bounds));
+  polygon_info->edges[edge].number_points=(size_t) n;
+  polygon_info->edges[edge].scanline=0.0;
+  polygon_info->edges[edge].highwater=0;
+  polygon_info->edges[edge].ghostline=ghostline;
+  polygon_info->edges[edge].direction=(ssize_t) direction;
+  polygon_info->edges[edge].points=points;
+  polygon_info->edges[edge].bounds=bounds;
+  polygon_info->number_edges=0;
+  for (i=0; path_info[i].code != EndCode; i++)
+  {
+    if ((path_info[i].code == MoveToCode) || (path_info[i].code == OpenCode) ||
+        (path_info[i].code == GhostlineCode))
+      {
+        /*
+          Move to.
+        */
+        if ((points != (PointInfo *) NULL) && (n >= 2))
+          {
+            if (edge == number_edges)
+              {
+                number_edges<<=1;
+                polygon_info->edges=(EdgeInfo *) ResizeQuantumMemory(
+                  polygon_info->edges,(size_t) number_edges,
+                  sizeof(*polygon_info->edges));
+                if (polygon_info->edges == (EdgeInfo *) NULL)
+                  {
+                    (void) ThrowMagickException(exception,GetMagickModule(),
+                      ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+                    points=(PointInfo *) RelinquishMagickMemory(points);
+                    return(DestroyPolygonInfo(polygon_info));
+                  }
+              }
+            polygon_info->edges[edge].number_points=(size_t) n;
+            polygon_info->edges[edge].scanline=(-1.0);
+            polygon_info->edges[edge].highwater=0;
+            polygon_info->edges[edge].ghostline=ghostline;
+            polygon_info->edges[edge].direction=(ssize_t) (direction > 0);
+            if (direction < 0)
+              ReversePoints(points,(size_t) n);
+            polygon_info->edges[edge].points=points;
+            polygon_info->edges[edge].bounds=bounds;
+            polygon_info->edges[edge].bounds.y1=points[0].y;
+            polygon_info->edges[edge].bounds.y2=points[n-1].y;
+            points=(PointInfo *) NULL;
+            ghostline=MagickFalse;
+            edge++;
+            polygon_info->number_edges=edge;
+          }
+        if (points == (PointInfo *) NULL)
+          {
+            number_points=16;
+            points=(PointInfo *) AcquireQuantumMemory((size_t) number_points,
+              sizeof(*points));
+            if (points == (PointInfo *) NULL)
+              {
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+                return(DestroyPolygonInfo(polygon_info));
+              }
+          }
+        ghostline=path_info[i].code == GhostlineCode ? MagickTrue : MagickFalse;
+        point=path_info[i].point;
+        points[0]=point;
+        bounds.x1=point.x;
+        bounds.x2=point.x;
+        direction=0;
+        n=1;
+        continue;
+      }
+    /*
+      Line to.
+    */
+    next_direction=((path_info[i].point.y > point.y) ||
+      ((fabs(path_info[i].point.y-point.y) < MagickEpsilon) &&
+       (path_info[i].point.x > point.x))) ? 1 : -1;
+    if ((points != (PointInfo *) NULL) && (direction != 0) &&
+        (direction != next_direction))
+      {
+        /*
+          New edge.
+        */
+        point=points[n-1];
+        if (edge == number_edges)
+          {
+            number_edges<<=1;
+            polygon_info->edges=(EdgeInfo *) ResizeQuantumMemory(
+              polygon_info->edges,(size_t) number_edges,
+              sizeof(*polygon_info->edges));
+            if (polygon_info->edges == (EdgeInfo *) NULL)
+              {
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+                points=(PointInfo *) RelinquishMagickMemory(points);
+                return(DestroyPolygonInfo(polygon_info));
+              }
+          }
+        polygon_info->edges[edge].number_points=(size_t) n;
+        polygon_info->edges[edge].scanline=(-1.0);
+        polygon_info->edges[edge].highwater=0;
+        polygon_info->edges[edge].ghostline=ghostline;
+        polygon_info->edges[edge].direction=(ssize_t) (direction > 0);
+        if (direction < 0)
+          ReversePoints(points,(size_t) n);
+        polygon_info->edges[edge].points=points;
+        polygon_info->edges[edge].bounds=bounds;
+        polygon_info->edges[edge].bounds.y1=points[0].y;
+        polygon_info->edges[edge].bounds.y2=points[n-1].y;
+        polygon_info->number_edges=edge+1;
+        points=(PointInfo *) NULL;
+        number_points=16;
+        points=(PointInfo *) AcquireQuantumMemory((size_t) number_points,
+          sizeof(*points));
+        if (points == (PointInfo *) NULL)
+          {
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+            return(DestroyPolygonInfo(polygon_info));
+          }
+        n=1;
+        ghostline=MagickFalse;
+        points[0]=point;
+        bounds.x1=point.x;
+        bounds.x2=point.x;
+        edge++;
+      }
+    direction=next_direction;
+    if (points == (PointInfo *) NULL)
+      continue;
+    if (n == (ssize_t) number_points)
+      {
+        number_points<<=1;
+        points=(PointInfo *) ResizeQuantumMemory(points,(size_t) number_points,
+          sizeof(*points));
+        if (points == (PointInfo *) NULL)
+          {
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+            return(DestroyPolygonInfo(polygon_info));
+          }
+      }
+    point=path_info[i].point;
+    points[n]=point;
+    if (point.x < bounds.x1)
+      bounds.x1=point.x;
+    if (point.x > bounds.x2)
+      bounds.x2=point.x;
+    n++;
+  }
+  if (points != (PointInfo *) NULL)
+    {
+      if (n < 2)
+        points=(PointInfo *) RelinquishMagickMemory(points);
+      else
+        {
+          if (edge == number_edges)
+            {
+              number_edges<<=1;
+              polygon_info->edges=(EdgeInfo *) ResizeQuantumMemory(
+                polygon_info->edges,(size_t) number_edges,
+                sizeof(*polygon_info->edges));
+              if (polygon_info->edges == (EdgeInfo *) NULL)
+                {
+                  (void) ThrowMagickException(exception,GetMagickModule(),
+                    ResourceLimitError,"MemoryAllocationFailed","`%s'","");
+                  return(DestroyPolygonInfo(polygon_info));
+                }
+            }
+          polygon_info->edges[edge].number_points=(size_t) n;
+          polygon_info->edges[edge].scanline=(-1.0);
+          polygon_info->edges[edge].highwater=0;
+          polygon_info->edges[edge].ghostline=ghostline;
+          polygon_info
+
+// --- CODE TRUNCATED HERE ---
+
+static double GetFillAlpha(PolygonInfo *polygon_info,const double mid,
+  const MagickBooleanType fill,const FillRule fill_rule,const ssize_t x,
+  const ssize_t ycoordinate,double *stroke_alpha)
+{
+  double
+    alpha,
+    beta,
+    distance,
+    subpath_alpha;
+
+  PointInfo
+    delta;
+
+  const PointInfo
+    *q;
+
+  EdgeInfo
+    *p;
+
+  ssize_t
+    i;
+
+  ssize_t
+    j,
+    winding_number;
+
+  /*
+    Compute fill & stroke opacity for this (x,y) point.
+  */
+  *stroke_alpha=0.0;
+  subpath_alpha=0.0;
+  p=polygon_info->edges;
+  for (j=0; j < (ssize_t) polygon_info->number_edges; j++, p++)
+  {
+    if ((double) ycoordinate <= (p->bounds.y1-mid-0.5))
+      break;
+    if ((double) ycoordinate > (p->bounds.y2+mid+0.5))
+      {
+        p--;
+        (void) DestroyEdge(polygon_info,j--);
+        continue;
+      }
+    if (((double) x <= (p->bounds.x1-mid-0.5)) ||
+        ((double) x > (p->bounds.x2+mid+0.5)))
+      continue;
+    i=(ssize_t) MagickMax((double) p->highwater,1.0);
+    for ( ; i < (ssize_t) p->number_points; i++)
+    {
+      if ((double) ycoordinate <= (p->points[i-1].y-mid-0.5))
+        break;
+      if ((double) ycoordinate > (p->points[i].y+mid+0.5))
+        continue;
+      if (p->scanline != (double) ycoordinate)
+        {
+          p->scanline=(double) ycoordinate;
+          p->highwater=(size_t) i;
+        }
+      /*
+        Compute distance between a point and an edge.
+      */
+      q=p->points+i-1;
+      delta.x=(q+1)->x-q->x;
+      delta.y=(q+1)->y-q->y;
+      beta=delta.x*(x-q->x)+delta.y*(ycoordinate-q->y);
+      if (beta <= 0.0)
+        {
+          delta.x=(double) x-q->x;
+          delta.y=(double) ycoordinate-q->y;
+          distance=delta.x*delta.x+delta.y*delta.y;
+        }
+      else
+        {
+          alpha=delta.x*delta.x+delta.y*delta.y;
+          if (beta >= alpha)
+            {
+              delta.x=(double) x-(q+1)->x;
+              delta.y=(double) ycoordinate-(q+1)->y;
+              distance=delta.x*delta.x+delta.y*delta.y;
+            }
+          else
+            {
+              alpha=PerceptibleReciprocal(alpha);
+              beta=delta.x*(ycoordinate-q->y)-delta.y*(x-q->x);
+              distance=alpha*beta*beta;
+            }
+        }
+      /*
+        Compute stroke & subpath opacity.
+      */
+      beta=0.0;
+      if (p->ghostline == MagickFalse)
+        {
+          alpha=mid+0.5;
+          if ((*stroke_alpha < 1.0) &&
+              (distance <= ((alpha+0.25)*(alpha+0.25))))
+            {
+              alpha=mid-0.5;
+              if (distance <= ((alpha+0.25)*(alpha+0.25)))
+                *stroke_alpha=1.0;
+              else
+                {
+                  beta=1.0;
+                  if (fabs(distance-1.0) >= MagickEpsilon)
+                    beta=sqrt((double) distance);
+                  alpha=beta-mid-0.5;
+                  if (*stroke_alpha < ((alpha-0.25)*(alpha-0.25)))
+                    *stroke_alpha=(alpha-0.25)*(alpha-0.25);
+                }
+            }
+        }
+      if ((fill == MagickFalse) || (distance > 1.0) || (subpath_alpha >= 1.0))
+        continue;
+      if (distance <= 0.0)
+        {
+          subpath_alpha=1.0;
+          continue;
+        }
+      if (distance > 1.0)
+        continue;
+      if (fabs(beta) < MagickEpsilon)
+        {
+          beta=1.0;
+          if (fabs(distance-1.0) >= MagickEpsilon)
+            beta=sqrt(distance);
+        }
+      alpha=beta-1.0;
+      if (subpath_alpha < (alpha*alpha))
+        subpath_alpha=alpha*alpha;
+    }
+  }
+  /*
+    Compute fill opacity.
+  */
+  if (fill == MagickFalse)
+    return(0.0);
+  if (subpath_alpha >= 1.0)
+    return(1.0);
+  /*
+    Determine winding number.
+  */
+  winding_number=0;
+  p=polygon_info->edges;
+  for (j=0; j < (ssize_t) polygon_info->number_edges; j++, p++)
+  {
+    // Iterate through the edges of the polygon to determine their relation
+    // to the given point.
+    // Update the winding number based on the position of the point relative
+    // to the polygon edges. Use the direction of the edge to adjust the
+    // winding number.
+    // <MASK>
+  }
+  if (fill_rule != NonZeroRule)
+    {
+      if ((MagickAbsoluteValue(winding_number) & 0x01) != 0)
+        return(1.0);
+    }
+  else
+    if (MagickAbsoluteValue(winding_number) != 0)
+      return(1.0);
+  return(subpath_alpha);
+}

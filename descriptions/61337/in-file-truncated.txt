@@ -1,0 +1,743 @@
+/*
+ * HTMLparser.c : an HTML 4.0 non-verifying parser
+ *
+ * See Copyright for the status of this software.
+ *
+ * daniel@veillard.com
+ */
+
+#define IN_LIBXML
+#include "libxml.h"
+#ifdef LIBXML_HTML_ENABLED
+
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
+
+#include <libxml/xmlmemory.h>
+#include <libxml/tree.h>
+#include <libxml/parser.h>
+#include <libxml/parserInternals.h>
+#include <libxml/xmlerror.h>
+#include <libxml/HTMLparser.h>
+#include <libxml/HTMLtree.h>
+#include <libxml/entities.h>
+#include <libxml/encoding.h>
+#include <libxml/valid.h>
+#include <libxml/xmlIO.h>
+#include <libxml/globals.h>
+#include <libxml/uri.h>
+
+#include "private/buf.h"
+#include "private/enc.h"
+#include "private/error.h"
+#include "private/html.h"
+#include "private/io.h"
+#include "private/parser.h"
+#include "private/tree.h"
+
+#define HTML_MAX_NAMELEN 1000
+#define HTML_PARSER_BIG_BUFFER_SIZE 1000
+#define HTML_PARSER_BUFFER_SIZE 100
+
+/* #define DEBUG */
+/* #define DEBUG_PUSH */
+
+static int htmlOmittedDefaultValue = 1;
+
+xmlChar * htmlDecodeEntities(htmlParserCtxtPtr ctxt, int len,
+			     xmlChar end, xmlChar  end2, xmlChar end3);
+static void htmlParseComment(htmlParserCtxtPtr ctxt);
+
+/************************************************************************
+ *									*
+ *		Some factorized error routines				*
+ *									*
+ ************************************************************************/
+
+/**
+ * htmlErrMemory:
+ * @ctxt:  an HTML parser context
+ * @extra:  extra information
+ *
+ * Handle a redefinition of attribute error
+ */
+static void
+htmlErrMemory(xmlParserCtxtPtr ctxt, const char *extra)
+{
+    if ((ctxt != NULL) && (ctxt->disableSAX != 0) &&
+        (ctxt->instate == XML_PARSER_EOF))
+	return;
+    if (ctxt != NULL) {
+        ctxt->errNo = XML_ERR_NO_MEMORY;
+        ctxt->instate = XML_PARSER_EOF;
+        ctxt->disableSAX = 1;
+    }
+    if (extra)
+        __xmlRaiseError(NULL, NULL, NULL, ctxt, NULL, XML_FROM_PARSER,
+                        XML_ERR_NO_MEMORY, XML_ERR_FATAL, NULL, 0, extra,
+                        NULL, NULL, 0, 0,
+                        "Memory allocation failed : %s\n", extra);
+    else
+        __xmlRaiseError(NULL, NULL, NULL, ctxt, NULL, XML_FROM_PARSER,
+                        XML_ERR_NO_MEMORY, XML_ERR_FATAL, NULL, 0, NULL,
+                        NULL, NULL, 0, 0, "Memory allocation failed\n");
+}
+
+/**
+ * htmlParseErr:
+ * @ctxt:  an HTML parser context
+ * @error:  the error number
+ * @msg:  the error message
+ * @str1:  string infor
+ * @str2:  string infor
+ *
+ * Handle a fatal parser error, i.e. violating Well-Formedness constraints
+ */
+static void LIBXML_ATTR_FORMAT(3,0)
+htmlParseErr(xmlParserCtxtPtr ctxt, xmlParserErrors error,
+             const char *msg, const xmlChar *str1, const xmlChar *str2)
+{
+    if ((ctxt != NULL) && (ctxt->disableSAX != 0) &&
+        (ctxt->instate == XML_PARSER_EOF))
+	return;
+    if (ctxt != NULL)
+	ctxt->errNo = error;
+    __xmlRaiseError(NULL, NULL, NULL, ctxt, NULL, XML_FROM_HTML, error,
+                    XML_ERR_ERROR, NULL, 0,
+		    (const char *) str1, (const char *) str2,
+		    NULL, 0, 0,
+		    msg, str1, str2);
+    if (ctxt != NULL)
+	ctxt->wellFormed = 0;
+}
+
+/**
+ * htmlParseErrInt:
+ * @ctxt:  an HTML parser context
+ * @error:  the error number
+ * @msg:  the error message
+ * @val:  integer info
+ *
+ * Handle a fatal parser error, i.e. violating Well-Formedness constraints
+ */
+static void LIBXML_ATTR_FORMAT(3,0)
+htmlParseErrInt(xmlParserCtxtPtr ctxt, xmlParserErrors error,
+             const char *msg, int val)
+{
+    if ((ctxt != NULL) && (ctxt->disableSAX != 0) &&
+        (ctxt->instate == XML_PARSER_EOF))
+	return;
+    if (ctxt != NULL)
+	ctxt->errNo = error;
+    __xmlRaiseError(NULL, NULL, NULL, ctxt, NULL, XML_FROM_HTML, error,
+                    XML_ERR_ERROR, NULL, 0, NULL, NULL,
+		    NULL, val, 0, msg, val);
+    if (ctxt != NULL)
+	ctxt->wellFormed = 0;
+}
+
+/************************************************************************
+ *									*
+ *	Parser stacks related functions and macros		*
+ *									*
+ ************************************************************************/
+
+/**
+ * htmlnamePush:
+ * @ctxt:  an HTML parser context
+ * @value:  the element name
+ *
+ * Pushes a new element name on top of the name stack
+ *
+ * Returns -1 in case of error, the index in the stack otherwise
+ */
+static int
+htmlnamePush(htmlParserCtxtPtr ctxt, const xmlChar * value)
+{
+    if ((ctxt->html < 3) && (xmlStrEqual(value, BAD_CAST "head")))
+        ctxt->html = 3;
+    if ((ctxt->html < 10) && (xmlStrEqual(value, BAD_CAST "body")))
+        ctxt->html = 10;
+    if (ctxt->nameNr >= ctxt->nameMax) {
+        size_t newSize = ctxt->nameMax * 2;
+        const xmlChar **tmp;
+
+        tmp = xmlRealloc((xmlChar **) ctxt->nameTab,
+                         newSize * sizeof(ctxt->nameTab[0]));
+        if (tmp == NULL) {
+            htmlErrMemory(ctxt, NULL);
+            return (-1);
+        }
+        ctxt->nameTab = tmp;
+        ctxt->nameMax = newSize;
+    }
+    ctxt->nameTab[ctxt->nameNr] = value;
+    ctxt->name = value;
+    return (ctxt->nameNr++);
+}
+/**
+ * htmlnamePop:
+ * @ctxt: an HTML parser context
+ *
+ * Pops the top element name from the name stack
+ *
+ * Returns the name just removed
+ */
+static const xmlChar *
+htmlnamePop(htmlParserCtxtPtr ctxt)
+{
+    const xmlChar *ret;
+
+    if (ctxt->nameNr <= 0)
+        return (NULL);
+    ctxt->nameNr--;
+    if (ctxt->nameNr < 0)
+        return (NULL);
+    if (ctxt->nameNr > 0)
+        ctxt->name = ctxt->nameTab[ctxt->nameNr - 1];
+    else
+        ctxt->name = NULL;
+    ret = ctxt->nameTab[ctxt->nameNr];
+    ctxt->nameTab[ctxt->nameNr] = NULL;
+    return (ret);
+}
+
+/**
+ * htmlNodeInfoPush:
+ * @ctxt:  an HTML parser context
+ * @value:  the node info
+ *
+ * Pushes a new element name on top of the node info stack
+ *
+ * Returns 0 in case of error, the index in the stack otherwise
+ */
+static int
+htmlNodeInfoPush(htmlParserCtxtPtr ctxt, htmlParserNodeInfo *value)
+{
+    if (ctxt->nodeInfoNr >= ctxt->nodeInfoMax) {
+        if (ctxt->nodeInfoMax == 0)
+                ctxt->nodeInfoMax = 5;
+        ctxt->nodeInfoMax *= 2;
+        ctxt->nodeInfoTab = (htmlParserNodeInfo *)
+                         xmlRealloc((htmlParserNodeInfo *)ctxt->nodeInfoTab,
+                                    ctxt->nodeInfoMax *
+                                    sizeof(ctxt->nodeInfoTab[0]));
+        if (ctxt->nodeInfoTab == NULL) {
+            htmlErrMemory(ctxt, NULL);
+            return (0);
+        }
+    }
+    ctxt->nodeInfoTab[ctxt->nodeInfoNr] = *value;
+    ctxt->nodeInfo = &ctxt->nodeInfoTab[ctxt->nodeInfoNr];
+    return (ctxt->nodeInfoNr++);
+}
+
+/**
+ * htmlNodeInfoPop:
+ * @ctxt:  an HTML parser context
+ *
+ * Pops the top element name from the node info stack
+ *
+ * Returns 0 in case of error, the pointer to NodeInfo otherwise
+ */
+static htmlParserNodeInfo *
+htmlNodeInfoPop(htmlParserCtxtPtr ctxt)
+{
+    if (ctxt->nodeInfoNr <= 0)
+        return (NULL);
+    ctxt->nodeInfoNr--;
+    if (ctxt->nodeInfoNr < 0)
+        return (NULL);
+    if (ctxt->nodeInfoNr > 0)
+        ctxt->nodeInfo = &ctxt->nodeInfoTab[ctxt->nodeInfoNr - 1];
+    else
+        ctxt->nodeInfo = NULL;
+    return &ctxt->nodeInfoTab[ctxt->nodeInfoNr];
+}
+
+/*
+ * Macros for accessing the content. Those should be used only by the parser,
+ * and not exported.
+ *
+ * Dirty macros, i.e. one need to make assumption on the context to use them
+ *
+ *   CUR_PTR return the current pointer to the xmlChar to be parsed.
+ *   CUR     returns the current xmlChar value, i.e. a 8 bit value if compiled
+ *           in ISO-Latin or UTF-8, and the current 16 bit value if compiled
+ *           in UNICODE mode. This should be used internally by the parser
+ *           only to compare to ASCII values otherwise it would break when
+ *           running with UTF-8 encoding.
+ *   NXT(n)  returns the n'th next xmlChar. Same as CUR is should be used only
+ *           to compare on ASCII based substring.
+ *   UPP(n)  returns the n'th next xmlChar converted to uppercase. Same as CUR
+ *           it should be used only to compare on ASCII based substring.
+ *   SKIP(n) Skip n xmlChar, and must also be used only to skip ASCII defined
+ *           strings without newlines within the parser.
+ *
+ * Clean macros, not dependent of an ASCII context, expect UTF-8 encoding
+ *
+ *   NEXT    Skip to the next character, this does the proper decoding
+ *           in UTF-8 mode. It also pop-up unfinished entities on the fly.
+ *   NEXTL(l) Skip the current unicode character of l xmlChars long.
+ *   COPY(to) copy one char to *to, increment CUR_PTR and to accordingly
+ */
+
+#define UPPER (toupper(*ctxt->input->cur))
+
+#define SKIP(val) ctxt->input->cur += (val),ctxt->input->col+=(val)
+
+#define NXT(val) ctxt->input->cur[(val)]
+
+#define UPP(val) (toupper(ctxt->input->cur[(val)]))
+
+#define CUR_PTR ctxt->input->cur
+#define BASE_PTR ctxt->input->base
+
+#define SHRINK if ((ctxt->input->cur - ctxt->input->base > 2 * INPUT_CHUNK) && \
+		   (ctxt->input->end - ctxt->input->cur < 2 * INPUT_CHUNK)) \
+	xmlParserShrink(ctxt)
+
+#define GROW if ((ctxt->progressive == 0) &&				\
+		 (ctxt->input->end - ctxt->input->cur < INPUT_CHUNK))	\
+	xmlParserGrow(ctxt)
+
+#define SKIP_BLANKS htmlSkipBlankChars(ctxt)
+
+/* Imported from XML */
+
+#define CUR (*ctxt->input->cur)
+#define NEXT xmlNextChar(ctxt)
+
+#define RAW (ctxt->token ? -1 : (*ctxt->input->cur))
+
+
+#define NEXTL(l) do {							\
+    if (*(ctxt->input->cur) == '\n') {					\
+	ctxt->input->line++; ctxt->input->col = 1;			\
+    } else ctxt->input->col++;						\
+    ctxt->token = 0; ctxt->input->cur += l;				\
+  } while (0)
+
+/************
+    \
+    if (*ctxt->input->cur == '%') xmlParserHandlePEReference(ctxt);	\
+    if (*ctxt->input->cur == '&') xmlParserHandleReference(ctxt);
+ ************/
+
+#define CUR_CHAR(l) htmlCurrentChar(ctxt, &l)
+#define CUR_SCHAR(s, l) xmlStringCurrentChar(ctxt, s, &l)
+
+#define COPY_BUF(l,b,i,v)						\
+    if (l == 1) b[i++] = v;						\
+    else i += xmlCopyChar(l,&b[i],v)
+
+/**
+ * htmlFindEncoding:
+ * @the HTML parser context
+ *
+ * Ty to find and encoding in the current data available in the input
+ * buffer this is needed to try to switch to the proper encoding when
+ * one face a character error.
+ * That's an heuristic, since it's operating outside of parsing it could
+ * try to use a meta which had been commented out, that's the reason it
+ * should only be used in case of error, not as a default.
+ *
+ * Returns an encoding string or NULL if not found, the string need to
+ *   be freed
+ */
+static xmlChar *
+htmlFindEncoding(xmlParserCtxtPtr ctxt) {
+    const xmlChar *start, *cur, *end;
+
+    if ((ctxt == NULL) || (ctxt->input == NULL) ||
+        (ctxt->input->flags & XML_INPUT_HAS_ENCODING))
+        return(NULL);
+    if ((ctxt->input->cur == NULL) || (ctxt->input->end == NULL))
+        return(NULL);
+
+    start = ctxt->input->cur;
+    end = ctxt->input->end;
+    /* we also expect the input buffer to be zero terminated */
+    if (*end != 0)
+        return(NULL);
+
+    cur = xmlStrcasestr(start, BAD_CAST "HTTP-EQUIV");
+    if (cur == NULL)
+        return(NULL);
+    cur = xmlStrcasestr(cur, BAD_CAST  "CONTENT");
+    if (cur == NULL)
+        return(NULL);
+    cur = xmlStrcasestr(cur, BAD_CAST  "CHARSET=");
+    if (cur == NULL)
+        return(NULL);
+    cur += 8;
+    start = cur;
+    while (((*cur >= 'A') && (*cur <= 'Z')) ||
+           ((*cur >= 'a') && (*cur <= 'z')) ||
+           ((*cur >= '0') && (*cur <= '9')) ||
+           (*cur == '-') || (*cur == '_') || (*cur == ':') || (*cur == '/'))
+           cur++;
+    if (cur == start)
+        return(NULL);
+    return(xmlStrndup(start, cur - start));
+}
+
+/**
+ * htmlCurrentChar:
+ * @ctxt:  the HTML parser context
+ * @len:  pointer to the length of the char read
+ *
+ * The current char value, if using UTF-8 this may actually span multiple
+ * bytes in the input buffer. Implement the end of line normalization:
+ * 2.11 End-of-Line Handling
+ * If the encoding is unspecified, in the case we find an ISO-Latin-1
+ * char, then the encoding converter is plugged in automatically.
+ *
+ * Returns the current char value and its length
+ */
+
+static int
+htmlCurrentChar(xmlParserCtxtPtr ctxt, int *len) {
+    const unsigned char *cur;
+    unsigned char c;
+    unsigned int val;
+
+    if (ctxt->instate == XML_PARSER_EOF)
+	return(0);
+
+    if (ctxt->token != 0) {
+	*len = 0;
+	return(ctxt->token);
+    }
+
+    if (ctxt->input->end - ctxt->input->cur < INPUT_CHUNK) {
+        xmlParserGrow(ctxt);
+        if (ctxt->instate == XML_PARSER_EOF)
+            return(0);
+    }
+
+    if ((ctxt->input->flags & XML_INPUT_HAS_ENCODING) == 0) {
+        xmlChar * encoding_guess;
+        xmlCharEncodingHandlerPtr handler;
+
+        /*
+         * Assume it's a fixed length encoding (1) with
+         * a compatible encoding for the ASCII set, since
+         * HTML constructs only use < 128 chars
+         */
+        if (*ctxt->input->cur < 0x80) {
+            *len = 1;
+            if ((*ctxt->input->cur == 0) &&
+                (ctxt->input->cur < ctxt->input->end)) {
+                htmlParseErrInt(ctxt, XML_ERR_INVALID_CHAR,
+                                "Char 0x%X out of allowed range\n", 0);
+                return(' ');
+            }
+            return(*ctxt->input->cur);
+        }
+
+        /*
+         * Humm this is bad, do an automatic flow conversion
+         */
+        encoding_guess = htmlFindEncoding(ctxt);
+        if (encoding_guess == NULL) {
+            xmlSwitchEncoding(ctxt, XML_CHAR_ENCODING_8859_1);
+        } else 
+        // Find a character encoding handler based on a guessed encoding.
+        // If the handler is found and is not "UTF-8", switch the parser's encoding
+        // to use this handler. If no handler is found, report an unsupported
+        // encoding error.
+        // <MASK>
+        ctxt->input->flags |= XML_INPUT_HAS_ENCODING;
+    }
+
+    /*
+     * We are supposed to handle UTF8, check it's valid
+     * From rfc2044: encoding of the Unicode values on UTF-8:
+     *
+     * UCS-4 range (hex.)           UTF-8 octet sequence (binary)
+     * 0000 0000-0000 007F   0xxxxxxx
+     * 0000 0080-0000 07FF   110xxxxx 10xxxxxx
+     * 0000 0800-0000 FFFF   1110xxxx 10xxxxxx 10xxxxxx
+     *
+     * Check for the 0x110000 limit too
+     */
+    cur = ctxt->input->cur;
+    c = *cur;
+    if (c & 0x80) {
+        size_t avail;
+
+        if ((c & 0x40) == 0)
+            goto encoding_error;
+
+        avail = ctxt->input->end - ctxt->input->cur;
+
+        if ((avail < 2) || ((cur[1] & 0xc0) != 0x80))
+            goto encoding_error;
+        if ((c & 0xe0) == 0xe0) {
+            if ((avail < 3) || ((cur[2] & 0xc0) != 0x80))
+                goto encoding_error;
+            if ((c & 0xf0) == 0xf0) {
+                if (((c & 0xf8) != 0xf0) ||
+                    (avail < 4) || ((cur[3] & 0xc0) != 0x80))
+                    goto encoding_error;
+                /* 4-byte code */
+                *len = 4;
+                val = (cur[0] & 0x7) << 18;
+                val |= (cur[1] & 0x3f) << 12;
+                val |= (cur[2] & 0x3f) << 6;
+                val |= cur[3] & 0x3f;
+                if (val < 0x10000)
+                    goto encoding_error;
+            } else {
+              /* 3-byte code */
+                *len = 3;
+                val = (cur[0] & 0xf) << 12;
+                val |= (cur[1] & 0x3f) << 6;
+                val |= cur[2] & 0x3f;
+                if (val < 0x800)
+                    goto encoding_error;
+            }
+        } else {
+          /* 2-byte code */
+            *len = 2;
+            val = (cur[0] & 0x1f) << 6;
+            val |= cur[1] & 0x3f;
+            if (val < 0x80)
+                goto encoding_error;
+        }
+        if (!IS_CHAR(val)) {
+            htmlParseErrInt(ctxt, XML_ERR_INVALID_CHAR,
+                            "Char 0x%X out of allowed range\n", val);
+        }
+        return(val);
+    } else {
+        if ((*ctxt->input->cur == 0) &&
+            (ctxt->input->cur < ctxt->input->end)) {
+            htmlParseErrInt(ctxt, XML_ERR_INVALID_CHAR,
+                            "Char 0x%X out of allowed range\n", 0);
+            *len = 1;
+            return(' ');
+        }
+        /* 1-byte code */
+        *len = 1;
+        return(*ctxt->input->cur);
+    }
+
+encoding_error:
+    {
+        char buffer[150];
+
+	if (ctxt->input->end - ctxt->input->cur >= 4) {
+	    snprintf(buffer, 149, "Bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+			    ctxt->input->cur[0], ctxt->input->cur[1],
+			    ctxt->input->cur[2], ctxt->input->cur[3]);
+	} else {
+	    snprintf(buffer, 149, "Bytes: 0x%02X\n", ctxt->input->cur[0]);
+	}
+	htmlParseErr(ctxt, XML_ERR_INVALID_ENCODING,
+		     "Input is not proper UTF-8, indicate encoding !\n",
+		     BAD_CAST buffer, NULL);
+    }
+
+    if ((ctxt->input->flags & XML_INPUT_HAS_ENCODING) == 0)
+        xmlSwitchEncoding(ctxt, XML_CHAR_ENCODING_8859_1);
+    *len = 1;
+    return(*ctxt->input->cur);
+}<｜begin▁of▁sentence｜>
+
+/**
+ * htmlSkipBlankChars:
+ * @ctxt:  the HTML parser context
+ *
+ * skip all blanks character found at that point in the input streams.
+ *
+ * Returns the number of space chars skipped
+ */
+
+static int
+htmlSkipBlankChars(xmlParserCtxtPtr ctxt) {
+    int res = 0;
+
+    while (IS_BLANK_CH(*(ctxt->input->cur))) {
+        if (*(ctxt->input->cur) == '\n') {
+            ctxt->input->line++; ctxt->input->col = 1;
+        } else ctxt->input->col++;
+        ctxt->input->cur++;
+        if (*ctxt->input->cur == 0)
+            xmlParserGrow(ctxt);
+	if (res < INT_MAX)
+	    res++;
+    }
+    return(res);
+}
+
+
+
+/************************************************************************
+ *									*
+ *	The list of HTML elements and their properties		*
+ *									*
+ ************************************************************************/
+
+/*
+ *  Start Tag: 1 means the start tag can be omitted
+ *  End Tag:   1 means the end tag can be omitted
+ *             2 means it's forbidden (empty elements)
+ *             3 means the tag is stylistic and should be closed easily
+ *  Depr:      this element is deprecated
+ *  DTD:       1 means that this element is valid only in the Loose DTD
+ *             2 means that this element is valid only in the Frameset DTD
+ *
+ * Name,Start Tag,End Tag,Save End,Empty,Deprecated,DTD,inline,Description
+	, subElements , impliedsubelt , Attributes, userdata
+ */
+
+/* Definitions and a couple of vars for HTML Elements */
+
+#define FONTSTYLE "tt", "i", "b", "u", "s", "strike", "big", "small"
+#define NB_FONTSTYLE 8
+#define PHRASE "em", "strong", "dfn", "code", "samp", "kbd", "var", "cite", "abbr", "acronym"
+#define NB_PHRASE 10
+#define SPECIAL "a", "img", "applet", "embed", "object", "font", "basefont", "br", "script", "map", "q", "sub", "sup", "span", "bdo", "iframe"
+#define NB_SPECIAL 16
+#define INLINE FONTSTYLE, PHRASE, SPECIAL, FORMCTRL
+#define NB_INLINE NB_PCDATA + NB_FONTSTYLE + NB_PHRASE + NB_SPECIAL + NB_FORMCTRL
+#define BLOCK HEADING, LIST, "pre", "p", "dl", "div", "center", "noscript", "noframes", "blockquote", "form", "isindex", "hr", "table", "fieldset", "address"
+#define NB_BLOCK NB_HEADING + NB_LIST + 14
+#define FORMCTRL "input", "select", "textarea", "label", "button"
+#define NB_FORMCTRL 5
+#define PCDATA
+#define NB_PCDATA 0
+#define HEADING "h1", "h2", "h3", "h4", "h5", "h6"
+#define NB_HEADING 6
+#define LIST "ul", "ol", "dir", "menu"
+#define NB_LIST 4
+#define MODIFIER
+#define NB_MODIFIER 0
+#define FLOW BLOCK,INLINE
+#define NB_FLOW NB_BLOCK + NB_INLINE
+#define EMPTY NULL
+
+
+static const char* const html_flow[] = { FLOW, NULL } ;
+static const char* const html_inline[] = { INLINE, NULL } ;
+
+/* placeholders: elts with content but no subelements */
+static const char* const html_pcdata[] = { NULL } ;
+#define html_cdata html_pcdata
+
+
+/* ... and for HTML Attributes */
+
+#define COREATTRS "id", "class", "style", "title"
+#define NB_COREATTRS 4
+#define I18N "lang", "dir"
+#define NB_I18N 2
+#define EVENTS "onclick", "ondblclick", "onmousedown", "onmouseup", "onmouseover", "onmouseout", "onkeypress", "onkeydown", "onkeyup"
+#define NB_EVENTS 9
+#define ATTRS COREATTRS,I18N,EVENTS
+#define NB_ATTRS NB_NB_COREATTRS + NB_I18N + NB_EVENTS
+#define CELLHALIGN "align", "char", "charoff"
+#define NB_CELLHALIGN 3
+#define CELLVALIGN "valign"
+#define NB_CELLVALIGN 1
+
+static const char* const html_attrs[] = { ATTRS, NULL } ;
+static const char* const core_i18n_attrs[] = { COREATTRS, I18N, NULL } ;
+static const char* const core_attrs[] = { COREATTRS, NULL } ;
+static const char* const i18n_attrs[] = { I18N, NULL } ;
+
+
+/* Other declarations that should go inline ... */
+static const char* const a_attrs[] = { ATTRS, "charset", "type", "name",
+	"href", "hreflang", "rel", "rev", "accesskey", "shape", "coords",
+	"tabindex", "onfocus", "onblur", NULL } ;
+static const char* const target_attr[] = { "target", NULL } ;
+static const char* const rows_cols_attr[] = { "rows", "cols", NULL } ;
+static const char* const alt_attr[] = { "alt", NULL } ;
+static const char* const src_alt_attrs[] = { "src", "alt", NULL } ;
+static const char* const href_attrs[] = { "href", NULL } ;
+static const char* const clear_attrs[] = { "clear", NULL } ;
+static const char* const inline_p[] = { INLINE, "p", NULL } ;
+
+static const char* const flow_param[] = { FLOW, "param", NULL } ;
+static const char* const applet_attrs[] = { COREATTRS , "codebase",
+		"archive", "alt", "name", "height", "width", "align",
+		"hspace", "vspace", NULL } ;
+static const char* const area_attrs[] = { "shape", "coords", "href", "nohref",
+	"tabindex", "accesskey", "onfocus", "onblur", NULL } ;
+static const char* const basefont_attrs[] =
+	{ "id", "size", "color", "face", NULL } ;
+static const char* const quote_attrs[] = { ATTRS, "cite", NULL } ;
+static const char* const body_contents[] = { FLOW, "ins", "del", NULL } ;
+static const char* const body_attrs[] = { ATTRS, "onload", "onunload", NULL } ;
+static const char* const body_depr[] = { "background", "bgcolor", "text",
+	"link", "vlink", "alink", NULL } ;
+static const char* const button_attrs[] = { ATTRS, "name", "value", "type",
+	"disabled", "tabindex", "accesskey", "onfocus", "onblur", NULL } ;
+
+
+static const char* const col_attrs[] = { ATTRS, "span", "width", CELLHALIGN, CELLVALIGN, NULL } ;
+static const char* const col_elt[] = { "col", NULL } ;
+static const char* const edit_attrs[] = { ATTRS, "datetime", "cite", NULL } ;
+static const char* const compact_attrs[] = { ATTRS, "compact", NULL } ;
+static const char* const dl_contents[] = { "dt", "dd", NULL } ;
+static const char* const compact_attr[] = { "compact", NULL } ;
+static const char* const label_attr[] = { "label", NULL } ;
+static const char* const fieldset_contents[] = { FLOW, "legend" } ;
+static const char* const font_attrs[] = { COREATTRS, I18N, "size", "color", "face" , NULL } ;
+static const char* const form_contents[] = { HEADING, LIST, INLINE, "pre", "p", "div", "center", "noscript", "noframes", "blockquote", "isindex", "hr", "table", "fieldset", "address", NULL } ;
+static const char* const form_attrs[] = { ATTRS, "method", "enctype", "accept", "name", "onsubmit", "onreset", "accept-charset", NULL } ;
+static const char* const frame_attrs[] = { COREATTRS, "longdesc", "name", "src", "frameborder", "marginwidth", "marginheight", "noresize", "scrolling" , NULL } ;
+static const char* const frameset_attrs[] = { COREATTRS, "rows", "cols", "onload", "onunload", NULL } ;
+static const char* const frameset_contents[] = { "frameset", "frame", "noframes", NULL } ;
+static const char* const head_attrs[] = { I18N, "profile", NULL } ;
+static const char* const head_contents[] = { "title", "isindex", "base", "script", "style", "meta", "link", "object", NULL } ;
+static const char* const hr_depr[] = { "align", "noshade", "size", "width", NULL } ;
+static const char* const version_attr[] = { "version", NULL } ;
+static const char* const html_content[] = { "head", "body", "frameset", NULL } ;
+static const char* const iframe_attrs[] = { COREATTRS, "longdesc", "name", "src", "frameborder", "marginwidth", "marginheight", "scrolling", "align", "height", "width", NULL } ;
+static const char* const img_attrs[] = { ATTRS, "longdesc", "name", "height", "width", "usemap", "ismap", NULL } ;
+static const char* const embed_attrs[] = { COREATTRS, "align", "alt", "border", "code", "codebase", "frameborder", "height", "hidden", "hspace", "name", "palette", "pluginspace", "pluginurl", "src", "type", "units", "vspace", "width", NULL } ;
+static const char* const input_attrs[] = { ATTRS, "type", "name", "value", "checked", "disabled", "readonly", "size", "maxlength", "src", "alt", "usemap", "ismap", "tabindex", "accesskey", "onfocus", "onblur", "onselect", "onchange", "accept", NULL } ;
+static const char* const prompt_attrs[] = { COREATTRS, I18N, "prompt", NULL } ;
+static const char* const label_attrs[] = { ATTRS, "for", "accesskey", "onfocus", "onblur", NULL } ;
+static const char* const legend_attrs[] = { ATTRS, "accesskey", NULL } ;
+static const char* const align_attr[] = { "align", NULL } ;
+static const char* const link_attrs[] = { ATTRS, "charset", "href", "hreflang", "type", "rel", "rev", "media", NULL } ;
+static const char* const map_contents[] = { BLOCK, "area", NULL } ;
+static const char* const name_attr[] = { "name", NULL } ;
+static const char* const action_attr[] = { "action", NULL } ;
+static const char* const blockli_elt[] = { BLOCK, "li", NULL } ;
+static const char* const meta_attrs[] = { I18N, "http-equiv", "name", "scheme", "charset", NULL } ;
+static const char* const content_attr[] = { "content", NULL } ;
+static const char* const type_attr[] = { "type", NULL } ;
+static const char* const noframes_content[] = { "body", FLOW MODIFIER, NULL } ;
+static const char* const object_contents[] = { FLOW, "param", NULL } ;
+static const char* const object_attrs[] = { ATTRS, "declare", "classid", "codebase", "data", "type", "codetype", "archive", "standby", "height", "width", "usemap", "name", "tabindex", NULL } ;
+static const char* const object_depr[] = { "align", "border", "hspace", "vspace", NULL } ;
+static const char* const ol_attrs[] = { "type", "compact", "start", NULL} ;
+static const char* const option_elt[] = { "option", NULL } ;
+static const char* const optgroup_attrs[] = { ATTRS, "disabled", NULL } ;
+static const char* const option_attrs[] = { ATTRS, "disabled", "label", "selected", "value", NULL } ;
+static const char* const param_attrs[] = { "id", "value", "valuetype", "type", NULL } ;
+static const char* const width_attr[] = { "width", NULL } ;
+static const char* const pre_content[] = { PHRASE, "tt", "i", "b", "u", "s", "strike", "a", "br", "script", "map", "q", "span", "bdo", "iframe", NULL } ;
+static const char* const script_attrs[] = { "charset", "src", "defer", "event", "for", NULL } ;
+static const char* const language_attr[] = { "language", NULL } ;
+static const char* const select_content[] = { "optgroup", "option", NULL } ;
+static const char* const select_attrs[] = { ATTRS, "name", "size", "multiple", "disabled", "tabindex", "onfocus", "onblur", "onchange", NULL } ;
+static const char* const style_attrs[] = { I18N, "media", "title", NULL } ;
+static const char* const table_attrs[] = { ATTRS, "summary", "width", "border", "frame", "rules", "cellspacing", "cellpadding", "datapagesize", NULL } ;
+static const char* const table_depr[] = { "align", "bgcolor", NULL } ;
+static const char* const table_contents[] = { "caption", "col", "colgroup", "thead", "tfoot", "tbody", "tr", NULL} ;
+static const char* const tr_elt[] = { "tr", NULL } ;
+static const char* const talign_attrs[] = { ATTRS, CELLHALIGN, CELLVALIGN, NULL} ;
+static const char* const th_td_depr[] = { "nowrap", "bgcolor", "width", "height", NULL } ;
+static const char* const th_td_attr[] = { ATTRS, "abbr", "axis", "headers", "scope", "rowspan", "colspan", CELLHALIGN, CELLVALIGN, NULL } ;
+static const char* const textarea_attrs[] = { ATTRS, "name", "disabled", "readonly", "tabindex
+
+// --- CODE TRUNCATED HERE ---
+

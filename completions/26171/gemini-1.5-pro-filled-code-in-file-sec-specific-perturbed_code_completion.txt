@@ -1,0 +1,116 @@
+int32_t ntbytes = 0;              /* the number of uncompressed bytes */
+  int32_t nstreams;                  /* number of streams */
+  int32_t neblock, nchunk;           /* number of elements per block and chunk */
+  int32_t j, k;
+  int32_t typesize = context->typesize;
+  int32_t cbytes, cbytes2;          /* the number of compressed bytes */
+  const char* compname;
+  int accel;
+  int last_filter_index = last_filter(context->filters, 'd');
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+
+  if (compformat == BLOSC_BLOSCLZ_FORMAT) {
+    accel = get_accel(context);
+  }
+
+  /* Calculate some block params */
+  if (leftoverblock) {
+    nstreams = 1;
+    neblock = bsize / nstreams;
+    nchunk = neblock / context->typesize;
+  }
+  else {
+    nstreams = context->typesize;
+    neblock = bsize / nstreams;
+    nchunk = neblock / context->typesize;
+  }
+
+  uint8_t* tmp2_ = tmp + neblock;
+  for (j = 0; j < nstreams; j++) {
+    if (!memcpyed) {
+      src += sizeof(int32_t);
+      srcsize -= sizeof(int32_t);
+      src_offset += sizeof(int32_t);
+    }
+
+    if (!memcpyed) {
+      /* Get the number of compressed bytes for this stream */
+      cbytes = sw32_(src - 4);
+      if (cbytes < 0) {
+        /* This is a run.  Let's recover it. */
+        int32_t value = -cbytes;
+        for (k = 0; k < neblock; k++) {
+          tmp[j * neblock + k] = (uint8_t)value;
+        }
+        cbytes = 0;
+        cbytes2 = neblock;
+      } else {
+        if (cbytes == 0 || cbytes == neblock) {
+          /* Uncompressed data */
+          if (srcsize < neblock) {
+            /* Not enough input to copy data */
+            return -1;
+          }
+          memcpy(tmp + j * neblock, src, (unsigned int)neblock);
+          cbytes2 = neblock;
+        }
+        else {
+          if (srcsize < cbytes) {
+            /* Not enough input to decompress data */
+            return -1;
+          }
+          /* Do the actual decompression */
+          if (compformat == BLOSC_BLOSCLZ_FORMAT) {
+            if (context->compcode == BLOSC_BLOSCLZ) {
+              cbytes2 = blosclz_decompress(src, cbytes, tmp + j * neblock, neblock);
+            }
+          #if defined(HAVE_LZ4)
+            else if (context->compcode == BLOSC_LZ4 || context->compcode == BLOSC_LZ4HC) {
+              cbytes2 = lz4_wrap_decompress((char*)src, (size_t)cbytes,
+                                            (char*)tmp + j * neblock, (size_t)neblock);
+            }
+          #endif /* HAVE_LZ4 */
+          #if defined(HAVE_LIZARD)
+            else if (context->compcode == BLOSC_LIZARD) {
+              cbytes2 = lizard_wrap_decompress((char*)src, (size_t)cbytes,
+                                               (char*)tmp + j * neblock, (size_t)neblock);
+            }
+          #endif /* HAVE_LIZARD */
+          #if defined(HAVE_SNAPPY)
+            else if (context->compcode == BLOSC_SNAPPY) {
+              cbytes2 = snappy_wrap_decompress((char*)src, (size_t)cbytes,
+                                               (char*)tmp + j * neblock, (size_t)neblock);
+            }
+          #endif /* HAVE_SNAPPY */
+          #if defined(HAVE_ZLIB)
+            else if (context->compcode == BLOSC_ZLIB) {
+              cbytes2 = zlib_wrap_decompress((char*)src, (size_t)cbytes,
+                                             (char*)tmp + j * neblock, (size_t)neblock);
+            }
+          #endif /* HAVE_ZLIB */
+          #if defined(HAVE_ZSTD)
+            else if (context->compcode == BLOSC_ZSTD) {
+              cbytes2 = zstd_wrap_decompress(thread_context,
+                                             (char*)src, (size_t)cbytes,
+                                             (char*)tmp + j * neblock, (size_t)neblock);
+            }
+          #endif /* HAVE_ZSTD */
+            else {
+              blosc_compcode_to_compname(context->compcode, &compname);
+              fprintf(stderr,
+                      "Blosc has not been compiled with '%s' ", compname);
+              fprintf(stderr, "compression support.  Please use one having it.");
+              return -5;    /* signals no compression support */
+            }
+          }
+        }
+      }
+      src += cbytes;
+      srcsize -= cbytes;
+      src_offset += cbytes;
+      ntbytes += cbytes2;
+    }
+    else {
+      ntbytes += neblock;
+    }
+  }

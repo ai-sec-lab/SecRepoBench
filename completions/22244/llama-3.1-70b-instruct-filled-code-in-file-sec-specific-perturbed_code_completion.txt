@@ -1,0 +1,51 @@
+// Analyze the packet payload to determine if it might be an OpenVPN packet.
+if (packet->payload_packet_len >= 9) {
+  if (packet->protocol == NDPI_PROTOCOL_TCP) {
+    // Adjust the payload pointer if it's over TCP.
+    ovpn_payload = packet->payload + 4;
+  }
+
+  // Extract the operation code from the payload.
+  operationcode = (ovpn_payload[0] & P_OPCODE_MASK) >> 3;
+
+  // If it's over UDP, perform additional checks.
+  if (packet->protocol == NDPI_PROTOCOL_UDP) {
+    // Check if the first packet in the flow matches specific length and operation code criteria.
+    if (packet->payload_packet_len == 44 && operationcode == P_CONTROL_HARD_RESET_CLIENT_V1) {
+      // Identify it as OpenVPN.
+      ndpi_int_add_protocol_to_bitmask(detection_bitmask, NDPI_PROTOCOL_OPENVPN);
+      return;
+    }
+
+    // Check if the flow's OpenVPN counter is below a threshold and the operation code indicates a client reset.
+    if (flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT && (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+      // Attempt to extract and store the session ID from the payload.
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if (hmac_size > 0) {
+        session_remote = ovpn_payload + 1;
+        memcpy(flow->openvpn_session_id, session_remote, 8);
+      }
+    }
+
+    // Check if the counter is within a range and the operation code indicates a server reset.
+    if (flow->openvpn_counter >= 1 && flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT && (operationcode == P_CONTROL_HARD_RESET_SERVER_V1 || operationcode == P_CONTROL_HARD_RESET_SERVER_V2)) {
+      // Verify the session ID matches.
+      session_remote = ovpn_payload + 1;
+      if (memcmp(flow->openvpn_session_id, session_remote, 8) == 0) {
+        // Identify the protocol as OpenVPN.
+        ndpi_int_add_protocol_to_bitmask(detection_bitmask, NDPI_PROTOCOL_OPENVPN);
+      } else {
+        // Mark the attempt as failed.
+        failed = 1;
+      }
+    }
+  }
+}
+
+// Increment the flow's OpenVPN counter after processing.
+flow->openvpn_counter++;
+
+// If the detection attempt fails, exclude the protocol from the flow's possible protocols.
+if (failed) {
+  ndpi_int_remove_protocol_from_bitmask(detection_bitmask, NDPI_PROTOCOL_OPENVPN);
+}

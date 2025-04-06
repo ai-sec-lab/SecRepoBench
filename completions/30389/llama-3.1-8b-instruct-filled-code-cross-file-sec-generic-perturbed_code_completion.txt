@@ -1,0 +1,51 @@
+// Process tags within the crypto data by iterating over them.
+// For each tag, check if it is either "SNI\0" or "UAID".
+// If the tag is "SNI\0", extract the server name information (SNI) from the crypto data
+// and store it in the flow structure's SNI field. Log the SNI for debugging purposes.
+// Perform matching of the SNI against known subprotocols and check for DGA.
+// Mark the hello message as processed once SNI is handled.
+// If the tag is "UAID", extract the user agent information from the crypto data,
+// log it for debugging, and process it using the HTTP user agent handling function.
+// Keep track of whether SNI or UAID have been found and return early if both are processed.
+for(i = 0; i < num_tags; i++) {
+  if(8 + 8 * i + 8 >= crypto_data_len)
+    break;
+  tag = &crypto_data[8 + 8 * i];
+  offset = le32toh(*((u_int32_t *)&crypto_data[8 + 8 * i + 4]));
+  if(prev_offset > offset)
+    break;
+  len = offset - prev_offset;
+  const uint8_t *tag_data = &crypto_data[8 + 8 * i + 8];
+  uint32_t tag_len = le32toh(*((u_int32_t *)&crypto_data[8 + 8 * i + 12]));
+  if(tag_len > len)
+    break;
+  const uint8_t *tag_value = &crypto_data[8 + 8 * i + 16];
+  if(memcmp(tag_value, "SNI\0", 4) == 0) {
+    // Extract the server name information (SNI) from the crypto data
+    // and store it in the flow structure's SNI field.
+    flow->protos.tls_quic_stun.tls_quic.client_requested_server_name = (uint8_t *)malloc(tag_len);
+    memcpy(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name, tag_value, tag_len);
+    flow->protos.tls_quic_stun.tls_quic.client_requested_server_name[tag_len] = '\0';
+    // Log the SNI for debugging purposes.
+    NDPI_LOG_DBG(detectionmodule, "SNI: %s\n", flow->protos.tls_quic_stun.tls_quic.client_requested_server_name);
+    // Perform matching of the SNI against known subprotocols and check for DGA.
+    ndpi_match_sni(detectionmodule, flow);
+    // Mark the hello message as processed once SNI is handled.
+    flow->flags |= NDPI_FLAG_SNI_PROCESSED;
+    sni_found = 1;
+  } else if(memcmp(tag_value, "UAID", 4) == 0) {
+    // Extract the user agent information from the crypto data,
+    // log it for debugging, and process it using the HTTP user agent handling function.
+    flow->protos.tls_quic_stun.tls_quic.ua_id = (uint8_t *)malloc(tag_len);
+    memcpy(flow->protos.tls_quic_stun.tls_quic.ua_id, tag_value, tag_len);
+    flow->protos.tls_quic_stun.tls_quic.ua_id[tag_len] = '\0';
+    // Log the UAID for debugging purposes.
+    NDPI_LOG_DBG(detectionmodule, "UAID: %s\n", flow->protos.tls_quic_stun.tls_quic.ua_id);
+    // Process the UAID using the HTTP user agent handling function.
+    ndpi_process_http_user_agent(detectionmodule, flow);
+    ua_found = 1;
+  }
+  prev_offset = offset;
+  if(sni_found && ua_found)
+    break;
+}

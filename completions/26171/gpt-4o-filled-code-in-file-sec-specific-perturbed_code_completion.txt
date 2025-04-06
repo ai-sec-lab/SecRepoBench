@@ -1,0 +1,95 @@
+int32_t nstreams;
+  int32_t neblock;
+  int32_t ctbytes = 0;
+  int32_t ntbytes = 0;
+  int32_t cbytes;
+  int32_t maxout;
+  int32_t typesize = context->typesize;
+  const uint8_t* _src;
+  uint8_t* _tmp = tmp;
+  uint8_t* _tmp2 = tmp2;
+  uint8_t* _tmp3 = thread_context->tmp4;
+  int last_filter_index = last_filter(context->filters, 'd');
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+
+  if (last_filter_index >= 0) {
+    _src = tmp;
+  } else {
+    _src = src + src_offset;
+  }
+
+  /* The number of compressed data streams for this block */
+  if (!leftoverblock && !dont_split) {
+    nstreams = (int32_t)typesize;
+  } else {
+    nstreams = 1;
+  }
+  neblock = bsize / nstreams;
+
+  for (int j = 0; j < nstreams; j++) {
+    int32_t csize = sw32_(src + src_offset + j * sizeof(int32_t));
+    if (csize < 0) {
+      /* This is a run */
+      int32_t value = -csize;
+      memset(_tmp + j * neblock, value, (unsigned int)neblock);
+      cbytes = neblock;
+    } else if (csize == neblock) {
+      /* This is an uncompressed block */
+      memcpy(_tmp + j * neblock, src + src_offset + j * neblock + sizeof(int32_t), (unsigned int)neblock);
+      cbytes = neblock;
+    } else {
+      /* Regular decompression */
+      maxout = neblock;
+      if (context->compcode == BLOSC_BLOSCLZ) {
+        cbytes = blosclz_decompress(src + src_offset + j * neblock + sizeof(int32_t), csize, _tmp + j * neblock, (int)maxout);
+      }
+#if defined(HAVE_LZ4)
+      else if (context->compcode == BLOSC_LZ4) {
+        cbytes = lz4_wrap_decompress((char*)src + src_offset + j * neblock + sizeof(int32_t), csize, (char*)_tmp + j * neblock, (size_t)maxout);
+      }
+      else if (context->compcode == BLOSC_LZ4HC) {
+        cbytes = lz4_wrap_decompress((char*)src + src_offset + j * neblock + sizeof(int32_t), csize, (char*)_tmp + j * neblock, (size_t)maxout);
+      }
+#endif /* HAVE_LZ4 */
+#if defined(HAVE_LIZARD)
+      else if (context->compcode == BLOSC_LIZARD) {
+        cbytes = lizard_wrap_decompress((char*)src + src_offset + j * neblock + sizeof(int32_t), csize, (char*)_tmp + j * neblock, (size_t)maxout);
+      }
+#endif /* HAVE_LIZARD */
+#if defined(HAVE_SNAPPY)
+      else if (context->compcode == BLOSC_SNAPPY) {
+        cbytes = snappy_wrap_decompress((char*)src + src_offset + j * neblock + sizeof(int32_t), csize, (char*)_tmp + j * neblock, (size_t)maxout);
+      }
+#endif /* HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+      else if (context->compcode == BLOSC_ZLIB) {
+        cbytes = zlib_wrap_decompress((char*)src + src_offset + j * neblock + sizeof(int32_t), csize, (char*)_tmp + j * neblock, (size_t)maxout);
+      }
+#endif /* HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+      else if (context->compcode == BLOSC_ZSTD) {
+        cbytes = zstd_wrap_decompress(thread_context, (char*)src + src_offset + j * neblock + sizeof(int32_t), csize, (char*)_tmp + j * neblock, (size_t)maxout);
+      }
+#endif /* HAVE_ZSTD */
+      else {
+        return -5;  /* signals no decompression support */
+      }
+    }
+
+    if (cbytes < 0) {
+      return -2;  /* decompression error */
+    }
+    if (cbytes != neblock) {
+      return -1;  /* should never happen */
+    }
+    ctbytes += cbytes;
+  }  /* Closes j < nstreams */
+
+  if (last_filter_index >= 0) {
+    int errcode = pipeline_d(context, bsize, dest, destinationoffset, tmp, tmp2, tmp3, last_filter_index);
+    if (errcode < 0)
+      return errcode;
+  }
+
+  /* Return the number of uncompressed bytes */
+  return (int)ntbytes;

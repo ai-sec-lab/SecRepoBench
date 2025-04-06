@@ -1,0 +1,103 @@
+int32_t nstreams = (context->header_flags & 0x1f);
+int32_t ntbytes = 0;
+int32_t cbytes = 0;
+int32_t dbytes = 0;
+int32_t last_filter_index = -1;
+int32_t j;
+uint8_t* ip = src + src_offset;
+uint8_t* ip_bound = src + srcsize;
+uint8_t* dest2 = dest + destinationoffset;
+uint8_t* tmp3 = tmp;
+
+for (j = 0; j < nstreams; j++) {
+  if (ip + 5 > ip_bound) {
+    thread_context->parent_context->thread_giveup_code = -1;
+    return -1;
+  }
+  int32_t csize = sw32_(ip);
+  ip += 4;
+  if (ip + csize > ip_bound) {
+    thread_context->parent_context->thread_giveup_code = -1;
+    return -1;
+  }
+  if (csize == 0) {
+    // runs
+    if (ip + 1 > ip_bound) {
+      thread_context->parent_context->thread_giveup_code = -1;
+      return -1;
+    }
+    uint8_t x = *ip;
+    ip++;
+    int32_t nruns = 1;
+    while (ip < ip_bound && *ip == x) {
+      ip++;
+      nruns++;
+    }
+    if (nruns * context->typesize > bsize) {
+      thread_context->parent_context->thread_giveup_code = -1;
+      return -1;
+    }
+    memset(dest2, x, (unsigned int)nruns * context->typesize);
+    dest2 += nruns * context->typesize;
+    ntbytes += nruns * context->typesize;
+  }
+  else if (csize == 1) {
+    // uncompressed data
+    if (ip + bsize > ip_bound) {
+      thread_context->parent_context->thread_giveup_code = -1;
+      return -1;
+    }
+    memcpy(dest2, ip, (unsigned int)bsize);
+    ip += bsize;
+    dest2 += bsize;
+    ntbytes += bsize;
+  }
+  else {
+    // compressed data
+    if (ip + csize > ip_bound) {
+      thread_context->parent_context->thread_giveup_code = -1;
+      return -1;
+    }
+    if (context->header_flags & (uint8_t)BLOSC_MEMCPYED) {
+      memcpy(dest2, ip, (unsigned int)csize);
+      ip += csize;
+      dest2 += csize;
+      ntbytes += csize;
+    }
+    else {
+      int errcode = decompress_d(compformat, ip, csize, tmp3, bsize, &dbytes);
+      if (errcode < 0) {
+        thread_context->parent_context->thread_giveup_code = errcode;
+        return errcode;
+      }
+      if (dbytes!= bsize) {
+        thread_context->parent_context->thread_giveup_code = -1;
+        return -1;
+      }
+      if (filters!= NULL) {
+        last_filter_index = -1;
+        for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+          if (filters[i]!= BLOSC_NOFILTER) {
+            last_filter_index = i;
+          }
+        }
+        if (last_filter_index >= 0) {
+          int errcode = pipeline_d(context, bsize, dest, destinationoffset, tmp3, tmp, tmp2, last_filter_index);
+          if (errcode < 0) {
+            thread_context->parent_context->thread_giveup_code = errcode;
+            return errcode;
+          }
+        }
+        else {
+          memcpy(dest2, tmp3, (unsigned int)bsize);
+        }
+      }
+      else {
+        memcpy(dest2, tmp3, (unsigned int)bsize);
+      }
+      ip += csize;
+      dest2 += bsize;
+      ntbytes += bsize;
+    }
+  }
+}

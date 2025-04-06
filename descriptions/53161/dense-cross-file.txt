@@ -1,0 +1,308 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// mrbgems/mruby-pack/src/pack.c
+static mrb_value
+pack_unpack(mrb_state *mrb, mrb_value str, int single)
+{
+  mrb_value result;
+  struct tmpl tmpl;
+  int count;
+  unsigned int flags;
+  enum pack_dir dir;
+  enum pack_type type;
+  int size;
+  int srcidx, srclen;
+  const unsigned char *sptr;
+
+  prepare_tmpl(mrb, &tmpl);
+
+  srcidx = 0;
+  srclen = (int)RSTRING_LEN(str);
+
+  result = mrb_ary_new(mrb);
+  while (has_tmpl(&tmpl)) {
+    read_tmpl(mrb, &tmpl, &dir, &type, &size, &count, &flags);
+
+    if (dir == PACK_DIR_INVALID)
+      continue;
+    else if (dir == PACK_DIR_NUL) {
+      check_x(mrb, srclen-srcidx, count, 'x');
+      srcidx += count;
+      continue;
+    }
+    else if (dir == PACK_DIR_BACK) {
+      check_x(mrb, srcidx, count, 'X');
+      srcidx -= count;
+      continue;
+    }
+    else if (dir == PACK_DIR_ABS) {
+      check_x(mrb, srclen, count, '@');
+      srcidx = count;
+      continue;
+    }
+
+    /* PACK_FLAG_COUNT2 directions */
+    sptr = (const unsigned char *)RSTRING_PTR(str) + srcidx;
+    switch (dir) {
+    case PACK_DIR_HEX:
+      srcidx += unpack_hex(mrb, sptr, srclen - srcidx, result, count, flags);
+      continue;
+    case PACK_DIR_STR:
+      srcidx += unpack_str(mrb, sptr, srclen - srcidx, result, count, flags);
+      continue;
+    case PACK_DIR_BASE64:
+      srcidx += unpack_base64(mrb, sptr, srclen - srcidx, result);
+      continue;
+    case PACK_DIR_QENC:
+      srcidx += unpack_qenc(mrb, sptr, srclen - srcidx, result);
+      continue;
+    default:
+      break;
+    }
+
+    while (count != 0 && srcidx < srclen) {
+      if (srclen - srcidx < size) {
+        while (count-- > 0) {
+          mrb_ary_push(mrb, result, mrb_nil_value());
+        }
+        break;
+      }
+
+      sptr = (const unsigned char*)RSTRING_PTR(str) + srcidx;
+      switch (dir) {
+      case PACK_DIR_CHAR:
+        srcidx += unpack_char(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_SHORT:
+        srcidx += unpack_short(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_LONG:
+        srcidx += unpack_long(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_QUAD:
+        srcidx += unpack_quad(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_BER:
+        srcidx += unpack_BER(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+#ifndef MRB_NO_FLOAT
+      case PACK_DIR_FLOAT:
+        srcidx += unpack_float(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      case PACK_DIR_DOUBLE:
+        srcidx += unpack_double(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+#endif
+      case PACK_DIR_UTF8:
+        srcidx += unpack_utf8(mrb, sptr, srclen - srcidx, result, flags);
+        break;
+      default:
+        mrb_raise(mrb, E_RUNTIME_ERROR, "mruby-pack's bug");
+      }
+      if (count > 0) {
+        count--;
+      }
+    }
+    if (single) {
+      if (RARRAY_LEN(result) > 0) {
+        return RARRAY_PTR(result)[0];
+      }
+      return mrb_nil_value();
+    }
+  }
+  return result;
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-pack/src/pack.c
+static mrb_value
+mrb_pack_pack(mrb_state *mrb, mrb_value ary)
+{
+  mrb_value o, result;
+  mrb_int aidx;
+  struct tmpl tmpl;
+  int count;
+  unsigned int flags;
+  enum pack_dir dir;
+  enum pack_type type;
+  int ridx, size;
+
+  prepare_tmpl(mrb, &tmpl);
+
+  result = mrb_str_new(mrb, NULL, 128);  /* allocate initial buffer */
+  aidx = 0;
+  ridx = 0;
+  while (has_tmpl(&tmpl)) {
+    read_tmpl(mrb, &tmpl, &dir, &type, &size, &count, &flags);
+
+    if (dir == PACK_DIR_INVALID)
+      continue;
+    else if (dir == PACK_DIR_NUL) {
+    grow:
+      if (ridx > INT_MAX - count) goto overflow;
+      ridx += pack_nul(mrb, result, ridx, count);
+      continue;
+    }
+    else if (dir == PACK_DIR_BACK) {
+      check_x(mrb, ridx, count, 'X');
+      ridx -= count;
+      continue;
+    }
+    else if (dir == PACK_DIR_ABS) {
+      count -= ridx;
+      if (count > 0) goto grow;
+      count = -count;
+      check_x(mrb, ridx, count, '@');
+      ridx -= count;
+      continue;
+    }
+
+    if ((flags & PACK_FLAG_WIDTH) && aidx >= RARRAY_LEN(ary)) {
+      mrb_raise(mrb, E_ARGUMENT_ERROR, "too few arguments");
+    }
+    for (; aidx < RARRAY_LEN(ary); aidx++) {
+      if (count == 0 && !(flags & PACK_FLAG_WIDTH))
+        break;
+
+      o = mrb_ary_ref(mrb, ary, aidx);
+      if (type == PACK_TYPE_INTEGER) {
+        o = mrb_ensure_int_type(mrb, o);
+      }
+#ifndef MRB_NO_FLOAT
+      else if (type == PACK_TYPE_FLOAT) {
+        if (!mrb_float_p(o)) {
+          o = mrb_ensure_float_type(mrb, o);
+        }
+      }
+#endif
+      else if (type == PACK_TYPE_STRING) {
+        if (!mrb_string_p(o)) {
+          mrb_raisef(mrb, E_TYPE_ERROR, "can't convert %T into String", o);
+        }
+      }
+
+      switch (dir) {
+      case PACK_DIR_CHAR:
+        ridx += pack_char(mrb, o, result, ridx, flags);
+        break;
+      case PACK_DIR_SHORT:
+        ridx += pack_short(mrb, o, result, ridx, flags);
+        break;
+      case PACK_DIR_LONG:
+        ridx += pack_long(mrb, o, result, ridx, flags);
+        break;
+      case PACK_DIR_QUAD:
+        ridx += pack_quad(mrb, o, result, ridx, flags);
+        break;
+      case PACK_DIR_BER:
+        ridx += pack_BER(mrb, o, result, ridx, flags);
+        break;
+      case PACK_DIR_BASE64:
+        ridx += pack_base64(mrb, o, result, ridx, count);
+        break;
+      case PACK_DIR_QENC:
+        ridx += pack_qenc(mrb, o, result, ridx, count);
+        break;
+      case PACK_DIR_HEX:
+        ridx += pack_hex(mrb, o, result, ridx, count, flags);
+        break;
+      case PACK_DIR_STR:
+        ridx += pack_str(mrb, o, result, ridx, count, flags);
+        break;
+#ifndef MRB_NO_FLOAT
+      case PACK_DIR_DOUBLE:
+        ridx += pack_double(mrb, o, result, ridx, flags);
+        break;
+      case PACK_DIR_FLOAT:
+        ridx += pack_float(mrb, o, result, ridx, flags);
+        break;
+#endif
+      case PACK_DIR_UTF8:
+        ridx += pack_utf8(mrb, o, result, ridx, count, flags);
+        break;
+      default:
+        break;
+      }
+      if (flags & PACK_FLAG_COUNT2) {
+        /* always consumes 1 entry */
+        aidx++;
+        break;
+      }
+      if (count > 0) {
+        count--;
+      }
+    }
+    if (ridx < 0) {
+    overflow:
+      mrb_raise(mrb, E_RANGE_ERROR, "negative (or overflowed) template size");
+    }
+  }
+
+  mrb_str_resize(mrb, result, ridx);
+  return result;
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-pack/src/pack.c
+static void
+prepare_tmpl(mrb_state *mrb, struct tmpl *tmpl)
+{
+  mrb_get_args(mrb, "S", &tmpl->str);
+  tmpl->idx = 0;
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-pack/src/pack.c
+static int
+pack_long(mrb_state *mrb, mrb_value o, mrb_value str, mrb_int sidx, unsigned int flags)
+{
+  uint32_t n;
+
+  str = str_len_ensure(mrb, str, sidx + 4);
+  n = (uint32_t)mrb_integer(o);
+  if (flags & PACK_FLAG_LITTLEENDIAN) {
+    RSTRING_PTR(str)[sidx+0] = (char)(n & 0xff);
+    RSTRING_PTR(str)[sidx+1] = (char)(n >> 8);
+    RSTRING_PTR(str)[sidx+2] = (char)(n >> 16);
+    RSTRING_PTR(str)[sidx+3] = (char)(n >> 24);
+  } else {
+    RSTRING_PTR(str)[sidx+0] = (char)(n >> 24);
+    RSTRING_PTR(str)[sidx+1] = (char)(n >> 16);
+    RSTRING_PTR(str)[sidx+2] = (char)(n >> 8);
+    RSTRING_PTR(str)[sidx+3] = (char)(n & 0xff);
+  }
+  return 4;
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-pack/src/pack.c
+static int
+pack_quad(mrb_state *mrb, mrb_value o, mrb_value str, mrb_int sidx, unsigned int flags)
+{
+  uint64_t n;
+
+  str = str_len_ensure(mrb, str, sidx + 8);
+  n = (uint64_t)mrb_integer(o);
+  if (flags & PACK_FLAG_LITTLEENDIAN) {
+    RSTRING_PTR(str)[sidx+0] = (char)(n & 0xff);
+    RSTRING_PTR(str)[sidx+1] = (char)(n >> 8);
+    RSTRING_PTR(str)[sidx+2] = (char)(n >> 16);
+    RSTRING_PTR(str)[sidx+3] = (char)(n >> 24);
+    RSTRING_PTR(str)[sidx+4] = (char)(n >> 32);
+    RSTRING_PTR(str)[sidx+5] = (char)(n >> 40);
+    RSTRING_PTR(str)[sidx+6] = (char)(n >> 48);
+    RSTRING_PTR(str)[sidx+7] = (char)(n >> 56);
+  } else {
+    RSTRING_PTR(str)[sidx+0] = (char)(n >> 56);
+    RSTRING_PTR(str)[sidx+1] = (char)(n >> 48);
+    RSTRING_PTR(str)[sidx+2] = (char)(n >> 40);
+    RSTRING_PTR(str)[sidx+3] = (char)(n >> 32);
+    RSTRING_PTR(str)[sidx+4] = (char)(n >> 24);
+    RSTRING_PTR(str)[sidx+5] = (char)(n >> 16);
+    RSTRING_PTR(str)[sidx+6] = (char)(n >> 8);
+    RSTRING_PTR(str)[sidx+7] = (char)(n & 0xff);
+  }
+  return 8;
+}
+

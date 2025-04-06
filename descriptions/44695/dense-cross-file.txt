@@ -1,0 +1,301 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/jplist.c
+static plist_t parse_string(const char* js, jsmntok_info_t* ti, int* index)
+{
+    if (ti->tokens[*index].type != JSMN_STRING) {
+        PLIST_JSON_ERR("%s: token type != JSMN_STRING\n", __func__);
+        return NULL;
+    }
+
+    size_t str_len = 0; ;
+    char* strval = unescape_string(js + ti->tokens[*index].start, ti->tokens[*index].end - ti->tokens[*index].start, &str_len);
+    if (!strval) {
+        return NULL;
+    }
+    plist_t node;
+
+    plist_data_t data = plist_new_plist_data();
+    data->type = PLIST_STRING;
+    data->strval = strval;
+    data->length = str_len;
+    node = plist_new_node(data);
+
+    (*index)++;
+    return node;
+}
+
+// the below code fragment can be found in:
+// src/jplist.c
+static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index)
+{
+    if (ti->tokens[*index].type != JSMN_OBJECT) {
+        PLIST_JSON_ERR("%s: token type != JSMN_OBJECT\n", __func__);
+        return NULL;
+    }
+    int num_tokens = ti->tokens[*index].size;
+    int num;
+    int j = (*index)+1;
+    if (num_tokens % 2 != 0) {
+        PLIST_JSON_ERR("%s: number of children must be even\n", __func__);
+        return NULL;
+    }
+    plist_t obj = plist_new_dict();
+    for (num = 0; num < num_tokens; num++) {
+        if (j+1 >= ti->count) {
+            PLIST_JSON_ERR("%s: token index out of valid range\n", __func__);
+            plist_free(obj);
+            return NULL;
+        }
+        if (ti->tokens[j].type == JSMN_STRING) {
+            char* key = unescape_string(js + ti->tokens[j].start, ti->tokens[j].end - ti->tokens[j].start, NULL);
+            if (!key) {
+                plist_free(obj);
+                return NULL;
+            }
+            plist_t val = NULL;
+            j++;
+            num++;
+            switch (ti->tokens[j].type) {
+                case JSMN_OBJECT:
+                    val = parse_object(js, ti, &j);
+                    break;
+                case JSMN_ARRAY:
+                    val = parse_array(js, ti, &j);
+                    break;
+                case JSMN_STRING:
+                    val = parse_string(js, ti, &j);
+                    break;
+                case JSMN_PRIMITIVE:
+                    val = parse_primitive(js, ti, &j);
+                    break;
+                default:
+                    break;
+            }
+            if (val) {
+                plist_dict_set_item(obj, key, val);
+            } else {
+                free(key);
+                plist_free(obj);
+                return NULL;
+            }
+            free(key);
+        } else {
+            PLIST_JSON_ERR("%s: keys must be of type STRING\n", __func__);
+            plist_free(obj);
+            return NULL;
+        }
+    }
+    (*index) = j;
+    return obj;
+}
+
+// the below code fragment can be found in:
+// src/jplist.c
+static plist_t parse_array(const char* js, jsmntok_info_t* ti, int* index)
+{
+    if (ti->tokens[*index].type != JSMN_ARRAY) {
+        PLIST_JSON_ERR("%s: token type != JSMN_ARRAY\n", __func__);
+        return NULL;
+    }
+    plist_t arr = plist_new_array();
+    int num_tokens = ti->tokens[*index].size;
+    int num;
+    int j = (*index)+1;
+    for (num = 0; num < num_tokens; num++) {
+        if (j >= ti->count) {
+            PLIST_JSON_ERR("%s: token index out of valid range\n", __func__);
+            plist_free(arr);
+            return NULL;
+        }
+        plist_t val = NULL;
+        switch (ti->tokens[j].type) {
+            case JSMN_OBJECT:
+                val = parse_object(js, ti, &j);
+                break;
+            case JSMN_ARRAY:
+                val = parse_array(js, ti, &j);
+                break;
+            case JSMN_STRING:
+                val = parse_string(js, ti, &j);
+                break;
+            case JSMN_PRIMITIVE:
+                val = parse_primitive(js, ti, &j);
+                break;
+            default:
+                break;
+        }
+        if (val) {
+            plist_array_append_item(arr, val);
+        } else {
+            plist_free(arr);
+            return NULL;
+        }
+    }
+    *(index) = j;
+    return arr;
+}
+
+// the below code fragment can be found in:
+// src/jsmn.c
+static jsmnerr_t jsmn_parse_primitive(jsmn_parser *parser, const char *js,
+		jsmntok_t *tokens, int num_tokens) {
+	jsmntok_t *token;
+	int start;
+
+	start = parser->pos;
+
+	for (; (parser->end > 0 && parser->pos < parser->end) && js[parser->pos] != '\0'; parser->pos++) {
+		switch (js[parser->pos]) {
+#ifndef JSMN_STRICT
+			/* In strict mode primitive must be followed by "," or "}" or "]" */
+			case ':':
+#endif
+			case '\t' : case '\r' : case '\n' : case ' ' :
+			case ','  : case ']'  : case '}' :
+				goto found;
+			default:
+				break;
+		}
+		if (js[parser->pos] < 32 || js[parser->pos] >= 127) {
+			parser->pos = start;
+			return JSMN_ERROR_INVAL;
+		}
+	}
+#ifdef JSMN_STRICT
+	/* In strict mode primitive must be followed by a comma/object/array */
+	parser->pos = start;
+	return JSMN_ERROR_PART;
+#endif
+
+found:
+	token = jsmn_alloc_token(parser, tokens, num_tokens);
+	if (token == NULL) {
+		parser->pos = start;
+		return JSMN_ERROR_NOMEM;
+	}
+	jsmn_fill_token(token, JSMN_PRIMITIVE, start, parser->pos);
+#ifdef JSMN_PARENT_LINKS
+	token->parent = parser->toksuper;
+#endif
+	parser->pos--;
+	return JSMN_SUCCESS;
+}
+
+// the below code fragment can be found in:
+// src/jsmn.c
+jsmnerr_t jsmn_parse(jsmn_parser *parser, const char *js, unsigned int length, jsmntok_t *tokens,
+		unsigned int num_tokens) {
+	jsmnerr_t r;
+	int i;
+	jsmntok_t *token;
+
+	parser->end = length;
+
+	for (; (parser->end > 0 && parser->pos < parser->end) && js[parser->pos] != '\0'; parser->pos++) {
+		char c;
+		jsmntype_t type;
+
+		c = js[parser->pos];
+		switch (c) {
+			case '{': case '[':
+				token = jsmn_alloc_token(parser, tokens, num_tokens);
+				if (token == NULL)
+					return JSMN_ERROR_NOMEM;
+				if (parser->toksuper != -1) {
+					tokens[parser->toksuper].size++;
+#ifdef JSMN_PARENT_LINKS
+					token->parent = parser->toksuper;
+#endif
+				}
+				token->type = (c == '{' ? JSMN_OBJECT : JSMN_ARRAY);
+				token->start = parser->pos;
+				parser->toksuper = parser->toknext - 1;
+				break;
+			case '}': case ']':
+				type = (c == '}' ? JSMN_OBJECT : JSMN_ARRAY);
+#ifdef JSMN_PARENT_LINKS
+				if (parser->toknext < 1) {
+					return JSMN_ERROR_INVAL;
+				}
+				token = &tokens[parser->toknext - 1];
+				for (;;) {
+					if (token->start != -1 && token->end == -1) {
+						if (token->type != type) {
+							return JSMN_ERROR_INVAL;
+						}
+						token->end = parser->pos + 1;
+						parser->toksuper = token->parent;
+						break;
+					}
+					if (token->parent == -1) {
+						break;
+					}
+					token = &tokens[token->parent];
+				}
+#else
+				for (i = parser->toknext - 1; i >= 0; i--) {
+					token = &tokens[i];
+					if (token->start != -1 && token->end == -1) {
+						if (token->type != type) {
+							return JSMN_ERROR_INVAL;
+						}
+						parser->toksuper = -1;
+						token->end = parser->pos + 1;
+						break;
+					}
+				}
+				/* Error if unmatched closing bracket */
+				if (i == -1) return JSMN_ERROR_INVAL;
+				for (; i >= 0; i--) {
+					token = &tokens[i];
+					if (token->start != -1 && token->end == -1) {
+						parser->toksuper = i;
+						break;
+					}
+				}
+#endif
+				break;
+			case '\"':
+				r = jsmn_parse_string(parser, js, tokens, num_tokens);
+				if (r < 0) return r;
+				if (parser->toksuper != -1)
+					tokens[parser->toksuper].size++;
+				break;
+			case '\t' : case '\r' : case '\n' : case ':' : case ',': case ' ':
+				break;
+#ifdef JSMN_STRICT
+			/* In strict mode primitives are: numbers and booleans */
+			case '-': case '0': case '1' : case '2': case '3' : case '4':
+			case '5': case '6': case '7' : case '8': case '9':
+			case 't': case 'f': case 'n' :
+#else
+			/* In non-strict mode every unquoted value is a primitive */
+			default:
+#endif
+				r = jsmn_parse_primitive(parser, js, tokens, num_tokens);
+				if (r < 0) return r;
+				if (parser->toksuper != -1)
+					tokens[parser->toksuper].size++;
+				break;
+
+#ifdef JSMN_STRICT
+			/* Unexpected char in strict mode */
+			default:
+				return JSMN_ERROR_INVAL;
+#endif
+
+		}
+	}
+
+	for (i = parser->toknext - 1; i >= 0; i--) {
+		/* Unmatched opened object or array */
+		if (tokens[i].start != -1 && tokens[i].end == -1) {
+			return JSMN_ERROR_PART;
+		}
+	}
+
+	return JSMN_SUCCESS;
+}
+

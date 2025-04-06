@@ -1,0 +1,185 @@
+"HTTP stage %d: filename_start %u\n",
+		  flow->l4.tcp.http_stage, filename_start);
+
+    if(filename_start > 0) {
+      flow->http_detected = 1;
+      flow->l4.tcp.http_stage = 1;
+
+      if(packet->payload_packet_len > filename_start) {
+        char *filename = ndpi_malloc(filename_start + 1);
+
+        if(filename) {
+          memcpy(filename, packet->payload, filename_start);
+          filename[filename_start] = '\0';
+
+          ndpi_check_http_url(ndpi_struct, flow, filename);
+          ndpi_free(filename);
+        }
+      }
+
+      ndpi_parse_packet_line_info(ndpi_struct, flow);
+      check_content_type_and_change_protocol(ndpi_struct, flow);
+      ndpi_validate_http_content(ndpi_struct, flow);
+      ndpi_int_http_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_HTTP, NDPI_PROTOCOL_CATEGORY_WEB);
+      return;
+    }
+  } else if(packet->payload_packet_len > 0) {
+    /* Expected a response */
+    if(flow->l4.tcp.http_stage == 0) {
+      flow->http_detected = 0;
+
+      NDPI_LOG_DBG2(ndpi_struct, "HTTP stage %d: \n", flow->l4.tcp.http_stage);
+
+      if(packet->payload_packet_len >= 12) {
+        char buf[4];
+
+        /* Set server HTTP response code */
+        strncpy(buf, (char*)&packet->payload[9], 3);
+        buf[3] = '\0';
+
+        flow->http.response_status_code = atoi(buf);
+
+        /* https://en.wikipedia.org/wiki/List_of_HTTP_status_codes */
+        if((flow->http.response_status_code < 100) || (flow->http.response_status_code > 509))
+          flow->http.response_status_code = 0; /* Out of range */
+        else if(flow->http.response_status_code >= 400) {
+          char ec[48];
+          
+          if(flow->http.url != NULL) {
+            /* Let's check for Wordpress */
+            char *slash = strchr(flow->http.url, '/');
+
+            if(slash != NULL &&
+               (((flow->http.method == NDPI_HTTP_METHOD_POST) && (strncmp(slash, "/wp-admin/", 10) == 0))
+                || ((flow->http.method == NDPI_HTTP_METHOD_GET) && (strncmp(slash, "/wp-content/uploads/", 20) == 0))		 
+               )) {
+              /* Example of popular exploits https://www.wordfence.com/blog/2022/05/millions-of-attacks-target-tatsu-builder-plugin/ */
+              ndpi_set_risk(ndpi_struct, flow, NDPI_POSSIBLE_EXPLOIT, "Possible Wordpress Exploit");
+            }
+          }
+
+          snprintf(ec, sizeof(ec), "HTTP Error Code %u", flow->http.response_status_code);
+          ndpi_set_risk(ndpi_struct, flow, NDPI_ERROR_CODE_DETECTED, ec);
+        }
+
+        if(flow->flow_payload) {
+          char *endl;
+          
+          flow->flow_payload[flow->flow_payload_len] = '\0';
+          if((endl = strrchr(flow->flow_payload, '\r')) == NULL)
+            endl = strrchr(flow->flow_payload, '\n');
+
+          if(endl != NULL) {
+            endl[0] = '\0';
+            flow->flow_payload_len = endl - flow->flow_payload;
+          }
+        }
+      }
+
+      ndpi_parse_packet_line_info(ndpi_struct, flow);
+      check_content_type_and_change_protocol(ndpi_struct, flow);
+      ndpi_validate_http_content(ndpi_struct, flow);
+      ndpi_int_http_add_connection(ndpi_struct, flow, NDPI_PROTOCOL_HTTP, NDPI_PROTOCOL_CATEGORY_WEB);
+      return;
+    }
+  }
+
+  if(packet->payload_packet_len > 0) {
+    check_http_payload(ndpi_struct, flow);
+  }
+}
+
+/* ************************************************************* */
+
+static void ndpi_search_http_tcp(struct ndpi_detection_module_struct *ndpi_struct,
+				 struct ndpi_flow_struct *flow) {
+  if(flow->detected_protocol_stack[0] == NDPI_PROTOCOL_HTTP) {
+    ndpi_check_http_tcp(ndpi_struct, flow);
+  } else {
+    NDPI_LOG_DBG(ndpi_struct, "Protocol not supported\n");
+  }
+}
+
+/* ************************************************************* */
+
+static void ndpi_init_http_variables(struct ndpi_detection_module_struct *ndpi_struct,
+				     struct ndpi_flow_struct *flow) {
+  flow->l4.tcp.http_stage = 0;
+  flow->http_detected = 0;
+  flow->http.response_status_code = 0;
+  flow->http.request_content_type = NULL;
+  flow->http.content_type = NULL;
+  flow->http.user_agent = NULL;
+  flow->http.nat_ip = NULL;
+  flow->http.url = NULL;
+  flow->http.detected_os = NULL;
+  flow->http.request_content_type = NULL;
+  flow->http.content_disposition_line.ptr = NULL;
+  flow->http.content_disposition_line.len = 0;
+  flow->http.content_disposition_filename = NULL;
+  flow->http.content_disposition_filename_len = 0;
+  flow->http.content_disposition_filename_enc = 0;
+  flow->http.content_disposition_parameters = NULL;
+  flow->http.content_disposition_parameters_len = 0;
+  flow->http.content_disposition_parameters_enc = 0;
+  flow->http.content_length = 0;
+  flow->http.content_length_set = 0;
+  flow->http.content_length_max = 0;
+  flow->http.content_length_max_set = 0;
+  flow->http.content_length_min = 0;
+  flow->http.content_length_min_set = 0;
+  flow->http.content_range_start = 0;
+  flow->http.content_range_start_set = 0;
+  flow->http.content_range_end = 0;
+  flow->http.content_range_end_set = 0;
+  flow->http.content_range_length = 0;
+  flow->http.content_range_length_set = 0;
+  flow->http.content_range_unit = NULL;
+  flow->http.content_range_unit_len = 0;
+  flow->http.transfer_encoding = NULL;
+  flow->http.transfer_encoding_len = 0;
+  flow->http.transfer_encoding_chunked = 0;
+  flow->http.transfer_encoding_gzip = 0;
+  flow->http.transfer_encoding_deflate = 0;
+  flow->http.transfer_encoding_compress = 0;
+  flow->http.transfer_encoding_identity = 0;
+  flow->http.connection_close = 0;
+  flow->http.connection_keep_alive = 0;
+  flow->http.connection_upgrade = 0;
+  flow->http.expect_continue = 0;
+  flow->http.expect_continue_100_continue = 0;
+  flow->http.expect_continue_100_continue_sent = 0;
+  flow->http.expect_continue_100_continue_received = 0;
+  flow->http.expect_continue_100_continue_sent_len = 0;
+  flow->http.expect_continue_100_continue_received_len = 0;
+  flow->http.expect_continue_100_continue_sent_ptr = NULL;
+  flow->http.expect_continue_100_continue_received_ptr = NULL;
+  flow->http.expect_continue_100_continue_sent_enc = 0;
+  flow->http.expect_continue_100_continue_received_enc = 0;
+  flow->http.expect_continue_100_continue_sent_enc_len = 0;
+  flow->http.expect_continue_100_continue_received_enc_len = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr = NULL;
+  flow->http.expect_continue_100_continue_received_enc_ptr = NULL;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr = NULL;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr = NULL;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr_len = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len_max = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr_len_max = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len_max_set = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr_len_max_set = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len_max_set_ptr = NULL;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr_len_max_set_ptr = NULL;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len_max_set_ptr_len = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr_len_max_set_ptr_len = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len_max_set_ptr_len_max = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr_len_max_set_ptr_len_max = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len_max_set_ptr_len_max_set = 0;
+  flow->http.expect_continue_100_continue_received_enc_ptr_len_max_set_ptr_len_max_set_ptr_len_max_set = 0;
+  flow->http.expect_continue_100_continue_sent_enc_ptr_len_max_set_ptr_len_max_set_ptr_len_max_set_ptr

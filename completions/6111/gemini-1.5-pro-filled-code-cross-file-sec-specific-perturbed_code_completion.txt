@@ -1,0 +1,98 @@
+register ssize_t i;
+
+  /*
+    Read image from Postscript delegated to Ghostscript.
+  */
+  postscript_image=NewImageList();
+  read_info=CloneImageInfo(image_info);
+  *read_info->magick='\0';
+  density=AcquireString(read_info->density);
+  options=AcquireString(read_info->options);
+  (void) FormatLocaleString(filename,MagickPathExtent,"%s%s",
+    TemporaryDirectory,PSDelegatePostscript);
+  filedescriptor=AcquireUniqueFileResource(filename);
+  if (filedescriptor == -1)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),FileOpenError,
+        "UnableToCreateTemporaryFile","`%s'",filename);
+      goto FINISH_PS;
+    }
+  image=ReadImage(image_info,exception);
+  if (image == (Image *) NULL)
+    goto FINISH_PS;
+  DestroyBlob(image);
+  image->blob=ReferenceBlob(image_info->blob);
+  /*
+    Write Postscript to temporary file.
+  */
+  if (image->blob != (const void *) NULL)
+    {
+      if (WriteBlob(image,image->blob->length,image->blob->data) == MagickFalse)
+        {
+          (void) ThrowMagickException(exception,GetMagickModule(),
+            FileOpenError,"UnableToCreateTemporaryFile","`%s'",filename);
+          goto FINISH_PS;
+        }
+    }
+  (void) CloseBlob(image);
+  delegate_info=GetPostscriptDelegateInfo(read_info,exception);
+  if (delegate_info == (const DelegateInfo *) NULL)
+    goto FINISH_PS;
+  (void) FormatLocaleString(command,MagickPathExtent,
+    GetDelegateCommands(delegate_info),read_info->antialias != MagickFalse ?
+    " -dGraphicsAlphaBits=4" : "",read_info->antialias != MagickFalse ?
+    " -dTextAlphaBits=4" : "",read_info->quality != UndefinedCompressionQuality ?
+    " -dJPEGQ=%ld" : "",read_info->quality != UndefinedCompressionQuality ?
+    (long) read_info->quality : 0,read_info->sampling_factor != (char *) NULL ?
+    " -dDownScaleFactor=%ld" : "",read_info->sampling_factor != (char *) NULL ?
+    (long) StringToLong(read_info->sampling_factor) : 0,density != (char *) NULL ?
+    " -r%s" : "",density != (char *) NULL ? density : "",options != (char *) NULL ?
+    " %s" : "",options != (char *) NULL ? options : "",filename,
+    read_info->filename);
+  *message='\0';
+  status=InvokePostscriptDelegate(read_info->verbose,command,message,
+    MagickPathExtent,exception);
+  (void) RelinquishUniqueFileResource(filename);
+  options=DestroyString(options);
+  density=DestroyString(density);
+  (void) DeleteFile(filename);
+  if ((status == MagickFalse) || (*message != '\0'))
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),DelegateError,
+        "PostscriptDelegateFailed","`%s' (%s)",command,message);
+      goto FINISH_PS;
+    }
+  /*
+    Read Ghostscript output.
+  */
+  (void) FormatLocaleString(postscript_filename,MagickPathExtent,"%s%s",
+    TemporaryDirectory,PSDelegateOutput);
+  for (i=0; ; i++)
+  {
+    (void) FormatLocaleString(input_filename,MagickPathExtent,"%s.%04ld",
+      postscript_filename,(long) i);
+    (void) CopyMagickString(read_info->filename,input_filename,MagickPathExtent);
+    image=ReadImage(read_info,exception);
+    (void) DeleteFile(input_filename);
+    if (image == (Image *) NULL)
+      break;
+    AppendImageToList(&postscript_image,image);
+  }
+  (void) DeleteFile(postscript_filename);
+FINISH_PS:
+  read_info=DestroyImageInfo(read_info);
+  if (postscript_image == (Image *) NULL)
+    return((Image *) NULL);
+  if (GetFirstImageInList(postscript_image) == (Image *) NULL)
+    {
+      postscript_image=DestroyImageList(postscript_image);
+      return((Image *) NULL);
+    }
+  /*
+    Post process, set image resolution.
+  */
+  page=GetImageFromList(postscript_image,0);
+  if (page == (Image *) NULL)
+    return(postscript_image);
+  columns=page->columns;
+  rows=page->rows;
