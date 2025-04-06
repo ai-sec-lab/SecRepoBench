@@ -1,0 +1,68 @@
+p = b;
+while (step > 0) {
+	/* Get directory record length. */
+	uint8_t dr_len = p[0];
+
+	/* If length is 0, skip to the next block boundary. */
+	if (dr_len == 0) {
+		size_t pad = iso9660->logical_block_size - (step % iso9660->logical_block_size);
+		if (pad == iso9660->logical_block_size || pad > step)
+			break; /* Nothing more to process in this block. */
+		p += pad;
+		step -= pad;
+		continue;
+	}
+
+	/* If the record exceeds the remaining buffer, or is too short, stop. */
+	if (dr_len > step || dr_len < 34)
+		break;
+
+	/* Parse basic directory record fields safely. */
+	uint32_t extent = archive_le32dec(p + 2);
+	uint32_t size   = archive_le32dec(p + 10);
+	uint8_t flags   = p[25];
+	uint8_t name_len = p[32];
+
+	/* Ensure name length doesn't exceed the directory record. */
+	if ((size_t)name_len + 33U > dr_len) {
+		/* Corrupt or truncated record; stop parsing. */
+		break;
+	}
+
+	/* Skip '.' and '..' entries. */
+	if (!(name_len == 1 &&
+	     (p[33] == 0x00 || p[33] == 0x01))) {
+		/* Create and populate a new file_info structure. */
+		struct file_info *child = allocate_file_info(iso9660, parent, p, dr_len);
+		if (child == NULL)
+			return (ARCHIVE_FATAL);
+
+		/* If this is part of a multi-extent file, link or create the chain. */
+		if (flags & 0x80) {
+			if (multi == NULL) {
+				multi = child;
+			} else {
+				/* Add this child extent to the existing multi-extent file. */
+				append_extent(multi, child);
+				/* We won't add 'child' separately to the tree or pending files. */
+				child = NULL;
+			}
+		} else if (multi != NULL) {
+			/* Final extent of a multi-extent file. */
+			append_extent(multi, child);
+			multi = NULL; /* Reset multi for future files. */
+			child = NULL;
+		}
+
+		/* If the file_info wasn't part of a multi-extent chain, record it. */
+		if (child) {
+			add_child_to_parent(parent, child);
+			if ((child->mode & AE_IFMT) == AE_IFDIR)
+				parent->subdirs++;
+		}
+	}
+
+	/* Advance to the next directory record. */
+	p += dr_len;
+	step -= dr_len;
+}

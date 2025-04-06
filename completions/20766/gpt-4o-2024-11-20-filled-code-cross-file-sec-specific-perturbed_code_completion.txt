@@ -1,0 +1,55 @@
+struct ndpi_udphdr *udph = NULL;
+    struct ndpi_tcphdr *tcph = NULL;
+
+    if (header->caplen < ip_offset + ip_len + sizeof(struct ndpi_udphdr))
+      return ndpiprotocol; /* Too short for UDP header */
+
+    udph = (struct ndpi_udphdr *)&packet[ip_offset + ip_len];
+
+    if (proto == IPPROTO_UDP) {
+      u_int16_t sport = ntohs(udph->source), dport = ntohs(udph->dest);
+
+      /* Check for GTP-U */
+      if ((sport == 2152 || dport == 2152) && (header->caplen >= ip_offset + ip_len + 8)) {
+        u_int8_t flags = packet[ip_offset + ip_len + 0];
+        u_int8_t message_type = packet[ip_offset + ip_len + 1];
+
+        if ((flags >> 5) == 1 && message_type == 0xFF) { /* GTPv1 and GTP-U message */
+          ip_offset += ip_len + 8;
+          tunnel_type = ndpi_gtp_tunnel;
+        }
+      }
+
+      /* Check for TZSP */
+      else if ((sport == 37008 || dport == 37008) && (header->caplen >= ip_offset + ip_len + 2)) {
+        u_int8_t version = packet[ip_offset + ip_len + 0];
+        u_int8_t encapsulated_protocol = packet[ip_offset + ip_len + 1];
+
+        if (version == 1 && encapsulated_protocol == 1) { /* TZSP version 1, Ethernet encapsulation */
+          ip_offset += ip_len + 2;
+
+          /* Skip TZSP tags */
+          while (ip_offset < header->caplen) {
+            u_int8_t tag_type = packet[ip_offset];
+            u_int8_t tag_length = packet[ip_offset + 1];
+
+            ip_offset += 2 + tag_length;
+            if (tag_type == 1) /* End of tags */
+              break;
+          }
+
+          tunnel_type = ndpi_tzsp_tunnel;
+        }
+      }
+
+      /* Check for CAPWAP */
+      else if (sport == 5246 && (header->caplen >= ip_offset + ip_len + 8)) {
+        u_int8_t capwap_flags = packet[ip_offset + ip_len + 0];
+        u_int8_t capwap_message_type = packet[ip_offset + ip_len + 1];
+
+        if ((capwap_flags & 0x80) && (capwap_message_type == 0)) { /* CAPWAP data packet */
+          ip_offset += ip_len + 8;
+          tunnel_type = ndpi_capwap_tunnel;
+        }
+      }
+    }

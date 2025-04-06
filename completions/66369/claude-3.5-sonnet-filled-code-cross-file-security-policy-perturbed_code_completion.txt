@@ -1,0 +1,125 @@
+if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+    char *rg = (char *)aux + 3;
+    char *rg_end = memchr(rg, '\0', aux_end - rg);
+    if (!rg_end) {
+        hts_log_warning("RG:Z tag is not null-terminated");
+        goto err;
+    }
+    brg = sam_hdr_find_rg(filedescriptor->header, rg);
+}
+
+while (aux < aux_end) {
+    char type;
+    int32_t i32;
+    int r;
+
+    if (aux_end - aux < 3) {
+        hts_log_warning("Malformed aux data");
+        goto err;
+    }
+
+    // Ensure we don't read past the end of the aux data
+    if (aux[2] == 'Z' || aux[2] == 'H') {
+        char *end = memchr(aux+3, '\0', aux_end - (aux+3));
+        if (!end) {
+            hts_log_warning("Aux %c%c:Z data is not null-terminated", aux[0], aux[1]);
+            goto err;
+        }
+    }
+
+    if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
+        if (verbatim_MD) goto copy_aux;
+        if (no_ref) {
+            // Not possible to generate the MD on the fly as we have no ref
+            verbatim_MD = 1;
+            goto copy_aux;
+        }
+        // Otherwise we'll generate it on the fly
+        aux += 3;
+        while (*aux && aux < aux_end) aux++;
+        if (*aux) goto err;
+        aux++;
+        continue;
+    }
+
+    if (aux[0] == 'N' && aux[1] == 'M') {
+        if (verbatim_NM) goto copy_aux;
+        if (no_ref) {
+            // Not possible to generate the NM on the fly as we have no ref
+            verbatim_NM = 1;
+            goto copy_aux;
+        }
+        // Otherwise we'll generate it on the fly
+        aux += 3;
+        aux += aux[2] == 'C' ? 1 : aux[2] == 'S' ? 2 : 4;
+        continue;
+    }
+
+copy_aux:
+    BLOCK_APPEND(td_b, aux, 3);
+
+    // Append remainder of aux tag
+    type = aux[2];
+    aux += 3;
+
+    switch (type) {
+    case 'A': case 'C': case 'c':
+        BLOCK_APPEND(td_b, aux, 1);
+        aux++;
+        break;
+
+    case 'S': case 's':
+        BLOCK_APPEND(td_b, aux, 2);
+        aux += 2;
+        break;
+
+    case 'I': case 'i': case 'f':
+        BLOCK_APPEND(td_b, aux, 4);
+        aux += 4;
+        break;
+
+    case 'd':
+        BLOCK_APPEND(td_b, aux, 8);
+        aux += 8;
+        break;
+
+    case 'Z': case 'H':
+        while (*aux && aux < aux_end)
+            BLOCK_APPEND_CHAR(td_b, *aux++);
+        if (*aux) goto err;
+        BLOCK_APPEND_CHAR(td_b, 0);
+        aux++;
+        break;
+
+    case 'B': {
+        int type = *aux++;
+        int32_t count = le_to_i32(aux);
+        aux += 4;
+        BLOCK_APPEND(td_b, aux-5, 5);
+        switch (type) {
+        case 'c': case 'C':
+            BLOCK_APPEND(td_b, aux, count);
+            aux += count;
+            break;
+        case 's': case 'S':
+            BLOCK_APPEND(td_b, aux, 2*count);
+            aux += 2*count;
+            break;
+        case 'i': case 'I': case 'f':
+            BLOCK_APPEND(td_b, aux, 4*count);
+            aux += 4*count;
+            break;
+        default:
+            hts_log_error("Unknown sub-type '%c' for aux type 'B'", type);
+            goto err;
+        }
+        break;
+    }
+
+    default:
+        hts_log_error("Unknown aux type '%c'", type);
+        goto err;
+    }
+}
+
+BLOCK_APPEND_CHAR(td_b, 0);

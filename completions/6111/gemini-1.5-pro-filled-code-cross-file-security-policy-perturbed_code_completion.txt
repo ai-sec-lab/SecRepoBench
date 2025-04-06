@@ -1,0 +1,97 @@
+register long
+    i;
+
+  size_t
+    length;
+
+  ssize_t
+    count;
+
+  unsigned char
+    *profile;
+
+  /*
+    Read image from Postscript delegated to Ghostscript.
+  */
+  if (image_info->monochrome != MagickFalse)
+    delegate_info=GetDelegateInfo("ps:mono",(char *) NULL,exception);
+  else
+    delegate_info=GetDelegateInfo("ps:color",(char *) NULL,exception);
+  if (delegate_info == (const DelegateInfo *) NULL)
+    return((Image *) NULL);
+  *message='\0';
+  (void) FormatLocaleString(input_filename,MagickPathExtent,"%s",
+    image_info->filename);
+  filedescriptor=AcquireUniqueSymbolicLink(input_filename,postscript_filename);
+  if (filedescriptor < 0)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),FileOpenError,
+        "UnableToCreateTemporaryFile","`%s'",postscript_filename);
+      return((Image *) NULL);
+    }
+  (void) Close(filedescriptor);
+  profile=(unsigned char *) GetImageProfile(image,"8bim");
+  if (profile != (unsigned char *) NULL)
+    {
+      /*
+        Embed Photoshop profile for Ghostscript rendering.
+      */
+      (void) FormatLocaleString(filename,MagickPathExtent,"%s.eps",
+        postscript_filename);
+      filedescriptor=Open(filename,O_WRONLY | O_CREAT | O_TRUNC |
+        O_BINARY,S_MODE);
+      if (filedescriptor < 0)
+        {
+          (void) ThrowMagickException(exception,GetMagickModule(),FileOpenError,
+            "UnableToCreateTemporaryFile","`%s'",postscript_filename);
+          return((Image *) NULL);
+        }
+      (void) Write(filedescriptor,"%!PS-Adobe-3.0 EPSF-3.0\n",25);
+      (void) FormatLocaleString(command,MagickPathExtent,"%%%%BoundingBox: 0 0 %g %g\n",
+        (double) image->columns,(double) image->rows);
+      (void) Write(filedescriptor,command,(size_t) strlen(command));
+      (void) Write(filedescriptor,"%%BeginPhotoshop:\n",18);
+      length=strlen((char *) profile);
+      for (i=0; i < (long) length; i+=64)
+      {
+        (void) FormatLocaleString(command,MagickPathExtent,
+          "%%ImageData: %g %g 8 3 1 1 %" MAGICK_SIZE_T_F "u\n",
+          (double) image->columns,(double) image->rows,(MAGICK_SIZE_T)
+          MagickMin((size_t) 64,length-i));
+        (void) Write(filedescriptor,command,(size_t) strlen(command));
+        count=Write(filedescriptor,profile+i,(size_t) MagickMin((size_t) 64,
+          length-i));
+        if (count < 0)
+          break;
+        (void) Write(filedescriptor,"\n",1);
+      }
+      (void) Write(filedescriptor,"%%EndPhotoshop:\n",16);
+      (void) Close(filedescriptor);
+      (void) CopyMagickString(input_filename,filename,MagickPathExtent);
+    }
+  (void) FormatLocaleString(command,MagickPathExtent,
+    GetDelegateCommands(delegate_info),input_filename);
+  options=AcquireString("");
+  density=AcquireString("");
+  if (image_info->density != (char *) NULL)
+    (void) FormatLocaleString(density,MagickPathExtent,"%s",image_info->density);
+  option=GetImageOption(image_info,"eps:use-cropbox");
+  if (IsStringTrue(option) != MagickFalse)
+    (void) ConcatenateMagickString(options,"-dEPSCrop ",MagickPathExtent);
+  read_info=CloneImageInfo(image_info);
+  SetGeometry(image,&geometry_info);
+  (void) FormatLocaleString(geometry,MagickPathExtent,"%dx%d",
+    (unsigned int) geometry_info.rho,(unsigned int) geometry_info.sigma);
+  (void) FormatLocaleString(command,MagickPathExtent,
+    GetDelegateCommands(delegate_info),input_filename);
+  postscript_image=ReadImage(read_info,exception);
+  (void) RelinquishUniqueFileResource(postscript_filename);
+  read_info=DestroyImageInfo(read_info);
+  density=DestroyString(density);
+  options=DestroyString(options);
+  if (postscript_image == (Image *) NULL)
+    return((Image *) NULL);
+  do
+  {
+    (void) SubstituteString(&postscript_image->filename,postscript_filename,
+      input_filename);

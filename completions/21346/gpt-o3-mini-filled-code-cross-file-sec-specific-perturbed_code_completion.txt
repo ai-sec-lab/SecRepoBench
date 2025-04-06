@@ -1,0 +1,78 @@
+{
+  const char *line = packet->line[i].ptr;
+  u_int16_t line_len = packet->line[i].len;
+  int token_start = j;
+  /* Extract the command token after "DCC " */
+  while (j < line_len && line[j] != ' ')
+    j++;
+  int token_len = j - token_start;
+  if (token_len > 0 &&
+      ((token_len == 4 && (memcmp(&line[token_start], "SEND", 4) == 0)) ||
+       (token_len == 4 && (memcmp(&line[token_start], "CHAT", 4) == 0)) ||
+       (token_len == 4 && (memcmp(&line[token_start], "chat", 4) == 0)) ||
+       (token_len == 7 && (memcmp(&line[token_start], "sslchat", 7) == 0)) ||
+       (token_len == 5 && (memcmp(&line[token_start], "TSEND", 5) == 0)))) {
+    /* Skip to the part after the command token and any following spaces.
+       We need to locate the port number which is expected after the third space. */
+    int space_count = 0;
+    while (j < line_len && space_count < 3) {
+      if (line[j] == ' ')
+        space_count++;
+      j++;
+    }
+    /* Parse the port number string ensuring bounds-checking */
+    int port_val = 0;
+    while (j < line_len && isdigit((unsigned char)line[j])) {
+      int digit = line[j] - '0';
+      if (port_val > (65535 - digit) / 10)
+        break; // Prevent overflow
+      port_val = port_val * 10 + digit;
+      j++;
+    }
+    if (port_val > 0 && port_val <= 65535) {
+      /* Choose the identifier to update: prefer src if marked as IRC, otherwise dst */
+      struct ndpi_id_struct *id = NULL;
+      if (flow->src != NULL &&
+          NDPI_COMPARE_PROTOCOL_TO_BITMASK(flow->src->detected_protocol_bitmask, NDPI_PROTOCOL_IRC))
+        id = flow->src;
+      else if (flow->dst != NULL &&
+               NDPI_COMPARE_PROTOCOL_TO_BITMASK(flow->dst->detected_protocol_bitmask, NDPI_PROTOCOL_IRC))
+        id = flow->dst;
+      if (id != NULL) {
+        int exists = 0;
+        u_int16_t counter;
+        /* Check if this port is already stored */
+        for (counter = 0; counter < id->irc_number_of_port; counter++) {
+          if (id->irc_port[counter] == (u_int16_t)port_val) {
+            exists = 1;
+            id->last_time_port_used[counter] = packet->tick_timestamp;
+            break;
+          }
+        }
+        if (!exists) {
+          /* Define a maximum number of ports the array can hold */
+          const u_int16_t max_ports = 10;
+          if (id->irc_number_of_port < max_ports) {
+            id->irc_port[id->irc_number_of_port] = (u_int16_t)port_val;
+            id->last_time_port_used[id->irc_number_of_port] = packet->tick_timestamp;
+            id->irc_number_of_port++;
+          } else {
+            /* Replace the least recently used port */
+            u_int16_t min_time = id->last_time_port_used[0];
+            int min_index = 0;
+            for (counter = 1; counter < max_ports; counter++) {
+              if (id->last_time_port_used[counter] < min_time) {
+                min_time = id->last_time_port_used[counter];
+                min_index = counter;
+              }
+            }
+            id->irc_port[min_index] = (u_int16_t)port_val;
+            id->last_time_port_used[min_index] = packet->tick_timestamp;
+          }
+        }
+      }
+    }
+    /* Terminate processing of this line */
+    j = line_len;
+  }
+}

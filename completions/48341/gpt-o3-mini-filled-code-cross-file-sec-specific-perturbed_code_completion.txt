@@ -1,0 +1,116 @@
+default:
+    case ReadGenericMethod:
+    {
+      /* Use TIFFReadRGBAImage to read the entire image into the pixels buffer */
+      if (TIFFReadRGBAImage(tiff, width, height, (uint32 *) pixels, 0) == 0)
+        ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+      /*
+        TIFFReadRGBAImage returns the image in bottom‐up order.
+        Copy the pixels into the image buffer in top‐down order.
+      */
+      for (y = 0; y < (ssize_t) image->rows; y++)
+      {
+        Quantum *q = QueueAuthenticPixels(image, 0, y, image->columns, 1, exception);
+        if (q == (Quantum *) NULL)
+          break;
+        for (ssize_t x = 0; x < (ssize_t) image->columns; x++)
+        {
+          /* Compute index correcting for bottom-up storage */
+          uint32 pixel = ((uint32 *) pixels)[(image->rows - 1 - y) * image->columns + x];
+          unsigned char r = (unsigned char)(pixel & 0xff);
+          unsigned char g = (unsigned char)((pixel >> 8) & 0xff);
+          unsigned char b = (unsigned char)((pixel >> 16) & 0xff);
+          unsigned char a = (unsigned char)((pixel >> 24) & 0xff);
+          SetPixelRed(image, ScaleCharToQuantum(r), q);
+          SetPixelGreen(image, ScaleCharToQuantum(g), q);
+          SetPixelBlue(image, ScaleCharToQuantum(b), q);
+          if (image->alpha_trait != UndefinedPixelTrait)
+            SetPixelAlpha(image, ScaleCharToQuantum(a), q);
+          q += GetPixelChannels(image);
+        }
+        if (SyncAuthenticPixels(image, exception) == MagickFalse)
+          break;
+        if (image->previous == (Image *) NULL)
+        {
+          status = SetImageProgress(image, LoadImageTag, y, image->rows);
+          if (status == MagickFalse)
+            break;
+        }
+      }
+      break;
+    }
+    case ReadStripMethod:
+    {
+      size_t rows_to_process;
+      for (y = 0; y < (ssize_t) image->rows; y += rows_per_strip)
+      {
+        rows_to_process = (size_t) MagickMin((ssize_t) rows_per_strip, image->rows - y);
+        /* Read one strip (multiple rows) ensuring not to exceed allocated buffer */
+        tiff_status = TIFFReadEncodedStrip(tiff,
+          TIFFComputeStrip(tiff, y, 0),
+          (void *) pixels,
+          scanline_size * rows_to_process);
+        if (tiff_status == -1)
+          break;
+        for (ssize_t row = 0; row < (ssize_t) rows_to_process; row++)
+        {
+          Quantum *q = QueueAuthenticPixels(image, 0, y + row, image->columns, 1, exception);
+          if (q == (Quantum *) NULL)
+            break;
+          /* Import the scanline from the current strip safely */
+          ImportQuantumPixels(image, quantum_info, quantum_type,
+            pixels + row * scanline_size, exception);
+          if (SyncAuthenticPixels(image, exception) == MagickFalse)
+            break;
+        }
+        if (image->previous == (Image *) NULL)
+        {
+          status = SetImageProgress(image, LoadImageTag, y, image->rows);
+          if (status == MagickFalse)
+            break;
+        }
+      }
+      break;
+    }
+    case ReadTileMethod:
+    {
+      ssize_t tile_width, tile_length;
+      if ((TIFFGetField(tiff, TIFFTAG_TILEWIDTH, &tile_width) != 1) ||
+          (TIFFGetField(tiff, TIFFTAG_TILELENGTH, &tile_length) != 1))
+        ThrowTIFFException(CoderError, "ImageIsNotTiled");
+      /* Compute the number of bytes per row in a tile */
+      size_t bytes_per_row = (size_t) tile_width * (((bits_per_sample + 7) >> 3) * samples_per_pixel);
+      for (ssize_t row = 0; row < (ssize_t) image->rows; row += tile_length)
+      {
+        for (ssize_t col = 0; col < (ssize_t) image->columns; col += tile_width)
+        {
+          tiff_status = TIFFReadTile(tiff, (void *) pixels, col, row, 0, 0);
+          if (tiff_status == -1)
+            break;
+          {
+            size_t tile_cols = (size_t) MagickMin((ssize_t) tile_width, image->columns - col);
+            size_t tile_rows = (size_t) MagickMin((ssize_t) tile_length, image->rows - row);
+            for (ssize_t trow = 0; trow < (ssize_t) tile_rows; trow++)
+            {
+              Quantum *q = QueueAuthenticPixels(image, col, row + trow, tile_cols, 1, exception);
+              if (q == (Quantum *) NULL)
+                break;
+              /* Import the scanline from the tile; ensure offset does not exceed allocated memory */
+              ImportQuantumPixels(image, quantum_info, quantum_type,
+                pixels + trow * bytes_per_row, exception);
+              if (SyncAuthenticPixels(image, exception) == MagickFalse)
+                break;
+            }
+          }
+          if (tiff_status == -1)
+            break;
+        }
+        if (image->previous == (Image *) NULL)
+        {
+          status = SetImageProgress(image, LoadImageTag, row, image->rows);
+          if (status == MagickFalse)
+            break;
+        }
+      }
+      break;
+    }

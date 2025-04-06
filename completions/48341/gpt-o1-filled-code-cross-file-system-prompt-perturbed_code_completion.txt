@@ -1,0 +1,158 @@
+case ReadStripMethod:
+      {
+        /* Read the image data a strip at a time. */
+        tsize_t strip_size;
+        tstrip_t strip, num_strips;
+        unsigned char *strip_data;
+
+        strip_size=TIFFStripSize(tiff);
+        num_strips=TIFFNumberOfStrips(tiff);
+        if (strip_size <= 0 || num_strips == 0)
+          ThrowTIFFException(CorruptImageError,"CorruptImage");
+
+        strip_data=(unsigned char *) AcquireMagickMemory((size_t) strip_size);
+        if (strip_data == (unsigned char *) NULL)
+          ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+
+        for (strip=0; strip < num_strips; strip++)
+        {
+          tmsize_t count=TIFFReadEncodedStrip(tiff,strip,strip_data,strip_size);
+          if (count < 0)
+            {
+              RelinquishMagickMemory(strip_data);
+              ThrowTIFFException(CorruptImageError,"UnableToReadImageData");
+            }
+          /*
+            Convert strip data into pixels, row by row, then import quantum
+            pixels into the image.
+          */
+          {
+            ssize_t row_start=(ssize_t) strip*rows_per_strip,
+              row_end=(ssize_t) MagickMin((size_t) row_start+rows_per_strip,
+              (size_t) image->rows);
+            for (y=row_start; y < row_end; y++)
+            {
+              Quantum *q=QueueAuthenticPixels(image,0,y,
+                image->columns,1,exception);
+              if (q == (Quantum *) NULL)
+                break;
+              (void) ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+                quantum_type,strip_data+(y-row_start)*scanline_size,exception);
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+              if (image->previous == (Image *) NULL)
+                {
+                  status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                    image->rows);
+                  if (status == MagickFalse)
+                    break;
+                }
+            }
+          }
+          if (status == MagickFalse)
+            break;
+        }
+        RelinquishMagickMemory(strip_data);
+        break;
+      }
+      case ReadTileMethod:
+      {
+        /* Read the image data a tile at a time. */
+        uint32 tile_width, tile_height;
+        tsize_t tile_size;
+        unsigned char *tile_data;
+        uint32 col, row;
+
+        (void) TIFFGetField(tiff,TIFFTAG_TILEWIDTH,&tile_width);
+        (void) TIFFGetField(tiff,TIFFTAG_TILELENGTH,&tile_height);
+        tile_size=TIFFTileSize(tiff);
+        if ((tile_size <= 0) || (tile_width == 0) || (tile_height == 0))
+          ThrowTIFFException(CorruptImageError,"CorruptImage");
+
+        tile_data=(unsigned char *) AcquireMagickMemory((size_t) tile_size);
+        if (tile_data == (unsigned char *) NULL)
+          ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+
+        for (row=0; row < (uint32) image->rows; row+=tile_height)
+        {
+          for (col=0; col < (uint32) image->columns; col+=tile_width)
+          {
+            tmsize_t count=TIFFReadEncodedTile(tiff,
+              TIFFComputeTile(tiff,col,row,0,0),tile_data,tile_size);
+            if (count < 0)
+              {
+                RelinquishMagickMemory(tile_data);
+                ThrowTIFFException(CorruptImageError,"UnableToReadImageData");
+              }
+            /*
+              Import the tile's pixels into the image, line by line.
+            */
+            {
+              uint32 row_limit=MagickMin(row+tile_height,(uint32) image->rows);
+              uint32 col_limit=MagickMin(col+tile_width,(uint32) image->columns);
+              uint32 tile_row, tile_col;
+              for (tile_row=row; tile_row < row_limit; tile_row++)
+              {
+                Quantum *q=QueueAuthenticPixels(image,(ssize_t) col,
+                  (ssize_t) tile_row,col_limit-col,1,exception);
+                if (q == (Quantum *) NULL)
+                  break;
+                tile_col=col_limit-col;
+                (void) ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+                  quantum_type,
+                  tile_data+(tile_row-row)*(tile_width*((bits_per_sample+7) >> 3)
+                  *samples_per_pixel),
+                  exception);
+                if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                  break;
+                if (image->previous == (Image *) NULL)
+                  {
+                    status=SetImageProgress(image,LoadImageTag,
+                      (MagickOffsetType) tile_row,image->rows);
+                    if (status == MagickFalse)
+                      break;
+                  }
+              }
+            }
+            if (status == MagickFalse)
+              break;
+          }
+          if (status == MagickFalse)
+            break;
+        }
+        RelinquishMagickMemory(tile_data);
+        break;
+      }
+      case ReadGenericMethod:
+      default:
+      {
+        /*
+          Use TIFFReadRGBAImage: read entire image into RGBA buffer and
+          then import into the final image.
+        */
+        if (TIFFReadRGBAImage(tiff,width,height,(uint32 *) pixels,0) == 0)
+          ThrowTIFFException(CorruptImageError,"UnableToReadImageData");
+
+        /*
+          Convert from RGBA to the desired quantum type.
+        */
+        for (y=0; y < (ssize_t) image->rows; y++)
+        {
+          Quantum *q=QueueAuthenticPixels(image,0,y,image->columns,1,exception);
+          if (q == (Quantum *) NULL)
+            break;
+          (void) ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+            quantum_type,pixels+(image->rows-1-y)* (size_t) image->columns*
+            sizeof(uint32),exception);
+          if (SyncAuthenticPixels(image,exception) == MagickFalse)
+            break;
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+        break;
+      }

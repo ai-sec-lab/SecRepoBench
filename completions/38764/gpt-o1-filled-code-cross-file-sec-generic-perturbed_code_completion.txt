@@ -1,0 +1,101 @@
+while (step > 0) {
+	size_t dr_len = p[0];
+
+	/* If the record length is 0, skip to the next logical block boundary. */
+	if (dr_len == 0) {
+		size_t block_gap = iso9660->logical_block_size
+		    - ((size_t)(p - b) % iso9660->logical_block_size);
+		if (block_gap > step)
+			block_gap = step;
+		p += block_gap;
+		step -= block_gap;
+		continue;
+	}
+
+	/* If there's not enough data left for this record, stop processing. */
+	if (dr_len > step)
+		break;
+
+	/*
+	 * Minimum valid ISO9660 directory entry is 34 bytes (for
+	 * standard fields). If it's too small, skip it.
+	 */
+	if (dr_len < 34) {
+		p += dr_len;
+		step -= dr_len;
+		continue;
+	}
+
+	/* Extract record fields. */
+	uint32_t extent = archive_le32dec(p + 2);
+	uint32_t file_size = archive_le32dec(p + 10);
+	unsigned char flags = p[25];
+	unsigned char name_len = p[32];
+
+	/*
+	 * If the name field doesn't fit within the record, skip
+	 * this entry.
+	 */
+	if ((size_t)name_len + 33U > dr_len) {
+		p += dr_len;
+		step -= dr_len;
+		continue;
+	}
+
+	/* Skip '.' and '..' entries. */
+	if (name_len == 1 && (p[33] == 0 || p[33] == 1)) {
+		p += dr_len;
+		step -= dr_len;
+		continue;
+	}
+
+	/* Manage multi-extent files if flag 0x80 is set. */
+	if ((flags & 0x80) != 0) {
+		/*
+		 * If we're not currently tracking a multi-extent file,
+		 * create a new one; otherwise, extend the existing file
+		 * if this next extent follows on immediately. If it does
+		 * not follow, finalize the old multi-extent file and
+		 * start a new one.
+		 */
+		if (multi == NULL) {
+			multi = iso9660_file_new_entry(iso9660, p, dr_len, parent);
+			if (multi == NULL) {
+				archive_set_error(&archivereader->archive, ENOMEM,
+				    "No memory for multi-extent file info");
+				return (ARCHIVE_FATAL);
+			}
+		} else {
+			uint64_t next_offset = (uint64_t)extent
+			    * (uint64_t)iso9660->logical_block_size;
+			if (multi->offset + multi->size == next_offset) {
+				multi->size += file_size;
+				iso9660_add_multi_extent(multi, next_offset, file_size);
+			} else {
+				iso9660_finalize_multi_extent(iso9660, multi, parent);
+				multi = iso9660_file_new_entry(iso9660, p, dr_len, parent);
+				if (multi == NULL) {
+					archive_set_error(&archivereader->archive, ENOMEM,
+					    "No memory for multi-extent file info");
+					return (ARCHIVE_FATAL);
+				}
+			}
+		}
+	} else {
+		/*
+		 * If we were tracking a multi-extent file, finalize it
+		 * before adding a new single-extent entry.
+		 */
+		if (multi != NULL) {
+			iso9660_finalize_multi_extent(iso9660, multi, parent);
+			multi = NULL;
+		}
+		/* Create and store a single-extent file entry. */
+		if (iso9660_store_directory_entry(iso9660, p, dr_len, parent) != ARCHIVE_OK)
+			return (ARCHIVE_FATAL);
+	}
+
+	/* Advance to the next directory record. */
+	p += dr_len;
+	step -= dr_len;
+}

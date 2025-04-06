@@ -1,0 +1,129 @@
+// <MASK>
+{
+  if(handshake_type == 0x02 /* Server Hello */) {
+    offset += session_id_len;
+    ja3.server_cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    offset += 2;
+
+    extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    offset += 2;
+
+    while(offset < total_len) {
+      u_int16_t extension_type = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+      u_int16_t extension_len2 = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+
+      switch(extension_type) {
+      case 0x0000: /* server_name */
+        break;
+      case 0x000a: /* supported_groups */
+        ja3.server_supported_groups = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        break;
+      case 0x000b: /* ec_point_formats */
+        ja3.server_ec_point_formats = packet->payload[offset];
+        break;
+      case 0x000d: /* signature_algorithms */
+        ja3.server_signature_algorithms = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        break;
+      case 0x0010: /* supported_versions */
+        ja3.server_tls_version = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        break;
+      }
+
+      offset += extension_len2;
+    }
+  } else if(handshake_type == 0x01 /* Client Hello */) {
+    offset = base_offset + session_id_len;
+    ja3.client_cipher_suites_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    offset += 2;
+
+    for(i = 0, j = 0; i < ja3.client_cipher_suites_len / 2; i++) {
+      u_int16_t cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset + i * 2]));
+      if(cipher_suite % 0x1000 != 0x0a) { // Skip GREASE values
+        ja3.client_cipher_suites[j++] = cipher_suite;
+      }
+    }
+    ja3.client_cipher_suites_len = j;
+    offset += ja3.client_cipher_suites_len * 2;
+
+    extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    offset += 2;
+
+    while(offset < total_len) {
+      u_int16_t extension_type = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+      u_int16_t extension_len2 = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+
+      switch(extension_type) {
+      case 0x0000: /* server_name */
+        break;
+      case 0x000a: /* supported_groups */
+        ja3.client_supported_groups_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        for(i = 0, j = 0; i < ja3.client_supported_groups_len / 2; i++) {
+          u_int16_t group = ntohs(*((u_int16_t*)&packet->payload[offset + i * 2 + 2]));
+          if(group % 0x1000 != 0x0a) { // Skip GREASE values
+            ja3.client_supported_groups[j++] = group;
+          }
+        }
+        ja3.client_supported_groups_len = j;
+        break;
+      case 0x000b: /* ec_point_formats */
+        ja3.client_ec_point_formats_len = packet->payload[offset];
+        for(i = 0; i < ja3.client_ec_point_formats_len; i++) {
+          ja3.client_ec_point_formats[i] = packet->payload[offset + i + 1];
+        }
+        break;
+      case 0x000d: /* signature_algorithms */
+        ja3.client_signature_algorithms_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        for(i = 0, j = 0; i < ja3.client_signature_algorithms_len / 2; i++) {
+          u_int16_t sig_algo = ntohs(*((u_int16_t*)&packet->payload[offset + i * 2 + 2]));
+          if(sig_algo % 0x1000 != 0x0a) { // Skip GREASE values
+            ja3.client_signature_algorithms[j++] = sig_algo;
+          }
+        }
+        ja3.client_signature_algorithms_len = j;
+        break;
+      case 0x0010: /* supported_versions */
+        ja3.client_tls_version_len = packet->payload[offset];
+        for(i = 0; i < ja3.client_tls_version_len; i++) {
+          ja3.client_tls_versions[i] = ntohs(*((u_int16_t*)&packet->payload[offset + i * 2 + 1]));
+        }
+        break;
+      }
+
+      offset += extension_len2;
+    }
+
+    ja3_str_len = snprintf(ja3_str, JA3_STR_LEN, "%u,%u,%u,%u", tls_version, ja3.client_cipher_suites_len, ja3.client_cipher_suites, ja3.client_supported_groups_len);
+    if (ja3_str_len >= JA3_STR_LEN) {
+      jainvalid = 1;
+    } else {
+      snprintf(ja3_str + ja3_str_len, JA3_STR_LEN - ja3_str_len, ",%u,%u,%u", ja3.client_ec_point_formats_len, ja3.client_ec_point_formats, ja3.client_signature_algorithms_len);
+      ja3_str_len = strlen(ja3_str);
+      if (ja3_str_len >= JA3_STR_LEN) {
+        jainvalid = 1;
+      } else {
+        snprintf(ja3_str + ja3_str_len, JA3_STR_LEN - ja3_str_len, ",%u", ja3.client_tls_version_len);
+        for (i = 0; i < ja3.client_tls_version_len; i++) {
+          snprintf(buffer, sizeof(buffer), ",%u", ja3.client_tls_versions[i]);
+          strncat(ja3_str, buffer, JA3_STR_LEN - strlen(ja3_str) - 1);
+        }
+      }
+    }
+
+    if (!jainvalid) {
+      ndpi_MD5_Init(&ctx);
+      ndpi_MD5_Update(&ctx, (const unsigned char *)ja3_str, strlen(ja3_str));
+      ndpi_MD5_Final(md5_hash, &ctx);
+
+      for (i = 0; i < 16; i++) {
+        snprintf(buffer, sizeof(buffer), "%02X", md5_hash[i]);
+        strncat(flow->protos.stun_ssl.ssl.ja3_client, buffer, sizeof(flow->protos.stun_ssl.ssl.ja3_client) - strlen(flow->protos.stun_ssl.ssl.ja3_client) - 1);
+      }
+    }
+  }
+
+  return(handshake_type);
+}

@@ -1,0 +1,76 @@
+NDPI_LOG_DBG(ndpi_struct, "search openvpn\n");
+  
+  /* skip marked packets */
+  if(packet->detected_protocol_stack[0] != NDPI_PROTOCOL_OPENVPN) {
+    /* Check if we have enough payload to analyze */
+    if(packet->payload_packet_len >= 2) {
+      /* Adjust payload pointer for TCP connections */
+      if(packet->tcp != NULL) {
+        /* In TCP, there might be a length field before the actual payload */
+        if(packet->payload_packet_len >= 4) {
+          ovpn_payload = packet->payload + 2;
+        } else {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+      }
+      
+      /* Extract operation code from payload */
+      operationcode = ovpn_payload[0] & 0x0F;
+      
+      /* Special checks for UDP */
+      if(packet->udp != NULL) {
+        /* First packet in flow special case */
+        if(flow->packet_counter == 1) {
+          /* Check if packet matches OpenVPN criteria */
+          if(packet->payload_packet_len == 14 && operationcode == 0x08) {
+            NDPI_LOG_INFO(ndpi_struct, "found openvpn\n");
+            ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+            return;
+          }
+        } 
+        /* For packets after the first one */
+        else {
+          /* Check for client reset with counter below threshold */
+          if(flow->l4.udp.openvpn_counter < 10 && operationcode == 0x01) {
+            /* Extract session ID */
+            alen = ovpn_payload[1];
+            if(packet->payload_packet_len >= 2 + alen) {
+              session_remote = &ovpn_payload[2];
+              if(flow->l4.udp.openvpn_counter == 0) {
+                /* Store the session ID for later comparison */
+                memcpy(flow->l4.udp.openvpn_session_id, session_remote, alen);
+                flow->l4.udp.openvpn_session_id_len = alen;
+              }
+            }
+          } 
+          /* Check for server reset with matching session ID */
+          else if(flow->l4.udp.openvpn_counter < 10 && flow->l4.udp.openvpn_counter > 0 && operationcode == 0x02) {
+            alen = ovpn_payload[1];
+            if(packet->payload_packet_len >= 2 + alen && alen == flow->l4.udp.openvpn_session_id_len) {
+              session_remote = &ovpn_payload[2];
+              if(memcmp(session_remote, flow->l4.udp.openvpn_session_id, alen) == 0) {
+                /* Session ID matches, identify as OpenVPN */
+                NDPI_LOG_INFO(ndpi_struct, "found openvpn\n");
+                ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+                return;
+              } else {
+                failed = 1;
+              }
+            }
+          }
+        }
+        
+        /* Increment OpenVPN counter */
+        flow->l4.udp.openvpn_counter++;
+        
+        /* If detection failed, exclude protocol */
+        if(failed) {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        }
+      }
+    } else {
+      /* Not enough payload to analyze */
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    }
+  }

@@ -1,39 +1,55 @@
-bool result = false;
-    hb_set_t *glyphs = hb_set_create();
-    if (!glyphs) {
-      if (font) hb_font_destroy(font);
-      return_trace(false);
+hb_vector_t<SubsetGlyph> subset_glyphs;
+    if (unlikely (!subset_glyphs.alloc (context->plan->glyphs.len)))
+    {
+      if (font) hb_font_destroy (font);
+      return_trace (false);
     }
 
-    // Populate the glyphs set based on the subset plan
-    if (!populate_glyphs_set(context->plan, font, glyphs)) {
-      hb_set_destroy(glyphs);
-      if (font) hb_font_destroy(font);
-      return_trace(false);
+    for (unsigned int i = 0; i < context->plan->glyphs.len; i++)
+    {
+      SubsetGlyph &subset_glyph = subset_glyphs[i];
+      if (unlikely (!subset_glyph.compile (context->plan->glyphs[i], font)))
+      {
+        if (font) hb_font_destroy (font);
+        subset_glyphs.free_compiled_bytes ();
+        return_trace (false);
+      }
     }
 
-    // Calculate padded offsets and determine loca format
-    bool use_short_loca = false;
-    if (!calculate_padded_offsets_and_loca_format(glyphs, &use_short_loca)) {
-      hb_set_destroy(glyphs);
-      if (font) hb_font_destroy(font);
-      return_trace(false);
+    if (font) hb_font_destroy (font);
+
+    hb_vector_t<unsigned int> padded_offsets;
+    if (unlikely (!padded_offsets.alloc (context->plan->glyphs.len + 1)))
+    {
+      subset_glyphs.free_compiled_bytes ();
+      return_trace (false);
     }
 
-    // Initialize glyf object for serialization
-    glyf_object_t *glyf_object = glyf_object_create();
-    if (!glyf_object) {
-      hb_set_destroy(glyphs);
-      if (font) hb_font_destroy(font);
-      return_trace(false);
+    unsigned int offset = 0;
+    for (unsigned int i = 0; i < context->plan->glyphs.len; i++)
+    {
+      padded_offsets[i] = offset;
+      offset += subset_glyphs[i].get_padded_size ();
+    }
+    padded_offsets[context->plan->glyphs.len] = offset;
+
+    bool use_short_loca = offset <= 0xFFFF * 2;
+
+    glyf glyf_object;
+    if (unlikely (!glyf_object.init (context->serializer, use_short_loca)))
+    {
+      subset_glyphs.free_compiled_bytes ();
+      return_trace (false);
     }
 
-    // Serialize the subset of glyphs
-    result = serialize_glyphs_to_glyf_object(glyphs, glyf_object, use_short_loca);
+    for (unsigned int i = 0; i < context->plan->glyphs.len; i++)
+    {
+      if (unlikely (!glyf_object.serialize_glyph (context->serializer, subset_glyphs[i], padded_offsets[i])))
+      {
+        subset_glyphs.free_compiled_bytes ();
+        return_trace (false);
+      }
+    }
 
-    // Cleanup
-    hb_set_destroy(glyphs);
-    if (font) hb_font_destroy(font);
-    glyf_object_destroy(glyf_object);
-
-    return result;
+    subset_glyphs.free_compiled_bytes ();
+    return_trace (true);

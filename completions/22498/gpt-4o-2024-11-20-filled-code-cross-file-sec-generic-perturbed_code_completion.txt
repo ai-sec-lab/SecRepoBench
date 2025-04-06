@@ -1,0 +1,61 @@
+for(a = 0; a < packet->payload_packet_len; a++) {
+    // Check for "\r\n" sequence
+    if((a + 1 < packet->payload_packet_len) &&
+       (packet->payload[a] == '\r') &&
+       (packet->payload[a + 1] == '\n')) {
+      packet->line[packet->parsed_lines].len =
+        (u_int16_t)(((unsigned long) &packet->payload[a]) -
+                    ((unsigned long) packet->line[packet->parsed_lines].ptr));
+      packet->parsed_lines++;
+
+      if(packet->parsed_lines >= MAX_PACKET_LINES)
+        break;
+
+      a += 1; // Skip '\n'
+      if((a + 1 < packet->payload_packet_len) &&
+         (packet->payload[a + 1] == '\r') &&
+         (packet->payload[a + 2] == '\n')) {
+        // "\r\n\r\n" sequence found, mark the end of headers
+        dataflow->initial_binary_bytes_len = packet->payload_packet_len - (a + 2);
+        if(dataflow->initial_binary_bytes_len > MAX_BINARY_BYTES)
+          dataflow->initial_binary_bytes_len = MAX_BINARY_BYTES;
+
+        memcpy(dataflow->initial_binary_bytes, &packet->payload[a + 2], dataflow->initial_binary_bytes_len);
+        break;
+      }
+
+      // Start a new line
+      packet->line[packet->parsed_lines].ptr = &packet->payload[a + 1];
+      packet->line[packet->parsed_lines].len = 0;
+    }
+  }
+
+  // Analyze the first line for HTTP response status codes
+  if(packet->parsed_lines > 0) {
+    struct ndpi_packet_line_struct *first_line = &packet->line[0];
+    if(first_line->len >= 12 && strncmp((char *)first_line->ptr, "HTTP/", 5) == 0) {
+      char *status_code_ptr = (char *)first_line->ptr + 9;
+      if((status_code_ptr[0] >= '0' && status_code_ptr[0] <= '9') &&
+         (status_code_ptr[1] >= '0' && status_code_ptr[1] <= '9') &&
+         (status_code_ptr[2] >= '0' && status_code_ptr[2] <= '9')) {
+        packet->http_response_status_code = (status_code_ptr[0] - '0') * 100 +
+                                            (status_code_ptr[1] - '0') * 10 +
+                                            (status_code_ptr[2] - '0');
+      }
+    }
+  }
+
+  // Extract specific HTTP headers
+  for(a = 1; a < packet->parsed_lines; a++) {
+    struct ndpi_packet_line_struct *line = &packet->line[a];
+    if(line->len > 7 && strncasecmp((char *)line->ptr, "Server:", 7) == 0) {
+      packet->http_server_name.ptr = line->ptr + 7;
+      packet->http_server_name.len = line->len - 7;
+    } else if(line->len > 5 && strncasecmp((char *)line->ptr, "Host:", 5) == 0) {
+      packet->http_host.ptr = line->ptr + 5;
+      packet->http_host.len = line->len - 5;
+    } else if(line->len > 13 && strncasecmp((char *)line->ptr, "Content-Type:", 13) == 0) {
+      packet->http_content_type.ptr = line->ptr + 13;
+      packet->http_content_type.len = line->len - 13;
+    }
+  }

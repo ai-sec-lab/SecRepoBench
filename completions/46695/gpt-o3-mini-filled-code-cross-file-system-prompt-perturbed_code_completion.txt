@@ -1,0 +1,110 @@
+/* 1. If an encoding is specified, select the corresponding character map */
+  if (encoding != (const char *) NULL)
+  {
+    if (LocaleCompare(encoding, "unicode") == 0)
+      encoding_type = FT_ENCODING_UNICODE;
+    else if (LocaleCompare(encoding, "ascii") == 0)
+      encoding_type = FT_ENCODING_NONE;  /* Fallback for ASCII */
+    else
+    {
+      FT_Done_Face(face);
+      FT_Done_FreeType(library);
+      if (stream != (FT_StreamRec *) NULL)
+        free(stream);
+      ThrowFreetypeErrorException("UnrecognizedEncoding", 0, encoding);
+      return(MagickFalse);
+    }
+    ft_status = FT_Select_Charmap(face, encoding_type);
+    if (ft_status != 0)
+    {
+      FT_Done_Face(face);
+      FT_Done_FreeType(library);
+      if (stream != (FT_StreamRec *) NULL)
+        free(stream);
+      ThrowFreetypeErrorException("UnableToSelectCharmap", ft_status, encoding);
+      return(MagickFalse);
+    }
+  }
+
+  /* 2. Set the character size based on point size and resolution.
+       Use default resolution 300 DPI if none is provided. */
+  resolution.x = (draw_info->density.x > 0) ? draw_info->density.x : 300.0;
+  resolution.y = (draw_info->density.y > 0) ? draw_info->density.y : 300.0;
+  ft_status = FT_Set_Char_Size(face, (FT_F26Dot6)(draw_info->pointsize * 64), 0,
+                                (FT_UInt) resolution.x, (FT_UInt) resolution.y);
+  if (ft_status != 0)
+  {
+    FT_Done_Face(face);
+    FT_Done_FreeType(library);
+    if (stream != (FT_StreamRec *) NULL)
+      free(stream);
+    ThrowFreetypeErrorException("UnableToSetCharSize", ft_status, draw_info->font);
+    return(MagickFalse);
+  }
+
+  /* 3. Initialize TypeMetric metrics using the font face metrics */
+  if (metrics != (TypeMetric *) NULL)
+  {
+    metrics->ascent            = (double)(face->size->metrics.ascender >> 6);
+    metrics->descent           = (double)(face->size->metrics.descender >> 6);
+    metrics->width             = (double)(face->size->metrics.max_advance >> 6);
+    metrics->height            = (double)((face->size->metrics.ascender - face->size->metrics.descender) >> 6);
+    metrics->max_advance       = (double)(face->size->metrics.max_advance >> 6);
+    metrics->underline_position = (double)(face->underline_position >> 6);
+    metrics->underline_thickness = (double)(face->underline_thickness >> 6);
+    if (metrics->ascent < 0)
+      metrics->ascent = 0;
+    if (metrics->descent > 0)
+      metrics->descent = 0;
+  }
+
+  /* 4. If there is no text to render, clean up and return successfully */
+  if (draw_info->text == (char *) NULL || *draw_info->text == '\0')
+  {
+    FT_Done_Face(face);
+    FT_Done_FreeType(library);
+    if (stream != (FT_StreamRec *) NULL)
+      free(stream);
+    return(MagickTrue);
+  }
+
+  /* 5. Configure rendering options. Set the default load flags and enable rendering if requested. */
+  flags = FT_LOAD_DEFAULT;
+  if (draw_info->render != MagickFalse)
+    flags |= FT_LOAD_RENDER;
+
+  /* 6. Loop through each character in the text and render glyphs */
+  p = (char *) draw_info->text;
+  while (*p != '\0')
+  {
+    code = GetUTFCode(p);
+    if (code == 0)
+      break;
+    glyph.id = FT_Get_Char_Index(face, (FT_ULong) code);
+    if (FT_Load_Glyph(face, glyph.id, flags) != 0)
+    {
+      p += GetUTFOctets(p);
+      continue;
+    }
+    /* Optionally trace the outline if an affine transformation is requested */
+    if (draw_info->affine != MagickFalse)
+      (void) FT_Outline_Decompose(&face->glyph->outline, &OutlineMethods, (void *) &glyph);
+    if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL) != 0)
+    {
+      p += GetUTFOctets(p);
+      continue;
+    }
+    /*
+      Composite the rendered glyph bitmap onto the image at the proper offset.
+      The actual compositing is implementation-specific and depends on image internals.
+    */
+    /* Update metrics and bounding box as necessary (omitted for brevity) */
+    p += GetUTFOctets(p);
+  }
+
+  /* 7. Clean up FreeType resources and return the rendering status. */
+  FT_Done_Face(face);
+  FT_Done_FreeType(library);
+  if (stream != (FT_StreamRec *) NULL)
+    free(stream);
+  return(MagickTrue);

@@ -1,0 +1,169 @@
+if (handshake_type == 0x02) { /* Server Hello */
+  offset += session_id_len + 1; /* Skip session ID */
+
+  ja3.server_cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+
+  if (offset + 2 > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto invalid_ja3;
+  }
+
+  extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+
+  if (offset + extension_len > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto invalid_ja3;
+  }
+
+  for (j = 0; j < extension_len;) {
+    u_int16_t ext_type, ext_len;
+
+    if (offset + j + 4 > packet->payload_packet_len) {
+      jainvalid = 1;
+      goto invalid_ja3;
+    }
+
+    ext_type = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+    ext_len = ntohs(*((u_int16_t*)&packet->payload[offset + j + 2]));
+
+    if (offset + j + ext_len + 4 > packet->payload_packet_len) {
+      jainvalid = 1;
+      goto invalid_ja3;
+    }
+
+    switch (ext_type) {
+      case TLS_EXT_SUPPORTED_VERSIONS: /* Supported Versions */
+        if (packet->payload[offset + j + 4] != 1 || offset + j + ext_len + 5 > packet->payload_packet_len) {
+          jainvalid = 1;
+          goto invalid_ja3;
+        }
+        ja3.tls_negotiated_version = packet->payload[offset + j + 5];
+        break;
+      default:
+        break;
+    }
+    j += ext_len + 4;
+  }
+} else if (handshake_type == 0x01) { /* Client Hello */
+  offset += 34; /* Skip random and session ID length */
+
+  if (offset >= packet->payload_packet_len) {
+    jainvalid = 1;
+    goto invalid_ja3;
+  }
+
+  cipher_suite_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+
+  if (offset + cipher_suite_len > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto invalid_ja3;
+  }
+
+  for (i = 0; i < cipher_suite_len; i += 2) {
+    u_int16_t cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset + i]));
+
+    if (cipher_suite >= 0xff01 && cipher_suite <= 0xff0a) {
+      continue; /* Skip GREASE values */
+    }
+
+    snprintf(buffer, sizeof(buffer), "%s%04X", buffer[0] ? "," : "", cipher_suite);
+    strncat(ja3.cipher_suites, buffer, JA3_STR_LEN - strlen(ja3.cipher_suites) - 1);
+  }
+
+  if (offset + 2 > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto invalid_ja3;
+  }
+
+  extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+
+  if (offset + extension_len > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto invalid_ja3;
+  }
+
+  for (j = 0; j < extension_len;) {
+    u_int16_t ext_type, ext_len;
+
+    if (offset + j + 4 > packet->payload_packet_len) {
+      jainvalid = 1;
+      goto invalid_ja3;
+    }
+
+    ext_type = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+    ext_len = ntohs(*((u_int16_t*)&packet->payload[offset + j + 2]));
+
+    if (offset + j + ext_len + 4 > packet->payload_packet_len) {
+      jainvalid = 1;
+      goto invalid_ja3;
+    }
+
+    switch (ext_type) {
+      case TLS_EXT_SUPPORTED_GROUPS:
+        for (u_int16_t k = 0; k < ext_len - 2; k += 2) {
+          u_int16_t group = ntohs(*((u_int16_t*)&packet->payload[offset + j + 4 + k]));
+
+          if (group >= 0xff01 && group <= 0xff0a) {
+            continue; /* Skip GREASE values */
+          }
+
+          snprintf(buffer, sizeof(buffer), "%s%04X", ja3.supported_groups[0] ? "," : "", group);
+          strncat(ja3.supported_groups, buffer, JA3_STR_LEN - strlen(ja3.supported_groups) - 1);
+        }
+        break;
+
+      case TLS_EXT_EC_POINT_FORMATS:
+        for (u_int8_t k = 0; k < packet->payload[offset + j + 3]; k++) {
+          u_int8_t point_format = packet->payload[offset + j + 4 + k];
+
+          if (point_format >= 0xff && point_format <= 0xfe) {
+            continue; /* Skip GREASE values */
+          }
+
+          snprintf(buffer, sizeof(buffer), "%s%02X", ja3.ec_point_formats[0] ? "," : "", point_format);
+          strncat(ja3.ec_point_formats, buffer, JA3_STR_LEN - strlen(ja3.ec_point_formats) - 1);
+        }
+        break;
+
+      case TLS_EXT_SUPPORTED_VERSIONS:
+        if (packet->payload[offset + j + 3] != 1 || offset + j + ext_len + 4 > packet->payload_packet_len) {
+          jainvalid = 1;
+          goto invalid_ja3;
+        }
+        ja3.tls_negotiated_version = packet->payload[offset + j + 4];
+        break;
+
+      default:
+        break;
+    }
+    j += ext_len + 4;
+  }
+}
+
+ja3_str_len = snprintf(ja3_str, JA3_STR_LEN,
+                       "%u,%s,%s,%s,%s",
+                       ja3.tls_handshake_version,
+                       ja3.cipher_suites,
+                       ja3.supported_groups,
+                       ja3.ec_point_formats,
+                       ja3.extensions);
+
+if (ja3_str_len >= JA3_STR_LEN) {
+  jainvalid = 1;
+  goto invalid_ja3;
+}
+
+ndpi_MD5_Init(&ctx);
+ndpi_MD5_Update(&ctx, (unsigned char *)ja3_str, ja3_str_len);
+ndpi_MD5_Final(md5_hash, &ctx);
+
+memcpy(flow->l4.tcp.tls.ja3_fingerprint, md5_hash, 16);
+
+return handshake_type;
+
+invalid_ja3:
+return 0;

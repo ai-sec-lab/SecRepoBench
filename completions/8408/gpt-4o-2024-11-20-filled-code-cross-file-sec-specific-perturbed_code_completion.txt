@@ -1,0 +1,95 @@
+/*
+    Initialize resources and parse the drawing commands.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  assert(draw_info != (DrawInfo *) NULL);
+  assert(draw_info->signature == MagickCoreSignature);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"begin draw-image");
+
+  GetAffineMatrix(&affine);
+  GetAffineMatrix(&current);
+
+  /*
+    Allocate memory for graphic contexts and initialize.
+  */
+  size_t max_graphic_contexts = 16;
+  DrawInfo **graphic_context = (DrawInfo **) AcquireQuantumMemory(
+      max_graphic_contexts, sizeof(*graphic_context));
+  if (graphic_context == (DrawInfo **) NULL)
+    ThrowBinaryException(ResourceLimitError, "MemoryAllocationFailed", image->filename);
+
+  graphic_context[0] = CloneDrawInfo((ImageInfo *) NULL, draw_info);
+  size_t n = 0;
+
+  /*
+    Parse the drawing commands.
+  */
+  PrimitiveInfo *primitive_info = (PrimitiveInfo *) NULL;
+  size_t number_points = 0;
+  char *primitive = AcquireString(draw_info->primitive);
+  if (primitive == (char *) NULL)
+    ThrowBinaryException(ResourceLimitError, "MemoryAllocationFailed", image->filename);
+
+  char *token = primitive;
+  while (*token != '\0') {
+    /*
+      Parse and execute each drawing command.
+    */
+    GetNextToken(token, &token, MagickPathExtent, primitive_name);
+    if (*primitive_name == '\0')
+      break;
+
+    if (LocaleCompare(primitive_name, "push") == 0) {
+      /*
+        Push a new graphic context.
+      */
+      if (n == max_graphic_contexts - 1) {
+        max_graphic_contexts *= 2;
+        graphic_context = (DrawInfo **) ResizeQuantumMemory(
+            graphic_context, max_graphic_contexts, sizeof(*graphic_context));
+        if (graphic_context == (DrawInfo **) NULL)
+          ThrowBinaryException(ResourceLimitError, "MemoryAllocationFailed", image->filename);
+      }
+      graphic_context[++n] = CloneDrawInfo((ImageInfo *) NULL, graphic_context[n - 1]);
+      continue;
+    }
+
+    if (LocaleCompare(primitive_name, "pop") == 0) {
+      /*
+        Pop the current graphic context.
+      */
+      if (n == 0)
+        ThrowBinaryException(DrawError, "UnbalancedGraphicContextPushPop", primitive_name);
+      graphic_context[n] = DestroyDrawInfo(graphic_context[n]);
+      n--;
+      continue;
+    }
+
+    /*
+      Handle other drawing primitives.
+    */
+    if (primitive_info == (PrimitiveInfo *) NULL) {
+      number_points = 2047;
+      primitive_info = (PrimitiveInfo *) AcquireQuantumMemory(
+          number_points, sizeof(*primitive_info));
+      if (primitive_info == (PrimitiveInfo *) NULL)
+        ThrowBinaryException(ResourceLimitError, "MemoryAllocationFailed", image->filename);
+    }
+
+    size_t extent = strlen(token) + MagickPathExtent;
+    ParsePrimitive(image, graphic_context[n], &primitive_info, &number_points,
+                   primitive_name, token, &token, extent, exception);
+
+    if (exception->severity != UndefinedException)
+      break;
+  }
+
+  /*
+    Free the primitive string.
+  */
+  primitive = DestroyString(primitive);

@@ -1,0 +1,149 @@
+/*
+    Initialize variables and structures for processing Postscript images.
+  */
+  image=NULL;
+  postscript_image=NULL;
+  density=(char *) GetImageOption(image_info,"density");
+  read_info=CloneImageInfo(image_info);
+  delegate_info=(const DelegateInfo *) GetDelegateInfo("gs",MagickFalse,
+    exception);
+  if (delegate_info == (const DelegateInfo *) NULL)
+    ThrowReaderException(MissingDelegateError,
+      "GhostscriptDelegateRequiredToReadThisImageFormat");
+  /*
+    Open the input image file and create a symbolic link to it for processing.
+  */
+  filedescriptor=AcquireUniqueFileResource(input_filename);
+  if (filedescriptor == -1)
+    ThrowReaderException(ResourceLimitError,"UnableToCreateTemporaryFile");
+  (void) CopyMagickString(filename,image_info->filename,MagickPathExtent);
+  (void) MagickCopyFD(filedescriptor,OpenBlob(image_info,image,BinaryMode,
+    exception));
+  (void) CloseBlob(image);
+  (void) CloseFile(filedescriptor);
+  /*
+    Initialize an array to map hex characters to their integer values.
+  */
+  static const unsigned char hex_map[256]={
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00
+  };
+  /*
+    Set the page density for the image based on the provided resolution or default values.
+  */
+  if (density != (char *) NULL)
+    {
+      GeometryInfo geometry_info;
+      int flags;
+
+      flags=ParseGeometry(density,&geometry_info);
+      if ((flags & SigmaValue) != 0)
+        image_info->resolution.x=geometry_info.rho;
+      if ((flags & XiValue) != 0)
+        image_info->resolution.y=geometry_info.sigma;
+    }
+  if (image_info->resolution.x == 0.0)
+    image_info->resolution.x=72.0;
+  if (image_info->resolution.y == 0.0)
+    image_info->resolution.y=image_info->resolution.x;
+  FormatLocaleString(geometry,MagickPathExtent,"-g%lux%lu",
+    (unsigned long) (image_info->resolution.x+0.5),
+    (unsigned long) (image_info->resolution.y+0.5));
+  (void) SetImageOption(read_info,"page",geometry);
+  /*
+    Determine the page geometry using the Postscript bounding box comments.
+  */
+  option=GetImageOption(image_info,"ps:use-bounding-box");
+  if ((option == (const char *) NULL) ||
+      (IsOptionMember("true",option) != MagickFalse))
+    {
+      FILE
+        *postscript;
+
+      RectangleInfo
+        bounding_box;
+
+      /*
+        Read the Postscript file and determine the bounding box.
+      */
+      postscript=fopen_utf8(input_filename,"rb");
+      if (postscript == (FILE *) NULL)
+        ThrowReaderException(FileOpenError,"UnableToOpenFile");
+      (void) ParsePostscript((PostscriptInfo *) NULL,postscript,read_info,
+        filename,&bounding_box,exception);
+      fclose(postscript);
+      if ((bounding_box.width != 0) && (bounding_box.height != 0))
+        FormatLocaleString(geometry,MagickPathExtent,"%.20gx%.20g+%.20g+%.20g",
+          (double) bounding_box.width,(double) bounding_box.height,
+          (double) bounding_box.x,(double) bounding_box.y);
+    }
+  (void) SetImageOption(read_info,"page",geometry);
+  /*
+    Create a control file for Ghostscript to render the Postscript image.
+  */
+  FormatLocaleString(postscript_filename,MagickPathExtent,"%s.ps",filename);
+  filedescriptor=AcquireUniqueFileResource(postscript_filename);
+  if (filedescriptor != -1)
+    (void) CloseFile(filedescriptor);
+  postscript_file=fopen_utf8(postscript_filename,"wb");
+  if (postscript_file == (FILE *) NULL)
+    ThrowReaderException(FileOpenError,"UnableToOpenFile");
+  (void) CopyMagickString(command,delegate_info->stealth,MagickPathExtent);
+  (void) WriteCommandString(postscript_file,command,exception);
+  (void) fclose(postscript_file);
+  /*
+    Use the Ghostscript delegate to render the Postscript into a raster format.
+  */
+  FormatLocaleString(message,MagickPathExtent,
+    "%s %s \"%s\" %s",delegate_info->delegate,RenderPostscriptText,
+    postscript_filename,ReadImagesOptions(read_info,exception));
+  (void) LogMagickEvent(DelegateEvent,GetMagickModule(),"%s",message);
+  options=InterpretCommandlineOptions(&magick_options,command,exception);
+  image=ReadImages(read_info,filename,exception);
+  RelinquishMagickMemory(options);
+  /*
+    Read the rendered images and append them to the image list, handling profiles if necessary.
+  */
+  if (image == (Image *) NULL)
+    return(DestroyImageList(image));
+  do
+  {
+    (void) CopyMagickString(postscript_image->filename,filename,
+      MagickPathExtent);
+    (void) CopyMagickString(postscript_image->magick,image->magick,
+      MagickPathExtent);
+    if (columns != 0)
+      postscript_image->magick_columns=columns;
+    if (rows != 0)
+      postscript_image->magick_rows=rows;
+    postscript_image->page=page;
+    (void) CloneImageProfiles(postscript_image,image);
+    (void) CloneImageProperties(postscript_image,image);
+    next=SyncNextImageInList(postscript_image);
+    if (next != (Image *) NULL)
+      postscript_image=next;
+  } while (next != (Image *) NULL);
+  image=DestroyImageList(image);
+  scene=0;
+  for (next=GetFirstImageInList(postscript_image); next != (Image *) NULL; )
+  {
+    next->scene=scene++;
+    next=GetNextImageInList(next);
+  }
+  return(GetFirstImageInList(postscript_image));

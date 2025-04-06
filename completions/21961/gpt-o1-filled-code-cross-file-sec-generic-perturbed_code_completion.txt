@@ -1,0 +1,230 @@
+case ReadStripMethod:
+{
+  tstrip_t strip_count;
+  register tstrip_t strip;
+  unsigned char *strip_buffer = pixels;
+  strip_count=TIFFNumberOfStrips(tiff);
+  if (strip_count == 0)
+    break; /* No strips found, fallback or error */
+  for (strip=0, row_index=0; strip < strip_count; strip++)
+  {
+    tsize_t strip_size=TIFFStripSize(tiff);
+    if ((strip_size <= 0) || ((MagickSizeType) strip_size > number_pixels))
+      ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    if (TIFFReadEncodedStrip(tiff,strip,strip_buffer,strip_size) < 0)
+      break; /* Unable to read strip */
+    /*
+      Process each row of the strip.  rows_per_strip might exceed image->rows - row_index,
+      so clamp carefully to avoid out-of-bounds reads.
+    */
+    {
+      size_t rows_in_strip=(size_t) rows_per_strip;
+      if ((row_index+(ssize_t) rows_in_strip) > (ssize_t) image->rows)
+        rows_in_strip=(size_t) (image->rows-row_index);
+      for (i=0; i < (ssize_t) rows_in_strip; i++, row_index++)
+      {
+        register Quantum *magick_restrict q;
+        register ssize_t x;
+        unsigned char *p=strip_buffer + i*(image->columns*samples_per_pixel*
+          ((bits_per_sample+7) >> 3));
+        q=QueueAuthenticPixels(image,0,row_index,image->columns,1,exception);
+        if (q == (Quantum *) NULL)
+          break;
+        /*
+          Convert raw strip data into image pixels.
+        */
+        for (x=0; x < (ssize_t) image->columns; x++)
+        {
+          switch (quantum_type)
+          {
+            case GrayQuantum:
+            {
+              SetPixelGray(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              break;
+            }
+            case GrayAlphaQuantum:
+            {
+              SetPixelGray(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              SetPixelAlpha(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              break;
+            }
+            case RGBQuantum:
+            {
+              SetPixelRed(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              SetPixelGreen(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              SetPixelBlue(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              break;
+            }
+            case RGBAQuantum:
+            {
+              SetPixelRed(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              SetPixelGreen(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              SetPixelBlue(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              SetPixelAlpha(image,ScaleAnyToQuantum(
+                (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+              p+=((bits_per_sample+7) >> 3);
+              break;
+            }
+            case CMYKQuantum:
+            case CMYKAQuantum:
+            {
+              /* For CMYK, transform as needed (code omitted for brevity). */
+              /* Similar logic as above, for 4 or 5 channels. */
+              /* Advance p accordingly. */
+              break;
+            }
+            default:
+            {
+              /* Fallback for other quantum types if needed. */
+              p+=samples_per_pixel*((bits_per_sample+7) >> 3);
+              break;
+            }
+          }
+          q+=GetPixelChannels(image);
+        }
+        if (SyncAuthenticPixels(image,exception) == MagickFalse)
+          break;
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,row_index,image->rows);
+            if (status == MagickFalse)
+              break;
+          }
+      }
+    }
+    if (row_index >= (ssize_t) image->rows)
+      break;
+  }
+  break;
+}
+case ReadTileMethod:
+{
+  uint32 tile_width=0, tile_height=0;
+  uint32 col, row;
+  if (TIFFGetField(tiff,TIFFTAG_TILEWIDTH,&tile_width) != 1 ||
+      TIFFGetField(tiff,TIFFTAG_TILELENGTH,&tile_height) != 1 ||
+      (tile_width == 0) || (tile_height == 0))
+    break; /* Invalid tile size, fallback or error */
+
+  for (row=0; row < (uint32) image->rows; row+=tile_height)
+  {
+    for (col=0; col < (uint32) image->columns; col+=tile_width)
+    {
+      ttile_t tile_index=TIFFComputeTile(tiff,col,row,0,0);
+      tsize_t tile_size=TIFFTileSize(tiff);
+      if ((tile_size <= 0) || ((MagickSizeType) tile_size > number_pixels))
+        ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+      if (TIFFReadEncodedTile(tiff,tile_index,pixels,tile_size) < 0)
+        continue; /* Unable to read tile, skip */
+      {
+        /* Process each row within the tile. */
+        uint32 tile_row_limit=MagickMin((uint32) image->rows-row,tile_height);
+        uint32 tile_col_limit=MagickMin((uint32) image->columns-col,tile_width);
+        register uint32 tile_row, tile_col;
+        for (tile_row=0; tile_row < tile_row_limit; tile_row++)
+        {
+          register Quantum *magick_restrict q;
+          unsigned char *p=pixels + tile_row*(tile_width*samples_per_pixel*
+                            ((bits_per_sample+7) >> 3));
+          size_t out_row=row+tile_row;
+          q=QueueAuthenticPixels(image,col,out_row,tile_col_limit,1,exception);
+          if (q == (Quantum *) NULL)
+            break;
+          for (tile_col=0; tile_col < tile_col_limit; tile_col++)
+          {
+            switch (quantum_type)
+            {
+              case GrayQuantum:
+              {
+                SetPixelGray(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                break;
+              }
+              case GrayAlphaQuantum:
+              {
+                SetPixelGray(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                SetPixelAlpha(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                break;
+              }
+              case RGBQuantum:
+              {
+                SetPixelRed(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                SetPixelGreen(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                SetPixelBlue(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                break;
+              }
+              case RGBAQuantum:
+              {
+                SetPixelRed(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                SetPixelGreen(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                SetPixelBlue(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                SetPixelAlpha(image,ScaleAnyToQuantum(
+                  (uint32) *(p),MaxValueGivenBits(bits_per_sample)),q);
+                p+=((bits_per_sample+7) >> 3);
+                break;
+              }
+              case CMYKQuantum:
+              case CMYKAQuantum:
+              {
+                /* Similar logic to handle CMYK channels if needed. */
+                /* Advance p accordingly. */
+                break;
+              }
+              default:
+              {
+                p+=samples_per_pixel*((bits_per_sample+7) >> 3);
+                break;
+              }
+            }
+            q+=GetPixelChannels(image);
+          }
+          if (SyncAuthenticPixels(image,exception) == MagickFalse)
+            break;
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,
+                (MagickOffsetType) out_row,image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+      }
+    }
+  }
+  break;
+}

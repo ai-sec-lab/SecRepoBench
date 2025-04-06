@@ -1,0 +1,88 @@
+// Parse the UDP header from the packet using the current IP offset
+if(header->caplen >= (ip_offset+ip_len+sizeof(struct ndpi_udphdr))) {
+  struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset+ip_len];
+  u_int16_t sport = ntohs(udp->source), dport = ntohs(udp->dest);
+
+  // GTP-U: UDP port 2152
+  if((sport == 2152) || (dport == 2152)) {
+    // Check for GTP-U header (at least 8 bytes)
+    if(header->caplen >= (ip_offset+ip_len+sizeof(struct ndpi_udphdr)+8)) {
+      const u_int8_t* gtp = &packet[ip_offset+ip_len+sizeof(struct ndpi_udphdr)];
+      u_int8_t version = (gtp[0] & 0xE0) >> 5;
+      u_int8_t msg_type = gtp[1];
+      
+      // Check if it's GTP-U (version 1, message type 255)
+      if(version == 1 && msg_type == 255) {
+        u_int16_t header_len = 8;
+        
+        // Extended header if E, S, or PN flags are set
+        if(gtp[0] & 0x07) header_len = 12;
+        
+        if(header->caplen >= (ip_offset+ip_len+sizeof(struct ndpi_udphdr)+header_len)) {
+          tunnel_type = ndpi_gtp_tunnel;
+          ip_offset += ip_len + sizeof(struct ndpi_udphdr) + header_len;
+          goto iph_check;
+        }
+      }
+    }
+  }
+  // TZSP: UDP port 37008
+  else if((sport == 37008) || (dport == 37008)) {
+    // Check for TZSP header (at least 4 bytes)
+    if(header->caplen >= (ip_offset+ip_len+sizeof(struct ndpi_udphdr)+4)) {
+      const u_int8_t* tzsp = &packet[ip_offset+ip_len+sizeof(struct ndpi_udphdr)];
+      
+      // TZSP version 1
+      if(tzsp[0] == 1) {
+        u_int16_t offset = ip_offset+ip_len+sizeof(struct ndpi_udphdr)+4;
+        
+        // Skip TZSP tags until end tag (0) or end of packet
+        while(offset < header->caplen) {
+          if(packet[offset] == 0) { // End tag
+            offset++;
+            break;
+          } else if(packet[offset] == 1) { // Padding (no length)
+            offset++;
+          } else if(offset+1 < header->caplen) { // Regular tag with length
+            u_int8_t tag_len = packet[offset+1];
+            
+            if(offset+2+tag_len <= header->caplen)
+              offset += 2 + tag_len;
+            else
+              break; // Prevent buffer overflow
+          } else {
+            break; // Not enough data for tag length
+          }
+        }
+        
+        // Check if we found the encapsulated Ethernet frame
+        if(offset < header->caplen) {
+          tunnel_type = ndpi_tzsp_tunnel;
+          eth_offset = offset;
+          datalink_type = DLT_EN10MB;
+          goto datalink_check;
+        }
+      }
+    }
+  }
+  // CAPWAP: UDP ports 5246 or 5247
+  else if((sport == 5246) || (dport == 5246) || (sport == 5247) || (dport == 5247)) {
+    // Check for CAPWAP header (at least 8 bytes)
+    if(header->caplen >= (ip_offset+ip_len+sizeof(struct ndpi_udphdr)+8)) {
+      const u_int8_t* capwap = &packet[ip_offset+ip_len+sizeof(struct ndpi_udphdr)];
+      
+      // CAPWAP version 0, data packet (type bit set)
+      if(((capwap[0] & 0xF0) >> 4) == 0 && (capwap[1] & 0x80)) {
+        // Calculate header length: HLEN field + 8
+        u_int8_t hlen = ((capwap[1] & 0x07) << 2) | ((capwap[2] & 0xC0) >> 6);
+        u_int16_t header_len = 8 + (hlen * 4);
+        
+        if(header->caplen >= (ip_offset+ip_len+sizeof(struct ndpi_udphdr)+header_len)) {
+          tunnel_type = ndpi_capwap_tunnel;
+          ip_offset += ip_len + sizeof(struct ndpi_udphdr) + header_len;
+          goto iph_check;
+        }
+      }
+    }
+  }
+}

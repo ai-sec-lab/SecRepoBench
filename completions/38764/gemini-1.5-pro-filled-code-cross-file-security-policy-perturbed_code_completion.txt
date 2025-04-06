@@ -1,0 +1,155 @@
+p = b + (step - parent->size < iso9660->logical_block_size
+		    ? step - parent->size : 0);
+		while (p + ISO9660_ENTRY_LENGTH_MIN <= b + step) {
+			struct file_info *file;
+			size_t len, name_len;
+			int r;
+
+			len = isonum_711(p + ISO9660_ENTRY_LEN_OFFSET);
+
+			/* If this entry isn't long enough to hold even
+			 * the file identifier length, something is
+			 * seriously wrong; skip to the next block. */
+			if (len < ISO9660_ENTRY_LENGTH_MIN)
+				break;
+
+			/* If this entry extends past the end of the
+			 * block, something is seriously wrong; skip
+			 * to the next block. */
+			if (p + len > b + step)
+				break;
+
+			name_len = isonum_711(p + ISO9660_ENTRY_NAME_LEN_OFFSET);
+
+			/*
+			 * Basic sanity checks of the record.
+			 *   -   First record should not have a gap before it.
+			 *   -   No record should have a gap after it.
+			 *   -   The first record must have name length > 1.
+			 *       (Zero-length names are only allowed for
+			 *       the special continuation entries used for
+			 *       multi-extent files.)
+			 */
+			if ((p == b && isonum_711(p + ISO9660_ENTRY_EXT_ATTR_LEN_OFFSET) != 0) ||
+			    (len > ISO9660_ENTRY_LENGTH_MIN &&
+				isonum_711(p + len - 1) != 0) ||
+			    (p == b && name_len <= 1)) {
+				break;
+			}
+
+			file = file_new(iso9660);
+			if (file == NULL)
+				return (ARCHIVE_FATAL);
+
+			file->parent = parent;
+			file->offset = isonum_733(p + ISO9660_ENTRY_EXT_LOC_OFFSET);
+
+			/*
+			 * Take EXT_FILE_FLAGS_OFFSET into account for
+			 * calculating file size.
+			 */
+			file->size = isonum_733(p + ISO9660_ENTRY_EXT_LEN_OFFSET);
+
+			file->recorded_size = len;
+
+			r = parse_file_flags(file, p);
+			if (r != ARCHIVE_OK) {
+				file_free(file);
+				return (r);
+			}
+
+			iso9660->current_entry_number++;
+			file->number = iso9660->current_entry_number;
+
+			/* Read file timestamps. */
+			r = read_timestamp(file, p + ISO9660_ENTRY_DATE_OFFSET, 0);
+			if (r != ARCHIVE_OK) {
+				file_free(file);
+				return (r);
+			}
+
+			/* Parse the name, which is always using the
+			 * d-characters. */
+			if (name_len == 1 && p[ISO9660_ENTRY_NAME_OFFSET] == 0) {
+				if (multi != NULL) {
+					struct content *content;
+
+					content = content_new(iso9660);
+					if (content == NULL)
+						return (ARCHIVE_FATAL);
+					content->size = file->size;
+					content->offset = file->offset;
+					content->next = NULL;
+					*multi->contents.last = content;
+					multi->contents.last = &(content->next);
+					multi->size += file->size;
+					file_free(file);
+				} else {
+					archive_set_error(
+					    &archivereader->archive,
+					    ARCHIVE_ERRNO_MISC,
+					    "Invalid multi-extent entry");
+					file_free(file);
+					return (ARCHIVE_FAILED);
+				}
+			} else if (name_len == 1 && p[ISO9660_ENTRY_NAME_OFFSET] == 1) {
+				if (multi != NULL) {
+					archive_set_error(
+					    &archivereader->archive,
+					    ARCHIVE_ERRNO_MISC,
+					    "Invalid multi-extent entry");
+					file_free(file);
+					return (ARCHIVE_FAILED);
+				}
+				multi = file;
+				multi->contents.first = NULL;
+				multi->contents.last = &(multi->contents.first);
+				multi->size = 0;
+			} else {
+				struct content *content;
+
+				if (multi != NULL) {
+					multi->multi_extent = 1;
+					file = multi;
+					multi = NULL;
+				}
+
+				if (p[ISO9660_ENTRY_NAME_OFFSET + name_len - 1] == ';') {
+					file->has_rockridge = 1;
+					name_len--; /* Zap the ';' */
+				}
+				archive_strncpy(&file->name,
+				    (const char *)p + ISO9660_ENTRY_NAME_OFFSET,
+				    name_len);
+
+				if (file->has_rockridge) {
+					parse_rockridge_extensions(archivereader,
+					    file, p + ISO9660_ENTRY_LENGTH_MIN + name_len,
+					    len - ISO9660_ENTRY_LENGTH_MIN - name_len);
+				}
+
+				content = content_new(iso9660);
+				if (content == NULL)
+					return (ARCHIVE_FATAL);
+				content->offset = file->offset;
+				content->size = file->size;
+				content->next = NULL;
+				*file->contents.last = content;
+				file->contents.last = &(content->next);
+
+				/* Add this file to parent's list. */
+				file->next = NULL;
+				*parent->files.last = file;
+				parent->files.last = &(file->next);
+				parent->subdirs +=
+				    ((file->mode & AE_IFMT) == AE_IFDIR);
+			}
+
+			p += len;
+		}
+		if (p < b + step)
+			step = 0;
+		else
+			step -= (size_t)(p - b);
+		skip_size -= (size_t)(p - b);
+		b = p;

@@ -1,0 +1,92 @@
+{
+    // TCP packet processing
+    if(packet->tcp != NULL) {
+      sport = ntohs(packet->tcp->source);
+      dport = ntohs(packet->tcp->dest);
+
+      // Check if we have enough payload data to inspect
+      if(packet->payload_packet_len >= 4) {
+        // If the first byte is 0x03, it could be TPKT (RFC1006)
+        if(packet->payload[0] == 0x03) {
+          // Get TPKT length (bytes 3 & 4)
+          u_int16_t tpkt_len = (packet->payload[2] << 8) + packet->payload[3];
+          
+          // Validate length against actual payload size
+          if((tpkt_len >= 4) && (tpkt_len <= packet->payload_packet_len)) {
+            // Check for RDP pattern to exclude it
+            if((packet->payload_packet_len >= 11) && 
+               (packet->payload[4] == 0x01) && 
+               (packet->payload[5] == 0x00)) {
+              NDPI_EXCLUDE_PROTO(ndpi_struct, stream);
+              return;
+            }
+            
+            // Check for Q.931/H.225 pattern
+            if((packet->payload_packet_len > 10) && 
+               (packet->payload[4] == 0x08) && 
+               (packet->payload[5] == 0x02)) {
+              
+              NDPI_LOG_INFO(ndpi_struct, "found H323 via Q.931/H.225 pattern\n");
+              ndpi_set_detected_protocol(ndpi_struct, stream, NDPI_PROTOCOL_H323, NDPI_PROTOCOL_UNKNOWN, NDPI_CONFIDENCE_DPI);
+              return;
+            }
+            
+            // Check for H.245 pattern
+            if((packet->payload_packet_len > 10) && 
+               (packet->payload[4] == 0x00) && 
+               (packet->payload[5] == 0x00) && 
+               (packet->payload[6] == 0x00)) {
+              
+              NDPI_LOG_INFO(ndpi_struct, "found H323 via H.245 pattern\n");
+              ndpi_set_detected_protocol(ndpi_struct, stream, NDPI_PROTOCOL_H323, NDPI_PROTOCOL_UNKNOWN, NDPI_CONFIDENCE_DPI);
+              return;
+            }
+          }
+        }
+      }
+    }
+    
+    // UDP packet processing
+    if(packet->udp != NULL) {
+      sport = ntohs(packet->udp->source);
+      dport = ntohs(packet->udp->dest);
+      
+      // Common H.323 UDP ports
+      if((sport == 1719) || (dport == 1719) || 
+         (sport == 1718) || (dport == 1718)) {
+        
+        // Check for RAS messages
+        if(packet->payload_packet_len >= 4) {
+          if((packet->payload[0] == 0x03) || // GatekeeperRequest
+             (packet->payload[0] == 0x04) || // GatekeeperConfirm
+             (packet->payload[0] == 0x06) || // RegistrationRequest
+             (packet->payload[0] == 0x0D)) { // LocationRequest
+            
+            NDPI_LOG_INFO(ndpi_struct, "found H323 via UDP RAS message\n");
+            ndpi_set_detected_protocol(ndpi_struct, stream, NDPI_PROTOCOL_H323, NDPI_PROTOCOL_UNKNOWN, NDPI_CONFIDENCE_DPI);
+            return;
+          }
+        }
+        
+        // H.323 broadcast detection
+        if((packet->payload_packet_len > 0) && (dport == 1718)) {
+          NDPI_LOG_INFO(ndpi_struct, "found H323 broadcast\n");
+          ndpi_set_detected_protocol(ndpi_struct, stream, NDPI_PROTOCOL_H323, NDPI_PROTOCOL_UNKNOWN, NDPI_CONFIDENCE_DPI);
+          return;
+        }
+      }
+    }
+    
+    // Need more packets - check well-known H.323 ports
+    if(((packet->tcp != NULL) && ((sport == 1720) || (dport == 1720) || 
+                                 (sport == 1503) || (dport == 1503))) ||
+       ((packet->udp != NULL) && ((sport == 1719) || (dport == 1719)))) {
+      
+      NDPI_LOG_DBG(ndpi_struct, "need more H323 packets\n");
+      stream->l4.tcp.h323_valid_packets++;
+      return;
+    }
+    
+    // Not H.323
+    NDPI_EXCLUDE_PROTO(ndpi_struct, stream);
+}

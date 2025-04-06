@@ -1,0 +1,99 @@
+struct ndpi_ipv4hdr iph;
+  u_int16_t ip_len = ntohs(ipv6_header->ndpi_ipv6_plen) + sizeof(struct ndpi_ipv6hdr);
+  u_int8_t l4proto = ipv6_header->ndpi_ipv6_nextheader;
+  const u_int8_t *l4ptr = (const u_int8_t *)ipv6_header + sizeof(struct ndpi_ipv6hdr);
+  u_int8_t next_header = l4proto;
+  u_int16_t header_len = sizeof(struct ndpi_ipv6hdr);
+
+  memset(&iph, 0, sizeof(iph));
+  memcpy(&iph.saddr, &ipv6_header->ndpi_ipv6_src, 16);
+  memcpy(&iph.daddr, &ipv6_header->ndpi_ipv6_dst, 16);
+
+  /* IPv6 Extension Headers */
+  while (1) {
+    switch (next_header) {
+    case NDPI_IPV6_NEXTHDR_HOPBYHOP:
+    case NDPI_IPV6_NEXTHDR_ROUTING:
+    case NDPI_IPV6_NEXTHDR_DEST: {
+      u_int8_t hdrlen;
+
+      if ((l4ptr + 1) >= ((const u_int8_t *)ipv6_header + ip_len))
+	return NULL;
+
+      next_header = *l4ptr;
+      hdrlen = *(l4ptr + 1);
+
+      if (hdrlen == 0)
+	return NULL;
+
+      hdrlen = (hdrlen + 1) << 3;
+
+      if ((l4ptr + hdrlen) > ((const u_int8_t *)ipv6_header + ip_len))
+	return NULL;
+
+      l4ptr += hdrlen;
+      header_len += hdrlen;
+    }
+      break;
+
+    case NDPI_IPV6_NEXTHDR_FRAGMENT: {
+      if ((l4ptr + 6) > ((const u_int8_t *)ipv6_header + ip_len))
+	return NULL;
+
+      next_header = *l4ptr;
+      l4ptr += 8;
+      header_len += 8;
+    }
+      break;
+
+    case NDPI_PROTOCOL_TCP:
+    case NDPI_PROTOCOL_UDP:
+    case NDPI_PROTOCOL_ICMPV6:
+    case NDPI_PROTOCOL_SCTP:
+    case NDPI_PROTOCOL_IGMP:
+      goto found_l4;
+
+    default:
+      /* RFC 7045 */
+      if ((l4ptr + 1) >= ((const u_int8_t *)ipv6_header + ip_len))
+	return NULL;
+
+      next_header = *l4ptr;
+      if (next_header >= 59)
+	goto found_l4;
+
+      return NULL;
+    }
+  }
+
+ found_l4:
+  *payload = (u_int8_t *)l4ptr;
+  l4proto = next_header;
+  *payload_len = ip_len - (l4ptr - (const u_int8_t *)ipv6_header);
+
+  if(l4proto == NDPI_PROTOCOL_TCP) {
+    *tcph = (struct ndpi_tcphdr *)l4ptr;
+    *udph = NULL;
+
+    if (((const u_int8_t *)(*tcph) + sizeof(struct ndpi_tcphdr)) > ((const u_int8_t *)ipv6_header + ip_len))
+      return NULL;
+
+    *sport = ntohs((*tcph)->source);
+    *dport = ntohs((*tcph)->dest);
+  } else if(l4proto == NDPI_PROTOCOL_UDP) {
+    *udph = (struct ndpi_udphdr *)l4ptr;
+    *tcph = NULL;
+
+    if (((const u_int8_t *)(*udph) + sizeof(struct ndpi_udphdr)) > ((const u_int8_t *)ipv6_header + ip_len))
+      return NULL;
+
+    *sport = ntohs((*udph)->source);
+    *dport = ntohs((*udph)->dest);
+  } else {
+    *tcph = NULL;
+    *udph = NULL;
+    *sport = 0;
+    *dport = 0;
+  }
+
+  *proto = l4proto;

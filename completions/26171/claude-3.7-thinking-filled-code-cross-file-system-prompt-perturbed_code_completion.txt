@@ -1,0 +1,155 @@
+int32_t ntbytes = 0;                 // Total number of uncompressed bytes
+uint8_t* _src = (uint8_t*)(src) + src_offset;
+uint8_t* _dest = dest + destinationoffset;
+int32_t csizem12;
+int32_t nstreams;
+int32_t neblock;
+int32_t chunk_nbytes;
+int32_t last_filter_index = -1;
+int j = 0;
+int32_t srcsize_ = srcsize;
+uint8_t* filters_orig = context->filters;
+uint8_t* filters_chunk = _src + 2;
+
+if (srcsize_ < 0) {
+  srcsize_ = INT32_MAX;
+}
+if ((src_offset + 16) > srcsize_) {
+  return -1;
+}
+
+csizem12 = sw32_(_src + 12);
+if (csizem12 < 16) {
+  return -1;
+}
+if ((src_offset + csizem12) > srcsize_) {
+  return -1;
+}
+
+nstreams = (uint8_t)(_src[1]);
+if (nstreams == 0) {
+  nstreams = 1;
+}
+_src += 16;
+
+if (*filters_chunk == 0) {
+  context->filters[0] = 0;
+  context->filters[1] = 0;
+  last_filter_index = -1;
+}
+else {
+  last_filter_index = get_last_filter(*filters_chunk & 0xf);
+}
+
+neblock = bsize / context->typesize;
+
+if (csizem12 == BLOSC_EXTENDED_HEADER_LENGTH) {
+  ntbytes = 0;
+}
+else if (bsize == 0) {
+  ntbytes = 0;
+}
+else if (_src[0] == 0) {
+  if (((size_t)(csizem12 - BLOSC_EXTENDED_HEADER_LENGTH)) < bsize) {
+    return -1;
+  }
+  memcpy(_dest, _src + BLOSC_EXTENDED_HEADER_LENGTH, bsize);
+  ntbytes = bsize;
+}
+else {
+  if ((_src[0] & 0xf0) == 0xf0) {
+    uint8_t val = _src[0] & 0x0f;
+    uint32_t run_size = sw32_(_src + 1);
+    if (run_size > (uint32_t)bsize) {
+      return -1;
+    }
+    memset(_dest, val, run_size);
+    ntbytes = run_size;
+  }
+  else {
+    int32_t stream_sizes[BLOSC2_MAX_STREAMS];
+    int32_t compressed_sizes[BLOSC2_MAX_STREAMS];
+    int64_t nbytes = bsize;
+    uint8_t* compressed_ptr = _src + BLOSC_EXTENDED_HEADER_LENGTH;
+    
+    for (j = 0; j < nstreams; j++) {
+      stream_sizes[j] = (int32_t)(nbytes / nstreams);
+    }
+    for (j = 0; j < (nbytes % nstreams); j++) {
+      stream_sizes[j]++;
+    }
+
+    for (j = 0; j < nstreams; j++) {
+      if (*compressed_ptr != 0) {
+        compressed_sizes[j] = sw32_(compressed_ptr) - 4;
+        compressed_ptr += 4;
+      } else {
+        compressed_sizes[j] = 0;
+        compressed_ptr++;
+      }
+    }
+    
+    for (j = 0; j < nstreams; j++) {
+      int32_t stream_cbytes = compressed_sizes[j];
+      
+      if (stream_cbytes > 0) {
+        if (compformat == BLOSC_BLOSCLZ_FORMAT) {
+          chunk_nbytes = blosclz_decompress(compressed_ptr, stream_cbytes, 
+                                          tmp2, stream_sizes[j]);
+        } else if (compformat == BLOSC_LZ4_FORMAT || compformat == BLOSC_LZ4HC_FORMAT) {
+#ifdef HAVE_LZ4
+          chunk_nbytes = lz4_wrap_decompress((char*)compressed_ptr, stream_cbytes,
+                                           (char*)tmp2, stream_sizes[j]);
+#else
+          return -5;
+#endif
+        } else if (compformat == BLOSC_ZLIB_FORMAT) {
+#ifdef HAVE_ZLIB
+          chunk_nbytes = zlib_wrap_decompress((char*)compressed_ptr, stream_cbytes,
+                                            (char*)tmp2, stream_sizes[j]);
+#else
+          return -5;
+#endif
+        } else if (compformat == BLOSC_ZSTD_FORMAT) {
+#ifdef HAVE_ZSTD
+          chunk_nbytes = zstd_wrap_decompress((char*)compressed_ptr, stream_cbytes,
+                                           (char*)tmp2, stream_sizes[j]);
+#else
+          return -5;
+#endif
+        } else {
+          return -1;
+        }
+        
+        if (chunk_nbytes < 0) {
+          return chunk_nbytes;
+        }
+        if (chunk_nbytes != stream_sizes[j]) {
+          return -2;
+        }
+        
+        compressed_ptr += stream_cbytes;
+      } else {
+        chunk_nbytes = stream_sizes[j];
+        memset(tmp2, 0, chunk_nbytes);
+      }
+      
+      if (last_filter_index >= 0) {
+        if ((j == 0) && (filters_orig[last_filter_index] == BLOSC_DELTA)) {
+          memcpy(tmp, tmp2, chunk_nbytes);
+        } else {
+          memcpy(tmp + j * stream_sizes[0], tmp2, chunk_nbytes);
+        }
+      } else {
+        memcpy(_dest + j * stream_sizes[0], tmp2, chunk_nbytes);
+      }
+      
+      ntbytes += chunk_nbytes;
+    }
+  }
+}
+
+if (*filters_chunk != 0) {
+  context->filters[0] = filters_orig[0];
+  context->filters[1] = filters_orig[1];
+}

@@ -1,0 +1,45 @@
+if (ctx->bytes_in_header > 0) {
+    /* Combine the stored header bytes with a few bytes from the current buffer
+       to try and locate a complete start code. We only need a few extra bytes
+       to verify the start code pattern (which is 0x000001XX). */
+    int extra = (remain < 10) ? remain : 10;
+    int temp_size = ctx->bytes_in_header + extra;
+    /* Use a fixed-size temporary buffer that is large enough */
+    u8 temp_buf[32];
+    if ((unsigned)temp_size > sizeof(temp_buf))
+        temp_size = sizeof(temp_buf);
+    memcpy(temp_buf, ctx->hdr_store, ctx->bytes_in_header);
+    memcpy(temp_buf + ctx->bytes_in_header, start, extra);
+
+    int found = mpgviddmx_next_start_code(temp_buf, temp_size);
+    if (found < 0) {
+        /* No valid start code found in the stored header bytes,
+           dispatch them as continuation of the previous data. */
+        u8 *packet_data;
+        GF_FilterPacket *stored_pck = gf_filter_pck_new_alloc(ctx->opid, ctx->bytes_in_header, &packet_data);
+        if (!stored_pck)
+            return GF_OUT_OF_MEM;
+        memcpy(packet_data, ctx->hdr_store, ctx->bytes_in_header);
+        gf_filter_pck_set_framing(stored_pck, GF_FALSE, GF_FALSE);
+        gf_filter_pck_set_cts(stored_pck, GF_FILTER_NO_TS);
+        gf_filter_pck_set_dts(stored_pck, GF_FILTER_NO_TS);
+        mpgviddmx_enqueue_or_dispatch(ctx, stored_pck, GF_FALSE, GF_FALSE);
+        /* Reset header storage */
+        ctx->bytes_in_header = 0;
+    } else {
+        /* A valid start code was found in the combined buffer.
+           Adjust the parsing state to account for the stored bytes.
+           The location in the current packet is the offset after the stored header. */
+        if ((u32)found < (u32)ctx->bytes_in_header) {
+            /* In the unlikely event the start code is entirely within the header store,
+               advance past it by marking it as processed. */
+            current = 0;
+            bytes_from_store = ctx->bytes_in_header;
+        } else {
+            current = found - ctx->bytes_in_header;
+            bytes_from_store = ctx->bytes_in_header;
+        }
+        hdr_offset = 0;
+        ctx->bytes_in_header = 0;
+    }
+}

@@ -1,0 +1,91 @@
+if(len <= sizeof(dNSName) - 1) {
+  u_int8_t j;
+  
+  // Extract the name
+  memcpy(dNSName, &packet->payload[i + 2], len);
+  dNSName[len] = '\0';
+  
+  // If it's an IP address, convert it properly
+  if(general_name_type == 0x87) { // IP address
+    char ipbuf[INET6_ADDRSTRLEN] = {0};
+    
+    if(len == 4) { // IPv4
+      struct in_addr addr;
+      memcpy(&addr, dNSName, sizeof(addr));
+      if(inet_ntop(AF_INET, &addr, ipbuf, sizeof(ipbuf)) != NULL) {
+        snprintf(dNSName, sizeof(dNSName), "%s", ipbuf);
+      }
+    } else if(len == 16) { // IPv6
+      struct in6_addr addr;
+      memcpy(&addr, dNSName, sizeof(addr));
+      if(inet_ntop(AF_INET6, &addr, ipbuf, sizeof(ipbuf)) != NULL) {
+        snprintf(dNSName, sizeof(dNSName), "%s", ipbuf);
+      }
+    }
+  }
+  
+  // Clean up the DNS name
+  for(j = 0; j < len && j < sizeof(dNSName) - 1; j++) {
+    if(!ndpi_isprint(dNSName[j])) {
+      dNSName[j] = '.';
+    }
+  }
+  
+#ifdef DEBUG_TLS
+  printf("[TLS] subjectAltName %s [%s: %s]\n", 
+         (general_name_type == 0x81) ? "rfc822Name" : 
+         (general_name_type == 0x82) ? "dNSName" : "ipAddress",
+         dNSName);
+#endif
+  
+  // Check if the DNS name matches the host server name
+  if((connection->host_server_name[0] != '\0') && 
+     (general_name_type == 0x82) && // only match dNSName
+     (strcasecmp(connection->host_server_name, dNSName) == 0)) {
+    matched_name = 1;
+  }
+  
+  // Update the server names list
+  if(connection->protos.tls_quic.server_names == NULL) {
+    connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+  } else {
+    char *newstr;
+    size_t old_len = strlen(connection->protos.tls_quic.server_names);
+    size_t dns_len = strlen(dNSName);
+    
+    if(old_len < UINT_MAX - dns_len - 2) { // Check for overflow
+      size_t new_len = old_len + dns_len + 2; // +2 for comma and null terminator
+      
+      newstr = ndpi_malloc(new_len);
+      if(newstr) {
+        snprintf(newstr, new_len, "%s,%s", connection->protos.tls_quic.server_names, dNSName);
+        ndpi_free(connection->protos.tls_quic.server_names);
+        connection->protos.tls_quic.server_names = newstr;
+      }
+    }
+  }
+  
+  // Try to detect a subprotocol
+  if(connection->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+    u_int16_t protocol_id;
+    ndpi_protocol_match_result ret_match;
+    
+    ndpi_match_host_subprotocol(ndpi_struct, connection, 
+                               (char *)dNSName,
+                               strlen((char *)dNSName),
+                               &ret_match,
+                               NDPI_PROTOCOL_TLS);
+    
+    if(ret_match.protocol_id != NDPI_PROTOCOL_UNKNOWN) {
+      protocol_id = ret_match.protocol_id;
+      
+      ndpi_protocol ret = { NDPI_PROTOCOL_TLS, protocol_id, ret_match.category };
+      
+      connection->detected_protocol_stack[0] = protocol_id;
+      connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+      
+      connection->category = ret.category;
+      ndpi_check_subprotocol_risk(ndpi_struct, connection, protocol_id);
+    }
+  }
+}

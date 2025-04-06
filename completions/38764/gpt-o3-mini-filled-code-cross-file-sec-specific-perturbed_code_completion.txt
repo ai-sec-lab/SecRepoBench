@@ -1,0 +1,63 @@
+p = b;
+while (step > 0) {
+    /* Each directory record begins with a length byte. */
+    unsigned char rec_len = *p;
+    if (rec_len == 0) {
+        /* A zero length indicates padding; break out of the loop. */
+        break;
+    }
+    if (rec_len > step) {
+        archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+            "Invalid directory record: length %u exceeds remaining %zu bytes",
+            rec_len, step);
+        return ARCHIVE_FATAL;
+    }
+
+    /* Allocate a new file_info structure for this directory entry */
+    struct file_info *entry = (struct file_info *)calloc(1, sizeof(*entry));
+    if (entry == NULL) {
+        archive_set_error(&archivereader->archive, ENOMEM,
+            "Out of memory allocating directory entry");
+        return ARCHIVE_FATAL;
+    }
+
+    /* Securely parse the directory record into the file_info structure.
+       The helper function 'parse_iso9660_entry' must validate all input lengths
+       and avoid buffer overreads. */
+    int r = parse_iso9660_entry(entry, p, rec_len);
+    if (r != ARCHIVE_OK) {
+        free(entry);
+        return r;
+    }
+
+    /* Skip entries for '.' and '..' */
+    if (strcmp(entry->name.s, ".") == 0 || strcmp(entry->name.s, "..") == 0) {
+        free(entry);
+    } else {
+        /*
+         * Handle multi-extent files:
+         * If this entry is marked as a multi-extent fragment, append it to the chain.
+         * Otherwise, add it immediately to the archive structure.
+         */
+        if (entry->multi_extent) {
+            if (multi == NULL) {
+                multi = entry;
+            } else {
+                struct file_info *tail = multi;
+                while (tail->next != NULL)
+                    tail = tail->next;
+                tail->next = entry;
+            }
+        } else {
+            r = add_file_entry(archivereader, parent, entry);
+            if (r != ARCHIVE_OK) {
+                free(entry);
+                return r;
+            }
+        }
+    }
+
+    p += rec_len;
+    step -= rec_len;
+    skip_size -= rec_len;
+}

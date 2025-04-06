@@ -1,0 +1,41 @@
+if (tag_offset_start + offset + len > crypto_data_len) {
+        NDPI_LOG_DBG(detectionmodule, "Tag length invalid\n");
+        break;
+    }
+
+    if(len == 4 && memcmp(tag, "SNI\0", 4) == 0) {
+      sni_len = le32toh(*((u_int32_t *)&crypto_data[tag_offset_start + offset]));
+      if(sni_len > 0 && tag_offset_start + offset + 4 + sni_len <= crypto_data_len) {
+        if (sni_len >= MAX_SNI_LEN)
+          sni_len = MAX_SNI_LEN - 1;
+
+        memcpy(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name,
+               &crypto_data[tag_offset_start + offset + 4], sni_len);
+        flow->protos.tls_quic_stun.tls_quic.client_requested_server_name[sni_len] = '\0';
+
+#ifdef QUIC_DEBUG
+        NDPI_LOG_DBG(detectionmodule, "SNI: %s\n", flow->protos.tls_quic_stun.tls_quic.client_requested_server_name);
+#endif
+        ret_match = ndpi_match_protocol_from_sni(detectionmodule, flow);
+        if(ret_match != NDPI_PROTOCOL_MATCH_NO_MATCH) {
+          ndpi_protocol_level_t proto_level = ret_match == NDPI_PROTOCOL_MATCH_SUBPROTOCOL ? NDPI_PROTOCOL_SUB : NDPI_PROTOCOL_APPLICATION;
+          ndpi_risk_t risk = ret_match == NDPI_PROTOCOL_MATCH_DGA ? NDPI_DGA_SUSPICIOUS : NDPI_NO_RISK;
+          ndpi_match_found(detectionmodule, flow, NDPI_PROTOCOL_QUIC, proto_level, risk);
+        }
+        sni_found = 1;
+        if(ua_found)
+          return;
+      }
+    } else if(len == 5 && memcmp(tag, "UAID", 4) == 0) {
+      uint32_t ua_len = le32toh(*((u_int32_t *)&crypto_data[tag_offset_start + offset]));
+
+      if(ua_len > 0 && tag_offset_start + offset + 4 + ua_len <= crypto_data_len) {
+#ifdef QUIC_DEBUG
+        NDPI_LOG_DBG(detectionmodule, "UA: %.*s\n", ua_len, (char *)&crypto_data[tag_offset_start + offset + 4]);
+#endif
+        ndpi_process_http_user_agent(detectionmodule, flow, (const char *)&crypto_data[tag_offset_start + offset + 4], ua_len);
+        ua_found = 1;
+        if(sni_found)
+          return;
+      }
+    }

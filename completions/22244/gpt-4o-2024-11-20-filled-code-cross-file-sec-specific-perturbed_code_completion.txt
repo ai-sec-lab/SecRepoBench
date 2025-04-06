@@ -1,0 +1,45 @@
+// Ensure the payload length is sufficient
+  if (packet->payload_packet_len < 8) {
+    return;
+  }
+
+  // Adjust payload pointer for TCP
+  if (packet->tcp != NULL) {
+    ovpn_payload += packet->tcp->seq_num - packet->tcp->ack_num;
+  }
+
+  // Extract operation code
+  operationcode = ovpn_payload[0];
+
+  // Check for UDP-specific conditions
+  if (packet->udp != NULL) {
+    if (flow->openvpn_stage == 0 && packet->payload_packet_len == 8 && operationcode == 0x38) {
+      flow->detected_protocol = NDPI_PROTOCOL_OPENVPN;
+      return;
+    }
+
+    if (flow->openvpn_stage < 3 && operationcode == 0x40) {
+      alen = ovpn_payload[1];
+      if (alen == 8) {
+        session_remote = &ovpn_payload[2];
+        memcpy(flow->openvpn_session_id, session_remote, alen);
+        flow->openvpn_stage = 1;
+      }
+    } else if (flow->openvpn_stage >= 1 && flow->openvpn_stage < 3 && operationcode == 0x41) {
+      alen = ovpn_payload[1];
+      if (alen == 8 && memcmp(flow->openvpn_session_id, &ovpn_payload[2], alen) == 0) {
+        flow->detected_protocol = NDPI_PROTOCOL_OPENVPN;
+        return;
+      } else {
+        failed = 1;
+      }
+    }
+  }
+
+  // Increment OpenVPN counter
+  flow->openvpn_stage++;
+
+  // Handle detection failure
+  if (failed) {
+    NDPI_EXCLUDE_PROTO(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+  }

@@ -1,0 +1,131 @@
+{
+      /* Server Hello */
+      offset += 1 + session_id_len; /* Skip session ID length and session ID */
+      ja3.cipher = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2; /* Skip cipher suite */
+
+      /* Skip compression method */
+      offset += 1;
+
+      /* Check if there are extensions */
+      if((offset + 2) <= total_len) {
+        extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+
+        while((extension_len > 0) && ((offset + 4) <= total_len)) {
+          u_int16_t ext_type = ntohs(*((u_int16_t*)&packet->payload[offset]));
+          u_int16_t ext_len = ntohs(*((u_int16_t*)&packet->payload[offset + 2]));
+
+          if((offset + 4 + ext_len) > total_len) {
+            jainvalid = 1;
+            break;
+          }
+
+          /* Store extensions for JA3 */
+          if(ja3.extension_count < MAX_EXTENSIONS) {
+            ja3.extensions[ja3.extension_count++] = ext_type;
+          }
+
+          offset += 4 + ext_len;
+          extension_len -= (4 + ext_len);
+        }
+      }
+    } else if(handshake_type == 0x01 /* Client Hello */) {
+      /* Client Hello */
+      offset += 1 + session_id_len; /* Skip session ID length and session ID */
+
+      /* Parse cipher suites */
+      if((offset + 2) > total_len) {
+        jainvalid = 1;
+      } else {
+        u_int16_t cipher_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+
+        if((offset + cipher_len) > total_len) {
+          jainvalid = 1;
+        } else {
+          for(j = 0; j < cipher_len; j += 2) {
+            u_int16_t cipher = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+
+            /* Skip GREASE values */
+            if((cipher & 0x0F0F) != 0x0A0A) {
+              if(ja3.cipher_count < MAX_CIPHERS) {
+                ja3.ciphers[ja3.cipher_count++] = cipher;
+              }
+            }
+          }
+          offset += cipher_len;
+        }
+      }
+
+      /* Skip compression methods */
+      if((offset + 1) > total_len) {
+        jainvalid = 1;
+      } else {
+        u_int8_t comp_len = packet->payload[offset];
+        offset += 1 + comp_len;
+
+        /* Parse extensions */
+        if((offset + 2) > total_len) {
+          jainvalid = 1;
+        } else {
+          extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+          offset += 2;
+
+          while((extension_len > 0) && ((offset + 4) <= total_len)) {
+            u_int16_t ext_type = ntohs(*((u_int16_t*)&packet->payload[offset]));
+            u_int16_t ext_len = ntohs(*((u_int16_t*)&packet->payload[offset + 2]));
+
+            if((offset + 4 + ext_len) > total_len) {
+              jainvalid = 1;
+              break;
+            }
+
+            /* Store extensions for JA3 */
+            if(ja3.extension_count < MAX_EXTENSIONS) {
+              ja3.extensions[ja3.extension_count++] = ext_type;
+            }
+
+            offset += 4 + ext_len;
+            extension_len -= (4 + ext_len);
+          }
+        }
+      }
+    }
+
+    /* Construct JA3 string */
+    if(!jainvalid) {
+      ja3_str_len = snprintf(ja3_str, sizeof(ja3_str), "%u,", ja3.tls_handshake_version);
+
+      for(i = 0; i < ja3.cipher_count; i++) {
+        ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len,
+                                "%s%u", (i > 0) ? "-" : "", ja3.ciphers[i]);
+      }
+
+      ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",");
+
+      for(i = 0; i < ja3.extension_count; i++) {
+        ja3_str_len += snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len,
+                                "%s%u", (i > 0) ? "-" : "", ja3.extensions[i]);
+      }
+
+      /* Compute MD5 hash of JA3 string */
+      ndpi_MD5_Init(&ctx);
+      ndpi_MD5_Update(&ctx, (unsigned char*)ja3_str, ja3_str_len);
+      ndpi_MD5_Final(md5_hash, &ctx);
+
+      /* Store JA3 hash in flow */
+      memcpy(flow->protos.stun_ssl.ssl.ja3_hash, md5_hash, sizeof(md5_hash));
+      flow->protos.stun_ssl.ssl.ja3_hash_found = 1;
+
+#ifdef DEBUG_TLS
+      printf("JA3 String: %s\n", ja3_str);
+      printf("JA3 Hash: ");
+      for(i = 0; i < sizeof(md5_hash); i++) {
+        printf("%02x", md5_hash[i]);
+      }
+      printf("\n");
+#endif
+
+      return(handshake_type == 0x01 ? 1 : 2); /* 1 for Client Hello, 2 for Server Hello */
+    }

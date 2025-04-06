@@ -1,0 +1,117 @@
+{
+  int cmd_start = j;
+  int found_cmd = 0;
+
+  /* Check if the command is one of SEND, CHAT, chat, sslchat, or TSEND, then skip its length. */
+  if((packet->line[i].len - cmd_start) >= 5 &&
+     (!memcmp(&packet->line[i].ptr[cmd_start], "SEND ", 5) ||
+      !memcmp(&packet->line[i].ptr[cmd_start], "CHAT ", 5) ||
+      !memcmp(&packet->line[i].ptr[cmd_start], "chat ", 5))) {
+    cmd_start += 5;
+    found_cmd = 1;
+  } else if((packet->line[i].len - cmd_start) >= 6 &&
+            !memcmp(&packet->line[i].ptr[cmd_start], "TSEND ", 6)) {
+    cmd_start += 6;
+    found_cmd = 1;
+  } else if((packet->line[i].len - cmd_start) >= 8 &&
+            !memcmp(&packet->line[i].ptr[cmd_start], "sslchat ", 8)) {
+    cmd_start += 8;
+    found_cmd = 1;
+  }
+
+  if(found_cmd) {
+    /* We have one of the recognized DCC commands, so parse out the port.
+     * IRC DCC arguments are typically: DCC <COMMAND> <filename> <IP> <port> [filesize]
+     * We'll look for the third whitespace-delimited token after the command. */
+    u_int16_t port = 0;
+    int space_count = 0;
+    /* Move until we reach the third space after command. */
+    for(; cmd_start < packet->line[i].len; cmd_start++) {
+      if(packet->line[i].ptr[cmd_start] == ' ') {
+        space_count++;
+        if(space_count == 2) {
+          /* Attempt to parse port from here. */
+          cmd_start++;
+          while(cmd_start < packet->line[i].len &&
+                (packet->line[i].ptr[cmd_start] >= '0' && packet->line[i].ptr[cmd_start] <= '9')) {
+            port = (port * 10) + (packet->line[i].ptr[cmd_start] - '0');
+            cmd_start++;
+          }
+          if(port != 0) {
+            NDPI_LOG_INFO(ndpi_struct, "found DCC. Port=%u\n", port);
+
+            /* Store port in src_id (if present). */
+            if(src_id != NULL) {
+              int replace_idx = -1, least_idx = 0;
+
+              /* Check if already stored or find LRU slot. */
+              for(k = 0; k < src_id->irc_number_of_port; k++) {
+                if(src_id->irc_port[k] == port) {
+                  /* Update last usage and stop. */
+                  src_id->last_time_port_used[k] = packet->tick_timestamp;
+                  replace_idx = -1; /* Means found existing port. */
+                  break;
+                }
+                /* Track least recently used if we need a replacement. */
+                if(src_id->last_time_port_used[k] < src_id->last_time_port_used[least_idx]) {
+                  least_idx = k;
+                }
+              }
+
+              if(k == src_id->irc_number_of_port) {
+                /* Not found as existing entry. */
+                if(src_id->irc_number_of_port < NDPI_MAX_PORTS) {
+                  /* Append new port. */
+                  src_id->irc_port[src_id->irc_number_of_port] = port;
+                  src_id->last_time_port_used[src_id->irc_number_of_port] = packet->tick_timestamp;
+                  src_id->irc_number_of_port++;
+                } else {
+                  /* Replace LRU if not found. */
+                  src_id->irc_port[least_idx] = port;
+                  src_id->last_time_port_used[least_idx] = packet->tick_timestamp;
+                }
+              }
+            }
+
+            /* Store port in dst (if present). */
+            if(dst != NULL) {
+              int replace_idx = -1, least_idx = 0;
+
+              /* Check if already stored or find LRU slot. */
+              for(k = 0; k < dst->irc_number_of_port; k++) {
+                if(dst->irc_port[k] == port) {
+                  /* Update last usage and stop. */
+                  dst->last_time_port_used[k] = packet->tick_timestamp;
+                  replace_idx = -1; /* Means found existing port. */
+                  break;
+                }
+                /* Track least recently used if we need a replacement. */
+                if(dst->last_time_port_used[k] < dst->last_time_port_used[least_idx]) {
+                  least_idx = k;
+                }
+              }
+
+              if(k == dst->irc_number_of_port) {
+                /* Not found as existing entry. */
+                if(dst->irc_number_of_port < NDPI_MAX_PORTS) {
+                  /* Append new port. */
+                  dst->irc_port[dst->irc_number_of_port] = port;
+                  dst->last_time_port_used[dst->irc_number_of_port] = packet->tick_timestamp;
+                  dst->irc_number_of_port++;
+                } else {
+                  /* Replace LRU if not found. */
+                  dst->irc_port[least_idx] = port;
+                  dst->last_time_port_used[least_idx] = packet->tick_timestamp;
+                }
+              }
+            }
+
+            ndpi_int_irc_add_connection(ndpi_struct, flow);
+          }
+          /* After parsing port, we can break or continue if needed. */
+          break;
+        }
+      }
+    }
+  }
+}

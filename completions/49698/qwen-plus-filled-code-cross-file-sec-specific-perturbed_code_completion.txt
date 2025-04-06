@@ -1,0 +1,56 @@
+// Validate the input parameters and check for potential heap overflow conditions
+if (nCompressed < 20) {
+    // Ensure there's at least 20 bytes for a valid header
+    return EXR_ERR_INVALID_ARGUMENT;
+}
+
+im = readUInt((const uint8_t*)compressed);
+iM = readUInt((const uint8_t*)(compressed + 4));
+nBits = readUInt((const uint8_t*)(compressed + 12));
+
+if (im < 0 || im >= HUF_ENCSIZE || iM < 0 || iM >= HUF_ENCSIZE) {
+    // Ensure 'im' and 'iM' are within acceptable limits
+    return EXR_ERR_INVALID_ARGUMENT;
+}
+
+ptr = compressed + 20;
+
+// Calculate the number of bytes required for decoding
+nBytes = ((uint64_t)nBits + 7) / 8;
+
+if (ptr + nBytes > compressed + nCompressed) {
+    // Ensure there is enough data in the buffer to perform decompression
+    return EXR_ERR_INVALID_DATA;
+}
+
+// Check if fast Huffman decoding is enabled and applicable
+if (FastHufDecoder::enabled() && nBits > 128) {
+    FastHufDecoder fhd(ptr, nCompressed - ((uintptr_t)ptr - (uintptr_t)compressed), im, iM, iM);
+
+    if (((uintptr_t)ptr - (uintptr_t)compressed) + nBytes > nCompressed) {
+        // Ensure no out-of-bounds access occurs during fast decoding
+        return EXR_ERR_INVALID_DATA;
+    }
+
+    rv = fhd.decode((unsigned char*)ptr, nBits, raw, nRawSize);
+} else {
+    // Use standard Huffman decoding method
+    AutoArray<uint64_t, HUF_ENCSIZE> freq;
+    AutoArray<HufDec, HUF_DECSIZE> hdec;
+
+    hufClearDecTable(hdec.data());
+
+    hufUnpackEncTable(&ptr, nCompressed - ((uintptr_t)ptr - (uintptr_t)compressed), im, iM, freq.data());
+
+    if (nBits > 8 * (nCompressed - ((uintptr_t)ptr - (uintptr_t)compressed))) {
+        // Ensure nBits does not exceed available data
+        return EXR_ERR_INVALID_DATA;
+    }
+
+    hufBuildDecTable(freq.data(), im, iM, hdec.data());
+    rv = hufDecode(freq.data(), hdec.data(), ptr, nBits, iM, nRawSize, raw);
+
+    hufFreeDecTable(hdec.data());
+}
+
+// Return the result of the decoding operation

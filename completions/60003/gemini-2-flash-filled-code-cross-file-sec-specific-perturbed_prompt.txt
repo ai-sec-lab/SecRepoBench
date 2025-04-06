@@ -1,0 +1,181 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static void ndpi_search_line(struct ndpi_detection_module_struct *detectionmodulestruct,
+                             struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct const * const packet = &detectionmodulestruct->packet;
+
+  NDPI_LOG_DBG(detectionmodulestruct, "searching LineCall\n");
+
+  if(packet->iph && (flow->guessed_protocol_id_by_ip == NDPI_PROTOCOL_LINE)) {
+    /*
+      The heuristic below (coming from reverse engineering packet traces)
+      will apply only to IPv4 and Line IP addresses. This is to avoid puttin
+      false positives in other nDPI-decoded protocols.
+    */
+
+    // Check the packet's payload against several specific patterns and lengths
+    // to determine if it matches known criteria for Line protocol packets.
+    // If a match is found, add the connection using ndpi_int_line_add_connection()
+    // to indicate that the flow is associated with the Line protocol, and exit
+    // the function early. These patterns involve checking specific byte values
+    // at certain payload offsets and comparing payload lengths.
+    // <MASK>
+  }
+
+  /* Some "random" UDP packets before the standard RTP stream:
+     it seems that the 4th bytes of these packets is some kind of packet
+     number. Look for 4 packets per direction with consecutive numbers. */
+  if(packet->payload_packet_len > 10) {
+    if(flow->l4.udp.line_pkts[packet->packet_direction] == 0) {
+      flow->l4.udp.line_base_cnt[packet->packet_direction] = packet->payload[3];
+      flow->l4.udp.line_pkts[packet->packet_direction] += 1;
+      return;
+    } else {
+      /* It might be a RTP/RTCP packet. Ignore it and keep looking for the
+         LINE packet numbers */
+      /* Basic RTP detection */
+      if((packet->payload[0] >> 6) == 2 && /* Version 2 */
+         (packet->payload[1] == 201 || /* RTCP, Receiver Report */
+          packet->payload[1] == 200 || /* RTCP, Sender Report */
+          is_valid_rtp_payload_type(packet->payload[1] & 0x7F)) /* RTP */) {
+        NDPI_LOG_DBG(detectionmodulestruct, "Probably RTP; keep looking for LINE");
+        return;
+      } else {
+        if((u_int8_t)(flow->l4.udp.line_base_cnt[packet->packet_direction] +
+                      flow->l4.udp.line_pkts[packet->packet_direction]) == packet->payload[3]) {
+          flow->l4.udp.line_pkts[packet->packet_direction] += 1;
+          if(flow->l4.udp.line_pkts[0] >= 4 && flow->l4.udp.line_pkts[1] >= 4) {
+            /* To avoid false positives: usually "base pkt numbers" per-direction are different */
+            if(flow->l4.udp.line_base_cnt[0] != flow->l4.udp.line_base_cnt[1])
+              ndpi_int_line_add_connection(detectionmodulestruct, flow);
+            else
+              NDPI_EXCLUDE_PROTO(detectionmodulestruct, flow);
+	  }
+          return;
+        }
+      }
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(detectionmodulestruct, flow);
+  return;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/wireguard.c
+void init_wireguard_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id)
+{
+  ndpi_set_bitmask_protocol_detection("WireGuard", ndpi_struct, *id,
+				      NDPI_PROTOCOL_WIREGUARD,
+				      ndpi_search_wireguard,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_UDP_WITH_PAYLOAD,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/epicgames.c
+void init_epicgames_dissector(struct ndpi_detection_module_struct *ndpi_struct,
+                              u_int32_t *id)
+{
+  ndpi_set_bitmask_protocol_detection("EpicGames", ndpi_struct, *id,
+                                      NDPI_PROTOCOL_EPICGAMES,
+                                      ndpi_search_epicgames,
+                                      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_UDP_WITH_PAYLOAD,
+                                      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+                                      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/rtp.c
+static void ndpi_search_rtp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int16_t source = ntohs(packet->udp->source);
+  u_int16_t dest = ntohs(packet->udp->dest);
+
+  // printf("==> %s()\n", __FUNCTION__);
+
+  /* printf("*** %s(pkt=%d)\n", __FUNCTION__, flow->packet_counter); */
+
+  if((source != 30303) && (dest != 30303 /* Avoid to mix it with Ethereum that looks alike */)
+     && (dest > 1023)
+     )
+    ndpi_rtp_search(ndpi_struct, flow, packet->payload, packet->payload_packet_len);
+  else
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static int is_vn(struct ndpi_detection_module_struct *ndpi_struct,
+		 struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int32_t version;
+  u_int8_t first_byte;
+  u_int8_t pub_bit1;
+  u_int8_t dest_conn_id_len, source_conn_id_len;
+
+  /* RFC 8999 6 */
+
+  /* First byte + version (4) + 2 CID lengths (set to 0) + at least one supported version */
+  if(packet->payload_packet_len < 11) {
+    return 0;
+  }
+
+  first_byte = packet->payload[0];
+  pub_bit1 = ((first_byte & 0x80) != 0);
+  if(!pub_bit1) {
+    NDPI_LOG_DBG2(ndpi_struct, "Not a long header\n");
+    return 0;
+  }
+
+  version = ntohl(*((u_int32_t *)&packet->payload[1]));
+  if(version != 0) {
+    NDPI_LOG_DBG2(ndpi_struct, "Invalid version 0x%x\n", version);
+    return 0;
+  }
+
+  /* Check that CIDs lengths are valid: QUIC limits the CID length to 20 */
+  dest_conn_id_len = packet->payload[5];
+  if(5 + 1 + dest_conn_id_len >= packet->payload_packet_len) {
+    NDPI_LOG_DBG2(ndpi_struct, "Invalid Length %d\n", packet->payload_packet_len);
+    return 0;
+  }
+  source_conn_id_len = packet->payload[5 + 1 + dest_conn_id_len];
+  if (dest_conn_id_len > QUIC_MAX_CID_LENGTH ||
+      source_conn_id_len > QUIC_MAX_CID_LENGTH) {
+    NDPI_LOG_DBG2(ndpi_struct, "Invalid CIDs length %u %u",
+		  dest_conn_id_len, source_conn_id_len);
+    return 0;
+  }
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/halflife2_and_mods.c
+void init_halflife2_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id)
+{
+  ndpi_set_bitmask_protocol_detection("HalfLife2", ndpi_struct, *id,
+				      NDPI_PROTOCOL_HALFLIFE2,
+				      ndpi_search_halflife2,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_UDP_WITH_PAYLOAD,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

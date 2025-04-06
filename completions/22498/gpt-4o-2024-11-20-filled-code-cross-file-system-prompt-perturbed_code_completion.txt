@@ -1,0 +1,53 @@
+for(a = 0; a < packet->payload_packet_len; a++) {
+    if((packet->payload[a] == '\r') && (a+1 < packet->payload_packet_len) && (packet->payload[a+1] == '\n')) {
+      packet->line[packet->parsed_lines].len =
+        (u_int16_t)(((unsigned long) &packet->payload[a]) -
+                    ((unsigned long) packet->line[packet->parsed_lines].ptr));
+      packet->parsed_lines++;
+
+      if(packet->parsed_lines >= MAX_PACKET_LINES)
+        break;
+
+      a += 1; // Skip '\n'
+      if((a+1 < packet->payload_packet_len) && (packet->payload[a+1] == '\r') &&
+         (a+2 < packet->payload_packet_len) && (packet->payload[a+2] == '\n')) {
+        // Found "\r\n\r\n", mark the end of headers
+        dataflow->initial_binary_bytes_len = packet->payload_packet_len - (a + 3);
+        if(dataflow->initial_binary_bytes_len > sizeof(dataflow->initial_binary_bytes))
+          dataflow->initial_binary_bytes_len = sizeof(dataflow->initial_binary_bytes);
+        memcpy(dataflow->initial_binary_bytes, &packet->payload[a + 3], dataflow->initial_binary_bytes_len);
+        break;
+      }
+
+      packet->line[packet->parsed_lines].ptr = &packet->payload[a + 1];
+      packet->line[packet->parsed_lines].len = 0;
+    }
+  }
+
+  // Analyze the first line for HTTP response status codes
+  if(packet->parsed_lines > 0) {
+    if((packet->line[0].len >= 12) && (memcmp(packet->line[0].ptr, "HTTP/", 5) == 0)) {
+      char *status_code_ptr = (char *)packet->line[0].ptr + 9;
+      if((status_code_ptr[0] >= '0' && status_code_ptr[0] <= '9') &&
+         (status_code_ptr[1] >= '0' && status_code_ptr[1] <= '9') &&
+         (status_code_ptr[2] >= '0' && status_code_ptr[2] <= '9')) {
+        packet->http_response_status_code = (status_code_ptr[0] - '0') * 100 +
+                                            (status_code_ptr[1] - '0') * 10 +
+                                            (status_code_ptr[2] - '0');
+      }
+    }
+  }
+
+  // Extract specific HTTP headers
+  for(a = 1; a < packet->parsed_lines; a++) {
+    if((packet->line[a].len > 7) && (strncasecmp((char *)packet->line[a].ptr, "Server:", 7) == 0)) {
+      packet->http.server_line.ptr = packet->line[a].ptr + 7;
+      packet->http.server_line.len = packet->line[a].len - 7;
+    } else if((packet->line[a].len > 5) && (strncasecmp((char *)packet->line[a].ptr, "Host:", 5) == 0)) {
+      packet->http.host_line.ptr = packet->line[a].ptr + 5;
+      packet->http.host_line.len = packet->line[a].len - 5;
+    } else if((packet->line[a].len > 13) && (strncasecmp((char *)packet->line[a].ptr, "Content-Type:", 13) == 0)) {
+      packet->http.content_type_line.ptr = packet->line[a].ptr + 13;
+      packet->http.content_type_line.len = packet->line[a].len - 13;
+    }
+  }

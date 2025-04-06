@@ -1,0 +1,94 @@
+if (strncmp(aux, "RG:Z:", 4) == 0) {
+            // Read Group
+            char *rg_val = aux + 5;
+            char *end = aux;
+            while (*end && end < aux_end)
+                end++;
+            size_t rg_len = end - rg_val;
+
+            // Check if RG exists in header
+            khint_t k;
+            int new_id;
+            k = kh_get(s2i, filedescriptor->header->hrecs->rg_hash, rg_val);
+            if (k == kh_end(filedescriptor->header->hrecs->rg_hash)) {
+                hts_log_warning("Missing RG ID '%s' in header", rg_val);
+                brg = NULL;
+            } else {
+                brg = kh_val(filedescriptor->header->hrecs->rg_hash, k);
+            }
+
+            aux = end;
+            if (*aux)
+                aux++;
+
+        } else if (strncmp(aux, "MD:Z:", 4) == 0 && !verbatim_MD) {
+            aux += 4;
+            while (*aux && aux < aux_end)
+                aux++;
+            if (*aux)
+                aux++;
+        } else if (strncmp(aux, "NM:i:", 4) == 0 && !verbatim_NM) {
+            aux += 4;
+            while (*aux && aux < aux_end)
+                aux++;
+            if (*aux)
+                aux++;
+        } else {
+            int32_t id;
+            cram_map *tm;
+
+            if (aux - orig >= aux_size - 3)
+                goto err;
+
+            id = (aux[0]<<16) | (aux[1]<<8) | aux[2];
+            k = kh_get(i2s, c->comp_hdr->TD_hash2, id);
+            if (k == kh_end(c->comp_hdr->TD_hash2)) {
+                // New tag
+                BLOCK_APPEND(td_b, aux, 3);
+                aux += 3;
+                BLOCK_APPEND_CHAR(td_b, '*');
+                aux++;
+            } else {
+                // Existing tag
+                BLOCK_APPEND(td_b, aux, 3);
+                aux += 3;
+                BLOCK_APPEND_CHAR(td_b, kh_val(c->comp_hdr->TD_hash2, k));
+                aux++;
+            }
+
+            tm = map_find(c->comp_hdr->tag_encoding_map, aux-4, id);
+            if (!tm) {
+                hts_log_error("Missing tag %c%c%c in map",
+                              aux[-4], aux[-3], aux[-2]);
+                goto err;
+            }
+
+            if (!tm->codec) {
+                // First time through, so initialise the codec
+                if (tm->init_codec) {
+                    r = tm->init_codec(filedescriptor, c, s, tm, err);
+                    if (r < 0) {
+                        hts_log_error("Failed to initialise codec for %c%c%c",
+                                      aux[-4], aux[-3], aux[-2]);
+                        goto err;
+                    }
+                } else {
+                    hts_log_error("Missing init_codec function for %c%c%c",
+                                  aux[-4], aux[-3], aux[-2]);
+                    goto err;
+                }
+            }
+
+            if (tm->codec->encode) {
+                r = tm->codec->encode(s, tm->codec, b, aux, err);
+                if (r < 0) {
+                    hts_log_error("Failed to encode aux tag %c%c%c",
+                                  aux[-4], aux[-3], aux[-2]);
+                    goto err;
+                }
+            } else {
+                hts_log_error("Missing encode function for %c%c%c",
+                              aux[-4], aux[-3], aux[-2]);
+                goto err;
+            }
+        }

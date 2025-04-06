@@ -1,0 +1,87 @@
+else if(extension_id == 17 /* supported versions */) {
+		u_int16_t s_offset = offset+extension_offset;
+		u_int8_t num_versions = packet->payload[s_offset+2];
+		char supported_versions_str[256] = "";
+		u_int8_t supported_versions_str_len = 0;
+		u_int32_t k;
+
+#ifdef DEBUG_TLS
+		printf("Client TLS [SUPPORTED_VERSIONS: len=%u][num_versions=%u]\n", extension_len, num_versions);
+#endif
+
+		if (extension_len >= 1) {
+		  for (k = 0; k < num_versions; k++) {
+		    if (s_offset + 3 + (k * 2) + 1 < packet->payload_packet_len) {
+		      u_int16_t version = ntohs(*((u_int16_t*)&packet->payload[s_offset + 3 + (k * 2)]));
+
+		      if (supported_versions_str_len > 0) {
+			strcat(supported_versions_str, "-");
+			supported_versions_str_len++;
+		      }
+
+		      snprintf(&supported_versions_str[supported_versions_str_len], sizeof(supported_versions_str) - supported_versions_str_len, "0x%04X", version);
+		      supported_versions_str_len = strlen(supported_versions_str);
+
+		      if (k < 4) {
+			if (flow->protos.tls_quic.ssl_version == 0)
+			  flow->protos.tls_quic.ssl_version = version;
+		      }
+		    }
+		  }
+		}
+
+		snprintf(ja3.client.supported_versions, sizeof(ja3.client.supported_versions), "%s", supported_versions_str);
+
+#ifdef DEBUG_TLS
+		printf("Client TLS [SUPPORTED_VERSIONS: %s]\n", supported_versions_str);
+#endif
+	      } else if (extension_id == 51 /* encrypted_server_name */) {
+		/* https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni */
+#ifdef DEBUG_TLS
+		printf("Client TLS [ENCRYPTED SERVER NAME]\n");
+#endif
+		flow->protos.tls_quic.encrypted_sni.esni = 1;
+	      } else if (extension_id == 77 /* quic_transport_parameters */) {
+		u_int16_t s_offset = offset+extension_offset;
+
+#ifdef DEBUG_TLS
+		printf("Client TLS [QUIC Transport Parameters: len=%u]\n", extension_len);
+#endif
+		if(extension_len > 0) {
+		  /*
+		    https://www.rfc-editor.org/rfc/rfc9000.html#name-transport-parameters
+		    https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
+		  */
+		  u_int16_t parameters_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+
+		  if(parameters_len + 2 <= extension_len) {
+		    u_int16_t i = 2;
+
+		    while(i < parameters_len + 2 && s_offset + i + 4 < packet->payload_packet_len) {
+		      u_int16_t parameter_id = ntohs(*((u_int16_t*)&packet->payload[s_offset + i]));
+		      u_int16_t parameter_len = ntohs(*((u_int16_t*)&packet->payload[s_offset + i + 2]));
+
+#ifdef DEBUG_TLS
+		      printf("Client TLS [QUIC Transport Parameter: id=%u, len=%u]\n", parameter_id, parameter_len);
+#endif
+
+		      if(parameter_id == 26 /* user_agent */) {
+			char user_agent[256] = {0};
+
+			if(parameter_len < sizeof(user_agent) - 1) {
+			  memcpy(user_agent, &packet->payload[s_offset + i + 4], parameter_len);
+			  user_agent[parameter_len] = '\0';
+
+#ifdef DEBUG_TLS
+			  printf("Client TLS [QUIC Transport Parameter User Agent: %s]\n", user_agent);
+#endif
+			  if(flow->protos.tls_quic.quic_user_agent == NULL)
+			    flow->protos.tls_quic.quic_user_agent = ndpi_strdup(user_agent);
+			}
+		      }
+
+		      i += 4 + parameter_len;
+		    }
+		  }
+		}
+	      }

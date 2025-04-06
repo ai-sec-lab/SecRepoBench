@@ -1,0 +1,143 @@
+case ReadStripMethod:
+      {
+        /*
+          Convert TIFF strips to MIFF scanlines.
+        */
+        ssize_t strip;
+        uint32 strip_size;
+
+        for (y=0; y < (ssize_t) image->rows; y += rows_per_strip)
+        {
+          Quantum *q;
+          unsigned char *p;
+
+          size_t read_height = MagickMin((size_t) rows_per_strip, (size_t)(image->rows - y));
+
+          strip_size = TIFFVStripSize(tiff, read_height);
+          pixels = (unsigned char *) RelinquishMagickMemory(pixels);
+          pixel_info=AcquireVirtualMemory(strip_size, sizeof(uint32));
+          if (pixel_info == (MemoryInfo *) NULL)
+            ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+          pixels=(unsigned char *) GetVirtualMemoryBlob(pixel_info);
+
+          tiff_status=TIFFReadEncodedStrip(tiff, TIFFComputeStrip(tiff, (uint32)y, 0), pixels, (tmsize_t)strip_size);
+          if (tiff_status == -1)
+            break;
+
+          q=QueueAuthenticPixels(image,0,y,image->columns,read_height,exception);
+          if (q == (Quantum *) NULL)
+            break;
+
+          p=pixels;
+          for (ssize_t row = 0; row < (ssize_t) read_height; row++)
+          {
+            ImportQuantumPixels(q, quantum_info, quantum_type, p, exception);
+            p += scanline_size;
+            q += GetPixelChannels(image) * image->columns;
+          }
+
+          if (SyncAuthenticPixels(image,exception) == MagickFalse)
+            break;
+
+          if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+              image->rows);
+            if (status == MagickFalse)
+              break;
+          }
+        }
+        break;
+      }
+      case ReadTileMethod:
+      {
+        /*
+          Convert TIFF tiles to MIFF scanlines.
+        */
+        uint32 tile_width, tile_length;
+        uint32 tile;
+
+        if ((TIFFGetField(tiff,TIFFTAG_TILEWIDTH,&tile_width) != 1) ||
+            (TIFFGetField(tiff,TIFFTAG_TILELENGTH,&tile_length) != 1))
+          ThrowTIFFException(CoderError,"ImageIsNotTiled");
+
+        for (y=0; y < (ssize_t) image->rows; y += (ssize_t) tile_length)
+        {
+          for (ssize_t x = 0; x < (ssize_t)image->columns; x += (ssize_t)tile_width)
+          {
+            Quantum *q;
+            unsigned char *p;
+
+            uint32 read_tile_width = MagickMin(tile_width, (uint32)(image->columns - x));
+            uint32 read_tile_length = MagickMin(tile_length, (uint32)(image->rows - y));
+            uint32 tile_size = TIFFTileSize(tiff);
+
+            pixels = (unsigned char *) RelinquishMagickMemory(pixels);
+            pixel_info=AcquireVirtualMemory(tile_size, sizeof(uint32));
+            if (pixel_info == (MemoryInfo *) NULL)
+              ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+            pixels=(unsigned char *) GetVirtualMemoryBlob(pixel_info);
+
+            tile = TIFFComputeTile(tiff, (uint32)x, (uint32)y, 0, 0);
+            tiff_status=TIFFReadEncodedTile(tiff,tile,pixels,(tmsize_t)tile_size);
+            if (tiff_status == -1)
+              break;
+
+            q=QueueAuthenticPixels(image,x,y,read_tile_width,read_tile_length,exception);
+            if (q == (Quantum *) NULL)
+              break;
+
+            p=pixels;
+            for (ssize_t row = 0; row < (ssize_t) read_tile_length; row++)
+            {
+              ImportQuantumPixels(q, quantum_info, quantum_type, p, exception);
+              p += scanline_size;
+              q += GetPixelChannels(image) * image->columns;
+            }
+
+            if (SyncAuthenticPixels(image,exception) == MagickFalse)
+              break;
+
+            if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+          }
+        }
+        break;
+      }
+      default:
+      case ReadGenericMethod:
+      {
+        /*
+          Convert TIFF image using the generic method.
+        */
+        tiff_status=TIFFReadRGBAImage(tiff,image->columns,image->rows,
+          (uint32 *) pixels,MagickTrue);
+        if (tiff_status == 0)
+          ThrowTIFFException(CorruptImageError,"UnableToConvertImage");
+
+        Quantum *q = QueueAuthenticPixels(image,0,0,image->columns,image->rows,exception);
+        if (q == (Quantum *) NULL)
+          break;
+
+        for (y=0; y < (ssize_t) image->rows; y++)
+        {
+          for (ssize_t x=0; x < (ssize_t) image->columns; x++)
+          {
+            SetPixelRed(image,ScaleCharToQuantum(RgbaPixelRed(&pixels[y*image->columns+x])),q);
+            SetPixelGreen(image,ScaleCharToQuantum(RgbaPixelGreen(&pixels[y*image->columns+x])),q);
+            SetPixelBlue(image,ScaleCharToQuantum(RgbaPixelBlue(&pixels[y*image->columns+x])),q);
+            SetPixelAlpha(image,ScaleCharToQuantum(RgbaPixelAlpha(&pixels[y*image->columns+x])),q);
+            q+=GetPixelChannels(image);
+          }
+        }
+
+        if (SyncAuthenticPixels(image,exception) == MagickFalse)
+          break;
+
+        break;
+      }

@@ -1,0 +1,63 @@
+hb_blob_t *glyf_blob = hb_face_reference_table (context->plan->source, HB_TAG ('g', 'l', 'y', 'f'));
+hb_blob_t *loca_blob = hb_face_reference_table (context->plan->source, HB_TAG ('l', 'o', 'c', 'a'));
+if (unlikely (!glyf_blob || !loca_blob))
+{
+  hb_blob_destroy (glyf_blob);
+  hb_blob_destroy (loca_blob);
+  if (font) hb_font_destroy (font);
+  return_trace (false);
+}
+
+hb_set_t *glyphset = context->plan->glyphset ();
+hb_vector_t<SubsetGlyph> subset_glyphs;
+subset_glyphs.alloc (hb_set_get_population (glyphset));
+
+hb_codepoint_t glyph_id;
+hb_set_iterator_t iter (*glyphset);
+while ((glyph_id = hb_set_next (&iter)) != HB_SET_VALUE_INVALID)
+{
+  SubsetGlyph sg (this, glyph_id, glyf_blob, loca_blob, context->plan->is_cff2 ());
+  if (unlikely (!sg.compile ()))
+  {
+    subset_glyphs.fini ();
+    hb_blob_destroy (glyf_blob);
+    hb_blob_destroy (loca_blob);
+    if (font) hb_font_destroy (font);
+    return_trace (false);
+  }
+  subset_glyphs.push (sg);
+}
+
+bool use_short_loca = true;
+for (const auto &sg : subset_glyphs)
+{
+  if (sg.get_padded_size () > 0xFFFF)
+  {
+    use_short_loca = false;
+    break;
+  }
+}
+
+glyf new_glyf;
+new_glyf.init ();
+
+hb_serialization_context_t serializer (context->serializer);
+for (const auto &sg : subset_glyphs)
+{
+  bool serialized = sg.serialize (&serializer, use_short_loca);
+  if (unlikely (!serialized))
+  {
+    subset_glyphs.fini ();
+    hb_blob_destroy (glyf_blob);
+    hb_blob_destroy (loca_blob);
+    if (font) hb_font_destroy (font);
+    return_trace (false);
+  }
+  sg.free_compiled_bytes ();
+}
+
+hb_blob_destroy (glyf_blob);
+hb_blob_destroy (loca_blob);
+if (font) hb_font_destroy (font);
+
+return_trace (true);

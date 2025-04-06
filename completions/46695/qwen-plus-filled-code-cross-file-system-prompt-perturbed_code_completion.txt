@@ -1,0 +1,129 @@
+if (encoding != NULL)
+{
+  if (LocaleCompare(encoding, "UTF-8") == 0 || LocaleCompare(encoding, "utf8") == 0)
+    encoding_type = FT_ENCODING_UNICODE;
+  else if (LocaleCompare(encoding, "ISO-8859-1") == 0)
+    encoding_type = FT_ENCODING_LATIN_1;
+  else if (LocaleCompare(encoding, "AdobeStandardEncoding") == 0)
+    encoding_type = FT_ENCODING_ADOBE_STANDARD;
+  else if (LocaleCompare(encoding, "AdobeExpertEncoding") == 0)
+    encoding_type = FT_ENCODING_ADOBE_EXPERT;
+  else if (LocaleCompare(encoding, "AdobeCustomEncoding") == 0)
+    encoding_type = FT_ENCODING_ADOBE_CUSTOM;
+  else if (LocaleCompare(encoding, "Big5") == 0)
+    encoding_type = FT_ENCODING_BIG5;
+  else if (LocaleCompare(encoding, "GB2312") == 0)
+    encoding_type = FT_ENCODING_GB2312;
+  else
+  {
+    (void) FT_Done_Face(face);
+    (void) FT_Done_FreeType(library);
+    ThrowFreetypeErrorException("UnsupportedEncoding", ft_status, encoding);
+    return MagickFalse;
+  }
+
+  ft_status = FT_Set_Charmap(face, FT_Get_Charmap_Index(face, encoding_type));
+  if (ft_status != 0)
+  {
+    (void) FT_Done_Face(face);
+    (void) FT_Done_FreeType(library);
+    ThrowFreetypeErrorException("UnableToSetCharmap", ft_status, encoding);
+    return MagickFalse;
+  }
+}
+
+resolution.x = draw_info->pointsize;
+resolution.y = draw_info->pointsize;
+
+if (draw_info->density != (char *) NULL)
+{
+  char *density_x = draw_info->density;
+  char *density_y = strchr(draw_info->density, 'x');
+  if (density_y != NULL)
+  {
+    *density_y = '\0';
+    density_y++;
+    resolution.x = atof(density_x);
+    resolution.y = atof(density_y);
+  }
+}
+
+ft_status = FT_Set_Char_Size(face, 0, (FT_F26Dot6)(resolution.x * 64), (FT_UInt)resolution.x, (FT_UInt)resolution.y);
+if (ft_status != 0)
+{
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+  ThrowFreetypeErrorException("UnableToSetCharacterSize", ft_status, draw_info->font);
+  return MagickFalse;
+}
+
+metrics->ascent = face->size->metrics.ascender >> 6;
+metrics->descent = -face->size->metrics.descender >> 6;
+metrics->width = metrics->height = 0;
+metrics->max_advance = face->size->metrics.max_advance >> 6;
+
+value = GetFontProperty(face, "underline_position");
+if (value != NULL && strlen(value) > 0)
+  metrics->underline_position = atoi(value);
+else
+  metrics->underline_position = -face->size->metrics.descender >> 6;
+
+value = GetFontProperty(face, "underline_thickness");
+if (value != NULL && strlen(value) > 0)
+  metrics->underline_thickness = atoi(value);
+else
+  metrics->underline_thickness = 1;
+
+if (draw_info->text == NULL || strlen(draw_info->text) == 0)
+{
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+  return MagickTrue;
+}
+
+flags = FT_LOAD_DEFAULT;
+if ((draw_info->render == MagickFalse) || (image->alpha_trait == UndefinedPixelTrait))
+  flags |= FT_LOAD_NO_BITMAP;
+
+grapheme = NULL;
+length = ComplexTextLayout(image, draw_info, draw_info->text, strlen(draw_info->text), face, flags, &grapheme, exception);
+
+if (length == 0 || grapheme == NULL)
+{
+  grapheme = DestroyGraphemeInfo(grapheme, length);
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+  return MagickTrue;
+}
+
+status = MagickTrue;
+
+for (i = 0; i < (ssize_t)length; i++)
+{
+  ft_status = FT_Load_Glyph(face, grapheme[i].index, flags);
+  if (ft_status != 0)
+    continue;
+
+  ft_status = FT_Get_Glyph(face->glyph, &glyph.image);
+  if (ft_status != 0)
+    continue;
+
+  if (face->glyph->format == FT_GLYPH_FORMAT_OUTLINE)
+  {
+    outline_methods.flags = FT_CURVE_TAG_CUBIC;
+    FT_Outline_Decompose(&face->glyph->outline, &outline_methods, NULL);
+  }
+
+  if (FT_Glyph_To_Bitmap(&glyph.image, FT_RENDER_MODE_MONO, &origin, MagickTrue) == 0)
+  {
+    bitmap = (FT_BitmapGlyph) glyph.image;
+    RenderBitmap(img, bitmap, offset, metrics, exception);
+  }
+
+  FT_Done_Glyph(glyph.image);
+}
+
+grapheme = DestroyGraphemeInfo(grapheme, length);
+(void) FT_Done_Face(face);
+(void) FT_Done_FreeType(library);
+return status;

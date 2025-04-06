@@ -1,0 +1,63 @@
+// Extract tag key and type
+key = aux;
+if (aux_end - aux < 3)
+    goto err;
+memcpy(tag_data, aux, 3);
+id = (tag_data[0]<<16) | (tag_data[1]<<8) | tag_data[2];
+aux += 3;
+
+// RG:Z handling
+if (tag_data[0] == 'R' && tag_data[1] == 'G' && tag_data[2] == 'Z') {
+    const char *rg = string_ndup(aux, strcspn(aux, "\0"));
+    if (!rg)
+        goto err;
+
+    // Locate or create the RG entry in the header
+    brg = sam_hrec_find_or_create(j->h->hrecs, "RG", rg);
+    if (!brg) {
+        hts_log_warning("Cannot find/create RG for %s", rg);
+        free(rg);
+        goto err;
+    }
+    cr->rg = brg->id + 1; // CRAM is 1-based
+    free(rg);
+
+    // Skip to the next tag
+    aux += strlen(aux) + 1;
+    continue;
+}
+
+// MD and NM handling
+if ((tag_data[0] == 'M' && tag_data[1] == 'D' && !verbatim_MD) ||
+    (tag_data[0] == 'N' && tag_data[1] == 'M' && !verbatim_NM)) {
+    // Skip auto-decoding of MD/NM if requested
+    aux += strcspn(aux, "\0") + 1;
+    continue;
+}
+
+// Lookup tag codec
+m = map_find(c->comp_hdr->tag_encoding_map, tag_data, id);
+if (!m) {
+    hts_log_warning("Unknown tag %c%c%c", tag_data[0], tag_data[1], tag_data[2]);
+    aux += strcspn(aux, "\0") + 1;
+    continue;
+}
+
+// Initialize and configure codec
+if (!m->codec) {
+    hts_log_error("No codec available for tag %c%c%c",
+                  tag_data[0], tag_data[1], tag_data[2]);
+    goto err;
+}
+
+// Append tag value to slice aux block
+r |= m->codec->encode(s, m->codec, aux, BLOCK_DATA(s->aux_blk),
+                      &out_sz);
+if (r)
+    goto err;
+
+BLOCK_APPEND(s->aux_blk, BLOCK_DATA(s->aux_blk), out_sz);
+cr->aux_size += out_sz;
+
+// Move to next tag
+aux += strcspn(aux, "\0") + 1;

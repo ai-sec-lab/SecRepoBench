@@ -1,0 +1,253 @@
+switch (tag)
+		{
+			case ID_SCE:	// mono channel
+			{
+				RequireAction ((channelIndex < numChannels), status = kALAC_ParamError ; goto NoMoreChannels ;) ;
+
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				p->mActiveElements |= (1 << channelIndex) ;
+
+				// read header
+				headerByte = BitBufferReadSmall (bits, 8) ;
+				partialFrame = (headerByte >> 3) & 0x01 ;
+				bytesShifted = (headerByte >> 1) & 0x03 ;
+				escapeFlag = headerByte & 0x01 ;
+
+				chanBits = p->mConfig.bitDepth - (bytesShifted * 8) + 1 ;
+
+				if (partialFrame)
+				{
+					numSamples = BitBufferRead (bits, 32) ;
+					RequireAction ((numSamples <= p->mConfig.frameLength), status = kALAC_ParamError ; goto Exit ;) ;
+					*outNumSamples = numSamples ;
+				}
+				else
+					numSamples = p->mConfig.frameLength ;
+
+				if (escapeFlag == 0)
+				{
+					// compressed frame
+
+					mixBits = BitBufferReadSmall (bits, 8) ;
+					mixResiduals = BitBufferReadSmall (bits, 8) ;
+
+					headerByte = BitBufferReadSmall (bits, 8) ;
+					modeU = headerByte >> 4 ;
+					denShiftU = headerByte & 0x0f ;
+
+					headerByte = BitBufferReadSmall (bits, 8) ;
+					pbFactorU = headerByte >> 5 ;
+					numU = headerByte & 0x1f ;
+
+					RequireAction ((numU <= 32), status = kALAC_ParamError ; goto Exit ;) ;
+
+					for (i = 0 ; i < numU ; i++)
+						coefsU [i] = BitBufferRead (bits, 16) ;
+
+					// de-interleave the shift buffer
+					if (bytesShifted != 0)
+					{
+						uint32_t		bitShift = bytesShifted * 8 ;
+
+						RequireAction ((bitShift <= 16), status = kALAC_ParamError ; goto Exit ;) ;
+
+						for (i = 0 ; i < numSamples ; i++)
+						{
+							uint32_t			shiftedVal ;
+
+							shiftedVal = BitBufferRead (bits, bitShift * 2) ;
+							p->mShiftBuffer [i] = shiftedVal & ((1ul << bitShift) - 1) ;
+						}
+					}
+
+					// run the dynamic predictor and lossless decompression
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorU * p->mConfig.pb) / 4, p->mConfig.kb, numSamples, numSamples, p->mConfig.maxRun) ;
+					pc_block_復号化 (sampleBuffer + channelIndex, p->mPredictor, numSamples, coefsU, numU, chanBits, denShiftU) ;
+					status = dyn_decomp (&agParams, bits, p->mPredictor, numSamples, chanBits, &chanBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// add back the prediction
+					for (i = 0 ; i < numSamples ; i++)
+						sampleBuffer [channelIndex + (i * numChannels)] = p->mPredictor [i] ;
+
+					// de-interleave the shift buffer
+					if (bytesShifted != 0)
+					{
+						uint32_t		bitShift = bytesShifted * 8 ;
+
+						for (i = 0 ; i < numSamples ; i++)
+						{
+							val = sampleBuffer [channelIndex + (i * numChannels)] ;
+							val <<= bitShift ;
+							val |= p->mShiftBuffer [i] ;
+							sampleBuffer [channelIndex + (i * numChannels)] = val ;
+						}
+					}
+				}
+				else
+				{
+					// uncompressed frame
+
+					// just copy the input data to the output buffer
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						extraBits = BitBufferRead (bits, p->mConfig.bitDepth) ;
+						sampleBuffer [channelIndex + (i * numChannels)] = extraBits ;
+					}
+				}
+
+				channelIndex++ ;
+				break ;
+			}
+
+			case ID_CPE:	// channel pair element
+			{
+				RequireAction (((channelIndex + 1) < numChannels), status = kALAC_ParamError ; goto NoMoreChannels ;) ;
+
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				p->mActiveElements |= (1 << channelIndex) | (1 << (channelIndex + 1)) ;
+
+				// read header
+				headerByte = BitBufferReadSmall (bits, 8) ;
+				partialFrame = (headerByte >> 3) & 0x01 ;
+				bytesShifted = (headerByte >> 1) & 0x03 ;
+				escapeFlag = headerByte & 0x01 ;
+
+				chanBits = p->mConfig.bitDepth - (bytesShifted * 8) + 1 ;
+
+				if (partialFrame)
+				{
+					numSamples = BitBufferRead (bits, 32) ;
+					RequireAction ((numSamples <= p->mConfig.frameLength), status = kALAC_ParamError ; goto Exit ;) ;
+					*outNumSamples = numSamples ;
+				}
+				else
+					numSamples = p->mConfig.frameLength ;
+
+				if (escapeFlag == 0)
+				{
+					// compressed frame
+
+					mixBits = BitBufferReadSmall (bits, 8) ;
+					mixResiduals = BitBufferReadSmall (bits, 8) ;
+
+					headerByte = BitBufferReadSmall (bits, 8) ;
+					modeU = headerByte >> 4 ;
+					denShiftU = headerByte & 0x0f ;
+
+					headerByte = BitBufferReadSmall (bits, 8) ;
+					pbFactorU = headerByte >> 5 ;
+					numU = headerByte & 0x1f ;
+
+					RequireAction ((numU <= 32), status = kALAC_ParamError ; goto Exit ;) ;
+
+					for (i = 0 ; i < numU ; i++)
+						coefsU [i] = BitBufferRead (bits, 16) ;
+
+					headerByte = BitBufferReadSmall (bits, 8) ;
+					modeV = headerByte >> 4 ;
+					denShiftV = headerByte & 0x0f ;
+
+					headerByte = BitBufferReadSmall (bits, 8) ;
+					pbFactorV = headerByte >> 5 ;
+					numV = headerByte & 0x1f ;
+
+					RequireAction ((numV <= 32), status = kALAC_ParamError ; goto Exit ;) ;
+
+					for (i = 0 ; i < numV ; i++)
+						coefsV [i] = BitBufferRead (bits, 16) ;
+
+					// de-interleave the shift buffer
+					if (bytesShifted != 0)
+					{
+						uint32_t		bitShift = bytesShifted * 8 ;
+
+						RequireAction ((bitShift <= 16), status = kALAC_ParamError ; goto Exit ;) ;
+
+						for (i = 0 ; i < numSamples ; i++)
+						{
+							uint32_t			shiftedVal ;
+
+							shiftedVal = BitBufferRead (bits, bitShift * 2) ;
+							p->mShiftBufferUV [i * 2 + 0] = (shiftedVal >> bitShift) & ((1ul << bitShift) - 1) ;
+							p->mShiftBufferUV [i * 2 + 1] = shiftedVal & ((1ul << bitShift) - 1) ;
+						}
+					}
+
+					// run the dynamic predictor and lossless decompression for the "left" channel
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorU * p->mConfig.pb) / 4, p->mConfig.kb, numSamples, numSamples, p->mConfig.maxRun) ;
+					pc_block_復号化 (sampleBuffer + channelIndex + 0, p->mPredictorU, numSamples, coefsU, numU, chanBits, denShiftU) ;
+					status = dyn_decomp (&agParams, bits, p->mPredictorU, numSamples, chanBits, &chanBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// run the dynamic predictor and lossless decompression for the "right" channel
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorV * p->mConfig.pb) / 4, p->mConfig.kb, numSamples, numSamples, p->mConfig.maxRun) ;
+					pc_block_復号化 (sampleBuffer + channelIndex + 1, p->mPredictorV, numSamples, coefsV, numV, chanBits, denShiftV) ;
+					status = dyn_decomp (&agParams, bits, p->mPredictorV, numSamples, chanBits, &chanBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// add back the prediction
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						sampleBuffer [(channelIndex + 0) + (i * numChannels)] = p->mPredictorU [i] ;
+						sampleBuffer [(channelIndex + 1) + (i * numChannels)] = p->mPredictorV [i] ;
+					}
+
+					// de-interleave the shift buffer
+					if (bytesShifted != 0)
+					{
+						uint32_t		bitShift = bytesShifted * 8 ;
+
+						for (i = 0 ; i < numSamples ; i++)
+						{
+							val = sampleBuffer [(channelIndex + 0) + (i * numChannels)] ;
+							val <<= bitShift ;
+							val |= p->mShiftBufferUV [i * 2 + 0] ;
+							sampleBuffer [(channelIndex + 0) + (i * numChannels)] = val ;
+
+							val = sampleBuffer [(channelIndex + 1) + (i * numChannels)] ;
+							val <<= bitShift ;
+							val |= p->mShiftBufferUV [i * 2 + 1] ;
+							sampleBuffer [(channelIndex + 1) + (i * numChannels)] = val ;
+						}
+					}
+				}
+				else
+				{
+					// uncompressed frame
+
+					// just copy the input data to the output buffer
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						extraBits = BitBufferRead (bits, p->mConfig.bitDepth) ;
+						sampleBuffer [(channelIndex + 0) + (i * numChannels)] = BitBufferRead (bits, p->mConfig.bitDepth) ;
+						sampleBuffer [(channelIndex + 1) + (i * numChannels)] = BitBufferRead (bits, p->mConfig.bitDepth) ;
+					}
+				}
+
+				channelIndex += 2 ;
+				break ;
+			}
+
+			case ID_END:	// end of frame
+			{
+				goto NoMoreChannels ;
+			}
+
+			case ID_FILL:	// fill element
+			{
+				// just skip it
+				break ;
+			}
+
+			case ID_LFE:	// LFE channel
+			default:
+			{
+				// not supported
+				status = kALAC_UnimplementedError ;
+				goto Exit ;
+			}
+		}
+
+		// byte align between elements
+		BitBufferByteAlign (bits, false) ;

@@ -1,0 +1,69 @@
+if (s->num_primitive_matrices > max_primitive_matrices) {
+        av_log(m->avctx, AV_LOG_ERROR,
+               "Number of primitive matrices %u exceeds maximum %d.\n",
+               s->num_primitive_matrices, max_primitive_matrices);
+        s->num_primitive_matrices = 0;
+        return AVERROR_INVALIDDATA;
+    }
+
+    /*
+     * If the noise type is not set, adjust the max channel to account
+     * for additional noise channels as per spec comment.
+     */
+    if (!m->noise_type) {
+        if (s->max_matrix_channel + 2 > MAX_CHANNELS) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Adjusting for noise channels exceeds available channels.\n");
+            s->num_primitive_matrices = 0;
+            return AVERROR_INVALIDDATA;
+        }
+        s->max_matrix_channel += 2;
+    }
+
+    for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+        unsigned int out_ch      = get_bits(gbp, 5);
+        unsigned int frac_bits   = get_bits(gbp, 4);
+        unsigned int bypass_lsbs = get_bits1(gbp);
+        unsigned int ch;
+
+        if (out_ch > s->max_matrix_channel) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Output channel %u exceeds max matrix channel %u.\n",
+                   out_ch, s->max_matrix_channel);
+            s->num_primitive_matrices = 0;
+            return AVERROR_INVALIDDATA;
+        }
+
+        if (frac_bits > 14) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Fractional bits %u exceed maximum allowed value of 14.\n",
+                   frac_bits);
+            s->num_primitive_matrices = 0;
+            return AVERROR_INVALIDDATA;
+        }
+
+        s->matrix_out_ch[mat]      = out_ch;
+        s->matrix_fractional_bits[mat] = frac_bits;
+        s->matrix_outch_lsbs[mat]  = bypass_lsbs;
+
+        for (ch = 0; ch <= s->max_matrix_channel; ch++) {
+            int32_t coeff = get_sbits(gbp, 10);
+            coeff <<= frac_bits;
+            s->matrix_coeff[mat][ch] = coeff;
+        }
+
+        if (m->noise_type) {
+            unsigned int shift_val = get_bits(gbp, 4);
+            if (shift_val > 14) {
+                av_log(m->avctx, AV_LOG_ERROR,
+                       "Noise shift %u out of range.\n", shift_val);
+                s->num_primitive_matrices = 0;
+                return AVERROR_INVALIDDATA;
+            }
+            s->matrix_noise_shift[mat] = shift_val;
+        } else {
+            s->matrix_noise_shift[mat] = 0;
+        }
+    }
+
+    return 0;

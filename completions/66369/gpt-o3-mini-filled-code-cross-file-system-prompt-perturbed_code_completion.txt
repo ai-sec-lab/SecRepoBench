@@ -1,0 +1,106 @@
+{
+    uint8_t tag1 = aux[0], tag2 = aux[1], tag_type = aux[2];
+    aux += 3;
+    /* Append the 3‐char tag key to the TD (tag dictionary) block */
+    BLOCK_APPEND(td_b, (char[]){tag1, tag2, tag_type}, 3);
+
+    if (tag1 == 'R' && tag2 == 'G' && tag_type == 'Z') {
+        /* For an RG tag, look up the corresponding read group string in the header */
+        const char *rg_str = sam_hdr_line_name(filedescriptor->header, "RG", cr->rg);
+        if (!rg_str) {
+            hts_log_error("RG tag found but no matching header record");
+            goto err;
+        }
+        size_t rg_len = strlen(rg_str);
+        BLOCK_APPEND(s->aux_blk, (char[]){'R','G','Z'}, 3);
+        BLOCK_APPEND(s->aux_blk, rg_str, rg_len);
+        BLOCK_APPEND_CHAR(s->aux_blk, '\0');
+        cr->aux_size += 3 + rg_len + 1;
+    } else if (tag1 == 'M' && tag2 == 'D' && tag_type == 'Z') {
+        if (!verbatim_MD) {
+            /* Instead of the original MD value, use the provided MD string */
+            size_t md_len = MD->l;
+            BLOCK_APPEND(s->aux_blk, (char[]){'M','D','Z'}, 3);
+            BLOCK_APPEND(s->aux_blk, MD->s, md_len);
+            BLOCK_APPEND_CHAR(s->aux_blk, '\0');
+            cr->aux_size += 3 + md_len + 1;
+            /* Skip over the original, now discarded, MD string */
+            while (aux < aux_end && *aux)
+                aux++;
+            aux++; // skip the null terminator
+        } else {
+            /* Copy the original MD tag and its value verbatim */
+            const char *p = aux;
+            while (p < aux_end && *p)
+                p++;
+            size_t len = p - aux;
+            BLOCK_APPEND(s->aux_blk, (char[]){'M','D','Z'}, 3);
+            BLOCK_APPEND(s->aux_blk, aux, len);
+            BLOCK_APPEND_CHAR(s->aux_blk, '\0');
+            cr->aux_size += 3 + len + 1;
+            aux = p + 1;
+        }
+    } else if (tag1 == 'N' && tag2 == 'M') {
+        if (!verbatim_NM) {
+            /* Instead of the stored NM value, use the provided NM value */
+            int32_t nm_val = NM;
+            BLOCK_APPEND(s->aux_blk, (char[]){'N','M','i'}, 3);
+            BLOCK_APPEND(s->aux_blk, (char *)&nm_val, 4);
+            cr->aux_size += 3 + 4;
+            /* Skip over the original 4-byte NM value */
+            aux += 4;
+        } else {
+            /* Copy the original NM tag verbatim (assuming a 4-byte value) */
+            BLOCK_APPEND(s->aux_blk, (char[]){tag1, tag2, tag_type}, 3);
+            BLOCK_APPEND(s->aux_blk, aux, 4);
+            cr->aux_size += 3 + 4;
+            aux += 4;
+        }
+    } else {
+        /* Generic processing for other auxiliary tags */
+        BLOCK_APPEND(s->aux_blk, (char[]){tag1, tag2, tag_type}, 3);
+        switch (tag_type) {
+            case 'A': /* Single character */
+                BLOCK_APPEND_CHAR(s->aux_blk, *aux);
+                cr->aux_size += 3 + 1;
+                aux += 1;
+                break;
+            case 'c':
+            case 'C': /* 1-byte integer */
+                BLOCK_APPEND(s->aux_blk, aux, 1);
+                cr->aux_size += 3 + 1;
+                aux += 1;
+                break;
+            case 's':
+            case 'S': /* 2-byte integer */
+                BLOCK_APPEND(s->aux_blk, aux, 2);
+                cr->aux_size += 3 + 2;
+                aux += 2;
+                break;
+            case 'i':
+            case 'I':
+            case 'f': /* 4-byte integer/float */
+                BLOCK_APPEND(s->aux_blk, aux, 4);
+                cr->aux_size += 3 + 4;
+                aux += 4;
+                break;
+            case 'Z':
+            case 'H': {
+                /* Null-terminated string */
+                const char *p = aux;
+                while (p < aux_end && *p)
+                    p++;
+                size_t str_len = p - aux;
+                BLOCK_APPEND(s->aux_blk, aux, str_len);
+                BLOCK_APPEND_CHAR(s->aux_blk, '\0');
+                cr->aux_size += 3 + str_len + 1;
+                aux = p + 1;
+                break;
+            }
+            default:
+                hts_log_error("Unknown auxiliary tag type: %c", tag_type);
+                goto err;
+        }
+    }
+}
+tm->blk->m = tm->m;

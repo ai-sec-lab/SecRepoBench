@@ -1,0 +1,92 @@
+{
+    /* Read the 3-byte tag identifier */
+    uint32_t tag_id = ((uint8_t)aux[0] << 16) | ((uint8_t)aux[1] << 8) | (uint8_t)aux[2];
+    char tag_type = aux[2];
+
+    /* Append the tag identifier to the TD block */
+    BLOCK_APPEND(td_b, aux, 3);
+    cr->aux_size += 3;
+    /* Save pointer to the start of this tag header for later lookup */
+    unsigned char *tag_hdr = (unsigned char *)aux;
+    aux += 3;
+
+    int data_len = 0;
+    /* Determine the length of this tag's value based on its type */
+    switch (tag_type) {
+        case 'A':
+        case 'c':
+        case 'C':
+            data_len = 1;
+            break;
+        case 's':
+        case 'S':
+            data_len = 2;
+            break;
+        case 'i':
+        case 'I':
+        case 'f':
+            data_len = 4;
+            break;
+        case 'd':
+            data_len = 8;
+            break;
+        case 'Z':
+        case 'H': {
+            /* Find the terminating null; ensure we don't overflow */
+            char *strend = memchr(aux, '\0', aux_end - aux);
+            if (!strend)
+                goto err;
+            data_len = (int)(strend - aux) + 1;
+            break;
+        }
+        case 'B': {
+            /* Ensure there are at least 5 bytes for array header */
+            if (aux_end - aux < 5)
+                goto err;
+            uint8_t arr_elem = aux[0];
+            int32_t count;
+            memcpy(&count, aux + 1, 4);
+            if (count < 0)
+                goto err;
+            data_len = 1 + 4; /* one byte for element type and 4 for count */
+            switch (arr_elem) {
+                case 'c':
+                case 'C':
+                    data_len += count * 1;
+                    break;
+                case 's':
+                case 'S':
+                    data_len += count * 2;
+                    break;
+                case 'i':
+                case 'I':
+                case 'f':
+                    data_len += count * 4;
+                    break;
+                default:
+                    goto err;
+            }
+            break;
+        }
+        default:
+            goto err;
+    }
+    /* Check we have enough data left */
+    if (aux_end - aux < data_len)
+        goto err;
+
+    /* Append the tag's value to the slice aux block */
+    BLOCK_APPEND(s->aux_blk, aux, data_len);
+    cr->aux_size += data_len;
+
+    /* Look up the tag mapping in the compression header's tag_encoding_map */
+    cram_tag_map *tm = map_find(c->comp_hdr->tag_encoding_map, tag_hdr, tag_id);
+    if (!tm)
+        goto err;
+
+    /* Update the mapping in the codec block as required */
+    tm->blk->m = tm->m;
+
+    /* Advance aux pointer past the tag data */
+    aux += data_len;
+}

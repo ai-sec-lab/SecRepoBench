@@ -1,0 +1,79 @@
+{
+  const u_int8_t *ptr = packet->payload;
+  const u_int8_t *end = packet->payload + packet->payload_packet_len;
+  int header_count = 0;
+  int first_line_parsed = 0;
+
+  while((ptr < end) && (packet->parsed_lines < MAX_NDPILINES)) {
+    /* Look for "\r\n" sequence */
+    if(((end - ptr) > 1) && (ptr[0] == '\r') && (ptr[1] == '\n')) {
+      /* Calculate length of the current line */
+      packet->line[packet->parsed_lines].len =
+        (u_int16_t)(ptr - packet->line[packet->parsed_lines].ptr);
+      packet->parsed_lines++;
+      ptr += 2; /* Skip the "\r\n" */
+
+      /* Check for "\r\n\r\n" indicating end of headers */
+      if(((end - ptr) > 1) && (ptr[0] == '\r') && (ptr[1] == '\n')) {
+        /* Store subsequent bytes into dataflow->initial_binary_bytes */
+        u_int32_t remaining = end - (ptr + 2);
+        if(remaining > 0) {
+          if(remaining > sizeof(dataflow->initial_binary_bytes))
+            remaining = sizeof(dataflow->initial_binary_bytes);
+          memcpy(dataflow->initial_binary_bytes, ptr + 2, remaining);
+          dataflow->initial_binary_len = remaining;
+        }
+        break;
+      }
+
+      /* Prepare for the next line if there's room */
+      if(packet->parsed_lines < MAX_NDPILINES) {
+        packet->line[packet->parsed_lines].ptr = ptr;
+        packet->line[packet->parsed_lines].len = 0;
+      } else {
+        break;
+      }
+
+    } else {
+      ptr++;
+    }
+  }
+
+  /* If we retrieved at least one line, analyze the first line for an HTTP response */
+  if(packet->parsed_lines > 0 && packet->line[0].len > 0) {
+    const char *first_line_start = (const char *)packet->line[0].ptr;
+    if(!strncasecmp(first_line_start, "HTTP/", 5)) {
+      /* Basic extraction of HTTP status code if present, e.g., "HTTP/1.1 200 OK" */
+      const char *code_ptr = strchr(first_line_start, ' ');
+      if(code_ptr && ((code_ptr - first_line_start) < packet->line[0].len)) {
+        int status_code = atoi(code_ptr + 1);
+        /* Additional status code handling logic can go here */
+        first_line_parsed = 1;
+      }
+    }
+  }
+
+  /* Scan parsed lines to identify and count specific headers */
+  for(int i = (first_line_parsed ? 1 : 0); i < packet->parsed_lines; i++) {
+    const char *line_ptr = (const char *)packet->line[i].ptr;
+    u_int16_t line_len = packet->line[i].len;
+
+    /* Mark empty lines if any */
+    if(line_len == 0) {
+      /* Found an empty line */
+      continue;
+    }
+
+    /* Identify known headers and count them (e.g., "Server:", "Host:", "Content-Type:") */
+    if((line_len > 7) && !strncasecmp(line_ptr, "Server:", 7)) {
+      header_count++;
+      /* Any additional server-header-related logic can go here */
+    } else if((line_len > 5) && !strncasecmp(line_ptr, "Host:", 5)) {
+      header_count++;
+      /* Additional host-header-related logic */
+    } else if((line_len > 13) && !strncasecmp(line_ptr, "Content-Type:", 13)) {
+      header_count++;
+      /* Additional content-type-header-related logic */
+    }
+  }
+}

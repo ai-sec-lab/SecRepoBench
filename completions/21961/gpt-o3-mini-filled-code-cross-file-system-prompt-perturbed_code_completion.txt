@@ -1,0 +1,78 @@
+case ReadStripMethod:
+case ReadTileMethod:
+{
+  if (method == ReadStripMethod)
+  {
+    /* Read image one strip at a time. */
+    for (row_index=0; row_index < (ssize_t) image->rows; )
+    {
+      const tsize_t scanline_size = TIFFScanlineSize(tiff);
+      const tsize_t strip_bytes = scanline_size * rows_per_strip;
+      tiff_status = TIFFReadEncodedStrip(tiff, row_index/rows_per_strip, pixels, strip_bytes);
+      if (tiff_status == -1)
+        break;
+      for (ssize_t r = 0; r < (ssize_t) rows_per_strip && (row_index + r) < (ssize_t) image->rows; r++)
+      {
+        Quantum *q = QueueAuthenticPixels(image, 0, row_index + r, image->columns, 1, exception);
+        if (q == (Quantum *) NULL)
+          break;
+        /* Import the scanline from the strip buffer.
+           Each scanline occupies 'scanline_size' bytes. */
+        (void) ImportQuantumPixels(image, NULL, quantum_info, quantum_type,
+          pixels + r * scanline_size, exception);
+        if (SyncAuthenticPixels(image, exception) == MagickFalse)
+          break;
+      }
+      row_index += rows_per_strip;
+      if (image->previous == (Image *) NULL)
+      {
+        status = SetImageProgress(image,LoadImageTag,(MagickOffsetType) row_index, image->rows);
+        if (status == MagickFalse)
+          break;
+      }
+    }
+  }
+  else /* method == ReadTileMethod */
+  {
+    uint32 tile_width, tile_length;
+    if ((TIFFGetField(tiff, TIFFTAG_TILEWIDTH, &tile_width) != 1) ||
+        (TIFFGetField(tiff, TIFFTAG_TILELENGTH, &tile_length) != 1))
+      break;
+    {
+      const tsize_t tile_size = TIFFTileSize(tiff);
+      unsigned char *tile_pixels = (unsigned char *) AcquireQuantumMemory(tile_size, sizeof(*tile_pixels));
+      if (tile_pixels == (unsigned char *) NULL)
+        ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+      for (uint32 y = 0; y < image->rows; y += tile_length)
+      {
+        for (uint32 x = 0; x < image->columns; x += tile_width)
+        {
+          if (TIFFReadTile(tiff, tile_pixels, x, y, 0, 0) < 0)
+            continue;
+          uint32 current_tile_width = (x + tile_width > image->columns) ? image->columns - x : tile_width;
+          uint32 current_tile_length = (y + tile_length > image->rows) ? image->rows - y : tile_length;
+          for (uint32 row = 0; row < current_tile_length; row++)
+          {
+            Quantum *q = QueueAuthenticPixels(image, x, y + row, current_tile_width, 1, exception);
+            if (q == (Quantum *) NULL)
+              break;
+            /* Calculate the offset into the tile buffer for the current row.
+               Assuming each pixel occupies ((bits_per_sample+7)>>3) bytes. */
+            size_t offset = row * current_tile_width * (((bits_per_sample+7) >> 3));
+            (void) ImportQuantumPixels(image, NULL, quantum_info, quantum_type, tile_pixels + offset, exception);
+            if (SyncAuthenticPixels(image, exception) == MagickFalse)
+              break;
+          }
+        }
+        if (image->previous == (Image *) NULL)
+        {
+          status = SetImageProgress(image,LoadImageTag,(MagickOffsetType) y, image->rows);
+          if (status == MagickFalse)
+            break;
+        }
+      }
+      tile_pixels = (unsigned char *) RelinquishMagickMemory(tile_pixels);
+    }
+  }
+  break;
+}

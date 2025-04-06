@@ -1,0 +1,58 @@
+// Parse the payload to extract the DNS name or IP address from the subjectAltName extension.
+u_int8_t j;
+for(j = 0; j < len && i + 2 + j < packet->payload_packet_len; j++) {
+  dNSName[j] = packet->payload[i + 2 + j];
+}
+dNSName[j] = '\0';
+
+// Convert the extracted address to a string format for IPv4 and IPv6.
+if (general_name_type == 0x87) { // ipAddress
+  if (ndpi_is_ipv4(dNSName)) {
+    ndpi_inet_ntop(AF_INET, dNSName, dNSName, sizeof(dNSName));
+  } else if (ndpi_is_ipv6(dNSName)) {
+    ndpi_inet_ntop(AF_INET6, dNSName, dNSName, sizeof(dNSName));
+  }
+}
+
+// Clean up the extracted DNS name and ensure it is printable.
+if (!ndpi_is_printable_string(dNSName, strlen(dNSName))) {
+  memset(dNSName, '\0', sizeof(dNSName));
+}
+
+// Check if the extracted DNS name matches the host server name.
+if (strcmp(dNSName, connection->host_server_name) == 0) {
+  matched_name = 1;
+}
+
+// If a match is found, set the matched_name flag and update the server names list in the flow structure.
+if (matched_name) {
+  if (connection->protos.tls_quic.server_names == NULL) {
+    // If the server names list is not initialized, create a new entry for the current DNS name.
+    connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+  } else {
+    // If the server names list already exists, append the current DNS name to it with a comma separator.
+    char *temp = ndpi_malloc(strlen(connection->protos.tls_quic.server_names) + strlen(dNSName) + 2);
+    if (temp != NULL) {
+      strcpy(temp, connection->protos.tls_quic.server_names);
+      strcat(temp, ",");
+      strcat(temp, dNSName);
+      ndpi_free(connection->protos.tls_quic.server_names);
+      connection->protos.tls_quic.server_names = temp;
+    }
+  }
+
+  // Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly.
+  u_int32_t val;
+  int rc = ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+                                   dNSName, strlen(dNSName), &val);
+
+  if (rc == 0) {
+    u_int16_t proto_id = (u_int16_t)val;
+    ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED };
+    connection->detected_protocol_stack[0] = proto_id;
+    connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+
+    connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+    ndpi_check_subprotocol_risk(ndpi_struct, connection, proto_id);
+  }
+}

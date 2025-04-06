@@ -1,0 +1,60 @@
+{
+	size_t reclen = (size_t)*b;
+	if (reclen == 0)
+		break;
+	if (reclen > step) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Invalid ISO9660 directory record length");
+		return (ARCHIVE_WARN);
+	}
+
+	/* Allocate and initialize a new file_info structure for this entry. */
+	struct file_info *child = (struct file_info *)calloc(1, sizeof(*child));
+	if (child == NULL) {
+		archive_set_error(&archivereader->archive, ENOMEM, "No memory");
+		return (ARCHIVE_FATAL);
+	}
+
+	/* Parse the directory record from the buffer.
+	 * Note: parse_dir_record is assumed to fill in the child structure from the raw record.
+	 * It should return 0 on success, non-zero on failure.
+	 */
+	if (parse_dir_record(child, b, reclen, parent) != 0) {
+		free(child);
+		b += reclen;
+		step -= reclen;
+		skip_size -= reclen;
+		continue;
+	}
+
+	/* Skip the special entries for "." and "..". */
+	if (child->name.s != NULL &&
+	    (strcmp(child->name.s, ".") == 0 || strcmp(child->name.s, "..") == 0)) {
+		free(child);
+		b += reclen;
+		step -= reclen;
+		skip_size -= reclen;
+		continue;
+	}
+
+	/* Handle multi-extent files: if the entry spans multiple extents,
+	 * link them together in a list for later processing.
+	 */
+	if (child->multi_extent) {
+		if (multi == NULL) {
+			multi = child;
+		} else {
+			struct file_info *p = multi;
+			while (p->next != NULL)
+				p = p->next;
+			p->next = child;
+		}
+	} else {
+		/* For a normal (single extent) entry, add it to the archive's file cache. */
+		cache_add_entry(iso9660, child);
+	}
+
+	b += reclen;
+	step -= reclen;
+	skip_size -= reclen;
+}

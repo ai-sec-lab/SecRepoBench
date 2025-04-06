@@ -1,0 +1,92 @@
+{
+    while (aux_end - aux >= 1 && aux[0] != 0) {
+        char t1 = aux[0];
+        char t2 = aux[1];
+        char type = aux[2];
+
+        // Ensure there's room for tag, type, and at least 1 byte of data
+        if (aux - orig >= aux_size - 3)
+            goto err;
+
+        // Skip non-verbatim MD and NM
+        if ((t1 == 'M' && t2 == 'D' && !verbatim_MD) ||
+            (t1 == 'N' && t2 == 'M' && !verbatim_NM)) {
+            // Advance 'aux' past this tag's data
+            aux = bam_aux_skip(aux);
+            continue;
+        }
+
+        // If RG:Z, record the read group if not already found
+        if (t1 == 'R' && t2 == 'G' && type == 'Z' && !brg) {
+            brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, aux + 3);
+            // Even if not found, we still store the tag in CRAM
+        }
+
+        // Append the three-byte tag (key + type) to TD block
+        BLOCK_APPEND(td_b, aux, 3);
+
+        // Move 'aux' forward and encode the corresponding data
+        switch (type) {
+        case 'A': case 'c': case 'C':
+            // 1-byte data
+            if (aux_end - aux < 4) goto err;
+            BLOCK_APPEND(s->aux_blk, aux + 3, 1);
+            aux += 4;
+            break;
+
+        case 's': case 'S':
+            // 2-byte data
+            if (aux_end - aux < 5) goto err;
+            BLOCK_APPEND(s->aux_blk, aux + 3, 2);
+            aux += 5;
+            break;
+
+        case 'i': case 'I': case 'f':
+            // 4-byte data
+            if (aux_end - aux < 7) goto err;
+            BLOCK_APPEND(s->aux_blk, aux + 3, 4);
+            aux += 7;
+            break;
+
+        case 'Z': case 'H': {
+            // NULL-terminated string
+            const char *z = aux + 3;
+            size_t len = strnlen(z, aux_end - (aux + 3)) + 1;
+            if (aux + 3 + len > aux_end) goto err;
+            BLOCK_APPEND(s->aux_blk, z, len);
+            aux += 3 + len;
+            break;
+        }
+
+        case 'B': {
+            // Array tag: [B,<subtype>,<nitems>,...]
+            // First 1 byte is subtype, next 4 are count
+            if (aux_end - aux < 8) goto err;
+            uint8_t subtype = *(uint8_t *)(aux + 3);
+            int32_t count = le_int4(aux + 4);
+            BLOCK_APPEND(s->aux_blk, aux + 3, 5);
+
+            size_t elsize;
+            switch (subtype) {
+            case 'c': case 'C': case 'A': elsize = 1; break;
+            case 's': case 'S': elsize = 2; break;
+            case 'i': case 'I': case 'f': elsize = 4; break;
+            default:
+                goto err;
+            }
+
+            if (aux_end - aux < 8 + (ptrdiff_t)(count * elsize)) goto err;
+            BLOCK_APPEND(s->aux_blk, aux + 8, count * elsize);
+            aux += 8 + count * elsize;
+            break;
+        }
+
+        default:
+            // Unknown tag type
+            goto err;
+        }
+    }
+
+    // Once all tags are processed, finalize tag map block usage
+    tm->blk->m = tm->m;
+}

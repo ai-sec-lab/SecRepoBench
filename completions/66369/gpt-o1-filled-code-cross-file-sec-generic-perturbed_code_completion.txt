@@ -1,0 +1,98 @@
+while (aux < aux_end && *aux) {
+        if (aux_end - aux < 3) {
+            // Not enough space for tag name + type
+            goto err;
+        }
+
+        // Extract tag name and type
+        char tag1 = aux[0];
+        char tag2 = aux[1];
+        char type = aux[2];
+        char tag[3];
+        tag[0] = tag1;
+        tag[1] = tag2;
+        tag[2] = type;
+
+        // Advance past tag name + type
+        aux += 3;
+
+        // Handle special tags: RG, NM, MD
+        if (tag1 == 'R' && tag2 == 'G' && (type == 'Z' || type == 'H')) {
+            // RG:Z (Read Group)
+            cr->rg = -1;
+            // Attempt to find or store RG in brg
+            if (!brg && filedescriptor->header->hrecs) {
+                // Try looking up the read group in the SAM header
+                brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, aux);
+                if (!brg) {
+                    // If missing in header, just carry on, but we could warn
+                    hts_log_warning("Read group '%s' not found in header", aux);
+                }
+            }
+        } else if (tag1 == 'N' && tag2 == 'M' && (type == 'i')) {
+            // NM:i (Edit distance)
+            if (!verbatim_NM) {
+                // Store or compute NM if not verbatim
+                NM = bam_aux2i((uint8_t *)(aux-3));
+            }
+        } else if (tag1 == 'M' && tag2 == 'D' && (type == 'Z' || type == 'H')) {
+            // MD:Z (Mismatch string)
+            if (!verbatim_MD) {
+                // Store or compute MD if not verbatim
+                kputs(aux, MD);
+            }
+        }
+
+        // Append tag triple to TD block (for CRAM tag dictionary)
+        BLOCK_APPEND(td_b, (char *)tag, 3);
+
+        // Now skip over the value itself for this tag
+        // (Length varies depending on 'type')
+        if (type == 'A' || type == 'c' || type == 'C') {
+            if (aux_end - aux < 1) goto err;
+            aux++;
+        } else if (type == 's' || type == 'S') {
+            if (aux_end - aux < 2) goto err;
+            aux += 2;
+        } else if (type == 'i' || type == 'I' || type == 'f') {
+            if (aux_end - aux < 4) goto err;
+            aux += 4;
+        } else if (type == 'Z' || type == 'H') {
+            // Z/H strings end with '\0'
+            while (aux < aux_end && *aux) {
+                aux++;
+            }
+            if (aux < aux_end) aux++; // skip the trailing '\0'
+        } else if (type == 'B') {
+            // B array: subtype + length + data
+            if (aux_end - aux < 5) goto err;
+            char sub_type = *aux;
+            uint32_t count = le_to_u32((unsigned char *)(aux + 1));
+            aux += 5;
+            // Determine size of each element in B array
+            int el_size = 0;
+            switch(sub_type) {
+            case 'c': case 'C': case 'A': el_size = 1; break;
+            case 's': case 'S':          el_size = 2; break;
+            case 'i': case 'I': case 'f':el_size = 4; break;
+            default:
+                // Unknown subtype
+                goto err;
+            }
+            // Check total size
+            if ((uint64_t)el_size * count > (uint64_t)(aux_end - aux)) {
+                // Not enough space
+                goto err;
+            }
+            aux += el_size * count;
+        } else {
+            // Unknown or unsupported tag type
+            goto err;
+        }
+
+        // For each appended tag, we might update local stats or codec info here
+        // ...
+
+        // Example final line in this loop (referencing some structure 'tm')
+        tm->blk->m = tm->m;
+    }

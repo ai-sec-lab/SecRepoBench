@@ -1,0 +1,102 @@
+/* Initialize header protection cipher */
+if(!quic_hp_cipher_init(&ciphers.hp_cipher, GCRY_MD_SHA256, 16, client_secret, version)) {
+  NDPI_LOG_DBG(ndpi_struct, "Error initializing header protection cipher\n");
+  return NULL;
+}
+
+/* Initialize payload protection */
+if(gcry_cipher_open(&ciphers.pp_cipher, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM, 0)) {
+  NDPI_LOG_DBG(ndpi_struct, "Error opening payload protection cipher\n");
+  quic_ciphers_reset(&ciphers);
+  return NULL;
+}
+
+uint8_t key[16];
+const char *key_label = is_version_with_v1_labels(version) ? "quic key" : "quicv2 key";
+const char *iv_label = is_version_with_v1_labels(version) ? "quic iv" : "quicv2 iv";
+
+if(!quic_hkdf_expand_label(GCRY_MD_SHA256, client_secret, HASH_SHA2_256_LENGTH, 
+                         key_label, key, sizeof(key))) {
+  NDPI_LOG_DBG(ndpi_struct, "Error deriving key for payload protection\n");
+  quic_ciphers_reset(&ciphers);
+  return NULL;
+}
+
+if(gcry_cipher_setkey(ciphers.pp_cipher, key, sizeof(key))) {
+  NDPI_LOG_DBG(ndpi_struct, "Error setting key for payload protection\n");
+  quic_ciphers_reset(&ciphers);
+  return NULL;
+}
+
+if(!quic_hkdf_expand_label(GCRY_MD_SHA256, client_secret, HASH_SHA2_256_LENGTH, 
+                         iv_label, ciphers.pp_iv, 12)) {
+  NDPI_LOG_DBG(ndpi_struct, "Error deriving IV for payload protection\n");
+  quic_ciphers_reset(&ciphers);
+  return NULL;
+}
+
+/* Calculate packet number offset */
+pn_offset = 1; /* Skip first byte */
+pn_offset += 4; /* Skip version */
+pn_offset += dest_conn_id_len; /* Skip DCID */
+pn_offset += src_conn_id_len; /* Skip SCID */
+
+/* Process token if present */
+token_length = 0;
+if(packet->payload[0] & 0x08) {
+  if(pn_offset >= packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short for token length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  
+  /* Read variable-length token length */
+  uint8_t token_len_byte = packet->payload[pn_offset];
+  uint8_t token_len_bytes = 1 << ((token_len_byte & 0xC0) >> 6);
+  
+  if(pn_offset + token_len_bytes > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short for token length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  
+  token_length = token_len_byte & 0x3F;
+  for(uint8_t i = 1; i < token_len_bytes; i++) {
+    token_length = (token_length << 8) | packet->payload[pn_offset + i];
+  }
+  
+  pn_offset += token_len_bytes;
+  if(pn_offset + token_length > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short for token\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  
+  pn_offset += token_length;
+}
+
+/* Read payload length */
+if(pn_offset >= packet->payload_packet_len) {
+  NDPI_LOG_DBG(ndpi_struct, "Packet too short for payload length\n");
+  quic_ciphers_reset(&ciphers);
+  return NULL;
+}
+
+uint8_t payload_len_byte = packet->payload[pn_offset];
+uint8_t payload_len_bytes = 1 << ((payload_len_byte & 0xC0) >> 6);
+
+if(pn_offset + payload_len_bytes > packet->payload_packet_len) {
+  NDPI_LOG_DBG(ndpi_struct, "Packet too short for payload length\n");
+  quic_ciphers_reset(&ciphers);
+  return NULL;
+}
+
+payload_length = payload_len_byte & 0x3F;
+for(uint8_t i = 1; i < payload_len_bytes; i++) {
+  payload_length = (payload_length << 8) | packet->payload[pn_offset + i];
+}
+
+pn_offset += payload_len_bytes;
+
+NDPI_LOG_DBG2(ndpi_struct, "pn_offset %u token_length %" PRIu64 " payload_length %" PRIu64 "\n", 
+             pn_offset, token_length, payload_length);

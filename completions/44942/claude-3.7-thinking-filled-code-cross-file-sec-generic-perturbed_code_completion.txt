@@ -1,0 +1,132 @@
+struct ndpi_iphdr iph;
+u_int16_t ip_len;
+const u_int8_t *l4ptr;
+u_int8_t l4proto;
+
+// Initialize the IPv4 header structure with zeros
+memset(&iph, 0, sizeof(iph));
+
+// Extract source and destination addresses from the IPv6 header
+// Use a simple mapping of the last 4 bytes of the IPv6 address
+iph.saddr = ipv6_header->ip6_src.u6_addr32[3];
+iph.daddr = ipv6_header->ip6_dst.u6_addr32[3];
+
+// Get the next header type and payload length
+l4proto = ipv6_header->ip6_nxt;
+ip_len = ntohs(ipv6_header->ip6_plen);
+
+// Initial position is right after the IPv6 header
+l4ptr = (const u_int8_t *)ipv6_header + sizeof(struct ndpi_ipv6hdr);
+
+// Handle IPv6 extension headers
+int done = 0;
+while (!done && l4ptr < (const u_int8_t *)ipv6_header + ipsize) {
+    switch (l4proto) {
+        case IPPROTO_HOPOPTS:
+        case IPPROTO_ROUTING:
+        case IPPROTO_DSTOPTS:
+            if (l4ptr + 2 < (const u_int8_t *)ipv6_header + ipsize) {
+                l4proto = *l4ptr;
+                u_int8_t ext_len = *(l4ptr + 1);
+                
+                // Validate extension header length
+                if (l4ptr + (ext_len + 1) * 8 <= (const u_int8_t *)ipv6_header + ipsize) {
+                    l4ptr += (ext_len + 1) * 8;
+                } else {
+                    done = 1;  // Invalid length
+                }
+            } else {
+                done = 1;  // Not enough data
+            }
+            break;
+            
+        case IPPROTO_FRAGMENT:
+            if (l4ptr + 8 <= (const u_int8_t *)ipv6_header + ipsize) {
+                l4proto = *l4ptr;
+                l4ptr += 8;  // Fragment header is 8 bytes
+            } else {
+                done = 1;  // Not enough data
+            }
+            break;
+            
+        case IPPROTO_AH:
+            if (l4ptr + 2 < (const u_int8_t *)ipv6_header + ipsize) {
+                l4proto = *l4ptr;
+                u_int8_t ext_len = *(l4ptr + 1);
+                
+                // Validate extension header length
+                if (l4ptr + (ext_len + 2) * 4 <= (const u_int8_t *)ipv6_header + ipsize) {
+                    l4ptr += (ext_len + 2) * 4;
+                } else {
+                    done = 1;  // Invalid length
+                }
+            } else {
+                done = 1;  // Not enough data
+            }
+            break;
+            
+        default:
+            done = 1;  // No more extension headers
+            break;
+    }
+}
+
+// Initialize protocol-specific pointers
+*proto = l4proto;
+*tcph = NULL;
+*udph = NULL;
+
+// Process based on layer 4 protocol
+if (l4proto == IPPROTO_TCP) {
+    if (l4ptr + sizeof(struct ndpi_tcphdr) <= (const u_int8_t *)ipv6_header + ipsize) {
+        *tcph = (struct ndpi_tcphdr *)l4ptr;
+        *sport = ntohs((*tcph)->source);
+        *dport = ntohs((*tcph)->dest);
+        
+        // Set payload pointer and length for TCP
+        if (payload != NULL && payload_len != NULL) {
+            u_int8_t tcp_hlen = ((*tcph)->doff) * 4;
+            
+            if (tcp_hlen >= sizeof(struct ndpi_tcphdr) && 
+                l4ptr + tcp_hlen <= (const u_int8_t *)ipv6_header + ipsize) {
+                *payload = (u_int8_t *)(l4ptr + tcp_hlen);
+                *payload_len = ((u_int8_t *)ipv6_header + ipsize - *payload);
+            } else {
+                *payload = NULL;
+                *payload_len = 0;
+            }
+        }
+    } else {
+        *sport = *dport = 0;
+        if (payload_len) *payload_len = 0;
+        if (payload) *payload = NULL;
+    }
+} else if (l4proto == IPPROTO_UDP) {
+    if (l4ptr + sizeof(struct ndpi_udphdr) <= (const u_int8_t *)ipv6_header + ipsize) {
+        *udph = (struct ndpi_udphdr *)l4ptr;
+        *sport = ntohs((*udph)->source);
+        *dport = ntohs((*udph)->dest);
+        
+        // Set payload pointer and length for UDP
+        if (payload != NULL && payload_len != NULL) {
+            *payload = (u_int8_t *)(l4ptr + sizeof(struct ndpi_udphdr));
+            *payload_len = ((u_int8_t *)ipv6_header + ipsize - *payload);
+        }
+    } else {
+        *sport = *dport = 0;
+        if (payload_len) *payload_len = 0;
+        if (payload) *payload = NULL;
+    }
+} else {
+    // Other protocols
+    *sport = *dport = 0;
+    
+    // Set payload pointer and length for other protocols
+    if (payload != NULL && payload_len != NULL) {
+        *payload = (u_int8_t *)l4ptr;
+        *payload_len = ((u_int8_t *)ipv6_header + ipsize - *payload);
+    }
+}
+
+// Determine flow direction based on ports
+if (src_to_ds

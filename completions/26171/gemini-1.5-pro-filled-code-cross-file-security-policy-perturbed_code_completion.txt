@@ -1,0 +1,81 @@
+uint32_t nstreams = context->nstreams;
+  int32_t bstarts = destinationoffset;
+  uint32_t nbytes, ntbytes = 0;
+  int32_t last_filter_index = context->last_filter_index;
+  int32_t cbytes, bsize2, leftoverblock2;
+
+  for (int j = 0; j < nstreams; j++) {
+    bsize2 = bsize;
+    leftoverblock2 = leftoverblock;
+    if (leftoverblock && (nstreams > 1) && j < (nstreams - 1)) {
+      bsize2 = bsize / nstreams;
+      leftoverblock2 = 0;
+    } else if (leftoverblock && (nstreams > 1) && j == (nstreams - 1)) {
+      bsize2 = bsize - (nstreams - 1) * (bsize / nstreams);
+      leftoverblock2 = 1;
+    }
+
+    /* Get the number of compressed bytes for this stream */
+    if (srcsize - src_offset < 4) {
+      return -1;
+    }
+    cbytes = sw32_(src + src_offset);
+    src_offset += 4;
+
+    if (cbytes <= bsize2 + 1) {
+      if (srcsize - src_offset < cbytes) {
+        return -1;
+      }
+      if (cbytes == 0) {
+        /* Uncompressed data case */
+        memcpy(dest + bstarts, src + src_offset, (unsigned int)bsize2);
+        nbytes = bsize2;
+        src_offset += bsize2;
+      }
+      else if (cbytes == 1) {
+        /* Run case */
+        memset(dest + bstarts, src[src_offset], (unsigned int)bsize2);
+        nbytes = bsize2;
+        src_offset += 1;
+      }
+      else {
+        /* Decompress the data */
+        if (compformat == BLOSC_BLOSCLZ) {
+          nbytes = blosclz_decompress(src + src_offset, cbytes,
+                                     dest + bstarts, bsize2);
+        } else if (compformat == BLOSC_LZ4) {
+          nbytes = LZ4_decompress_safe((const char*)(src + src_offset),
+                                      (char*)(dest + bstarts),
+                                      cbytes, bsize2);
+        } else if (compformat == BLOSC_LZ4HC) {
+          nbytes = LZ4_decompress_safe((const char*)(src + src_offset),
+                                      (char*)(dest + bstarts),
+                                      cbytes, bsize2);
+        } else if (compformat == BLOSC_ZSTD) {
+          size_t dSize = bsize2;
+          size_t cSize = cbytes;
+          size_t zstd_ret = ZSTD_decompress(dest + bstarts, dSize, src + src_offset, cSize);
+          if (ZSTD_isError(zstd_ret)) {
+            printf("Zstd decompression error: %s \n", ZSTD_getErrorName(zstd_ret));
+            return -1;
+          }
+          nbytes = (int32_t)zstd_ret;
+        } else {
+          /* Should never happen */
+          return -7;
+        }
+        src_offset += cbytes;
+      }
+    }
+    else {
+      return -2;
+    }
+
+    if (nbytes != bsize2) {
+      return -3;
+    }
+
+    /* Update the number of total uncompressed bytes */
+    bstarts += nbytes;
+    ntbytes += nbytes;
+  }

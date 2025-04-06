@@ -1,0 +1,146 @@
+// Select the appropriate character map (encoding) for the font face based on
+// the provided encoding string. If an encoding is specified, determine the
+// corresponding FreeType encoding type using a series of string comparisons.
+// If the encoding type is successfully determined, apply it to the font face.
+if (encoding != NULL)
+{
+  if (LocaleCompare(encoding, "unicode") == 0)
+    encoding_type = FT_ENCODING_UNICODE;
+  else if (LocaleCompare(encoding, "symbol") == 0)
+    encoding_type = FT_ENCODING_MS_SYMBOL;
+  else if (LocaleCompare(encoding, "ascii") == 0)
+    encoding_type = FT_ENCODING_NONE; // ASCII is default (none)
+  else if (LocaleCompare(encoding, "latin1") == 0)
+    encoding_type = FT_ENCODING_ADOBE_LATIN_1;
+  else if (LocaleCompare(encoding, "jis") == 0)
+    encoding_type = FT_ENCODING_JIS;
+  else if (LocaleCompare(encoding, "big5") == 0)
+    encoding_type = FT_ENCODING_BIG5;
+  else if (LocaleCompare(encoding, "gb2312") == 0)
+    encoding_type = FT_ENCODING_GB2312;
+  else if (LocaleCompare(encoding, "korean") == 0)
+    encoding_type = FT_ENCODING_KOREAN;
+
+  ft_status = FT_Select_Charmap(face, encoding_type);
+  if (ft_status != 0)
+  {
+    ThrowFreetypeErrorException("UnableToSetEncoding", ft_status, encoding);
+    goto cleanup;
+  }
+}
+
+// Set the character size for the font face based on the point size and resolution.
+resolution.x = draw_info->density ? DrawInfoResolution(draw_info) : DefaultResolution;
+resolution.y = draw_info->density ? DrawInfoResolution(draw_info) : DefaultResolution;
+ft_status = FT_Set_Char_Size(face, 0, (FT_F26Dot6)(draw_info->pointsize * 64), 
+                             (FT_UInt)resolution.x, (FT_UInt)resolution.y);
+if (ft_status != 0)
+{
+  ThrowFreetypeErrorException("UnableToSetCharacterSize", ft_status, img->filename);
+  goto cleanup;
+}
+
+// Initialize the TypeMetric structure with font size metrics.
+metrics->ascent = (ssize_t)(face->size->metrics.ascender >> 6);
+metrics->descent = (ssize_t)(face->size->metrics.descender >> 6);
+metrics->width = 0;
+metrics->height = metrics->ascent - metrics->descent;
+metrics->max_advance = (ssize_t)(face->size->metrics.max_advance >> 6);
+
+// Sanitize ascender and descender values if necessary.
+if (metrics->ascent < 0)
+  metrics->ascent = 0;
+if (metrics->descent > 0)
+  metrics->descent = 0;
+
+// Calculate underline position and thickness.
+metrics->underline_position = (ssize_t)((-face->underline_position) >> 6);
+metrics->underline_thickness = (ssize_t)(face->underline_thickness >> 6);
+
+// Check if there is no text or no glyphs available in the font.
+value = GetDrawInfoValue(draw_info);
+if ((value == NULL) || (*value == '\0') || (face->num_glyphs == 0))
+{
+  status = MagickTrue;
+  goto cleanup;
+}
+
+// Configure rendering options such as anti-aliasing and hinting.
+flags = FT_LOAD_DEFAULT;
+if (draw_info->render == MagickFalse)
+  flags |= FT_LOAD_MONOCHROME;
+if (image->matte == MagickFalse)
+  flags |= FT_LOAD_TARGET_MONO;
+
+// Prepare structures for rendering each glyph in the text string.
+length = strlen(value);
+grapheme = (GraphemeInfo *) AcquireQuantumMemory(length, sizeof(GraphemeInfo));
+if (grapheme == NULL)
+{
+  ThrowMagickException(exception, GetMagickModule(), ResourceLimitError,
+                       "MemoryAllocationFailed", "`%s'", img->filename);
+  goto cleanup;
+}
+ComplexTextLayout(image, draw_info, value, length, face, flags, &grapheme, exception);
+
+// Loop through each character in the text, rendering glyphs, tracing outlines if necessary,
+// and rasterizing the glyphs onto the image. Adjust the position and metrics of each rendered glyph.
+for (i = 0; i < (ssize_t)length; i++)
+{
+  ft_status = FT_Load_Glyph(face, grapheme[i].index, flags);
+  if (ft_status != 0)
+    continue;
+
+  ft_status = FT_Get_Glyph(face->glyph, &glyph.image);
+  if (ft_status != 0)
+    continue;
+
+  // Transform glyphs according to affine transformations if specified.
+  affine.xx = FRAC(1.0);
+  affine.xy = FRAC(0.0);
+  affine.yx = FRAC(0.0);
+  affine.yy = FRAC(1.0);
+  if (draw_info->affine.sx != 1.0 || draw_info->affine.sy != 1.0 ||
+      draw_info->affine.rx != 0.0 || draw_info->affine.ry != 0.0)
+  {
+    affine.xx = FRAC(draw_info->affine.sx);
+    affine.xy = FRAC(-draw_info->affine.rx);
+    affine.yx = FRAC(draw_info->affine.ry);
+    affine.yy = FRAC(draw_info->affine.sy);
+    FT_Matrix_Multiply(&affine, &glyph.image->root.transformation);
+  }
+
+  // Render the glyph onto the image with proper offset adjustments.
+  origin.x = grapheme[i].x_offset + offset->x;
+  origin.y = grapheme[i].y_offset + offset->y;
+  FT_Outline_Translate(&glyph.image->outline, origin.x, origin.y);
+  RenderOutline(img, draw_info, &glyph.image->outline, exception);
+
+  // Rasterize the glyph if necessary.
+  if (FT_Glyph_To_Bitmap(&glyph.image, FT_RENDER_MODE_NORMAL, 0, 1) == 0)
+  {
+    bitmap = (FT_BitmapGlyph)glyph.image;
+    RenderBitmap(img, draw_info, bitmap->bitmap, origin, exception);
+  }
+
+  // Clean up the glyph resource after processing.
+  FT_Done_Glyph(glyph.image);
+}
+
+// Finalize the font metrics by normalizing the bounding box coordinates and width.
+metrics->width = (ssize_t)(bounds.xMax - bounds.xMin);
+status = MagickTrue;
+
+cleanup:
+  if (grapheme != NULL)
+    grapheme = RelinquishMagickMemory(grapheme);
+  if (stream != NULL)
+  {
+    if (stream->descriptor.pointer != NULL)
+      FTCloseStream(stream);
+    stream = RelinquishMagickMemory(stream);
+  }
+  if (face != NULL)
+    FT_Done_Face(face);
+  FT_Done_FreeType(library);
+  return status;

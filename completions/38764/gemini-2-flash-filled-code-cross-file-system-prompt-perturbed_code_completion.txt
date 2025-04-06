@@ -1,0 +1,113 @@
+size_t entry_length;
+		int rr_skip;
+
+		p = b;
+		if (step < 1)
+			break;
+		entry_length = *p;
+		if (entry_length == 0)
+			break;
+
+		if (entry_length > step) {
+			archive_set_error(&archivereader->archive,
+			    ARCHIVE_ERRNO_MISC,
+			    "Invalid directory entry length %d > %d",
+			    (int)entry_length, (int)step);
+			return (ARCHIVE_WARN);
+		}
+
+		/* Skip '.' and '..' entries */
+		if (entry_length == 1) {
+			/*
+			 * Some buggy ISO images have a directory entry
+			 * with a length of 1.  These are always invalid,
+			 * so skip them.
+			 */
+			rr_skip = 1;
+		} else if (p[1] == 0) {
+			/* '.' entry */
+			rr_skip = 1;
+		} else if (p[1] == 1) {
+			/* '..' entry */
+			rr_skip = 1;
+		} else
+			rr_skip = 0;
+
+		if (rr_skip) {
+			p += entry_length;
+			step -= entry_length;
+			skip_size -= entry_length;
+			continue;
+		}
+
+		struct file_info *file;
+		file = file_info_from_dirent(archivereader, iso9660,
+		    parent, p, entry_length);
+		if (file == NULL)
+			return (ARCHIVE_FATAL);
+
+		if (file->flags & ISO9660_FLAG_MULTI_EXTENT) {
+			/*
+			 * This is a multi-extent file.  We need to
+			 * collect all of the pieces into a list.
+			 */
+			if (multi == NULL) {
+				multi = file;
+				multi->next = file;
+			} else {
+				file->next = multi->next;
+				multi->next = file;
+			}
+		} else {
+			/* Add this file to the archive structure. */
+			if (multi != NULL) {
+				/*
+				 * We've reached the end of a
+				 * multi-extent file.  Append all of
+				 * the pieces together and add the
+				 * result to the archive.
+				 */
+				struct file_info *first;
+				struct iso9660_content *content, *last;
+				int64_t total_size;
+
+				first = multi;
+				multi = NULL;
+				total_size = 0;
+				last = NULL;
+				do {
+					if (first->size > 0) {
+						content = (struct iso9660_content *)
+							malloc(sizeof(*content));
+						if (content == NULL) {
+							archive_set_error(
+							    &archivereader->archive,
+							    ENOMEM,
+							    "No memory");
+							release_file(first);
+							return (ARCHIVE_FATAL);
+						}
+						content->offset = first->offset;
+						content->size = first->size;
+						content->next = NULL;
+						if (last == NULL)
+							file->contents.first = content;
+						else
+							last->next = content;
+						last = content;
+						total_size += first->size;
+					}
+					struct file_info *tmp = first;
+					first = first->next;
+					release_file(tmp);
+				} while (first != file);
+				file->size = total_size;
+				file->flags &= ~ISO9660_FLAG_MULTI_EXTENT;
+			}
+			if (add_file(iso9660, file) != ARCHIVE_OK)
+				return (ARCHIVE_FATAL);
+		}
+
+		p += entry_length;
+		step -= entry_length;
+		skip_size -= entry_length;

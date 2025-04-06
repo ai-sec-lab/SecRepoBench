@@ -1,32 +1,40 @@
-// <MASK>
-hb_subset_plan_t *plan = context->plan;
-hb_vector_t<hb_codepoint_t> glyphs;
-if (!plan->create_glyph_map (&glyphs))
+// Generate a subset of glyphs based on the provided plan and font.
+hb_codepoint_t *glyph_ids = nullptr;
+unsigned int num_glyphs = 0;
+if (!_generate_subset_glyph_ids (context, &glyph_ids, &num_glyphs))
   return_trace (false);
 
-hb_blob_t *source_blob = hb_face_get_table (plan->source, HB_TAG ('g','l','y','f'));
-hb_bytes_t source_bytes = hb_blob_get_bytes (source_blob, nullptr);
-
-hb_glyf_accelerator_t glyf;
-if (!glyf.init (plan->source))
+// Populate a list of subset glyphs, checking for failure in the process.
+hb_vector_t<SubsetGlyph> subset_glyphs;
+if (!_populate_subset_glyphs (context, glyph_ids, num_glyphs, subset_glyphs))
+{
+  hb_free (glyph_ids);
   return_trace (false);
+}
+hb_free (glyph_ids);
 
-hb_glyf_table_t::glyph_header_t glyph_header;
-hb_glyf_table_t::short_loca_t short_loca;
-hb_glyf_table_t::long_loca_t long_loca;
-
-hb_blob_t *new_glyf_blob = hb_glyf_table_t::serialize (&glyf,
-                                                       glyphs,
-                                                       source_bytes,
-                                                       &glyph_header,
-                                                       &short_loca,
-                                                       &long_loca);
-
-hb_blob_destroy (source_blob);
+// Destroy the font if it was created for instancing, after using it.
 if (font)
   hb_font_destroy (font);
 
-bool result = plan->add_table (HB_TAG ('g','l','y','f'), new_glyf_blob);
-hb_blob_destroy (new_glyf_blob);
+// Calculate padded offsets for each subset glyph and determine if a short loca table can be used.
+bool use_short_loca = _calculate_glyph_offsets (subset_glyphs);
 
+// Initialize a new glyf object for serialization.
+glyf glyf_prime;
+
+// Serialize the subset of glyphs into the glyf object, using the determined loca format.
+if (!_serialize_glyphs (context, subset_glyphs, use_short_loca, &glyf_prime))
+{
+  for (auto &glyph : subset_glyphs)
+    glyph.free_compiled_bytes ();
+  return_trace (false);
+}
+
+// Handle any necessary cleanup of resources, particularly the compiled subset glyphs, if required.
+for (auto &glyph : subset_glyphs)
+  glyph.free_compiled_bytes ();
+
+// Return the result of the serialization process as the function's output.
+bool result = context->serializer->copy (&glyf_prime);
 return_trace (result);

@@ -1,0 +1,269 @@
+int
+    columns = 0,
+    rows = 0,
+    scene = 0;
+
+  long
+    page_count = 1;
+
+  RectangleInfo
+    page;
+
+  register ssize_t
+    i;
+
+  size_t
+    length;
+
+  ssize_t
+    count;
+
+  unsigned char
+    *buffer,
+    *hex_digits;
+
+  /*
+    Allocate image structure.
+  */
+  assert(image_info != (ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  assert(exception != (ExceptionInfo *) NULL);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  image=AcquireImage(image_info,exception);
+  if ((image->columns == 0) || (image->rows == 0))
+  {
+    if ((image_info->width != 0) && (image_info->height != 0))
+    {
+      image->columns=image_info->width;
+      image->rows=image_info->height;
+    }
+    else
+    {
+      image->columns=612;
+      image->rows=792;
+    }
+  }
+  (void) ResetMagickMemory(&page,0,sizeof(page));
+  page.width=image->columns;
+  page.height=image->rows;
+  density=GetImageOption(image_info,"density");
+  if (density == (char *) NULL)
+    density=GetImageOption(image_info,"res");
+  if ((density != (char *) NULL) && (strchr(density,'x') == (char *) NULL))
+    {
+      char
+        geometry[MagickPathExtent];
+
+      (void) FormatMagickString(geometry,MagickPathExtent,"%sx%s",density,
+        density);
+      density=geometry;
+    }
+  (void) CopyMagickString(input_filename,image_info->filename,
+    MagickPathExtent);
+  filedescriptor=AcquireFileDescriptor(input_filename,ReadMode,exception);
+  if (filedescriptor == -1)
+    {
+      image=DestroyImage(image);
+      return((Image *) NULL);
+    }
+  (void) close(filedescriptor);
+  (void) CopyMagickString(filename,input_filename,MagickPathExtent);
+  (void) ConcatenateMagickString(filename,".ps",MagickPathExtent);
+  (void) unlink(filename);
+  if (symlink(input_filename,filename) != 0)
+    {
+      (void) CopyMagickString(filename,input_filename,MagickPathExtent);
+      (void) LogMagickEvent(PolicyEvent,GetMagickModule(),
+        "Symbolic link failed, using original file");
+    }
+  hex_digits=(unsigned char *) AcquireQuantumMemory(256UL,sizeof(*hex_digits));
+  if (hex_digits == (unsigned char *) NULL)
+    {
+      ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+    }
+  (void) ResetMagickMemory(hex_digits,0,256*sizeof(*hex_digits));
+  for (i=0; i <= 9; i++)
+    hex_digits[(unsigned char) (i+'0')]=(unsigned char) i;
+  for (i=0; i <= 5; i++)
+  {
+    hex_digits[(unsigned char) (i+'A')]=(unsigned char) (i+10);
+    hex_digits[(unsigned char) (i+'a')]=(unsigned char) (i+10);
+  }
+  /*
+    Set page density.
+  */
+  (void) CopyMagickString(geometry,"72x72",MagickPathExtent);
+  if ((density != (char *) NULL) && (*density != '\0'))
+    (void) CopyMagickString(geometry,density,MagickPathExtent);
+  /*
+    Determine page geometry from Postscript bounding box comment.
+  */
+  page.x=0;
+  page.y=0;
+  page.width=0;
+  page.height=0;
+  (void) ResetMagickMemory(command,0,sizeof(command));
+  (void) FormatMagickString(command,MagickPathExtent,
+    "identify -format %%w;%%h %s 2>/dev/null",filename);
+  (void) CopyMagickString(message,command,MagickPathExtent);
+  columns=0;
+  rows=0;
+  count=ReadCommand(message,MagickPathExtent,exception);
+  if (count > 0)
+    {
+      char
+        *p;
+
+      p=strchr(message,';');
+      if (p != (char *) NULL)
+        {
+          *p='\0';
+          columns=(int) StringToLong(message);
+          rows=(int) StringToLong(p+1);
+        }
+    }
+  if ((columns == 0) || (rows == 0))
+    {
+      char
+        *geometry;
+
+      /*
+        Ghostscript fails to report the bounding box, try to extract it
+        ourselves.
+      */
+      geometry=GetImageOption(image_info,"ps:BoundingBox");
+      if (geometry != (char *) NULL)
+        {
+          double
+            x0,
+            x1,
+            y0,
+            y1;
+
+          sscanf(geometry,"%lf %lf %lf %lf",&x0,&y0,&x1,&y1);
+          columns=(int) fabs((double) (x1-x0));
+          rows=(int) fabs((double) (y1-y0));
+        }
+    }
+  if ((image_info->width != 0) && (image_info->height != 0))
+    {
+      columns=image_info->width;
+      rows=image_info->height;
+    }
+  if ((columns == 0) || (rows == 0))
+    {
+      columns=612;
+      rows=792;
+    }
+  page.width=columns;
+  page.height=rows;
+  /*
+    Create Ghostscript control file.
+  */
+  (void) CopyMagickString(postscript_filename,image_info->filename,
+    MagickPathExtent);
+  (void) ConcatenateMagickString(postscript_filename,".ps",MagickPathExtent);
+  (void) CopyMagickString(filename,image_info->filename,MagickPathExtent);
+  (void) ConcatenateMagickString(filename,".eps",MagickPathExtent);
+  (void) unlink(filename);
+  (void) CopyMagickString(command,"",MagickPathExtent);
+  options=AcquireString((char *) NULL);
+  option=GetImageOption(image_info,"ps:use-cropbox");
+  if (IsStringTrue(option) != MagickFalse)
+    options=ConcatenateString(options," -dUseCropBox ",(char *) NULL);
+  option=GetImageOption(image_info,"ps:use-mediabox");
+  if (IsStringTrue(option) != MagickFalse)
+    options=ConcatenateString(options," -dUseMediaBox ",(char *) NULL);
+  delegate_info=GetDelegateInfo(image_info,"ps",exception);
+  if (delegate_info != (const DelegateInfo *) NULL)
+  {
+    const char
+      *value;
+
+    value=GetDelegateAttribute(delegate_info,"command");
+    if (value != (const char *) NULL)
+      (void) CopyMagickString(command,value,MagickPathExtent);
+  }
+  (void) CopyMagickString(message,command,MagickPathExtent);
+  options=ConcatenateString(options," -q -dQUIET -dSAFER ",(char *) NULL);
+  options=ConcatenateString(options," -dBATCH -dNOPAUSE -dNOPROMPT ",
+    (char *) NULL);
+  options=ConcatenateString(options,
+    " -dMaxBitmap=500000000 -dAlignToPixels=0 -dGridFitTT=2 ",(char *) NULL);
+  options=ConcatenateString(options," -sDEVICE=pngalpha ",(char *) NULL);
+  (void) FormatMagickString(geometry,MagickPathExtent,"%gx%g",
+    (double) page.width,(double) page.height);
+  options=ConcatenateString(options," -g",geometry,(char *) NULL);
+  (void) FormatMagickString(geometry,MagickPathExtent,"%gx%g",
+    image_info->page.width,image_info->page.height);
+  if ((image_info->page.width != 0) && (image_info->page.height != 0))
+    options=ConcatenateString(options," -g",geometry,(char *) NULL);
+  if ((image_info->density != (char *) NULL) &&
+      (*image_info->density != '\0'))
+    options=ConcatenateString(options," -r",image_info->density,(char *) NULL);
+  else
+    options=ConcatenateString(options," -r72",(char *) NULL);
+  (void) FormatMagickString(geometry,MagickPathExtent,"%+g%+g",
+    image_info->page.x,image_info->page.y);
+  if ((image_info->page.x != 0) || (image_info->page.y != 0))
+    options=ConcatenateString(options," -c \"",geometry," translate\" ",
+      (char *) NULL);
+  (void) FormatMagickString(geometry,MagickPathExtent,"%gx%g",
+    image_info->extract.width,image_info->extract.height);
+  if ((image_info->extract.width != 0) && (image_info->extract.height != 0))
+    options=ConcatenateString(options," -c \"",geometry," rectclip\" ",
+      (char *) NULL);
+  options=ConcatenateString(options,"-f ",postscript_filename,(char *) NULL);
+  (void) SubstituteString(&message,"\"%u\"",options,MagickPathExtent);
+  options=DestroyString(options);
+  (void) SubstituteString(&message,"\"%i\"",filename,MagickPathExtent);
+  (void) SubstituteString(&message,"\"%o\"",image_info->filename,
+    MagickPathExtent);
+  (void) CopyMagickString(command,message,MagickPathExtent);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(DelegateEvent,GetMagickModule(),"%s",command);
+  (void) CopyMagickString(image->filename,image_info->filename,
+    MagickPathExtent);
+  image->colorspace=SRGBColorspace;
+  image->rendering_intent=PerceptualIntent;
+  postscript_image=NewImageList();
+  count=SystemCommand(MagickFalse,command,exception);
+  if (count == 0)
+    {
+      char
+        *p;
+
+      /*
+        Ghostscript failed, look for Postscript error messages.
+      */
+      (void) ThrowMagickException(exception,GetMagickModule(),DelegateError,
+        "PostscriptDelegateFailed","`%s' @ error/ps.c/ReadPSImage/425",
+        command);
+      image=DestroyImage(image);
+      return(DestroyImageList(postscript_image));
+    }
+  (void) CopyMagickString(filename,image_info->filename,MagickPathExtent);
+  (void) ConcatenateMagickString(filename,".png",MagickPathExtent);
+  read_info=CloneImageInfo(image_info);
+  (void) CopyMagickString(read_info->filename,filename,MagickPathExtent);
+  (void) CopyMagickString(read_info->magick,"PNG",MagickPathExtent);
+  (void) SetImageInfo(read_info,0,exception);
+  image=ReadImage(read_info,exception);
+  read_info=DestroyImageInfo(read_info);
+  if (image == (Image *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),DelegateError,
+        "PostscriptDelegateFailed","`%s' @ error/ps.c/ReadPSImage/438",
+        command);
+      return(DestroyImageList(postscript_image));
+    }
+  AppendImageToList(&postscript_image,image);
+  (void) CopyMagickString(filename,image_info->filename,MagickPathExtent);
+  (void) ConcatenateMagickString(filename,"-%d.png",MagickPathExtent);
+  read_info=CloneImageInfo(image_info);
+  (void) CopyMagickString(read_info->filename,filename,MagickPathExtent);
+  (void) CopyMagickString(read_info->magick,"PNG",MagickPathExtent);
+  (void) SetImageInfo(read_info,0,exception);
+  for (i=

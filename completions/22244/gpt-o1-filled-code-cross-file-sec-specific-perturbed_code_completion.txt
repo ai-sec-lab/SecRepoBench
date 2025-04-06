@@ -1,0 +1,42 @@
+// Ensure there's at least 1 byte to read an operation code
+  if (packet->payload_packet_len < 1) {
+    failed = 1;
+  } else {
+    // If TCP, adjust ovpn_payload pointer as needed (example: skip TCP header bytes if required)
+    // For simplicity, assume no additional offset is needed here:
+    operationcode = ovpn_payload[0];
+
+    // If it's UDP, try to detect OpenVPN-specific operations
+    if (packet->udp != NULL) {
+      // Check if this is the first packet with a potential handshake
+      if ((flow->openvpn_counter == 0)
+          && (packet->payload_packet_len >= 2)
+          && (operationcode == 0x03)) {
+        // Identify as OpenVPN
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+      } else if ((flow->openvpn_counter < 5) && (operationcode == 0xfa)) {
+        // Attempt to store session ID (need at least 18 bytes: 1 for opcode + 1 for another field + 16 for ID)
+        if (packet->payload_packet_len >= 18) {
+          memcpy(flow->protos.openvpn.session_id, &ovpn_payload[2], 16);
+        } else {
+          failed = 1;
+        }
+      } else if ((flow->openvpn_counter >= 5) && (operationcode == 0xfb)) {
+        // Verify the stored session ID
+        if ((packet->payload_packet_len >= 18)
+            && (memcmp(flow->protos.openvpn.session_id, &ovpn_payload[2], 16) == 0)) {
+          ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+        } else {
+          failed = 1;
+        }
+      }
+    }
+
+    // Increment the detection attempts
+    flow->openvpn_counter++;
+  }
+
+  // If detection failed, exclude this protocol
+  if (failed) {
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+  }

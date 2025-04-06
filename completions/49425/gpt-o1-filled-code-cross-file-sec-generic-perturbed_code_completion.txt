@@ -1,0 +1,77 @@
+{
+  mpz_t prod;
+  mpz_init(mrb, &prod);
+
+  /* Clear the quotient buffer. */
+  for (size_t i = 0; i < q.sz; i++) {
+    q.p[i] = 0;
+  }
+
+  /* Classical long division (Knuth's Algorithm D) in base 2^DIG_SIZE. */
+  for (index = xd; index-- > yd;) {
+    /* Combine two top limbs of x to form an approximate dividend. */
+    mp_limb2 high = (index + 1 < x.sz) ? x.p[index + 1] : 0;
+    /* Shift high by DIG_SIZE bits and add the current limb. */
+    uint64_t w = ((uint64_t)high << DIG_SIZE) + x.p[index];
+    /* Candidate quotient digit (qhat) and remainder (rhat). */
+    mp_limb2 qhat = (mp_limb2)(w / z);
+    mp_limb2 rhat = (mp_limb2)(w % z);
+
+    /*
+      Adjust qhat using the next divisor limb if needed.
+      Let d2 be the next-highest limb of the divisor y.
+    */
+    mp_limb2 d2 = (yd >= 2) ? y.p[yd - 2] : 0;
+    /* Check if qhat is too large. */
+    while (qhat == ((mp_limb2)1 << DIG_SIZE) ||
+           ((uint64_t)qhat * d2 >
+            ((uint64_t)rhat << DIG_SIZE) + ((index > 0) ? x.p[index - 1] : 0))) {
+      qhat--;
+      rhat += (mp_limb2)z;
+      if (rhat >= (1UL << DIG_SIZE)) break;
+    }
+
+    /* Multiply the divisor y by qhat. */
+    mpz_realloc(mrb, &prod, yd + 1);
+    mul1(mrb, &prod, &y, qhat);  /* prod = y * qhat */
+
+    /* Subtract prod from x, starting at limb index-yd+1. */
+    {
+      size_t off = index - (yd - 1);
+      mp_limb2 borrow = 0;
+      for (size_t j = 0; j < prod.sz || borrow; j++) {
+        uint64_t diff = (uint64_t)x.p[off + j];
+        uint64_t sub  = (uint64_t)((j < prod.sz) ? prod.p[j] : 0) + borrow;
+        if (diff >= sub) {
+          x.p[off + j] = (mp_limb2)(diff - sub);
+          borrow = 0;
+        }
+        else {
+          x.p[off + j] = (mp_limb2)((((uint64_t)1 << DIG_SIZE) + diff) - sub);
+          borrow = 1;
+        }
+      }
+    }
+
+    /*
+      If subtraction went "negative", then qhat was too large by 1.
+      Correct by adding y back to x and decrementing qhat.
+    */
+    if ((int64_t)x.p[index + 1] < 0) {
+      /* Add y back to restore correctness. */
+      mp_limb2 carry = 0;
+      for (size_t j = 0; j < yd || carry; j++) {
+        uint64_t sum = (uint64_t)x.p[index - yd + 1 + j] +
+                       (uint64_t)((j < yd) ? y.p[j] : 0) + carry;
+        x.p[index - yd + 1 + j] = (mp_limb2)sum;
+        carry = (mp_limb2)(sum >> DIG_SIZE);
+      }
+      qhat--;
+    }
+
+    /* Store the final quotient digit. */
+    q.p[index - (yd - 1)] = qhat;
+  }
+
+  mpz_clear(mrb, &prod);
+}

@@ -1,0 +1,65 @@
+if (header->caplen < ip_offset + sizeof(struct ndpi_udphdr))
+  goto tunnel_end;
+
+{
+  struct ndpi_udphdr *udph = (struct ndpi_udphdr *)&packet[ip_offset];
+  uint16_t udp_src = ntohs(udph->source);
+  uint16_t udp_dst = ntohs(udph->dest);
+  size_t udp_payload_offset = ip_offset + sizeof(struct ndpi_udphdr);
+
+  if (udp_payload_offset > header->caplen)
+    goto tunnel_end;
+
+  /* Check for GTP-U: standard port 2152 */
+  if (udp_src == 2152 || udp_dst == 2152) {
+    if (header->caplen >= udp_payload_offset + 8) {
+      uint8_t gtp_flags = packet[udp_payload_offset];
+      uint8_t gtp_msg_type = packet[udp_payload_offset + 1];
+      uint8_t gtp_version = gtp_flags >> 5;
+      if (gtp_version == 1 && gtp_msg_type == 0xff) {
+        ip_offset = udp_payload_offset + 8;
+        tunnel_type = ndpi_gtp_tunnel;
+        goto tunnel_end;
+      }
+    }
+  }
+
+  /* Check for TZSP: typical port 37008 */
+  if (udp_src == 37008 || udp_dst == 37008) {
+    if (header->caplen >= udp_payload_offset + 2) {
+      uint8_t tzsp_version = packet[udp_payload_offset];
+      if (tzsp_version == 1) {
+        size_t tzsp_offset = udp_payload_offset + 2; // Skip version and type fields
+        while (tzsp_offset < header->caplen) {
+          uint8_t tag_type = packet[tzsp_offset];
+          if (tag_type == 1) { // End tag
+            tzsp_offset++;
+            break;
+          }
+          if (tzsp_offset + 1 >= header->caplen)
+            break;
+          uint8_t tag_len = packet[tzsp_offset + 1];
+          tzsp_offset += 2 + tag_len;
+        }
+        if (tzsp_offset <= header->caplen) {
+          ip_offset = tzsp_offset;
+          tunnel_type = ndpi_tzsp_tunnel;
+          goto tunnel_end;
+        }
+      }
+    }
+  }
+
+  /* Check for CAPWAP: using source port 5246 or 5247 */
+  if (udp_src == 5246 || udp_src == 5247) {
+    if (header->caplen >= udp_payload_offset + 4) {
+      uint8_t capwap_ver = packet[udp_payload_offset] >> 4;
+      if (capwap_ver == 1) {
+        ip_offset = udp_payload_offset + 4;
+        tunnel_type = ndpi_capwap_tunnel;
+        goto tunnel_end;
+      }
+    }
+  }
+}
+tunnel_end:

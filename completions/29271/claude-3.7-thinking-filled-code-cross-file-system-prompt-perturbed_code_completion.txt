@@ -1,0 +1,57 @@
+if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &serialized_data_buffer, &buf_len) == FAILURE) {
+    RETURN_THROWS();
+}
+
+if (buf_len == 0) {
+    return;
+}
+
+s = p = (const unsigned char*)serialized_data_buffer;
+PHP_VAR_UNSERIALIZE_INIT(var_hash);
+
+zval *pmembers;
+zval *data = var_tmp_var(&var_hash);
+if (!php_var_unserialize(data, &p, s + buf_len, &var_hash) || Z_TYPE_P(data) != IS_ARRAY) {
+    goto outexcept;
+}
+
+/* storage */
+zval *storage = zend_hash_index_find(Z_ARRVAL_P(data), 0);
+if (!storage || Z_TYPE_P(storage) != IS_ARRAY) {
+    goto outexcept;
+}
+
+HashTable *ht = Z_ARRVAL_P(storage);
+zend_long num_elements = zend_hash_num_elements(ht);
+
+/* Storage array should have an even number of elements (object, info pairs) */
+if (num_elements % 2 != 0) {
+    goto outexcept;
+}
+
+/* Process object and info pairs */
+zval *obj, *inf;
+zend_ulong idx;
+ZEND_HASH_FOREACH_NUM_KEY_VAL(ht, idx, obj) {
+    if (idx % 2 == 0) {
+        /* This is an object */
+        if (Z_TYPE_P(obj) != IS_OBJECT) {
+            goto outexcept;
+        }
+        
+        /* Get the associated info, should be the next element */
+        inf = zend_hash_index_find(ht, idx + 1);
+        if (!inf) {
+            goto outexcept;
+        }
+        
+        /* Attach the object with its info to the storage */
+        spl_SplObjectStorageElement *elem = spl_object_storage_get(intern, Z_OBJ_P(obj));
+        if (elem) {
+            zval_ptr_dtor(&elem->inf);
+            ZVAL_COPY(&elem->inf, inf);
+        } else {
+            spl_object_storage_attach(intern, Z_OBJ_P(obj), inf);
+        }
+    }
+} ZEND_HASH_FOREACH_END();

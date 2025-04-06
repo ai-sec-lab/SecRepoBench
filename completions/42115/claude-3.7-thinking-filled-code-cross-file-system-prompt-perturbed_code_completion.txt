@@ -1,0 +1,93 @@
+if(len >= sizeof(dNSName))
+  len = sizeof(dNSName) - 1;
+
+memcpy(dNSName, &packet->payload[i + 2], len);
+dNSName[len] = '\0';
+
+if(general_name_type == 0x87) {
+  char str_ip[64];
+  
+  /* IPv4 */
+  if(len == 4) {
+    snprintf(str_ip, sizeof(str_ip), "%u.%u.%u.%u",
+             dNSName[0] & 0xFF, dNSName[1] & 0xFF, 
+             dNSName[2] & 0xFF, dNSName[3] & 0xFF);
+    
+    memcpy(dNSName, str_ip, strlen(str_ip) + 1);
+  } else if(len == 16) { /* IPv6 */
+    int j, idx = 0;
+    
+    for(j = 0; j < 16; j += 2) {
+      idx += snprintf(&str_ip[idx], sizeof(str_ip)-idx, 
+                     "%s%02x%02x", (j > 0) ? ":" : "",
+                     dNSName[j] & 0xFF, dNSName[j+1] & 0xFF);
+    }
+    
+    memcpy(dNSName, str_ip, strlen(str_ip) + 1);
+  }
+}
+
+/* Let's clean up the name */
+ndpi_normalize_printable_string(dNSName, len);
+
+#ifdef DEBUG_TLS
+printf("[TLS] dNSName [%s][len: %u][type: %u]\n", dNSName, len, general_name_type);
+#endif
+
+if(ndpi_is_printable_string((u_char*)dNSName, len) == 0) {
+  ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+}
+
+/* Let's check if this name matches something we're looking for */
+if(general_name_type == 0x82 && connection->host_server_name[0] != '\0') {
+  if(strcasecmp(dNSName, connection->host_server_name) == 0) {
+    matched_name = 1;
+  }
+}
+
+/* Add server name to flow */
+if(general_name_type == 0x82 /* dNSName */) {
+  if(connection->protos.tls_quic.server_names == NULL)
+    connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+  else {
+    int l = strlen(connection->protos.tls_quic.server_names);
+    
+    if(l < NDPI_MAX_TLS_HOSTNAME_LEN) {
+      u_int new_len = l + strlen(dNSName) + 1 /* , */ + 1 /* \0 */;
+      char *new_str = (char*)ndpi_realloc(connection->protos.tls_quic.server_names, l+1, new_len);
+      
+      if(new_str) {
+        connection->protos.tls_quic.server_names = new_str;
+        connection->protos.tls_quic.server_names[l] = ',';
+        strcpy(&connection->protos.tls_quic.server_names[l+1], dNSName);
+      }
+    }
+  }
+  
+  if(connection->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+    u_int32_t val;
+    int rc = ndpi_match_string_value(ndpi_struct->tls_cert_altname_automa.ac_automa,
+                                     dNSName, strlen(dNSName), &val);
+    
+    if(rc == 0) {
+      /* Match found */
+      u_int16_t proto_id = (u_int16_t)val;
+      ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED};
+      
+      connection->detected_protocol_stack[0] = proto_id,
+      connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+      
+      connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+      ndpi_check_subprotocol_risk(ndpi_struct, connection, proto_id);
+      
+      if(ndpi_struct->tls_cert_cache == NULL)
+        ndpi_struct->tls_cert_cache = ndpi_lru_cache_init(1024);
+      
+      if(ndpi_struct->tls_cert_cache && packet->iph) {
+        u_int32_t key = packet->iph->saddr + packet->tcp->source; /* Server */
+        
+        ndpi_lru_add_to_cache(ndpi_struct->tls_cert_cache, key, proto_id);
+      }
+    }
+  }
+}

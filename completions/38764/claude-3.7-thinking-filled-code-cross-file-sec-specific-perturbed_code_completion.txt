@@ -1,0 +1,59 @@
+p = b;
+while (step > 0) {
+    size_t remaining = step;
+    int entry_len, name_len;
+    struct file_info *file;
+    
+    /* Ensure we have enough data to read the entry length */
+    if (remaining < 1)
+        break;
+    
+    /* Get and validate entry length */
+    entry_len = *p;
+    if (entry_len == 0 || entry_len < 34 || (size_t)entry_len > remaining)
+        break;
+    
+    /* Validate we can safely read the name length */
+    name_len = p[32];
+    if (33 + name_len > entry_len || 33 + name_len > remaining)
+        break;
+    
+    /* Skip "." and ".." entries */
+    if (name_len == 1 && (p[33] == 0 || p[33] == 1)) {
+        p += entry_len;
+        step -= entry_len;
+        continue;
+    }
+    
+    /* Allocate and initialize file info structure */
+    file = calloc(1, sizeof(*file));
+    if (file == NULL) {
+        archive_set_error(&archivereader->archive, ENOMEM, 
+                          "No memory for file info");
+        return (ARCHIVE_FATAL);
+    }
+    
+    /* Extract file information from directory entry */
+    file->offset = archive_le32dec(p + 2);
+    file->size = archive_le32dec(p + 10);
+    file->parent = parent;
+    
+    /* Parse file name safely */
+    archive_string_init(&file->name);
+    archive_strncpy(&file->name, (const char *)(p + 33), name_len);
+    
+    /* Handle multi-extent files */
+    if (multi != NULL && multi->offset == file->offset) {
+        /* This is a continuation of a multi-extent file */
+        multi->size += file->size;
+        free(file);
+    } else {
+        /* This is a new file */
+        multi = file;
+        parent->subdirs++;
+    }
+    
+    /* Move to next entry */
+    p += entry_len;
+    step -= entry_len;
+}

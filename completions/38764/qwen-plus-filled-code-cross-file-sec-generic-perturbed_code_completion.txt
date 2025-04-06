@@ -1,0 +1,51 @@
+p = b;
+while (step > 0) {
+	if (*p == '\0') {
+		// Skip entries for '.' and '..' directories.
+		if (*(p + 1) == '\x01' || *(p + 1) == '\x02') {
+			step -= 34; // Length of a directory entry
+			p += 34;
+			continue;
+		}
+
+		// Parse the file information from the directory entry.
+		struct file_info *file = malloc(sizeof(struct file_info));
+		if (!file) {
+			archive_set_error(&archivereader->archive, ENOMEM,
+			    "Can't allocate memory for file info");
+			return (ARCHIVE_FATAL);
+		}
+		memset(file, 0, sizeof(struct file_info));
+
+		file->mode = ((p[2] & 0x02) ? AE_IFDIR : AE_IFREG);
+		file->size = le32toh(*(uint32_t *)(p + 28));
+		file->offset = iso9660->current_position - step + le32toh(*(uint32_t *)(p + 2));
+		file->name.s = strdup((const char *)(p + 33));
+		if (!file->name.s) {
+			free(file);
+			archive_set_error(&archivereader->archive, ENOMEM,
+			    "Can't allocate memory for file name");
+			return (ARCHIVE_FATAL);
+		}
+		file->name.length = strlen(file->name.s);
+
+		// Manage multi-extent files by collecting their contents into a list.
+		if (multi && multi->number == file->number) {
+			file->next = multi->next;
+			multi->next = file;
+			multi = file;
+		} else {
+			// For each valid directory entry, add it to the archive structure.
+			if (add_to_archive(archivereader, file) != ARCHIVE_OK) {
+				free_file_info(file);
+				return (ARCHIVE_WARN);
+			}
+			if (file->pz) {
+				multi = file;
+			}
+		}
+	}
+
+	step -= *(p + 32); // Move to the next directory entry
+	p += *(p + 32);
+}

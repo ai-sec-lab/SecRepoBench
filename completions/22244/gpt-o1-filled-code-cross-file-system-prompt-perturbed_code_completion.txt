@@ -1,0 +1,61 @@
+{
+  NDPI_LOG_DBG(ndpi_struct, "search openvpn\n");
+
+  /* Basic length check for operation code */
+  if (packet->payload_packet_len < 1) {
+    return; /* Not enough data to proceed */
+  }
+
+  /* If over TCP, skip first 2 bytes (often used for packet framing) */
+  if (packet->tcp != NULL && packet->payload_packet_len >= 2) {
+    ovpn_payload += 2;
+  }
+
+  operationcode = ovpn_payload[0];
+
+  /* Additional checks for UDP-based OpenVPN */
+  if (packet->udp != NULL) {
+    /* First packet heuristic */
+    if (flow->openvpn_counter == 0) {
+      if (packet->payload_packet_len == 14 && operationcode == 0x38) {
+        /* Likely an OpenVPN client handshake */
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+        return;
+      }
+    }
+    /* Check for client reset and try to store a session ID */
+    else if (flow->openvpn_counter < 3 && operationcode == 0x01) {
+      if (packet->payload_packet_len > 2) {
+        alen = ovpn_payload[1];
+        if (packet->payload_packet_len >= (2 + alen)) {
+          session_remote = ovpn_payload + 2;
+          /* Store session ID in flow structure for later verification */
+        }
+      }
+    }
+    /* Check for server reset and verify session ID against stored one */
+    else if (flow->openvpn_counter >= 3 && flow->openvpn_counter < 6 && operationcode == 0x02) {
+      if (packet->payload_packet_len > 2) {
+        alen = ovpn_payload[1];
+        if (packet->payload_packet_len >= (2 + alen)) {
+          session_remote = ovpn_payload + 2;
+          /* Compare with previously stored session ID */
+          if (/* session_remote matches stored session ID */) {
+            ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+            return;
+          } else {
+            failed = 1;
+          }
+        }
+      }
+    }
+  }
+
+  /* Increment the flow's OpenVPN counter after processing */
+  flow->openvpn_counter++;
+
+  /* If detection failed, exclude OpenVPN from further consideration */
+  if (failed) {
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+  }
+}

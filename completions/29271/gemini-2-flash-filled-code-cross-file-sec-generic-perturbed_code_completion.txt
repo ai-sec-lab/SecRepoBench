@@ -1,0 +1,81 @@
+zval *pmembers;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &serialized_data_buffer, &buf_len) == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	if (!buf_len) {
+		return;
+	}
+
+	p = (const unsigned char*)serialized_data_buffer;
+	s = p;
+
+	PHP_VAR_UNSERIALIZE_INIT(var_hash);
+
+	/* unserialize storage */
+	if (*p != 'x' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	{
+		zval tmp_zval;
+		if (!php_var_unserialize(&tmp_zval, &p, s + buf_len, &var_hash)) {
+			goto outexcept;
+		}
+
+		if (Z_TYPE(tmp_zval) != IS_ARRAY) {
+			zval_ptr_dtor(&tmp_zval);
+			goto outexcept;
+		}
+
+		HashTable *tmp_hash = Z_ARRVAL(tmp_zval);
+		zend_long num_elems = zend_hash_num_elements(tmp_hash);
+		if (num_elems % 2 != 0) {
+			zend_throw_exception_ex(spl_ce_UnexpectedValueException, 0, "Unexpected number of elements %zd", num_elems);
+			zend_array_destroy(tmp_hash);
+			zval_ptr_dtor(&tmp_zval);
+			RETURN_THROWS();
+		}
+
+		zend_hash_internal_pointer_reset(tmp_hash);
+		for (zend_long i = 0; i < num_elems; i += 2) {
+			zval *obj = zend_hash_get_current_data(tmp_hash);
+			zend_object *z_obj;
+			zval *inf;
+
+			if (!obj || Z_TYPE_P(obj) != IS_OBJECT) {
+				zend_array_destroy(tmp_hash);
+				zval_ptr_dtor(&tmp_zval);
+				goto outexcept;
+			}
+			z_obj = Z_OBJ_P(obj);
+			zend_hash_move_forward(tmp_hash);
+
+			inf = zend_hash_get_current_data(tmp_hash);
+			if (!inf) {
+				zend_array_destroy(tmp_hash);
+				zval_ptr_dtor(&tmp_zval);
+				goto outexcept;
+			}
+			zend_hash_move_forward(tmp_hash);
+
+			spl_SplObjectStorageElement *new_elem = emalloc(sizeof(spl_SplObjectStorageElement));
+			zend_object *handle = &z_obj->std;
+
+			/* Check if the object is already in the storage */
+			spl_SplObjectStorageElement **existing_elem = zend_hash_findPtr(&intern->storage, handle);
+			if (existing_elem) {
+				efree(new_elem);
+			} else {
+				/* Add the object to the storage */
+				zend_hash_addPtr(&intern->storage, handle, new_elem);
+				new_elem->obj = z_obj;
+				zend_object_addref(z_obj);
+				ZVAL_COPY(&new_elem->inf, inf);
+			}
+		}
+		zend_array_destroy(tmp_hash);
+		zval_ptr_dtor(&tmp_zval);
+	}

@@ -7,29 +7,37 @@ if (obj->type != DWG_TYPE_JUMP_r11)
 {
     SINCE (R_2_0b) // Pre R_2_0 doesn't contain size of entity
     {
-        size_t obj_end = obj->address + obj->size;
-        if (obj_end > bit_chain->byte)
+        size_t obj_size = dat->byte - obj->address;
+        if (obj_size > obj->size)
         {
-            LOG_WARN("Object size %lu exceeds data size %zu, adjusting", obj->size, bit_chain->byte - obj->address);
-            obj->size = bit_chain->byte - obj->address;
+            LOG_WARN("Object size %" PRIuSIZE " exceeds data size %" PRIuSIZE ", adjusting", obj_size, obj->size);
+            obj->size = obj_size;
         }
-        else if (obj_end < bit_chain->byte)
+        else if (obj_size < obj->size)
         {
-            size_t unknown_size = bit_chain->byte - obj_end;
-            LOG_TRACE("Extracting %zu bytes of unknown data", unknown_size);
-            obj->unknown_bits = calloc(1, unknown_size);
-            memcpy(obj->unknown_bits, &bit_chain->chain[obj_end], unknown_size);
-            obj->num_unknown_bits = 8 * unknown_size;
-        }
-        // Perform CRC checks for later versions
-        SINCE (R_2007)
-        {
-            Bit_Chain crc_chain = *bit_chain;
-            bit_set_position(&crc_chain, obj->address);
-            BITCODE_CRC calculated_crc = bit_calc_CRC(0xC0C1, &crc_chain, obj->size);
-            if (calculated_crc != obj->crc)
+            size_t unknown_size = obj->size - obj_size;
+            LOG_WARN("Object size %" PRIuSIZE " less than data size %" PRIuSIZE ", extracting %" PRIuSIZE " bytes of unknown data",
+                     obj_size, obj->size, unknown_size);
+            obj->unknown_bits = bit_read_bits(dat, unknown_size * 8);
+            if (!obj->unknown_bits)
             {
-                LOG_ERROR("Object CRC mismatch: calculated 0x%04X, expected 0x%04X", calculated_crc, obj->crc);
+                LOG_ERROR("Failed to read unknown data");
+                return DWG_ERR_VALUEOUTOFBOUNDS;
+            }
+            LOG_TRACE("unknown_bits [%" PRIuSIZE " bytes]: ", unknown_size);
+            LOG_TRACE_TF(obj->unknown_bits, unknown_size);
+            LOG_TRACE("\n");
+        }
+
+        // Perform CRC checks for later versions
+        SINCE (R_2_0b)
+        {
+            BITCODE_CRC expected_crc = bit_read_CRC(dat);
+            BITCODE_CRC calculated_crc = dwg_crc32(obj->address, obj->size, 0xC0C1);
+            if (expected_crc != calculated_crc)
+            {
+                LOG_ERROR("CRC mismatch for object at 0x%lx, expected 0x%04X, got 0x%04X",
+                          obj->address, expected_crc, calculated_crc);
                 return DWG_ERR_WRONGCRC;
             }
         }

@@ -1,0 +1,56 @@
+int32_t coffsets_cbytes = 0;
+  // Retrieve the offsets chunk
+  uint8_t* coffsets = get_coffsets(frame, headerlength, cbytes, &coffsets_cbytes);
+  if (coffsets == NULL) {
+    BLOSC_TRACE_ERROR("Cannot get the offsets chunk for the frame.");
+    return BLOSC2_ERROR_DATA;
+  }
+
+  // Retrieve the number of chunks from the frame
+  int32_t hlen, chunksize, typesize, nchunks;
+  int64_t flen, nbyts, cbyts;
+  int ret = get_header_info(frame, &hlen, &flen, &nbyts, &cbyts, &chunksize, &nchunks,
+                            &typesize, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return ret;
+  }
+  if (nchunk < 0 || nchunk >= nchunks) {
+    BLOSC_TRACE_ERROR("Invalid chunk index %d (total nchunks=%d).", nchunk, nchunks);
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  // If offsets chunk size is unknown, set it
+  if (coffsets_cbytes == 0) {
+    coffsets_cbytes = (int32_t)cbytes;
+  }
+
+  // Decompress the offsets
+  int64_t* offsets_buf = (int64_t*)malloc((size_t)nchunks * sizeof(int64_t));
+  if (offsets_buf == NULL) {
+    BLOSC_TRACE_ERROR("Cannot allocate memory for offsets buffer.");
+    return BLOSC2_ERROR_MEMORY_ALLOC;
+  }
+  blosc2_dparams off_dparams = BLOSC2_DPARAMS_DEFAULTS;
+  blosc2_context* dctx = blosc2_create_dctx(off_dparams);
+  int32_t dec_nbytes = blosc2_decompress_ctx(dctx, coffsets, coffsets_cbytes,
+                                             offsets_buf, nchunks * sizeof(int64_t));
+  blosc2_free_ctx(dctx);
+  if (dec_nbytes < 0) {
+    free(offsets_buf);
+    BLOSC_TRACE_ERROR("Cannot decompress offsets chunk.");
+    return dec_nbytes;
+  }
+
+  // Decode the offset for the requested chunk
+  uint64_t offset_val = (uint64_t)offsets_buf[nchunk];
+  if (offset_val & ((uint64_t)1 << 63)) {
+    // Special chunk
+    int runcode = (int)((offset_val >> 56) & 0xFF);
+    *offset = -(int64_t)runcode;
+  } else {
+    *offset = (int64_t)offset_val;
+  }
+
+  free(offsets_buf);
+  return 0;

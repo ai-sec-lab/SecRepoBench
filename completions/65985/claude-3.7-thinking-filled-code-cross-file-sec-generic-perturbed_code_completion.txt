@@ -1,0 +1,74 @@
+if (ctx->bytes_in_header) {
+    // We have bytes from previous packet that might contain a start code
+    // Add enough bytes from current packet to check
+    u32 check_size = (ctx->bytes_in_header < 3) ? (4 - ctx->bytes_in_header) : 1;
+    if (check_size > (u32)remain)
+        check_size = remain;
+    
+    // Append new bytes to what we have stored
+    memcpy(ctx->hdr_store + ctx->bytes_in_header, start, check_size);
+    
+    // Check if we have a start code
+    current = mpgviddmx_next_start_code(ctx->hdr_store, ctx->bytes_in_header + check_size);
+    
+    if (current >= 0) {
+        // Found a start code, prepare to parse it
+        forced_sc_type = ctx->hdr_store[current+3];
+        sc_type_forced = GF_TRUE;
+        hdr_offset = current + 4;
+        bytes_from_store = ctx->bytes_in_header + check_size - hdr_offset;
+        
+        // Include the bytes before the start code for dispatch if we already started a frame
+        if (current > 0 && ctx->frame_started) {
+            dst_pck = gf_filter_pck_new_alloc(ctx->opid, current, &packet_data);
+            if (!dst_pck) return GF_OUT_OF_MEM;
+            
+            if (ctx->src_pck) gf_filter_pck_merge_properties(ctx->src_pck, dst_pck);
+            memcpy(packet_data, ctx->hdr_store, current);
+            gf_filter_pck_set_framing(dst_pck, GF_FALSE, GF_FALSE);
+            gf_filter_pck_set_cts(dst_pck, GF_FILTER_NO_TS);
+            gf_filter_pck_set_dts(dst_pck, GF_FILTER_NO_TS);
+            
+            if (byte_offset != GF_FILTER_NO_BO) {
+                gf_filter_pck_set_byte_offset(dst_pck, byte_offset - ctx->bytes_in_header);
+            }
+            
+            mpgviddmx_enqueue_or_dispatch(ctx, dst_pck, GF_FALSE, GF_FALSE);
+        }
+        
+        // Copy remaining bytes from store to the beginning of it
+        if (bytes_from_store) {
+            memmove(ctx->hdr_store, ctx->hdr_store + hdr_offset, bytes_from_store);
+        }
+        ctx->bytes_in_header = bytes_from_store;
+        
+        // Skip the bytes we've processed from the new packet
+        if (check_size) {
+            start += check_size;
+            remain -= check_size;
+            if (byte_offset != GF_FILTER_NO_BO)
+                byte_offset += check_size;
+        }
+    } else {
+        // No start code found, dispatch all stored bytes as continuation if we already started a frame
+        if (ctx->frame_started) {
+            dst_pck = gf_filter_pck_new_alloc(ctx->opid, ctx->bytes_in_header, &packet_data);
+            if (!dst_pck) return GF_OUT_OF_MEM;
+            
+            if (ctx->src_pck) gf_filter_pck_merge_properties(ctx->src_pck, dst_pck);
+            memcpy(packet_data, ctx->hdr_store, ctx->bytes_in_header);
+            gf_filter_pck_set_framing(dst_pck, GF_FALSE, GF_FALSE);
+            gf_filter_pck_set_cts(dst_pck, GF_FILTER_NO_TS);
+            gf_filter_pck_set_dts(dst_pck, GF_FILTER_NO_TS);
+            
+            if (byte_offset != GF_FILTER_NO_BO) {
+                gf_filter_pck_set_byte_offset(dst_pck, byte_offset - ctx->bytes_in_header);
+            }
+            
+            mpgviddmx_enqueue_or_dispatch(ctx, dst_pck, GF_FALSE, GF_FALSE);
+        }
+        
+        // Reset header buffer
+        ctx->bytes_in_header = 0;
+    }
+}

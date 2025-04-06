@@ -1,0 +1,82 @@
+{
+                /* Identify the DCC command (SEND, CHAT, sslchat, TSEND, etc.) */
+                static const char *dcc_cmds[] = {"SEND", "CHAT", "sslchat", "TSEND"};
+                u_int8_t cmd_found = 0, sp_count = 0;
+                u_int16_t port = 0;
+                size_t cmd_len;
+                unsigned int cmd_idx;
+
+                /* Check which DCC command follows "DCC " */
+                for (cmd_idx = 0; cmd_idx < (sizeof(dcc_cmds)/sizeof(dcc_cmds[0])); cmd_idx++) {
+                  cmd_len = strlen(dcc_cmds[cmd_idx]);
+                  if (j + cmd_len <= packet->line[i].len &&
+                      ndpi_strncasecmp(&packet->line[i].ptr[j], dcc_cmds[cmd_idx], cmd_len) == 0) {
+                    cmd_found = 1;
+                    /* Advance index past the command */
+                    j += cmd_len;
+                    break;
+                  }
+                }
+                if(!cmd_found)
+                  continue;
+
+                /* Move j until we reach the third space after the command, which should precede the port. */
+                sp_count = 0;
+                while (j < packet->line[i].len && sp_count < 3) {
+                  if (packet->line[i].ptr[j] == ' ')
+                    sp_count++;
+                  j++;
+                }
+                if (sp_count < 3 || j >= packet->line[i].len) {
+                  /* Could not locate port */
+                  continue;
+                }
+
+                /* Parse the port: read consecutive digits */
+                {
+                  u_int32_t tmp_port = 0;
+                  while (j < packet->line[i].len && isdigit((unsigned char)packet->line[i].ptr[j])) {
+                    tmp_port = (tmp_port * 10) + (packet->line[i].ptr[j] - '0');
+                    /* Avoid overflow */
+                    if (tmp_port > 65535) {
+                      tmp_port = 0;
+                      break;
+                    }
+                    j++;
+                  }
+                  port = (u_int16_t)tmp_port;
+                }
+
+                /* If we got a valid port, store it */
+                if (port > 0 && port <= 65535) {
+                  struct ndpi_id_struct *who = dst ? dst : src_id;
+                  if (who != NULL) {
+                    /* Check if this port is already known; update timestamp if so */
+                    for (k = 0; k < who->irc_number_of_port; k++) {
+                      if (who->irc_port[k] == port) {
+                        who->last_time_port_used[k] = packet->tick_timestamp;
+                        goto continue_parsing;
+                      }
+                    }
+                    /* Port not known yet; if there's space, add it directly */
+                    if (who->irc_number_of_port < NDPI_MAX_PORTS) {
+                      who->irc_port[who->irc_number_of_port] = port;
+                      who->last_time_port_used[who->irc_number_of_port] = packet->tick_timestamp;
+                      who->irc_number_of_port++;
+                    } else {
+                      /* If it's full, replace the least recently used port if it's not a duplicate */
+                      u_int16_t oldest_idx = 0;
+                      u_int32_t oldest_ts = who->last_time_port_used[0];
+                      for (k = 1; k < who->irc_number_of_port; k++) {
+                        if (who->last_time_port_used[k] < oldest_ts) {
+                          oldest_ts = who->last_time_port_used[k];
+                          oldest_idx = k;
+                        }
+                      }
+                      who->irc_port[oldest_idx] = port;
+                      who->last_time_port_used[oldest_idx] = packet->tick_timestamp;
+                    }
+                  }
+                }
+              }
+continue_parsing:

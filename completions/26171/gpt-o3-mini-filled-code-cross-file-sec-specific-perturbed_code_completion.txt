@@ -1,0 +1,58 @@
+int32_t ntbytes = 0;
+int32_t last_filter_index = -1;
+int32_t nstreams = (context->nstreams > 0) ? context->nstreams : 1;
+int32_t base = bsize / nstreams;
+int32_t rem = bsize % nstreams;
+int32_t stream_offset = destinationoffset;
+for (int j = 0; j < nstreams; j++) {
+    /* Determine the uncompressed size for this stream */
+    int32_t stream_size = base + (j < rem ? 1 : 0);
+
+    /* Ensure there is enough data to read the 4-byte compressed size */
+    if (src_offset + 4 > srcsize) {
+      return -1;
+    }
+    int32_t cbytes = sw32_(src + src_offset);
+    src_offset += 4;
+
+    if (cbytes == 0) {
+      /* Uncompressed data: verify that there is enough input */
+      if (src_offset + stream_size > srcsize) {
+        return -1;
+      }
+      memcpy(dest + stream_offset, src + src_offset, (unsigned int)stream_size);
+      src_offset += stream_size;
+    }
+    else if (cbytes < 0) {
+      /* Propagate error code */
+      return cbytes;
+    }
+    else {
+      /* Compressed data: ensure compressed stream is within bounds */
+      if (src_offset + cbytes > srcsize) {
+        return -1;
+      }
+      int decompressed = 0;
+      switch (compformat) {
+        case BLOSC_BLOSCLZ:
+          decompressed = blosclz_decompress(src + src_offset, (unsigned int)cbytes,
+                                            dest + stream_offset, (unsigned int)stream_size);
+          break;
+        default:
+          return -1;
+      }
+      if (decompressed != stream_size) {
+        return -1;
+      }
+      src_offset += cbytes;
+    }
+    ntbytes += stream_size;
+    stream_offset += stream_size;
+}
+
+/* Determine the last active filter index */
+for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+  if (filters[i] != BLOSC_NOFILTER) {
+    last_filter_index = i;
+  }
+}

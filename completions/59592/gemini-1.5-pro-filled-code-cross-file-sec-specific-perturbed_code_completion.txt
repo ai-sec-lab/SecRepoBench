@@ -1,56 +1,54 @@
-bool result = false;
-    auto subset_glyphs = _generate_subset_glyphs (context->plan, font);
-    if (unlikely (subset_glyphs.failed ()))
-      goto cleanup;
+bool result = true;
+    auto compiled_glyphs = hb_malloc<SubsetGlyph> (context->plan->glyphs.length);
+    if (unlikely (!compiled_glyphs)) return_trace (false);
+    defer (hb_free (compiled_glyphs));
 
-    if (font) {
-      hb_font_destroy (font);
-      font = nullptr;
-    }
-
-    unsigned glyf_count = subset_glyphs.length;
-    unsigned *padded_offsets = (unsigned *) calloc (glyf_count + 1, sizeof (unsigned));
-    if (unlikely (!padded_offsets))
-      goto cleanup;
-
-    bool short_loca = _calculate_padded_offsets (subset_glyphs, padded_offsets);
-
-    hb_blob_t *glyf_blob = hb_blob_create (0);
-    if (unlikely (!glyf_blob))
+    unsigned int glyph_count = context->plan->glyphs.length;
+    for (unsigned int i = 0; i < glyph_count; i++)
     {
-      free (padded_offsets);
-      goto cleanup;
+      hb_codepoint_t glyph = context->plan->glyphs[i];
+      compiled_glyphs[i].init (glyph);
     }
 
-    hb_serialize_context_t serializer (glyf_blob);
-    serializer.start_serialize<BigEndian> ();
-
-    glyf_table_t::serialize_glyf (serializer,
-				  context,
-				  subset_glyphs,
-				  padded_offsets,
-				  short_loca);
-
-    if (serializer.in_error ())
-    {
-      serializer.end_serialize ();
-      hb_blob_destroy (glyf_blob);
-      free (padded_offsets);
-      goto cleanup;
-    }
-
-    serializer.end_serialize ();
-
-    context->glyf_blob = glyf_blob;
-    context->glyf_offset = 0;
-    context->loca_is_short = short_loca;
-
-    free (padded_offsets);
-    result = true;
-
-  cleanup:
     if (font)
+    {
+      for (unsigned int i = 0; i < glyph_count; i++)
+        compiled_glyphs[i].compile (*this, context, font);
       hb_font_destroy (font);
+    }
+    else
+    {
+      for (unsigned int i = 0; i < glyph_count; i++)
+        compiled_glyphs[i].compile (*this, context);
+    }
 
-    if (!result)
-       _destroy_subset_glyphs (subset_glyphs);
+
+    /* Calculate padded offsets for each glyph. */
+    unsigned int total_size = 0;
+    for (unsigned int i = 0; i < glyph_count; i++)
+    {
+      compiled_glyphs[i].offset = total_size;
+      total_size += compiled_glyphs[i].size;
+    }
+
+    bool short_loca = total_size < 65536 &&
+                      !(context->plan->flags & HB_SUBSET_FLAGS_USE_LONG_LOCA);
+
+    glyf_subsetter_t::glyf_t glyf_prime;
+    if (unlikely (!glyf_prime.init ()))
+    {
+      result = false;
+      goto end;
+    }
+
+    if (unlikely (!glyf_prime.serialize (context,
+                                        *this,
+                                        compiled_glyphs, glyph_count,
+                                        short_loca)))
+    {
+      result = false;
+    }
+
+  end:
+    for (unsigned int i = 0; i < glyph_count; i++)
+      compiled_glyphs[i].free_compiled_bytes ();

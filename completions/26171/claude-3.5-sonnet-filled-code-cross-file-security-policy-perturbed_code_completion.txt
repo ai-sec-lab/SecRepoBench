@@ -1,0 +1,91 @@
+int32_t nstreams = context->typesize;
+int32_t neblock = context->blocksize / nstreams;
+int32_t nbytes = 0;
+int32_t ntbytes = 0;
+int32_t j = 0;
+int last_filter_index = -1;
+
+if (context->filter_flags & BLOSC_DOSHUFFLE) {
+  last_filter_index = BLOSC_MAX_FILTERS - 1;
+}
+
+/* Iterate over streams */
+for (j = 0; j < nstreams; j++) {
+  int32_t csizep = sw32_(src + src_offset);
+  if (csizep == 0) {
+    /* No data in this stream */
+    continue;
+  }
+  if (src_offset + sizeof(int32_t) > (uint32_t)srcsize) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+  src_offset += sizeof(int32_t);
+  if (csizep > 0) {
+    if (src_offset + csizep > (uint32_t)srcsize) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if (csizep == neblock) {
+      /* Uncompressed data */
+      memcpy(dest + destinationoffset + j * neblock, src + src_offset, (unsigned int)neblock);
+      src_offset += csizep;
+      nbytes += csizep;
+    } else {
+      /* Compressed data */
+      int32_t cbytes = blosc_decompress_unsafe(src + src_offset, csizep,
+                                               dest + destinationoffset + j * neblock,
+                                               neblock, compformat);
+      if (cbytes < 0) {
+        return cbytes;
+      }
+      src_offset += csizep;
+      nbytes += cbytes;
+    }
+  } else {
+    /* Run-length encoding */
+    if (src_offset + 1 > (uint32_t)srcsize) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    uint8_t value = src[src_offset];
+    src_offset++;
+    memset(dest + destinationoffset + j * neblock, value, (unsigned int)neblock);
+    nbytes += neblock;
+  }
+}
+
+ntbytes += nbytes;
+
+if (leftoverblock && j == nstreams) {
+  int32_t csizep = sw32_(src + src_offset);
+  if (src_offset + sizeof(int32_t) > (uint32_t)srcsize) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+  src_offset += sizeof(int32_t);
+  if (csizep > 0) {
+    if (src_offset + csizep > (uint32_t)srcsize) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if (csizep == leftoverblock) {
+      /* Uncompressed data */
+      memcpy(dest + destinationoffset + j * neblock, src + src_offset, (unsigned int)leftoverblock);
+      nbytes += leftoverblock;
+    } else {
+      /* Compressed data */
+      int32_t cbytes = blosc_decompress_unsafe(src + src_offset, csizep,
+                                               dest + destinationoffset + j * neblock,
+                                               leftoverblock, compformat);
+      if (cbytes < 0) {
+        return cbytes;
+      }
+      nbytes += cbytes;
+    }
+  } else {
+    /* Run-length encoding */
+    if (src_offset + 1 > (uint32_t)srcsize) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    uint8_t value = src[src_offset];
+    memset(dest + destinationoffset + j * neblock, value, (unsigned int)leftoverblock);
+    nbytes += leftoverblock;
+  }
+  ntbytes += nbytes;
+}

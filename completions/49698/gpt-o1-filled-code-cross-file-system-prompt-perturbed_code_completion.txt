@@ -1,0 +1,58 @@
+rv = EXR_ERR_SUCCESS;
+    pctxt = (decode ? decode->context : NULL);
+
+    /* We need at least 20 bytes for the Huffman header */
+    if (nCompressed < 20)
+    {
+        if (nRawSize != 0) return EXR_ERR_CORRUPT_CHUNK;
+        return EXR_ERR_SUCCESS;
+    }
+
+    /* Read the header values */
+    im = unaligned_load32(compressed);
+    iM = unaligned_load32(compressed + 4);
+    /* Skip reading tableLength from compressed+8, as it's not used below */
+    nBits = unaligned_load32(compressed + 12);
+    /* The next 4 bytes (compressed+16) are reserved for future extensions */
+
+    /* Validate the table sizes */
+    if (im >= HUF_ENCSIZE || iM >= HUF_ENCSIZE) return EXR_ERR_CORRUPT_CHUNK;
+
+    nBytes = (nBits + 7ULL) >> 3;
+    if (20ULL + nBytes > nCompressed) return EXR_ERR_CORRUPT_CHUNK;
+    ptr = compressed + 20;
+
+    /* 
+     * Check if fast Huffman decoding is enabled/applicable
+     * (placeholder check here; actual condition may differ in real implementation)
+     */
+#ifdef ENABLE_FAST_HUF
+    if (nBits > 128 && internal_huf_can_do_fast_decode())
+    {
+        rv = internal_huf_decode_fast(ptr, nBits, raw, (int)nRawSize);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+    }
+    else
+#endif
+    {
+        /* Use standard Huffman decoding */
+        uint64_t* freq   = (uint64_t*) spare; /* freq array for decoding */
+        HufDec*   hdec   = (HufDec*) (freq + HUF_ENCSIZE);
+
+        hufClearDecTable(hdec);
+
+        rv = hufUnpackEncTable(&ptr, (size_t)(nCompressed - (ptr - compressed)), im, iM, freq);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        /* Validate bit count against the remaining buffer */
+        if (nBits > 8U * (uint32_t)(nCompressed - (ptr - compressed)))
+            return EXR_ERR_CORRUPT_CHUNK;
+
+        rv = hufBuildDecTable(freq, im, iM, hdec);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        rv = hufDecode(freq, hdec, ptr, nBits, iM, (int)nRawSize, raw);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+    }
+
+    rv = EXR_ERR_SUCCESS;

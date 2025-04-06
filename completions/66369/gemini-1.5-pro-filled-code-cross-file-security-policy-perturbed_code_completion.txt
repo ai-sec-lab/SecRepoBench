@@ -1,0 +1,86 @@
+key = (char *)aux;
+        if (aux_end - aux < 3)
+            goto err;
+
+        if (key[0] == 'R' && key[1] == 'G' && key[2] == 'Z') {
+            if (!brg) {
+                brg = filedescriptor->header->hrecs->rg[cr->rg];
+            }
+
+            if (!brg) {
+                hts_log_warning("Read Group %d not found in header, setting RG tag to '*'", cr->rg);
+                key[2] = '*'; // Overwrite type
+            }
+        }
+
+        if (key[0] == 'M' && key[1] == 'D' && key[2] == 'Z' && verbatim_MD) {
+            if (MD->l > 0) {
+                MD->s[MD->l] = 0; // null terminate
+                if (MD->l > aux_size) {
+                    goto err;
+                }
+            }
+        }
+
+        if (key[0] == 'N' && key[1] == 'M' && key[2] == 'i' && verbatim_NM)
+            key[2] = '*'; // Overwrite type
+
+
+        k = kh_put(m_c2i, c->comp_hdr->tag_map, key, &new);
+        if (new < 0)
+            goto err;
+
+        cram_map *tm = &c->comp_hdr->TM[kh_val(c->comp_hdr->tag_map, k)];
+        if (new) {
+            tm->codec = cram_new_codec(CRAM_AUX, filedescriptor->version);
+            if (!tm->codec)
+                goto err;
+
+            // RG:Z => RG:* if not defined in header
+            if (key[0] == 'R' && key[1] == 'G' && key[2] == '*') {
+                tm->codec->encode = cram_rg_codec_encode;
+                tm->codec->decode = cram_rg_codec_decode;
+            }
+
+            if (cram_stats_add(c->stats[DS_aux_tags], key) < 0)
+                goto err;
+        }
+
+        if (s->aux_blk == NULL) {
+            s->aux_blk = cram_new_block(CRAM_AUX, 0);
+            if (!s->aux_blk)
+                goto err;
+        }
+
+        BLOCK_APPEND(td_b, key, 3);
+        TD_blk_size += 3;
+
+        if (tm->blk == NULL) {
+            tm->blk = cram_new_block(tm->codec->codec, 0);
+            if (!tm->blk)
+                goto err;
+        }
+
+        if (key[0] == 'M' && key[1] == 'D' && key[2] == 'Z' && verbatim_MD) {
+            if (MD->l > 0) {
+                BLOCK_APPEND(tm->blk, MD->s, MD->l + 1);
+                tm->blk->m = tm->m;
+            }
+            aux += 3 + MD->l + 1;
+        } else {
+            int32_t out_sz = 0;
+            if (tm->codec->encode(filedescriptor, tm->codec,
+                                 tm->blk, aux, aux_end - aux, &out_sz) < 0)
+                goto err;
+
+            aux += 3 + out_sz;
+        }
+
+        if (cram_stats_add(s->stats[DS_aux], aux - orig - 3) < 0)
+            goto err;
+
+        if (cram_stats_add(c->stats[DS_aux], aux - orig - 3) < 0)
+            goto err;
+
+        s->aux_bytes += aux - orig - 3;
+        c->s_aux_bytes += aux - orig - 3;

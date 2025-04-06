@@ -1,0 +1,65 @@
+{
+  struct ndpi_iphdr iph;
+  uint8_t l4proto;
+  const uint8_t *l4ptr;
+  uint16_t ip_len;
+
+  /* Initialize the IPv4 header structure to zero */
+  memset(&iph, 0, sizeof(iph));
+
+  /* Extract protocol from IPv6 header and set pointer to start of the payload */
+  l4proto = ipv6_header->ip6_nxt;
+  l4ptr   = (const uint8_t *)ipv6_header + sizeof(struct ndpi_ipv6hdr);
+
+  /* Compute total IPv6 packet length (header + payload), cap at ipsize to avoid overflow */
+  ip_len = ntohs(ipv6_header->payload_len) + (uint16_t)sizeof(struct ndpi_ipv6hdr);
+  if(ip_len > ipsize) ip_len = ipsize;
+
+  /* Populate IPv4 header fields: mimic conversion of IPv6 to IPv4 by taking last 4 bytes */
+  iph.version  = 4;
+  iph.ihl      = 5; /* Typical IPv4 header length without options */
+  iph.tot_len  = htons(ip_len);
+  memcpy(&iph.saddr, &ipv6_header->ip6_src.s6_addr[12], 4);
+  memcpy(&iph.daddr, &ipv6_header->ip6_dst.s6_addr[12], 4);
+
+  /*
+   * Process IPv6 extension headers safely:
+   * Hop-by-Hop (0), Routing (43), Fragment (44), ESP (50), AH (51), Dest (60).
+   * Update l4proto and advance l4ptr accordingly, ensuring we stay within bounds.
+   */
+  while(1) {
+    uint8_t ext_hdr = l4proto;
+    if(ext_hdr == 0  || /* Hop-by-Hop */
+       ext_hdr == 43 || /* Routing */
+       ext_hdr == 44 || /* Fragment */
+       ext_hdr == 51 || /* AH */
+       ext_hdr == 60) { /* Destination */
+      if((l4ptr + 2) > ((const uint8_t*)ipv6_header + ipsize)) break;
+      const struct ndpi_ipv6_ext_head *ext = (const struct ndpi_ipv6_ext_head *)l4ptr;
+      uint16_t hdr_size = 0;
+
+      switch(ext_hdr) {
+        case 0:
+        case 43:
+        case 60: /* Hop-by-Hop, Routing, Dest */
+          hdr_size = (ext->hdr_ext_len + 1) << 3;
+          break;
+        case 44: /* Fragment */
+          hdr_size = 8;
+          break;
+        case 51: /* AH */
+          hdr_size = (ext->hdr_ext_len + 2) << 2;
+          break;
+      }
+
+      l4proto = ext->next_header;
+      if((l4ptr + hdr_size) > ((const uint8_t*)ipv6_header + ipsize)) break;
+      l4ptr += hdr_size;
+    } else {
+      break;
+    }
+  }
+
+  /* Final assignment of the layer-4 protocol in the IPv4 header structure */
+  iph.protocol = l4proto;
+}

@@ -1,0 +1,111 @@
+struct ndpi_udphdr *udp;
+u_int16_t sport, dport;
+u_int8_t *payload;
+u_int16_t payload_len;
+
+/* Check if packet is long enough to contain UDP header */
+if (header->caplen < (ip_offset + ip_len + sizeof(struct ndpi_udphdr)))
+  return ndpiprotocol; /* Too short for UDP header */
+
+/* Get UDP header and payload */
+udp = (struct ndpi_udphdr *)&packet[ip_offset + ip_len];
+sport = ntohs(udp->source);
+dport = ntohs(udp->dest);
+
+/* Set payload pointer and length */
+payload = (u_int8_t*)&packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr)];
+payload_len = header->caplen - ip_offset - ip_len - sizeof(struct ndpi_udphdr);
+
+/* GTP-U detection (port 2152) */
+if ((sport == 2152) || (dport == 2152)) {
+  /* Check for minimum GTP-U header size */
+  if (payload_len >= 8) {
+    u_int8_t version = (payload[0] >> 5) & 0x07;
+    u_int8_t msg_type = payload[1];
+    
+    /* Check if it's a GTP-U v1 packet with G-PDU message type */
+    if ((version == 1) && (msg_type == 0xFF)) {
+      u_int8_t gtp_header_len = 8;
+      
+      /* Check for extension headers */
+      if (payload[0] & 0x04) {
+        if (payload_len >= 12) /* Need space for extension headers */
+          gtp_header_len += 4;
+      }
+      
+      /* Make sure packet is long enough */
+      if (payload_len >= gtp_header_len) {
+        /* Update IP offset to point to the inner IP header */
+        ip_offset += ip_len + sizeof(struct ndpi_udphdr) + gtp_header_len;
+        tunnel_type = ndpi_gtp_tunnel;
+        
+        /* Reparse the new IP header */
+        goto iph_check;
+      }
+    }
+  }
+}
+
+/* TZSP detection (port 37008) */
+if ((sport == 37008) || (dport == 37008)) {
+  /* Check for minimum TZSP header size */
+  if (payload_len >= 4) {
+    u_int8_t version = payload[0];
+    u_int8_t type = payload[1];
+    
+    /* Check if it's a TZSP v1 received packet */
+    if ((version == 1) && (type == 0)) {
+      u_int16_t encap_offset = 4; /* TZSP header size */
+      
+      /* Skip through TZSP tags until we reach the end marker (0) */
+      while ((encap_offset + 2 < payload_len) && (payload[encap_offset] != 0)) {
+        u_int8_t tag_len = payload[encap_offset + 1];
+        
+        /* Make sure we don't overflow */
+        if (tag_len + 2 > payload_len - encap_offset)
+          break;
+        
+        encap_offset += tag_len + 2;
+      }
+      
+      /* Skip the end marker if present */
+      if ((encap_offset < payload_len) && (payload[encap_offset] == 0))
+        encap_offset++;
+      
+      /* Check if there's data after the TZSP header */
+      if (encap_offset < payload_len) {
+        /* Update to process the encapsulated Ethernet frame */
+        datalink_type = DLT_EN10MB;
+        eth_offset = ip_offset + ip_len + sizeof(struct ndpi_udphdr) + encap_offset;
+        tunnel_type = ndpi_tzsp_tunnel;
+        
+        /* Re-process with the new datalink type and offset */
+        goto datalink_check;
+      }
+    }
+  }
+}
+
+/* CAPWAP detection (port 5246) */
+if ((sport == 5246) || (dport == 5246)) {
+  /* Check for minimum CAPWAP header size */
+  if (payload_len >= 8) {
+    u_int8_t control = (payload[0] & 0x08) >> 3;
+    u_int8_t header_len = (payload[1] & 0xF8) >> 3; /* header length in 4-byte words */
+    
+    /* Check if it's a CAPWAP data packet with valid header length */
+    if ((control == 0) && (header_len >= 2) && (header_len <= 16)) {
+      u_int16_t capwap_header_len = header_len * 4;
+      
+      /* Make sure packet is long enough */
+      if (payload_len >= capwap_header_len) {
+        /* Update IP offset to point to the inner IP header */
+        ip_offset += ip_len + sizeof(struct ndpi_udphdr) + capwap_header_len;
+        tunnel_type = ndpi_capwap_tunnel;
+        
+        /* Reparse the new IP header */
+        goto iph_check;
+      }
+    }
+  }
+}

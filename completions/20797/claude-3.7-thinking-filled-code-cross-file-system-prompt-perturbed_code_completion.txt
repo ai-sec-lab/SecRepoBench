@@ -1,0 +1,120 @@
+{
+  offset += session_id_len + 1;
+
+  if(offset < total_len) {
+    u_int16_t cipher_len = 0;
+    ja3.server_cipher = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    
+    flow->protos.stun_ssl.ssl.server_unsafe_cipher = ndpi_is_safe_ssl_cipher(ja3.server_cipher) ? 0 : 1;
+    offset += 2;
+
+    /* Skip compression */
+    if((offset + 1) < total_len)
+      offset += packet->payload[offset] + 1;
+
+    /* Process extensions */
+    if((offset + 2) < total_len) {
+      u_int16_t extensions_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+
+      if((extensions_len == 0) || ((offset + extensions_len) > total_len))
+        return 2; /* Server Hello, no extensions */
+
+      extensions_len += offset;
+      
+      while(offset < extensions_len) {
+        u_int16_t extension_id, extension_len;
+
+        if((offset + 4) > extensions_len)
+          break;
+
+        extension_id  = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+
+        extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+
+        if((extension_id == 0) || (offset + extension_len) > extensions_len)
+          break;
+
+        if(extension_id == 43 /* supported versions */) {
+          if(extension_len >= 2) {
+            u_int16_t supported_version = ntohs(*((u_int16_t*)&packet->payload[offset]));
+            
+            flow->protos.stun_ssl.ssl.ssl_version = supported_version;
+          }
+        }
+
+        offset += extension_len;
+      }
+    }
+
+    /* Compute server JA3 fingerprint */
+    ja3_str_len = snprintf(ja3_str, sizeof(ja3_str), "%u,%u,", ja3.tls_handshake_version, ja3.server_cipher);
+
+    if(ja3_str_len > 0) {
+      ndpi_MD5Init(&ctx);
+      ndpi_MD5Update(&ctx, (const unsigned char *)ja3_str, ja3_str_len);
+      ndpi_MD5Final(md5_hash, &ctx);
+
+      for(i = 0; i < 16; i++)
+        sprintf(&flow->protos.stun_ssl.ssl.ja3_server[i*2], "%02x", md5_hash[i]);
+      
+      flow->protos.stun_ssl.ssl.ja3_server[32] = '\0';
+    }
+
+    return 2; /* Server Hello with extensions */
+  }
+
+  return 2; /* Server Hello */
+} else if(handshake_type == 0x01) { /* Client Hello */
+  u_int8_t compressions_len;
+  u_int16_t cipher_len;
+
+  if(session_id_len > 32)
+    return 0; /* Not found */
+
+  offset += session_id_len + 1;
+
+  if((offset + 2) > total_len)
+    return 0; /* Not found */
+
+  cipher_len = packet->payload[offset] << 8 | packet->payload[offset + 1];
+  offset += 2;
+
+  if((offset + cipher_len) > total_len)
+    return 0; /* Not found */
+
+  ja3.num_cipher = 0;
+  for(i = 0; i < cipher_len; i += 2) {
+    u_int16_t cipher = ntohs(*((u_int16_t*)&packet->payload[offset + i]));
+    
+    /* Skip GREASE */
+    if(ndpi_is_grease_value(cipher))
+      continue;
+
+    if(ja3.num_cipher < MAX_NUM_JA3)
+      ja3.cipher[ja3.num_cipher++] = cipher;
+  }
+
+  offset += cipher_len;
+
+  if((offset + 1) > total_len)
+    return 0; /* Not found */
+
+  compressions_len = packet->payload[offset];
+  offset++;
+
+  if((offset + compressions_len) > total_len)
+    return 0; /* Not found */
+
+  offset += compressions_len;
+
+  /* Extensions */
+  if((offset + 2) > total_len)
+    return 0; /* Not found */
+
+  extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+
+  if((offset + extensio

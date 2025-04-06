@@ -1,0 +1,149 @@
+if (aux[0] == 0) goto err;
+
+// Get tag ID.
+char type = aux[2];
+int tag_len = 0;
+const char *key = aux;
+
+// Special case handling for specific tags
+if (aux[0] == 'M' && aux[1] == 'D') {
+    if (verbatim_MD) {
+        if (MD) {
+            kstring_t *ks = MD;
+            ks->l = 0;
+            if (type == 'Z') {
+                int len = strlen(&aux[3]);
+                if (&aux[3+len] >= aux_end)
+                    goto err;
+                kputsn(&aux[3], len, ks);
+            }
+        }
+    } else if (!no_ref) {
+        // Let MD be created by CRAM automatically
+        type = '*';
+    }
+} else if (aux[0] == 'N' && aux[1] == 'M') {
+    if (verbatim_NM || NM != -1) {
+        if (!no_ref)
+            type = 'I';
+    } else if (!no_ref) {
+        // Let NM be created by CRAM automatically
+        type = '*';
+    }
+} else if (aux[0] == 'R' && aux[1] == 'G') {
+    if (type == 'Z') {
+        char *rg = &aux[3];
+        char *end = memchr(rg, 0, aux_end - rg);
+        if (!end)
+            goto err;
+
+        if (!(brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, rg)))
+            hts_log_warning("RG:Z:%s in record, but no such read group in header", rg);
+        else
+            cr->rg = brg->id;
+
+        if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4)
+            type = '*';
+    }
+}
+
+// Determine tag length based on type
+const char *val = aux+3;
+switch (type) {
+case 'A': case 'c': case 'C':
+    if (val + 1 > aux_end) goto err;
+    tag_len = 4;
+    break;
+case 's': case 'S':
+    if (val + 2 > aux_end) goto err;
+    tag_len = 5;
+    break;
+case 'i': case 'I': case 'f':
+    if (val + 4 > aux_end) goto err;
+    tag_len = 7;
+    break;
+case 'd':
+    if (val + 8 > aux_end) goto err;
+    tag_len = 11;
+    break;
+case 'Z': case 'H': {
+    char *end = memchr(val, 0, aux_end - val);
+    if (!end) goto err;
+    tag_len = (end - aux) + 1;
+    break;
+}
+case 'B': {
+    if (val + 5 > aux_end) goto err;
+    uint32_t count = (uint8_t)val[1] + ((uint8_t)val[2]<<8) +
+                     ((uint8_t)val[3]<<16) + ((uint8_t)val[4]<<24);
+    int elt_size = 0;
+    switch (val[0]) {
+    case 'c': case 'C': elt_size = 1; break;
+    case 's': case 'S': elt_size = 2; break;
+    case 'i': case 'I': case 'f': elt_size = 4; break;
+    default: goto err;
+    }
+    if (count >= (UINT32_MAX - 10) / elt_size) goto err;
+    if (val + 5 + count * elt_size > aux_end) goto err;
+    tag_len = 8 + count * elt_size;
+    break;
+}
+case '*':
+    tag_len = 3;
+    break;
+default:
+    goto err;
+}
+
+BLOCK_APPEND(td_b, key, 3);
+
+// Work out codec to use for storing aux data
+key = aux; // reset to key start
+int new;
+cram_tag_map *tm;
+khint_t k;
+char dat_key[3] = {key[0], key[1], type};
+
+// Find which tag type block to use
+int key_type;
+if (type == 'i' || type == 'I' || type == 's' || type == 'S' || type == 'c' || type == 'C') {
+    key_type = DS_aux_i;
+} else if (type == 'A') {
+    key_type = DS_aux_A;
+} else if (type == 'f' || type == 'd') {
+    key_type = DS_aux_f;
+} else if (type == 'Z' || type == 'H') {
+    key_type = DS_aux_S;
+} else {
+    key_type = DS_aux;
+}
+
+// Add tag to dictionary, using current codec or creating a new one
+k = kh_get(m_tagmap, c->tags_used, key_type);
+if (k == kh_end(c->tags_used)) {
+    int r;
+    k = kh_put(m_tagmap, c->tags_used, key_type, &r);
+    if (r < 0) goto err;
+    tm = calloc(1, sizeof(*tm));
+    if (!tm) goto err;
+    tm->blk = cram_new_block(EXTERNAL, DS_aux);
+    if (!tm->blk) {
+        free(tm);
+        goto err;
+    }
+    kh_val(c->tags_used, k) = tm;
+} else {
+    tm = kh_val(c->tags_used, k);
+}
+
+// Append tag value to the block
+if (CRAM_MAJOR_VERS(filedescriptor->version) <= 3) {
+    BLOCK_APPEND(tm->blk, aux+3, tag_len-3);
+} else {
+    // V4 tag format includes the tag key too
+    BLOCK_APPEND(tm->blk, dat_key, 3);
+    BLOCK_APPEND(tm->blk, aux+3, tag_len-3);
+}
+
+tm->count++;
+aux += tag_len;

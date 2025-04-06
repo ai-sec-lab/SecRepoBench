@@ -1,0 +1,78 @@
+struct ndpi_udphdr *udph = (struct ndpi_udphdr *)((u_char *)iph + ip_len);
+    u_int16_t sport = ntohs(udph->sport);
+    u_int16_t dport = ntohs(udph->dport);
+
+    if (sport == 2152 && dport == 2152) {
+      /* GTP-U */
+      if (header->caplen >= ip_offset + ip_len + 8) {
+        u_int8_t gtp_version = ((u_char *)udph + 8)[0] >> 5;
+        u_int8_t message_type = ((u_char *)udph + 8)[1];
+
+        if (gtp_version == 1 && message_type == 255) {
+          tunnel_type = ndpi_gtp_tunnel;
+          ip_offset += ip_len + 8; /* GTP-U header size */
+          iph = (struct ndpi_iphdr *) &packet[ip_offset];
+          if(iph->version == IPVERSION) {
+            ip_len = ((u_int16_t)iph->ihl * 4);
+          } else {
+            iph6 = (struct ndpi_ipv6hdr *)&packet[ip_offset];
+            ip_len = sizeof(struct ndpi_ipv6hdr);
+          }
+        }
+      }
+    } else if (sport == 37008 && dport == 37008) {
+      /* TZSP */
+      if (header->caplen >= ip_offset + ip_len + 4) {
+        u_int8_t tzsp_version = ((u_char *)udph + 0)[0];
+        u_int8_t tzsp_encapsulated_protocol = ((u_char *)udph + 0)[1];
+
+        if (tzsp_version == 1 && tzsp_encapsulated_protocol == 0) {
+          /* TZSP Ethernet Frame */
+          tunnel_type = ndpi_tzsp_tunnel;
+          ip_offset += ip_len + 4; /* TZSP header size */
+
+          /* Navigate through TZSP tags to find the encapsulated Ethernet frame */
+          u_int16_t tag_type, tag_length;
+          u_int16_t current_offset = ip_offset;
+          while (current_offset + 4 <= header->caplen) {
+            tag_type = ntohs(*(u_int16_t *)&packet[current_offset]);
+            tag_length = ntohs(*(u_int16_t *)&packet[current_offset + 2]);
+
+            if (tag_type == 0) {
+              /* End of tags */
+              current_offset += 4;
+              break;
+            } else {
+              current_offset += 4 + tag_length;
+            }
+
+            if (current_offset > header->caplen) {
+              /* Invalid tag length, prevent out-of-bounds read */
+              tunnel_type = ndpi_no_tunnel;
+              break;
+            }
+          }
+          ip_offset = current_offset;
+          ethernet = (struct ndpi_ethhdr *) &packet[ip_offset];
+          type = ntohs(ethernet->h_proto);
+          ip_offset += sizeof(struct ndpi_ethhdr);
+        }
+      }
+    } else if (sport == 5246) {
+      /* CAPWAP */
+      if (header->caplen >= ip_offset + ip_len + 4) {
+        u_int8_t capwap_message_type = ((u_char *)udph + 4)[0];
+
+        if (capwap_message_type == 0x01) {
+          tunnel_type = ndpi_capwap_tunnel;
+          ip_offset += ip_len + 8; /* CAPWAP header size */
+          iph = (struct ndpi_iphdr *) &packet[ip_offset];
+          if(iph->version == IPVERSION) {
+            ip_len = ((u_int16_t)iph->ihl * 4);
+          } else {
+            iph6 = (struct ndpi_ipv6hdr *)&packet[ip_offset];
+            ip_len = sizeof(struct ndpi_ipv6hdr);
+          }
+        }
+      }
+    }

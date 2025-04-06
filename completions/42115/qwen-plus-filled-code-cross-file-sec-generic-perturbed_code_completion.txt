@@ -1,0 +1,69 @@
+// Parse the payload to extract the DNS name or IP address from the subjectAltName extension.
+u_int8_t j;
+for(j = 0; j < len && j < sizeof(dNSName) - 1; ++j) {
+  dNSName[j] = packet->payload[i + 2 + j];
+}
+dNSName[j] = '\0'; // Null-terminate the string
+
+// Convert the extracted address to a string format for IPv4 and IPv6.
+if(general_name_type == 0x87) { // ipAddress
+  if(ndpi_is_ipv4(dNSName)) {
+    // Ensure it's a valid IPv4 address
+    if(inet_pton(AF_INET, dNSName, &flow->l4.tcp.tls.ipAddress) <= 0) {
+      ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_IP_ADDRESS);
+    }
+  } else if(ndpi_is_ipv6(dNSName)) {
+    // Ensure it's a valid IPv6 address
+    if(inet_pton(AF_INET6, dNSName, &flow->l4.tcp.tls.ipv6Address) <= 0) {
+      ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_IP_ADDRESS);
+    }
+  }
+}
+
+// Clean up the extracted DNS name and ensure it is printable.
+if(general_name_type == 0x82) { // dNSName
+  if(!ndpi_is_printable_string(dNSName, strlen(dNSName))) {
+    ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+  }
+}
+
+// Check if the extracted DNS name matches the host server name.
+if(strlen(connection->host_server_name) > 0 && strcmp(dNSName, connection->host_server_name) == 0) {
+  matched_name = 1;
+}
+
+// If the server names list is not initialized, create a new entry for the current DNS name.
+if(matched_name && !connection->protos.tls_quic.serverNames) {
+  connection->protos.tls_quic.serverNames = strdup(dNSName);
+}
+
+// If the server names list already exists, append the current DNS name to it with a comma separator.
+else if(matched_name && connection->protos.tls_quic.serverNames) {
+  size_t current_length = strlen(connection->protos.tls_quic.serverNames);
+  size_t new_length = current_length + strlen(dNSName) + 2; // +2 for ',' and '\0'
+  char *temp = realloc(connection->protos.tls_quic.serverNames, new_length);
+  if(temp) {
+    connection->protos.tls_quic.serverNames = temp;
+    snprintf(connection->protos.tls_quic.serverNames + current_length, new_length - current_length, ",%s", dNSName);
+  } else {
+    ndpi_set_risk(ndpi_struct, connection, NDPI_MEMORY_ALLOCATION_FAILED);
+  }
+}
+
+// Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly.
+if(matched_name && flow->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+  u_int32_t val;
+  int rc = ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+                                   dNSName, strlen(dNSName), &val);
+
+  if(rc == 0) {
+    u_int16_t proto_id = (u_int16_t)val;
+    ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED};
+
+    flow->detected_protocol_stack[0] = proto_id;
+    flow->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+
+    flow->category = ndpi_get_proto_category(ndpi_struct, ret);
+    ndpi_check_subprotocol_risk(ndpi_struct, flow, proto_id);
+  }
+}

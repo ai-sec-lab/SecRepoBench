@@ -1,43 +1,59 @@
-bool subset_glyphs(hb_subset_context_t *context, hb_font_t *font, hb_set_t *glyphs_to_retain) {
-    // Generate a subset of glyphs based on the provided plan and font
-    hb_set_t *glyphs_to_drop = hb_set_create();
-    if (!hb_subset_plan_populate_glyph_list(context->plan, glyphs_to_retain, glyphs_to_drop)) {
-        hb_set_destroy(glyphs_to_drop);
-        return false;
-    }
+// Generate a subset of glyphs based on the provided plan and font.
+hb_set_t *glyphs_to_retain = hb_subset_plan_create_glyph_map (context->plan);
+if (unlikely (!glyphs_to_retain))
+  return_trace (false);
 
-    // Populate a list of subset glyphs, checking for failure in the process
-    hb_codepoint_t glyph;
-    hb_set_for_each(glyphs_to_retain, glyph, {
-        if (!hb_subset_plan_add_table(context->plan, HB_OT_TAG_glyf, glyph)) {
-            hb_set_destroy(glyphs_to_drop);
-            return false;
-        }
-    });
-
-    // Calculate padded offsets for each subset glyph and determine if a short loca table can be used
-    bool use_short_loca = hb_subset_plan_calculate_glyph_offsets(context->plan);
-
-    // Initialize a new glyf object for serialization
-    hb_blob_t *glyf_blob = hb_subset_plan_create_glyf_blob(context->plan);
-    if (!glyf_blob) {
-        hb_set_destroy(glyphs_to_drop);
-        return false;
-    }
-
-    // Serialize the subset of glyphs into the glyf object, using the determined loca format
-    hb_blob_t *loca_blob = hb_subset_plan_create_loca_blob(context->plan, use_short_loca);
-    if (!loca_blob) {
-        hb_blob_destroy(glyf_blob);
-        hb_set_destroy(glyphs_to_drop);
-        return false;
-    }
-
-    // Handle any necessary cleanup of resources, particularly the compiled subset glyphs, if required
-    hb_subset_plan_add_table(context->plan, HB_OT_TAG_glyf, glyf_blob);
-    hb_subset_plan_add_table(context->plan, HB_OT_TAG_loca, loca_blob);
-    hb_set_destroy(glyphs_to_drop);
-
-    // Return the result of the serialization process as the function's output
-    return true;
+// Populate a list of subset glyphs, checking for failure in the process.
+hb_vector_t<hb_subset_glyph_data_t> subset_glyphs;
+if (unlikely (!subset_glyphs.alloc (glyphs_to_retain->get_population (), true)))
+{
+  hb_set_destroy (glyphs_to_retain);
+  return_trace (false);
 }
+
+for (hb_codepoint_t gid : *glyphs_to_retain)
+{
+  hb_subset_glyph_data_t glyph_data;
+  if (unlikely (!get_glyph_data (gid, &glyph_data, font)))
+  {
+    hb_set_destroy (glyphs_to_retain);
+    subset_glyphs.fini ();
+    return_trace (false);
+  }
+  subset_glyphs.push (glyph_data);
+}
+hb_set_destroy (glyphs_to_retain);
+
+// Calculate padded offsets for each subset glyph and determine if a short loca table can be used.
+bool use_short_loca = true;
+hb_vector_t<hb_uint32_t> glyph_offsets;
+if (unlikely (!calculate_glyph_offsets (subset_glyphs, &glyph_offsets, &use_short_loca)))
+{
+  subset_glyphs.fini_deep ();
+  return_trace (false);
+}
+
+// Initialize a new glyf object for serialization.
+glyf *glyf_prime = c->serializer->embed<glyf> ();
+if (unlikely (!glyf_prime))
+{
+  subset_glyphs.fini_deep ();
+  return_trace (false);
+}
+
+// Serialize the subset of glyphs into the glyf object, using the determined loca format.
+if (unlikely (!glyf_prime->serialize (c->serializer, subset_glyphs, glyph_offsets, use_short_loca)))
+{
+  subset_glyphs.fini_deep ();
+  return_trace (false);
+}
+
+// Handle any necessary cleanup of resources, particularly the compiled subset glyphs, if required.
+subset_glyphs.fini_deep ();
+
+// Destroy the font if it was created for instancing, after using it.
+if (font)
+  hb_font_destroy (font);
+
+bool result = true;
+return_trace (result);

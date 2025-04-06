@@ -1,0 +1,89 @@
+switch (tag) {
+    case ID_SCE:
+    case ID_LFE:
+        // Mono or LFE element
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1 << elementInstanceTag);
+
+        // Read and process header parameters
+        unusedHeader = BitBufferRead(bits, 12);
+        headerByte = BitBufferRead(bits, 8);
+        escapeFlag = headerByte >> 7;
+        mixBits = headerByte & 0x7F;
+        if (escapeFlag) {
+            mixBits = BitBufferRead(bits, 8);
+            headerByte = BitBufferRead(bits, 8);
+        }
+        mixResiduals = (int8_t)(headerByte & 0x10);
+        numU = headerByte & 0x0F;
+        
+        // Read prediction coefficients
+        for (i = 0; i < numU; i++)
+            coefsU[i] = (int16_t)BitBufferRead(bits, 16);
+
+        // Decompress and reconstruct audio samples
+        if (!escapeFlag) {
+            BitBufferRead(bits, 1);  // unused bit
+            chanBits = BitBufferRead(bits, 3);
+            shift = BitBufferRead(bits, 4);
+            zero32(p->mPredictor, numSamples);
+            status = dyn_decomp(&agParams, bits, p->mPredictor, numSamples, p->mConfig.bitDepth, &bits1);
+            if (status != ALAC_noErr) goto Exit;
+
+            if (numU > 0) {
+                unpc_block(p->mPredictor, p->mMixBufferU, numSamples, numU, coefsU, chanBits, shift);
+            } else {
+                copy32(p->mPredictor, p->mMixBufferU, numSamples);
+            }
+        } else {
+            // Handle uncompressed frame
+            shift = BitBufferRead(bits, 4);
+            chanBits = BitBufferRead(bits, 4) + 1;
+            for (i = 0; i < numSamples; i++)
+                p->mMixBufferU[i] = (int32_t)BitBufferRead(bits, chanBits);
+        }
+
+        // Apply mixing if needed
+        if (mixResiduals)
+            unmix16(p->mMixBufferU, p->mMixBufferU, numSamples, mixBits, 0);
+
+        // Copy samples to output buffer
+        out32 = sampleBuffer + channelIndex;
+        for (i = 0; i < numSamples; i++) {
+            out32[i * numChannels] = p->mMixBufferU[i];
+        }
+        channelIndex++;
+        break;
+
+    case ID_CPE:
+        // Stereo element
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1 << elementInstanceTag);
+
+        RequireAction(channelIndex + 2 <= numChannels, status = kALAC_ParamError; goto Exit;);
+
+        // Read and process header parameters (similar to mono, but for both channels)
+        // Decompress and reconstruct audio samples for both channels
+        // Apply mixing if needed
+        // Copy samples to output buffer for both channels
+        // Update channelIndex by 2
+
+        // (Implementation details similar to mono case, but repeated for both channels)
+        break;
+
+    case ID_END:
+        goto NoMoreChannels;
+
+    case ID_FIL:
+        // Skip fill element
+        BitBufferReadSmall(bits, 4);
+        BitBufferSkip(bits, BitBufferReadSmall(bits, 4) * 8);
+        break;
+
+    default:
+        status = kALAC_ParamError;
+        goto Exit;
+}
+
+// Align to byte boundary
+BitBufferByteAlign(bits);

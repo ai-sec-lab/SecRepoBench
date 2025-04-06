@@ -1,0 +1,50 @@
+{
+  u_int32_t i = 0;
+  u_int32_t max_lines = sizeof(packet->line) / sizeof(packet->line[0]);
+
+  /* Loop over the payload and parse lines delimited by "\r\n" */
+  for(i = 0; i + 1 < packet->payload_packet_len && packet->parsed_lines < max_lines - 1; i++) {
+    if(packet->payload[i] == '\r' && packet->payload[i+1] == '\n') {
+      /* Check if a double CRLF ("\r\n\r\n") is encountered */
+      if(i + 3 < packet->payload_packet_len &&
+         packet->payload[i+2] == '\r' && packet->payload[i+3] == '\n') {
+        /* Finalize current header line length */
+        packet->line[packet->parsed_lines].len = (u_int16_t)(i - ((u_int8_t *)packet->line[packet->parsed_lines].ptr - packet->payload));
+        packet->parsed_lines++;
+        /* Record the binary payload in the flow structure.
+           Assuming that dataflow has fields 'initial_bin_payload' and 'initial_bin_payload_len' */
+        dataflow->initial_bin_payload = &packet->payload[i+4];
+        dataflow->initial_bin_payload_len = packet->payload_packet_len - (i+4);
+        break;
+      }
+      
+      /* Finalize the current line length */
+      packet->line[packet->parsed_lines].len = (u_int16_t)(i - ((u_int8_t *)packet->line[packet->parsed_lines].ptr - packet->payload));
+      
+      /* Process the first line for HTTP response status codes */
+      if(packet->parsed_lines == 0) {
+        if(packet->line[0].ptr != NULL && strncmp((char *)packet->line[0].ptr, "HTTP/", 5) == 0) {
+          char *status_ptr = strchr((char *)packet->line[0].ptr, ' ');
+          if(status_ptr != NULL) {
+            status_ptr++; /* Move past the space */
+            packet->http_response_code = (u_int16_t)atoi(status_ptr);
+          }
+        }
+      } else {
+        /* Check for headers: "Server:", "Host:", "Content-Type:".
+           For simplicity, we assume that packet->header_count exists. */
+        if(strncasecmp((char *)packet->line[packet->parsed_lines].ptr, "Server:", 7) == 0 ||
+           strncasecmp((char *)packet->line[packet->parsed_lines].ptr, "Host:", 5) == 0 ||
+           strncasecmp((char *)packet->line[packet->parsed_lines].ptr, "Content-Type:", 13) == 0) {
+          packet->header_count++;
+        }
+      }
+      
+      /* Prepare for the next line */
+      packet->parsed_lines++;
+      if(packet->parsed_lines < max_lines)
+        packet->line[packet->parsed_lines].ptr = &packet->payload[i+2];
+      i++; /* Skip the '\n' already processed */
+    }
+  }
+}

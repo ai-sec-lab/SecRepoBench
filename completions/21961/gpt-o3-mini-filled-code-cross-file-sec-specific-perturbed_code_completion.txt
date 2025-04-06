@@ -1,0 +1,128 @@
+case ReadStripMethod:
+      case ReadTileMethod:
+      {
+        MagickBooleanType method_status = MagickTrue;
+        size_t buffer_size;
+        unsigned char *tile_buffer = (unsigned char *) NULL;
+        if (method == ReadStripMethod)
+        {
+          /*
+            Strip-based reading.
+          */
+          const size_t scanline_size = (size_t) TIFFScanlineSize(tiff);
+          /* rows_per_strip is already set and bounded in earlier code */
+          if (HeapOverflowSanityCheck(rows_per_strip, scanline_size) != MagickFalse)
+            ThrowTIFFException(ResourceLimitError, "MemoryAllocationFailed");
+          buffer_size = rows_per_strip * scanline_size;
+          tile_buffer = (unsigned char *) AcquireQuantumMemory(1, buffer_size);
+          if (tile_buffer == (unsigned char *) NULL)
+            ThrowTIFFException(ResourceLimitError, "MemoryAllocationFailed");
+          for (row_index = 0; row_index < (ssize_t) image->rows; row_index += rows_per_strip)
+          {
+            const ssize_t rows_to_read = (row_index + (ssize_t) rows_per_strip > (ssize_t) image->rows) ? image->rows - row_index : rows_per_strip;
+            for (ssize_t strip = 0; strip < rows_to_read; strip++)
+            {
+              tiff_status = TIFFReadScanline(tiff, tile_buffer + strip * scanline_size, row_index + strip, 0);
+              if (tiff_status < 0)
+              {
+                method_status = MagickFalse;
+                break;
+              }
+            }
+            if (method_status == MagickFalse)
+              break;
+            for (ssize_t strip = 0; strip < rows_to_read; strip++)
+            {
+              Quantum *q = QueueAuthenticPixels(image, 0, row_index + strip, image->columns, 1, exception);
+              if (q == (Quantum *) NULL)
+              {
+                method_status = MagickFalse;
+                break;
+              }
+              (void) ImportQuantumPixels(image, NULL, quantum_info, quantum_type,
+                tile_buffer + strip * scanline_size, exception);
+              if (SyncAuthenticPixels(image, exception) == MagickFalse)
+              {
+                method_status = MagickFalse;
+                break;
+              }
+              if (image->previous == (Image *) NULL)
+              {
+                status = SetImageProgress(image, LoadImageTag, (MagickOffsetType)(row_index + strip), image->rows);
+                if (status == MagickFalse)
+                {
+                  method_status = MagickFalse;
+                  break;
+                }
+              }
+            }
+            if (method_status == MagickFalse)
+              break;
+          }
+        }
+        else if (method == ReadTileMethod)
+        {
+          /*
+            Tile-based reading.
+          */
+          uint32 tile_width, tile_length;
+          if ((TIFFGetField(tiff, TIFFTAG_TILEWIDTH, &tile_width) != 1) ||
+              (TIFFGetField(tiff, TIFFTAG_TILELENGTH, &tile_length) != 1))
+            ThrowTIFFException(CorruptImageError, "ImproperImageHeader");
+          const size_t tile_size = (size_t) TIFFTileSize(tiff);
+          tile_buffer = (unsigned char *) AcquireQuantumMemory(1, tile_size);
+          if (tile_buffer == (unsigned char *) NULL)
+            ThrowTIFFException(ResourceLimitError, "MemoryAllocationFailed");
+          for (ssize_t y = 0; y < (ssize_t) image->rows; y += tile_length)
+          {
+            for (ssize_t x = 0; x < (ssize_t) image->columns; x += tile_width)
+            {
+              tiff_status = TIFFReadTile(tiff, tile_buffer, (uint32) x, (uint32) y, 0, 0);
+              if (tiff_status < 0)
+              {
+                method_status = MagickFalse;
+                break;
+              }
+              /* Determine the effective width and height for this tile block */
+              const size_t effective_width = (x + tile_width > image->columns) ? image->columns - x : tile_width;
+              const size_t effective_height = (y + tile_length > image->rows) ? image->rows - y : tile_length;
+              for (ssize_t ty = 0; ty < (ssize_t) effective_height; ty++)
+              {
+                Quantum *q = QueueAuthenticPixels(image, x, y + ty, effective_width, 1, exception);
+                if (q == (Quantum *) NULL)
+                {
+                  method_status = MagickFalse;
+                  break;
+                }
+                /* Calculate the offset into the tile_buffer for the current row */
+                size_t offset = ty * tile_size / tile_length;
+                (void) ImportQuantumPixels(image, NULL, quantum_info, quantum_type,
+                  tile_buffer + offset, exception);
+                if (SyncAuthenticPixels(image, exception) == MagickFalse)
+                {
+                  method_status = MagickFalse;
+                  break;
+                }
+                if (image->previous == (Image *) NULL)
+                {
+                  status = SetImageProgress(image, LoadImageTag, (MagickOffsetType)(y + ty), image->rows);
+                  if (status == MagickFalse)
+                  {
+                    method_status = MagickFalse;
+                    break;
+                  }
+                }
+              }
+              if (method_status == MagickFalse)
+                break;
+            }
+            if (method_status == MagickFalse)
+              break;
+          }
+        }
+        if (tile_buffer != (unsigned char *) NULL)
+          tile_buffer = (unsigned char *) RelinquishVirtualMemory(tile_buffer);
+        if (method_status == MagickFalse)
+          break;
+        break;
+      }

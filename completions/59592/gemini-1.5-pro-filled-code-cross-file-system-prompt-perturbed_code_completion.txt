@@ -1,38 +1,56 @@
 bool result = false;
-    auto subset_glyphs = _plan->generate_subset_glyphs (context->plan, font);
+    hb_vector_t<SubSetGlyph> subset_glyphs;
+
+    if (unlikely (!subset_glyphs.resize (context->plan->glyphs.length)))
+      goto cleanup;
+
+    if (unlikely (!compile_glyphs (context, font, subset_glyphs.arrayZ)))
+      goto cleanup;
 
     if (font)
       hb_font_destroy (font);
+    font = nullptr;
 
-    if (unlikely (subset_glyphs.failed ()))
-      return_trace (false);
+    unsigned max_glyph = context->plan->glyphs.max;
+    unsigned num_glyphs = max_glyph + 1;
 
-    _glyphs.init ();
-    unsigned glyf_count = subset_glyphs->length;
-    _glyphs.resize (glyf_count);
+    bool short_loca = num_glyphs < (1u << 16);
+    unsigned glyf_size = 0;
+    unsigned loca_size = (short_loca ? 2 : 4) * num_glyphs;
 
-    bool short_loca = true;
-    for (unsigned i = 0; i < glyf_count; i++)
+    for (unsigned int i = 0; i < num_glyphs; i++)
     {
-      hb_codepoint_t glyph = (*subset_glyphs)[i];
-      if (unlikely (!context->serializer->embed_glyph (glyph)))
-      {
-	DEBUG_MSG (SUBSET, nullptr, "failed to embed glyph %u", glyph);
-	return_trace (false);
-      }
-
-      unsigned offset = context->serializer->get_offset (glyph);
-      _glyphs[i].padded_offset = offset;
-      if (offset > 65535)
-	short_loca = false;
+      subset_glyphs[i].padded_offset = glyf_size;
+      glyf_size += subset_glyphs[i].size;
     }
 
-    _loca_format = short_loca ? HB_LOCA_FORMAT_SHORT : HB_LOCA_FORMAT_LONG;
+    glyf_size = hb_pad4 (glyf_size);
 
-    glyf_object_t glyf;
-    result = _serialize_glyf (context, &glyf);
+    bool has_loca = _is_table_present (context->plan->source, HB_TAG ('l','o','c','a'));
+    bool has_glyf = _is_table_present (context->plan->source, HB_TAG ('g','l','y','f'));
 
-    if (context->plan->drop_hints)
-      subset_glyphs->clear ();
+    if (unlikely (!has_loca || !has_glyf))
+      goto cleanup;
 
-    return_trace (result);
+    {
+      bool create_new_table = true;
+      glyf *glyf_prime = context->serializer->start_embed<glyf> (&create_new_table);
+
+      if (unlikely (!glyf_prime))
+        goto cleanup;
+
+      if (unlikely (!glyf_prime->serialize (context->serializer,
+					   *this,
+					   subset_glyphs.arrayZ,
+					   short_loca)))
+      {
+        DEBUG_MSG (SUBSET, nullptr, "Failed to serialize glyf table.");
+	goto cleanup;
+      }
+      result = true;
+    }
+
+
+  cleanup:
+    for (auto& glyph : subset_glyphs)
+      glyph.free_compiled_bytes ();

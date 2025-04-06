@@ -1,0 +1,79 @@
+if(handshake_type == 0x02 /* Server Hello */) {
+  u_int16_t cipher_suite_offset = base_offset + 4 + session_id_len;
+
+  if (cipher_suite_offset + 2 > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto error;
+  }
+
+  ja3.server_cipher_suite = ntohs(*((u_int16_t*)&packet->payload[cipher_suite_offset]));
+
+  // Extract JA3 components and construct the JA3 string
+  snprintf(ja3_str, JA3_STR_LEN, "%X,%X,%X,%X,%X", 
+           tls_version,
+           ja3.server_cipher_suite,
+           ja3.tls_handshake_version,
+           ja3.extensions_count,
+           ja3.elliptic_curves_count);
+
+} else if (handshake_type == 0x01 /* Client Hello */) {
+  u_int16_t cipher_suites_length = ntohs(*((u_int16_t*)&packet->payload[base_offset]));
+  u_int16_t extensions_length = 0;
+
+  if (base_offset + 2 + cipher_suites_length > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto error;
+  }
+
+  for(i = 0; i < cipher_suites_length; i += 2) {
+    u_int16_t cipher_suite = ntohs(*((u_int16_t*)&packet->payload[base_offset + 2 + i]));
+
+    if(cipher_suite >= 0xFF01 && cipher_suite <= 0xFF0A) {
+      continue; // Skip GREASE values
+    }
+
+    ja3.client_cipher_suites[ja3.cipher_suites_count++] = cipher_suite;
+  }
+
+  extensions_length = ntohs(*((u_int16_t*)&packet->payload[base_offset + 2 + cipher_suites_length]));
+
+  if (base_offset + 2 + cipher_suites_length + 2 + extensions_length > packet->payload_packet_len) {
+    jainvalid = 1;
+    goto error;
+  }
+
+  u_int16_t extensions_offset = base_offset + 2 + cipher_suites_length + 2;
+
+  for(i = 0; i < extensions_length;) {
+    u_int16_t extension_type = ntohs(*((u_int16_t*)&packet->payload[extensions_offset + i]));
+    u_int16_t extension_length = ntohs(*((u_int16_t*)&packet->payload[extensions_offset + i + 2]));
+
+    if(extension_type == 0x000A) { // Supported Versions
+      ja3.supported_versions_count = extension_length / 2;
+      memcpy(ja3.supported_versions, &packet->payload[extensions_offset + i + 4], ja3.supported_versions_count * 2);
+    } else if(extension_type == 0x000D) { // Elliptic Curves
+      ja3.elliptic_curves_count = extension_length / 2;
+      memcpy(ja3.elliptic_curves, &packet->payload[extensions_offset + i + 4], ja3.elliptic_curves_count * 2);
+    }
+
+    i += extension_length + 4;
+  }
+
+  // Construct JA3 string
+  snprintf(ja3_str, JA3_STR_LEN, "%X,%X,%X,%X,%X",
+           tls_version,
+           ja3.client_cipher_suites[0],
+           ja3.supported_versions_count,
+           ja3.elliptic_curves_count,
+           ja3.extensions_count);
+
+  // Compute MD5 hash of JA3 string
+  ndpi_MD5Init(&ctx);
+  ndpi_MD5Update(&ctx, (unsigned char*)ja3_str, strlen(ja3_str));
+  ndpi_MD5Final(md5_hash, &ctx);
+
+  memcpy(flow->l4.tcp.tls.ja3_md5, md5_hash, 16);
+}
+
+error:
+  return jainvalid ? -1 : 1;

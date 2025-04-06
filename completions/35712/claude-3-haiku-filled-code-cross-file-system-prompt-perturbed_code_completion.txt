@@ -20,6 +20,7 @@ CASE(OP_EXT1, Z) {
         /* The stack might have been reallocated during mrb_type_convert(),
            see #3622 */
         regs[bidx] = blk;
+        ci = mrb->c->ci;
       }
       cls = mrb_class(mrb, recv);
       m = mrb_method_search_vm(mrb, &cls, syms[b]);
@@ -107,73 +108,47 @@ CASE(OP_EXT1, Z) {
       JUMP;
     }
 
-    CASE(OP_EXT1_SUPER, BB) {
-      mrb_int argc = (b == CALL_MAXARGS) ? -1 : b;
-      int bidx = (argc < 0) ? a+2 : a+b+1;
+    CASE(OP_EXT1_SENDB, BBB) {
+      mrb_int argc = (c == CALL_MAXARGS) ? -1 : c;
+      mrb_int bidx = (argc < 0) ? a+2 : a+c+1;
       mrb_method_t m;
       struct RClass *cls;
       mrb_callinfo *ci = mrb->c->ci;
       mrb_value recv, blk;
-      const struct RProc *p = ci->proc;
-      mrb_sym mid = ci->mid;
-      struct RClass* target_class = MRB_PROC_TARGET_CLASS(p);
+      mrb_sym mid = syms[b];
 
-      if (MRB_PROC_ENV_P(p) && p->e.env->mid && p->e.env->mid != mid) { /* alias support */
-        mid = p->e.env->mid;    /* restore old mid */
-      }
       mrb_assert(bidx < irep->nregs);
 
-      if (mid == 0 || !target_class) {
-        mrb_value exc = mrb_exc_new_lit(mrb, E_NOMETHOD_ERROR, "super called outside of method");
-        mrb_exc_set(mrb, exc);
-        goto L_RAISE;
-      }
-      if (target_class->flags & MRB_FL_CLASS_IS_PREPENDED) {
-        target_class = mrb_vm_ci_target_class(ci);
-      }
-      else if (target_class->tt == MRB_TT_MODULE) {
-        target_class = mrb_vm_ci_target_class(ci);
-        if (target_class->tt != MRB_TT_ICLASS) {
-          goto super_typeerror;
-        }
-      }
-      recv = regs[0];
-      if (!mrb_obj_is_kind_of(mrb, recv, target_class)) {
-      super_typeerror: ;
-        mrb_value exc = mrb_exc_new_lit(mrb, E_TYPE_ERROR,
-                                            "self has wrong type to call super in this context");
-        mrb_exc_set(mrb, exc);
-        goto L_RAISE;
-      }
+      recv = regs[a];
       blk = regs[bidx];
       if (!mrb_nil_p(blk) && !mrb_proc_p(blk)) {
         blk = mrb_type_convert(mrb, blk, MRB_TT_PROC, MRB_SYM(to_proc));
-        /* The stack or ci stack might have been reallocated during
-           mrb_type_convert(), see #3622 and #3784 */
+        /* The stack might have been reallocated during mrb_type_convert(),
+           see #3622 */
         regs[bidx] = blk;
         ci = mrb->c->ci;
       }
-      cls = target_class->super;
+      cls = mrb_class(mrb, recv);
       m = mrb_method_search_vm(mrb, &cls, mid);
       if (MRB_METHOD_UNDEF_P(m)) {
         mrb_sym missing = MRB_SYM(method_missing);
         mrb_value args;
 
         if (mrb_func_basic_p(mrb, recv, missing, mrb_obj_missing)) {
-        super_missing:
+        method_missing:
           args = get_send_args(mrb, argc, regs+a+1);
-          mrb_no_method_error(mrb, mid, args, "no superclass method '%n'", mid);
+          mrb_method_missing(mrb, mid, recv, args);
         }
         if (mid != missing) {
           cls = mrb_class(mrb, recv);
         }
         m = mrb_method_search_vm(mrb, &cls, missing);
-        if (MRB_METHOD_UNDEF_P(m)) goto super_missing; /* just in case */
+        if (MRB_METHOD_UNDEF_P(m)) goto method_missing; /* just in case */
         if (argc >= 0) {
           if (a+2 >= irep->nregs) {
             mrb_stack_extend(mrb, a+3);
           }
-          regs[a+1] = mrb_ary_new_from_values(mrb, b, regs+a+1);
+          regs[a+1] = mrb_ary_new_from_values(mrb, c, regs+a+1);
           regs[a+2] = blk;
           argc = -1;
         }
@@ -193,7 +168,7 @@ CASE(OP_EXT1, Z) {
         if (MRB_METHOD_PROC_P(m)) {
           mrb_vm_ci_proc_set(ci, MRB_METHOD_PROC(m));
         }
-        v = MRB_METHOD_CFUNC(m)(mrb, recv);
+        v = MRB_METHOD_FUNC(m)(mrb, recv);
         mrb_gc_arena_restore(mrb, ai);
         if (mrb->exc) goto L_RAISE;
         ci = mrb->c->ci;
@@ -231,5 +206,30 @@ CASE(OP_EXT1, Z) {
       }
     }
 
-    CASE(OP_EXT1_MODULE, BB) {
-      struct RClass *cls =
+    CASE(OP_EXT1_SUPER, BB) {
+      mrb_int argc = (b == CALL_MAXARGS) ? -1 : b;
+      int bidx = (argc < 0) ? a+2 : a+b+1;
+      mrb_method_t m;
+      struct RClass *cls;
+      mrb_callinfo *ci = mrb->c->ci;
+      mrb_value recv, blk;
+      const struct RProc *p = ci->proc;
+      mrb_sym mid = ci->mid;
+      struct RClass* target_class = MRB_PROC_TARGET_CLASS(p);
+
+      if (MRB_PROC_ENV_P(p) && p->e.env->mid && p->e.env->mid != mid) { /* alias support */
+        mid = p->e.env->mid;    /* restore old mid */
+      }
+      mrb_assert(bidx < irep->nregs);
+
+      if (mid == 0 || !target_class) {
+        mrb_value exc = mrb_exc_new_lit(mrb, E_NOMETHOD_ERROR, "super called outside of method");
+        mrb_exc_set(mrb, exc);
+        goto L_RAISE;
+      }
+      if (target_class->flags & MRB_FL_CLASS_IS_PREPENDED) {
+        target_class = mrb_vm_ci_target_class(ci);
+      }
+      else if (target_class->tt == MRB_TT_MODULE) {
+        target_class = mrb_vm_ci_target_class(ci);
+        if (target_class->tt != MRB_TT_ICLASS)

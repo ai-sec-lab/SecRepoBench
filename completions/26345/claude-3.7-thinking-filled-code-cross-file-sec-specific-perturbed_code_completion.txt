@@ -1,0 +1,125 @@
+if (strstr(p->time_fmt, "%Y") || strstr(p->time_fmt, "%y")) {
+    p->time_with_year = FLB_TRUE;
+}
+else if (strstr(p->time_fmt, "%s")) {
+    /* epoch */
+    p->time_with_year = FLB_TRUE;
+    is_epoch = FLB_TRUE;
+}
+else {
+    int len_year;
+    char *tmp_year;
+    
+    p->time_with_year = FLB_FALSE;
+    
+    /* Append the year */
+    len_year = strlen(p->time_fmt);
+    tmp_year = flb_malloc(len_year + 4);  /* +4 for "%Y " and \0 */
+    if (!tmp_year) {
+        flb_errno();
+        flb_parser_destroy(p);
+        return NULL;
+    }
+    
+    memcpy(tmp_year, "%Y ", 3);
+    memcpy(tmp_year + 3, p->time_fmt, len_year);
+    tmp_year[len_year + 3] = '\0';
+    
+    p->time_fmt_year = tmp_year;
+}
+
+/* Check if the format contains timezone info */
+if (strstr(p->time_fmt, "%z") || strstr(p->time_fmt, "%Z") ||
+    strstr(p->time_fmt, "%SZ") || strstr(p->time_fmt, "%:z") ||
+    strstr(p->time_fmt, "%::z") || strstr(p->time_fmt, "%:::z") ||
+    strstr(p->time_fmt, "%ISO")) {
+    p->time_with_tz = FLB_TRUE;
+}
+else {
+    p->time_with_tz = FLB_FALSE;
+}
+
+/* Lookup for fractional seconds */
+timeptr = strstr(p->time_fmt, "%L");
+if (timeptr) {
+    int fmt_size;
+    char *tmp_fs;
+    
+    /* Create new format for fractional seconds */
+    fmt_size = (uintptr_t) timeptr - (uintptr_t) p->time_fmt;
+    tmp_fs = flb_malloc(fmt_size + 1);
+    if (!tmp_fs) {
+        flb_errno();
+        flb_parser_destroy(p);
+        return NULL;
+    }
+    
+    memcpy(tmp_fs, p->time_fmt, fmt_size);
+    tmp_fs[fmt_size] = '\0';
+    
+    p->time_fmt_fs = tmp_fs;
+    p->time_frac_secs = timeptr + 2;
+}
+else {
+    p->time_fmt_fs = NULL;
+}
+
+/* Initialize time offset */
+p->time_offset = 0;
+
+/* Optional fixed timezone offset */
+if (time_offset) {
+    int hours;
+    int minutes;
+    
+    diff = 0;
+    len = strlen(time_offset);
+    
+    if (len != 6) {
+        flb_error("[parser] timezone offset not valid: %s", time_offset);
+        flb_parser_destroy(p);
+        return NULL;
+    }
+    
+    /* Expect +HH:MM or -HH:MM */
+    if ((time_offset[0] != '+' && time_offset[0] != '-') || 
+        time_offset[3] != ':') {
+        flb_error("[parser] timezone offset not valid: %s", time_offset);
+        flb_parser_destroy(p);
+        return NULL;
+    }
+    
+    /* Check digit characters */
+    if (time_offset[1] < '0' || time_offset[1] > '9' ||
+        time_offset[2] < '0' || time_offset[2] > '9' ||
+        time_offset[4] < '0' || time_offset[4] > '9' ||
+        time_offset[5] < '0' || time_offset[5] > '9') {
+        flb_error("[parser] timezone offset not valid: %s", time_offset);
+        flb_parser_destroy(p);
+        return NULL;
+    }
+    
+    /* Parse hours */
+    hours = ((time_offset[1] - '0') * 10) + (time_offset[2] - '0');
+    if (hours < 0 || hours > 23) {
+        flb_error("[parser] timezone hours offset out of range: %s", time_offset);
+        flb_parser_destroy(p);
+        return NULL;
+    }
+    
+    /* Parse minutes */
+    minutes = ((time_offset[4] - '0') * 10) + (time_offset[5] - '0');
+    if (minutes < 0 || minutes > 59) {
+        flb_error("[parser] timezone minutes offset out of range: %s", time_offset);
+        flb_parser_destroy(p);
+        return NULL;
+    }
+    
+    /* Calculate diff */
+    diff = (hours * 3600) + (minutes * 60);
+    if (time_offset[0] == '-') {
+        diff = -diff;
+    }
+    
+    p->time_offset = diff;
+}
