@@ -1,0 +1,272 @@
+}
+
+    // Don't fix white on absolute colorimetric
+    if (Intent == INTENT_ABSOLUTE_COLORIMETRIC)
+        *dwFlags |= cmsFLAGS_NOWHITEONWHITEFIXUP;
+
+    if (!(*dwFlags & cmsFLAGS_NOWHITEONWHITEFIXUP)) {
+
+        if (!FixWhiteMisalignment(Dest, _cmsICCcolorSpace((int) T_COLORSPACE(*InputFormat)), _cmsICCcolorSpace((int) T_COLORSPACE(*OutputFormat)))) {
+
+            return FALSE;
+        }
+    }
+
+    // And return the obtained LUT
+    cmsPipelineFree(Src);
+    *Lut = Dest;
+    return TRUE;
+
+Error:
+
+    if (GammaTables != NULL) {
+        for (i=0; i < Src ->InputChannels; i++) {
+            if (GammaTables[i] != NULL) cmsFreeToneCurve(GammaTables[i]);
+        }
+        _cmsFree(Src->ContextID, GammaTables);
+    }
+
+    if (ObtainedCurves != NULL) cmsStageFree(ObtainedCurves);
+    if (Dest != NULL) cmsPipelineFree(Dest);
+
+    return FALSE;
+}
+
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------
+// This function creates simple LUT from complex ones. The generated LUT has an optional set of
+// prelinearization curves, a CLUT of nGridPoints and optional postlinearization tables.
+// These curves have to exist in the original LUT in order to be used in the simplified output.
+// Caller may also use the flags to allow this feature.
+// LUTS with all curves will be simplified to a single curve. Parametric curves are lost.
+// This function should be used on 16-bits LUTS only, as floating point losses precision when simplified
+// -----------------------------------------------------------------------------------------------------------------------------------------------
+
+static
+cmsBool OptimizeBySimplifying(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt32Number* InputFormat, cmsUInt32Number* OutputFormat, cmsUInt32Number* dwFlags)
+{
+    cmsPipeline* Src = *Lut;
+    cmsPipeline* Dest = NULL;
+    cmsStage* mpe;
+    cmsStage* ObtainedCurves = NULL;
+
+    // This is a lossy optimization! does not apply in floating-point cases
+    if (_cmsFormatterIsFloat(*InputFormat) || _cmsFormatterIsFloat(*OutputFormat)) return FALSE;
+
+    //  Only curves in this LUT?
+    for (mpe = cmsPipelineGetPtrToFirstStage(Src);
+         mpe != NULL;
+         mpe = cmsStageNext(mpe)) {
+            if (cmsStageType(mpe) != cmsSigCurveSetElemType) return FALSE;
+    }
+
+    // Allocate an empty LUT
+    Dest =  cmsPipelineAlloc(Src ->ContextID, Src ->InputChannels, Src ->OutputChannels);
+    if (Dest == NULL) return FALSE;
+
+    // Create target curves
+    ObtainedCurves = cmsStageAllocToneCurves(Src ->ContextID, Src ->InputChannels, _cmsStageGetPtrToCurveSet(Src));
+    if (ObtainedCurves == NULL) goto Error;
+
+    // Maybe the curves are linear at the end
+    if (!AllCurvesAreLinear(ObtainedCurves)) {
+       _cmsStageToneCurvesData* Data;
+
+        if (!cmsPipelineInsertStage(Dest, cmsAT_BEGIN, ObtainedCurves))
+            goto Error;
+        Data = (_cmsStageToneCurvesData*) cmsStageData(ObtainedCurves);
+        ObtainedCurves = NULL;
+
+        // If the curves are to be applied in 8 bits, we can save memory
+        if (_cmsFormatterIs8bit(*InputFormat)) {
+             Curves16Data* c16 = CurvesAlloc(Dest ->ContextID, Data ->nCurves, 256, Data ->TheCurves);
+
+             if (c16 == NULL) goto Error;
+             *dwFlags |= cmsFLAGS_NOCACHE;
+            _cmsPipelineSetOptimizationParameters(Dest, FastEvaluateCurves8, c16, CurvesFree, CurvesDup);
+
+        }
+        else {
+             Curves16Data* c16 = CurvesAlloc(Dest ->ContextID, Data ->nCurves, 65536, Data ->TheCurves);
+
+             if (c16 == NULL) goto Error;
+             *dwFlags |= cmsFLAGS_NOCACHE;
+            _cmsPipelineSetOptimizationParameters(Dest, FastEvaluateCurves16, c16, CurvesFree, CurvesDup);
+        }
+    }
+    else {
+
+        // LUT optimizes to nothing. Set the identity LUT
+        cmsStageFree(ObtainedCurves);
+        ObtainedCurves = NULL;
+
+        if (!cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageAllocIdentity(Dest ->ContextID, Src ->InputChannels)))
+            goto Error;
+
+        *dwFlags |= cmsFLAGS_NOCACHE;
+        _cmsPipelineSetOptimizationParameters(Dest, FastIdentity16, (void*) Dest, NULL, NULL);
+    }
+
+    // Don't fix white on absolute colorimetric
+    if (Intent == INTENT_ABSOLUTE_COLORIMETRIC)
+        *dwFlags |= cmsFLAGS_NOWHITEONWHITEFIXUP;
+
+    if (!(*dwFlags & cmsFLAGS_NOWHITEONWHITEFIXUP)) {
+
+        if (!FixWhiteMisalignment(Dest, _cmsICCcolorSpace((int) T_COLORSPACE(*InputFormat)), _cmsICCcolorSpace((int) T_COLORSPACE(*OutputFormat)))) {
+
+            return FALSE;
+        }
+    }
+
+    // And return the obtained LUT
+    cmsPipelineFree(Src);
+    *Lut = Dest;
+    return TRUE;
+
+Error:
+
+    if (ObtainedCurves != NULL) cmsStageFree(ObtainedCurves);
+    if (Dest != NULL) cmsPipelineFree(Dest);
+
+    return FALSE;
+}
+
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------
+// This function creates simple LUT from complex ones. The generated LUT has an optional set of
+// prelinearization curves, a CLUT of nGridPoints and optional postlinearization tables.
+// These curves have to exist in the original LUT in order to be used in the simplified output.
+// Caller may also use the flags to allow this feature.
+// LUTS with all curves will be simplified to a single curve. Parametric curves are lost.
+// This function should be used on 16-bits LUTS only, as floating point losses precision when simplified
+// -----------------------------------------------------------------------------------------------------------------------------------------------
+
+static
+cmsBool OptimizeBySimplifying16(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt32Number* InputFormat, cmsUInt32Number* OutputFormat, cmsUInt32Number* dwFlags)
+{
+    cmsPipeline* Src = *Lut;
+    cmsPipeline* Dest = NULL;
+    cmsStage* mpe;
+    cmsStage* ObtainedCurves = NULL;
+
+    // This is a lossy optimization! does not apply in floating-point cases
+    if (_cmsFormatterIsFloat(*InputFormat) || _cmsFormatterIsFloat(*OutputFormat)) return FALSE;
+
+    //  Only curves in this LUT?
+    for (mpe = cmsPipelineGetPtrToFirstStage(Src);
+         mpe != NULL;
+         mpe = cmsStageNext(mpe)) {
+            if (cmsStageType(mpe) != cmsSigCurveSetElemType) return FALSE;
+    }
+
+    // Allocate an empty LUT
+    Dest =  cmsPipelineAlloc(Src ->ContextID, Src ->InputChannels, Src ->OutputChannels);
+    if (Dest == NULL) return FALSE;
+
+    // Create target curves
+    ObtainedCurves = cmsStageAllocToneCurves(Src ->ContextID, Src ->InputChannels, _cmsStageGetPtrToCurveSet(Src));
+    if (ObtainedCurves == NULL) goto Error;
+
+    // Maybe the curves are linear at the end
+    if (!AllCurvesAreLinear(ObtainedCurves)) {
+       _cmsStageToneCurvesData* Data;
+
+        if (!cmsPipelineInsertStage(Dest, cmsAT_BEGIN, ObtainedCurves))
+            goto Error;
+        Data = (_cmsStageToneCurvesData*) cmsStageData(ObtainedCurves);
+        ObtainedCurves = NULL;
+
+        // If the curves are to be applied in 8 bits, we can save memory
+        if (_cmsFormatterIs8bit(*InputFormat)) {
+             Curves16Data* c16 = CurvesAlloc(Dest ->ContextID, Data ->nCurves, 256, Data ->TheCurves);
+
+             if (c16 == NULL) goto Error;
+             *dwFlags |= cmsFLAGS_NOCACHE;
+            _cmsPipelineSetOptimizationParameters(Dest, FastEvaluateCurves8, c16, CurvesFree, CurvesDup);
+
+        }
+        else {
+             Curves16Data* c16 = CurvesAlloc(Dest ->ContextID, Data ->nCurves, 65536, Data ->TheCurves);
+
+             if (c16 == NULL) goto Error;
+             *dwFlags |= cmsFLAGS_NOCACHE;
+            _cmsPipelineSetOptimizationParameters(Dest, FastEvaluateCurves16, c16, CurvesFree, CurvesDup);
+        }
+    }
+    else {
+
+        // LUT optimizes to nothing. Set the identity LUT
+        cmsStageFree(ObtainedCurves);
+        ObtainedCurves = NULL;
+
+        if (!cmsPipelineInsertStage(Dest, cmsAT_BEGIN, cmsStageAllocIdentity(Dest ->ContextID, Src ->InputChannels)))
+            goto Error;
+
+        *dwFlags |= cmsFLAGS_NOCACHE;
+        _cmsPipelineSetOptimizationParameters(Dest, FastIdentity16, (void*) Dest, NULL, NULL);
+    }
+
+    // Don't fix white on absolute colorimetric
+    if (Intent == INTENT_ABSOLUTE_COLORIMETRIC)
+        *dwFlags |= cmsFLAGS_NOWHITEONWHITEFIXUP;
+
+    if (!(*dwFlags & cmsFLAGS_NOWHITEONWHITEFIXUP)) {
+
+        if (!FixWhiteMisalignment(Dest, _cmsICCcolorSpace((int) T_COLORSPACE(*InputFormat)), _cmsICCcolorSpace((int) T_COLORSPACE(*OutputFormat)))) {
+
+            return FALSE;
+        }
+    }
+
+    // And return the obtained LUT
+    cmsPipelineFree(Src);
+    *Lut = Dest;
+    return TRUE;
+
+Error:
+
+    if (ObtainedCurves != NULL) cmsStageFree(ObtainedCurves);
+    if (Dest != NULL) cmsPipelineFree(Dest);
+
+    return FALSE;
+}
+
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------
+// This function creates simple LUT from complex ones. The generated LUT has an optional set of
+// prelinearization curves, a CLUT of nGridPoints and optional postlinearization tables.
+// These curves have to exist in the original LUT in order to be used in the simplified output.
+// Caller may also use the flags to allow this feature.
+// LUTS with all curves will be simplified to a single curve. Parametric curves are lost.
+// This function should be used on 16-bits LUTS only, as floating point losses precision when simplified
+// -----------------------------------------------------------------------------------------------------------------------------------------------
+
+static
+cmsBool OptimizeBySimplifying16_1(cmsPipeline** Lut, cmsUInt32Number Intent, cmsUInt32Number* InputFormat, cmsUInt32Number* OutputFormat, cmsUInt32Number* dwFlags)
+{
+    cmsPipeline* Src = *Lut;
+    cmsPipeline* Dest = NULL;
+    cmsStage* mpe;
+    cmsStage* ObtainedCurves = NULL;
+
+    // This is a lossy optimization! does not apply in floating-point cases
+    if (_cmsFormatterIsFloat(*InputFormat) || _cmsFormatterIsFloat(*OutputFormat)) return FALSE;
+
+    //  Only curves in this LUT?
+    for (mpe = cmsPipelineGetPtrToFirstStage(Src);
+         mpe != NULL;
+         mpe = cmsStageNext(mpe)) {
+            if (cmsStageType(mpe) != cmsSigCurveSetElemType) return FALSE;
+    }
+
+    // Allocate an empty LUT
+    Dest =  cmsPipelineAlloc(Src ->ContextID, Src ->InputChannels, Src ->OutputChannels);
+    if (Dest == NULL) return FALSE;
+
+    // Create target curves
+    ObtainedCurves = cmsStageAllocToneCurves(Src ->ContextID, Src ->InputChannels, _cmsStageGetPtrToCurveSet(Src));
+    if (ObtainedCurves == NULL) goto Error;
+
+    // Maybe the curves are linear at the end
+    if (!AllCurvesAreLinear(Ob

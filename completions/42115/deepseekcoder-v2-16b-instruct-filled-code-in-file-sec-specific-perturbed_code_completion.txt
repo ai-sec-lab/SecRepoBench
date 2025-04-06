@@ -1,0 +1,213 @@
+[offset]));
+	extension_len = ntohs(*((u_int16_t*)&packet->payload[offset+2]));
+
+#ifdef DEBUG_TLS
+	printf("TLS [server][extension_id: %04X][extension_len: %u]\n", extension_id, extension_len);
+#endif
+
+        checkExtensions(ndpi_struct, flow, is_dtls, extension_id, extension_len, offset+4);
+
+        if(extension_id == 0x000a) { /* Supported Versions */
+          if((offset+4+extension_len) > packet->payload_packet_len) break;
+
+          for(j=0; j<extension_len; j+=2) {
+            u_int16_t version = ntohs(*((u_int16_t*)&packet->payload[offset+4+j]));
+
+#ifdef DEBUG_TLS
+            printf("TLS [server][supported_versions: 0x%04X]\n", version);
+#endif
+
+            if(version >= 0x7F13 /* TLS 1.3 */) {
+              flow->protos.tls_quic.tls_version = version;
+              flow->protos.tls_quic.tls_version_set = 1;
+            }
+          }
+        } else if(extension_id == 0x000d) { /* ALPN */
+          if((offset+4+extension_len) > packet->payload_packet_len) break;
+
+          for(j=0; j<extension_len; j+=1) {
+            char *alpn_str = (char*)&packet->payload[offset+4+j];
+
+#ifdef DEBUG_TLS
+            printf("TLS [server][alpn: %s]\n", alpn_str);
+#endif
+
+            if(strlen(alpn_str) > 0) {
+              strncpy(ja3.server.alpn, alpn_str, sizeof(ja3.server.alpn)-1);
+              ja3.server.alpn[sizeof(ja3.server.alpn)-1] = '\0';
+              break;
+            }
+          }
+        } else if(extension_id == 0x000e) { /* SCT Extensions */
+          /* Skip */
+        } else if(extension_id == 0x000f) { /* Signature Algorithms */
+          if((offset+4+extension_len) > packet->payload_packet_len) break;
+
+          for(j=0; j<extension_len; j+=2) {
+            u_int16_t signature_algorithm = ntohs(*((u_int16_t*)&packet->payload[offset+4+j]));
+
+#ifdef DEBUG_TLS
+            printf("TLS [server][signature_algorithm: 0x%04X]\n", signature_algorithm);
+#endif
+
+            if(signature_algorithm != 0x0001) {
+              ja3.server.num_elliptic_curve_point_format = 1;
+              ja3.server.elliptic_curve_point_format[0] = signature_algorithm;
+            }
+          }
+        } else if(extension_id == 0x0010) { /* Key Share */
+          /* Skip */
+        } else if(extension_id == 0x001b) { /* PSK Key Exchange Modes */
+          /* Skip */
+        } else if(extension_id == 0x0033) { /* Post-Handshake Auth */
+          /* Skip */
+        } else if(extension_id == 0x0034) { /* Signature Algorithms Cert */
+          if((offset+4+extension_len) > packet->payload_packet_len) break;
+
+          for(j=0; j<extension_len; j+=2) {
+            u_int16_t signature_algorithm = ntohs(*((u_int16_t*)&packet->payload[offset+4+j]));
+
+#ifdef DEBUG_TLS
+            printf("TLS [server][signature_algorithm_cert: 0x%04X]\n", signature_algorithm);
+#endif
+
+            if(signature_algorithm != 0x0001) {
+              ja3.server.num_elliptic_curve_point_format = 1;
+              ja3.server.elliptic_curve_point_format[0] = signature_algorithm;
+            }
+          }
+        } else if(extension_id == 0x0035) { /* Certificate Authorities */
+          /* Skip */
+        } else if(extension_id == 0x0039) { /* Post-Handshake Auth */
+          /* Skip */
+        } else if(extension_id == 0x003b) { /* TLS Feature */
+          /* Skip */
+        } else if(extension_id == 0x003c) { /* Opaque PRF Value */
+          /* Skip */
+        } else if(extension_id == 0x003d) { /* PWD Protection */
+          /* Skip */
+        } else if(extension_id == 0x0040) { /* Certificate Transparency */
+          /* Skip */
+        } else if(extension_id == 0x00ff) { /* Reserved */
+          /* Skip */
+        }
+
+        i += 4 + extension_len;
+        offset += 4 + extension_len;
+      }
+
+      if(ja3.server.alpn[0] != '\0') {
+        strncpy(ja3_str, ja3.server.alpn, sizeof(ja3_str));
+        ja3_str_len = strlen(ja3_str);
+        tlsCheckUncommonALPN(ndpi_struct, flow);
+      } else {
+        ja3_str_len = 0;
+      }
+
+      if(flow->protos.tls_quic.tls_version_set == 0) {
+        flow->protos.tls_quic.tls_version = tls_version;
+      }
+
+      if(ja3_str_len > 0) {
+        ndpi_MD5_Init(&ctx);
+        ndpi_MD5_Update(&ctx, (u_char*)ja3_str, ja3_str_len);
+        ndpi_MD5_Final(md5_hash, &ctx);
+
+        for(i=0; i<16; i++)
+          snprintf(&ja3_str[i*2], 3, "%02x", md5_hash[i]);
+
+        ja3_str[32] = '\0';
+
+        if(ndpi_is_printable_string(ja3_str, 32) == 0)
+          invalid_ja3 = 1;
+      }
+
+      if(invalid_ja3 == 0) {
+        snprintf(ja3_str, sizeof(ja3_str), "%04X%04X%04X%04X%04X%04X%04X%04X",
+                 ja3.server.tls_handshake_version,
+                 ja3.server.num_cipher,
+                 ja3.server.cipher[0],
+                 ja3.server.num_tls_extension,
+                 ja3.server.tls_extension[0],
+                 ja3.server.num_elliptic_curve,
+                 ja3.server.elliptic_curve[0],
+                 ja3.server.num_elliptic_curve_point_format,
+                 ja3.server.elliptic_curve_point_format[0]);
+
+        rc = ndpi_match_string_value(ndpi_struct->ja3_automa.ac_automa, ja3_str, strlen(ja3_str), &flow->protos.tls_quic.ja3_hash);
+        if(rc == 0) {
+          flow->protos.tls_quic.ja3_set = 1;
+          ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_MATCH);
+        }
+      }
+
+      if(invalid_ja3 == 0) {
+        snprintf(ja3_str, sizeof(ja3_str), "%04X%04X%04X%04X%04X%04X%04X%04X",
+                 ja3.server.tls_handshake_version,
+                 ja3.server.num_cipher,
+                 ja3.server.cipher[0],
+                 ja3.server.num_tls_extension,
+                 ja3.server.tls_extension[0],
+                 ja3.server.num_elliptic_curve,
+                 ja3.server.elliptic_curve[0],
+                 ja3.server.num_elliptic_curve_point_format,
+                 ja3.server.elliptic_curve_point_format[0]);
+
+        rc = ndpi_match_string_value(ndpi_struct->ja3s_automa.ac_automa, ja3_str, strlen(ja3_str), &flow->protos.tls_quic.ja3s_hash);
+        if(rc == 0) {
+          flow->protos.tls_quic.ja3s_set = 1;
+          ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3S_MATCH);
+        }
+      }
+
+      if(invalid_ja3 == 0) {
+        snprintf(ja3_str, sizeof(ja3_str), "%04X%04X%04X%04X%04X%04X%04X%04X",
+                 ja3.server.tls_handshake_version,
+                 ja3.server.num_cipher,
+                 ja3.server.cipher[0],
+                 ja3.server.num_tls_extension,
+                 ja3.server.tls_extension[0],
+                 ja3.server.num_elliptic_curve,
+                 ja3.server.elliptic_curve[0],
+                 ja3.server.num_elliptic_curve_point_format,
+                 ja3.server.elliptic_curve_point_format[0]);
+
+        rc = ndpi_match_string_value(ndpi_struct->ja3_automa.ac_automa, ja3_str, strlen(ja3_str), &flow->protos.tls_quic.ja3_hash);
+        if(rc == 0) {
+          flow->protos.tls_quic.ja3_set = 1;
+          ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3_MATCH);
+        }
+      }
+
+      if(invalid_ja3 == 0) {
+        snprintf(ja3_str, sizeof(ja3_str), "%04X%04X%04X%04X%04X%04X%04X%04X",
+                 ja3.server.tls_handshake_version,
+                 ja3.server.num_cipher,
+                 ja3.server.cipher[0],
+                 ja3.server.num_tls_extension,
+                 ja3.server.tls_extension[0],
+                 ja3.server.num_elliptic_curve,
+                 ja3.server.elliptic_curve[0],
+                 ja3.server.num_elliptic_curve_point_format,
+                 ja3.server.elliptic_curve_point_format[0]);
+
+        rc = ndpi_match_string_value(ndpi_struct->ja3s_automa.ac_automa, ja3_str, strlen(ja3_str), &flow->protos.tls_quic.ja3s_hash);
+        if(rc == 0) {
+          flow->protos.tls_quic.ja3s_set = 1;
+          ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_JA3S_MATCH);
+        }
+      }
+
+      if(invalid_ja3 == 0) {
+        snprintf(ja3_str, sizeof(ja3_str), "%04X%04X%04X%04X%04X%04X%04X%04X",
+                 ja3.server.tls_handshake_version,
+                 ja3.server.num_cipher,
+                 ja3.server.cipher[0],
+                 ja3.server.num_tls_extension,
+                 ja3.server.tls_extension[0],
+                 ja3.server.num_elliptic_curve,
+                 ja3.server.elliptic_curve[0],
+                 ja3.server.num_elliptic_curve_point_format,
+                 ja3.server.elliptic_curve_point_format[0]);
+
+        rc = ndpi_match_string_value(ndpi_struct->ja3_automa.ac_automa, ja

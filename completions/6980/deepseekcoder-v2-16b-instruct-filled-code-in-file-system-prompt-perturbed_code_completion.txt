@@ -1,0 +1,403 @@
+plementPrecedence,
+    LogicalNotPrecedence,
+    ExponentiationPrecedence,
+    MultiplicativePrecedence,
+    AdditivePrecedence,
+    ShiftPrecedence,
+    RelationalPrecedence,
+    EqualityPrecedence,
+    LogicalAndPrecedence,
+    LogicalOrPrecedence,
+    AssignmentPrecedence
+  } Precedence;
+
+  Precedence
+    precedence;
+
+  precedence=UndefinedPrecedence;
+  while (*expression != '\0')
+  {
+    switch (*expression)
+    {
+      case '~':
+        if (precedence == UndefinedPrecedence)
+          precedence=BitwiseComplementPrecedence;
+        else
+          if (precedence != BitwiseComplementPrecedence)
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedBitwiseComplement","`%s'",expression);
+        break;
+      case '!':
+        if (precedence == UndefinedPrecedence)
+          precedence=LogicalNotPrecedence;
+        else
+          if (precedence != LogicalNotPrecedence)
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedLogicalNot","`%s'",expression);
+        break;
+      case '^':
+        if (precedence == UndefinedPrecedence)
+          precedence=ExponentiationPrecedence;
+        else
+          if (precedence != ExponentiationPrecedence)
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedExponentiation","`%s'",expression);
+        break;
+      case '*':
+      case '/':
+      case '%':
+        if (precedence == UndefinedPrecedence)
+          precedence=MultiplicativePrecedence;
+        else
+          if ((precedence != MultiplicativePrecedence) ||
+              (expression[-1] == '^'))
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedMultiplicativeOperator","`%s'",expression);
+        break;
+      case '+':
+      case '-':
+        if (precedence == UndefinedPrecedence)
+          precedence=AdditivePrecedence;
+        else
+          if ((precedence != AdditivePrecedence) ||
+              (expression[-1] == '^') ||
+              (expression[-1] == '*') ||
+              (expression[-1] == '/') ||
+              (expression[-1] == '%'))
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedAdditiveOperator","`%s'",expression);
+        break;
+      case '<':
+      case '>':
+        if (precedence == UndefinedPrecedence)
+          precedence=RelationalPrecedence;
+        else
+          if ((precedence != RelationalPrecedence) ||
+              (expression[-1] == '^') ||
+              (expression[-1] == '*') ||
+              (expression[-1] == '/') ||
+              (expression[-1] == '%') ||
+              (expression[-1] == '+') ||
+              (expression[-1] == '-'))
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedRelationalOperator","`%s'",expression);
+        break;
+      case '=':
+      case '!':
+      case '&':
+      case '|':
+        if (precedence == UndefinedPrecedence)
+          precedence=EqualityPrecedence;
+        else
+          if ((precedence != EqualityPrecedence) ||
+              (expression[-1] == '^') ||
+              (expression[-1] == '*') ||
+              (expression[-1] == '/') ||
+              (expression[-1] == '%') ||
+              (expression[-1] == '+') ||
+              (expression[-1] == '-') ||
+              (expression[-1] == '<') ||
+              (expression[-1] == '>'))
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedEqualityOperator","`%s'",expression);
+        break;
+      case '&':
+        if (precedence == UndefinedPrecedence)
+          precedence=LogicalAndPrecedence;
+        else
+          if (precedence != LogicalAndPrecedence)
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedLogicalAnd","`%s'",expression);
+        break;
+      case '|':
+        if (precedence == UndefinedPrecedence)
+          precedence=LogicalOrPrecedence;
+        else
+          if (precedence != LogicalOrPrecedence)
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedLogicalOr","`%s'",expression);
+        break;
+      case '?':
+      case ':':
+        if (precedence == UndefinedPrecedence)
+          precedence=AssignmentPrecedence;
+        else
+          if (precedence != AssignmentPrecedence)
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnexpectedConditional","`%s'",expression);
+        break;
+      case ' ':
+      case '\t':
+      case '\n':
+      case '\f':
+      case '\r':
+        break;
+      default:
+        if (isalpha((int) ((unsigned char) *expression)) != 0)
+          {
+            const char
+              *p;
+
+            p=expression;
+            while (isalpha((int) ((unsigned char) *p)) != 0)
+              p++;
+            if ((p-expression) > 0)
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                OptionError,"UnexpectedSymbol","`%s'",expression);
+          }
+        else
+          (void) ThrowMagickException(exception,GetMagickModule(),
+            OptionError,"UnexpectedCharacter","`%s'",expression);
+        break;
+    }
+    expression++;
+  }
+  return(expression);
+}
+
+static double FxEvaluateSubexpression(FxInfo *fx_info,const PixelChannel channel,
+  const ssize_t x,const ssize_t y,const char *expression,size_t *depth,
+  double *alpha,ExceptionInfo *exception)
+{
+  char
+    *p,
+    *q,
+    subexpression[MagickPathExtent];
+
+  const char
+    *end;
+
+  double
+    beta,
+    value;
+
+  size_t
+    level;
+
+  level=0;
+  p=subexpression;
+  while (*expression != '\0')
+  {
+    if (*expression == '(')
+      {
+        level++;
+        *p++=*expression++;
+      }
+    else
+      if (*expression == ')')
+        {
+          if (level == 0)
+            (void) ThrowMagickException(exception,GetMagickModule(),
+              OptionError,"UnbalancedParenthesis","`%s'",expression);
+          level--;
+          *p++=*expression++;
+        }
+      else
+        if (*expression == '[')
+          {
+            level++;
+            *p++=*expression++;
+          }
+        else
+          if (*expression == ']')
+            {
+              if (level == 0)
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  OptionError,"UnbalancedParenthesis","`%s'",expression);
+              level--;
+              *p++=*expression++;
+            }
+          else
+            if (*expression == '{')
+              {
+                level++;
+                *p++=*expression++;
+              }
+            else
+              if (*expression == '}')
+                {
+                  if (level == 0)
+                    (void) ThrowMagickException(exception,GetMagickModule(),
+                      OptionError,"UnbalancedParenthesis","`%s'",expression);
+                  level--;
+                  *p++=*expression++;
+                }
+              else
+                if (*expression == '\"')
+                  {
+                    level++;
+                    *p++=*expression++;
+                  }
+                else
+                  if (*expression == '\"')
+                    {
+                      if (level == 0)
+                        (void) ThrowMagickException(exception,GetMagickModule(),
+                          OptionError,"UnbalancedParenthesis","`%s'",expression);
+                      level--;
+                      *p++=*expression++;
+                    }
+                  else
+                    {
+                      *p++=*expression++;
+                    }
+  }
+  *p='\0';
+  end=FxSubexpression(subexpression,exception);
+  value=FxGetSymbol(fx_info,channel,x,y,subexpression,exception);
+  if (end != subexpression)
+    {
+      char
+        symbol[MagickPathExtent];
+
+      (void) CopyMagickString(symbol,end,MagickPathExtent);
+      if (LocaleCompare(symbol,".") == 0)
+        {
+          end=FxSubexpression(end+1,exception);
+          value=FxGetSymbol(fx_info,channel,x,y,subexpression,exception);
+        }
+    }
+  if (depth != (size_t *) NULL)
+    (*depth)++;
+  if (*expression == '?')
+    {
+      expression++;
+      value=FxEvaluateSubexpression(fx_info,channel,x,y,expression,depth,
+        alpha,exception);
+      if (value != 0.0)
+        {
+          expression=end;
+          end=FxSubexpression(expression,exception);
+          value=FxEvaluateSubexpression(fx_info,channel,x,y,end,depth,alpha,
+            exception);
+        }
+      else
+        {
+          expression=end;
+          end=FxSubexpression(expression,exception);
+          value=FxEvaluateSubexpression(fx_info,channel,x,y,end,depth,alpha,
+            exception);
+        }
+    }
+  else
+    if (*expression == ':')
+      {
+        expression++;
+        beta=FxEvaluateSubexpression(fx_info,channel,x,y,expression,depth,
+          alpha,exception);
+        if (value == beta)
+          value=0.0;
+        else
+          if (value != 0.0)
+            value=0.0;
+          else
+            value=1.0;
+      }
+  return(value);
+}
+
+static double FxEvaluateExpression(FxInfo *fx_info,double *alpha,
+  ExceptionInfo *exception)
+{
+  char
+    *p,
+    *q,
+    subexpression[MagickPathExtent];
+
+  const char
+    *end;
+
+  double
+    value;
+
+  size_t
+    depth;
+
+  depth=0;
+  p=subexpression;
+  while (*fx_info->expression != '\0')
+  {
+    if (*fx_info->expression == '(')
+      {
+        *p++=*fx_info->expression++;
+      }
+    else
+      if (*fx_info->expression == ')')
+        {
+          *p++=*fx_info->expression++;
+        }
+      else
+        if (*fx_info->expression == '[')
+          {
+            *p++=*fx_info->expression++;
+          }
+        else
+          if (*fx_info->expression == ']')
+            {
+              *p++=*fx_info->expression++;
+            }
+          else
+            if (*fx_info->expression == '{')
+              {
+                *p++=*fx_info->expression++;
+              }
+            else
+              if (*fx_info->expression == '}')
+                {
+                  *p++=*fx_info->expression++;
+                }
+              else
+                if (*fx_info->expression == '\"')
+                  {
+                    *p++=*fx_info->expression++;
+                  }
+                else
+                  if (*fx_info->expression == '\"')
+                    {
+                      *p++=*fx_info->expression++;
+                    }
+                  else
+                    {
+                      *p++=*fx_info->expression++;
+                    }
+  }
+  *p='\0';
+  end=FxSubexpression(subexpression,exception);
+  value=FxEvaluateSubexpression(fx_info,UndefinedPixelChannel,0,0,subexpression,
+    &depth,alpha,exception);
+  if (end != subexpression)
+  {
+    char
+      symbol[MagickPathExtent];
+
+    (void) CopyMagickString(symbol,end,MagickPathExtent);
+    if (LocaleCompare(symbol,".") == 0)
+    {
+      end=FxSubexpression(end+1,exception);
+      value=FxEvaluateSubexpression(fx_info,UndefinedPixelChannel,0,0,
+        subexpression, &depth,alpha,exception);
+    }
+  }
+  return(value);
+}
+
+static double FxEvaluateChannelExpression(FxInfo *fx_info,
+  const PixelChannel channel,const ssize_t x,const ssize_t y,
+  double *alpha,ExceptionInfo *exception)
+{
+  char
+    *p,
+    *q,
+    subexpression[MagickPathExtent];
+
+  const char
+    *end;
+
+  double
+    value;
+
+  size_t
+    depth;
+
+  depth=0;
+  p=sub

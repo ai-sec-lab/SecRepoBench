@@ -1,0 +1,290 @@
+mrb_value str;
+  mrb_int len;
+
+  buf = io_read_buf(mrb, self);
+  str = mrb_str_substr(mrb, buf, 0, 1);
+  len = RSTRING_LEN(buf);
+  if (len > 1) {
+    mrb_str_modify(mrb, RSTRING(buf));
+    memmove(RSTR_PTR(buf), RSTR_PTR(buf) + 1, len - 1);
+    RSTR_SET_LEN(buf, len - 1);
+  }
+  else {
+    mrb_iv_set(mrb, self, MRB_IVSYM(buf), mrb_str_new_cstr(mrb, ""));
+  }
+  return str;
+}
+
+static mrb_value
+io_readlines(mrb_state *mrb, mrb_value self)
+{
+  mrb_value ary = mrb_ary_new(mrb);
+  mrb_value line;
+  mrb_value buf;
+
+  while (1) {
+    line = mrb_funcall(mrb, self, "readline", 0);
+    if (mrb_nil_p(line)) break;
+    mrb_ary_push(mrb, ary, line);
+  }
+  return ary;
+}
+
+static mrb_value
+io_readline(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf;
+  mrb_value str;
+  mrb_int len;
+  const char *p;
+
+  buf = io_read_buf(mrb, self);
+  p = RSTR_PTR(buf);
+  len = RSTRING_LEN(buf);
+  if (len == 0) return mrb_nil_value();
+  str = mrb_str_new(mrb, p, len);
+  mrb_str_modify(mrb, RSTRING(str));
+  if (len > 0 && p[len - 1] == '\n') {
+    mrb_str_modify(mrb, RSTRING(buf));
+    RSTR_SET_LEN(buf, len - 1);
+  }
+  else {
+    mrb_iv_set(mrb, self, MRB_IVSYM(buf), mrb_str_new_cstr(mrb, ""));
+  }
+  return str;
+}
+
+static mrb_value
+io_readpartial(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  mrb_int len;
+  mrb_value str;
+  struct mrb_io *fptr;
+
+  mrb_get_args(mrb, "i", &len);
+
+  if (len < 0) {
+    mrb_raise(mrb, E_ARGUMENT_ERROR, "negative length");
+  }
+
+  if (mrb_nil_p(buf)) {
+    buf = mrb_str_new(mrb, NULL, 0);
+    mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+  }
+
+  fptr = io_get_read_fptr(mrb, self);
+  str = mrb_str_new(mrb, NULL, len);
+  mrb_str_modify(mrb, RSTRING(str));
+
+  while (RSTRING_LEN(buf) < len) {
+    mrb_value tmp;
+    mrb_int n;
+
+    tmp = mrb_str_new(mrb, NULL, len - RSTRING_LEN(buf));
+    n = read(fptr->fd, RSTR_PTR(tmp), RSTRING_LEN(tmp));
+    if (n <= 0) {
+      if (n < 0) mrb_sys_fail(mrb, "readpartial");
+      break;
+    }
+    mrb_str_resize(mrb, tmp, n);
+    mrb_str_append(mrb, buf, tmp);
+  }
+
+  if (RSTRING_LEN(buf) > len) {
+    str = mrb_str_substr(mrb, buf, 0, len);
+    mrb_str_modify(mrb, RSTRING(buf));
+    RSTR_SET_LEN(buf, len);
+  }
+  else {
+    str = buf;
+  }
+
+  return str;
+}
+
+static mrb_value
+io_readuntil(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  mrb_value str;
+  mrb_int len;
+  const char *p;
+  mrb_value eos;
+
+  mrb_get_args(mrb, "S", &eos);
+
+  if (mrb_nil_p(buf)) {
+    buf = mrb_str_new(mrb, NULL, 0);
+    mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+  }
+
+  mrb_str_modify(mrb, RSTRING(buf));
+  p = RSTR_PTR(buf);
+  len = RSTRING_LEN(buf);
+
+  while (1) {
+    mrb_value tmp;
+    mrb_int n;
+
+    tmp = mrb_str_new(mrb, p + len, 1);
+    n = read(mrb_io_fileno(mrb, self), RSTR_PTR(tmp), 1);
+    if (n <= 0) {
+      if (n < 0) mrb_sys_fail(mrb, "readuntil");
+      break;
+    }
+    mrb_str_resize(mrb, tmp, n);
+    mrb_str_append(mrb, buf, tmp);
+    if (mrb_str_end_with_p(mrb, buf, eos)) {
+      str = mrb_str_substr(mrb, buf, 0, len + 1);
+      mrb_str_modify(mrb, RSTRING(buf));
+      RSTR_SET_LEN(buf, len + 1);
+      return str;
+    }
+  }
+
+  return buf;
+}
+
+static mrb_value
+io_getc(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  mrb_value str;
+  mrb_int len;
+  const char *p;
+
+  if (mrb_nil_p(buf)) {
+    buf = mrb_str_new(mrb, NULL, 0);
+    mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+  }
+
+  mrb_str_modify(mrb, RSTRING(buf));
+  p = RSTR_PTR(buf);
+  len = RSTRING_LEN(buf);
+
+  if (len == 0) {
+    mrb_value tmp;
+    mrb_int n;
+
+    tmp = mrb_str_new(mrb, NULL, 1);
+    n = read(mrb_io_fileno(mrb, self), RSTR_PTR(tmp), 1);
+    if (n <= 0) {
+      if (n < 0) mrb_sys_fail(mrb, "getc");
+      return mrb_nil_value();
+    }
+    mrb_str_resize(mrb, tmp, n);
+    mrb_str_append(mrb, buf, tmp);
+  }
+
+  str = mrb_str_substr(mrb, buf, 0, 1);
+  mrb_str_modify(mrb, RSTRING(buf));
+  RSTR_SET_LEN(buf, len - 1);
+
+  return str;
+}
+
+static mrb_value
+io_ungetc(mrb_state *mrb, mrb_value self)
+{
+  mrb_value c;
+  mrb_value buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  mrb_int len;
+
+  mrb_get_args(mrb, "c", &c);
+
+  if (mrb_nil_p(buf)) {
+    buf = mrb_str_new(mrb, NULL, 0);
+    mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+  }
+
+  mrb_str_modify(mrb, RSTRING(buf));
+  len = RSTRING_LEN(buf);
+
+  if (len >= 1) {
+    mrb_str_modify(mrb, RSTRING(buf));
+    memmove(RSTR_PTR(buf) + 1, RSTR_PTR(buf), len);
+    RSTR_PTR(buf)[0] = mrb_string_value_cstr(mrb, &c);
+    RSTR_SET_LEN(buf, len + 1);
+  }
+  else {
+    RSTR_PTR(buf)[0] = mrb_string_value_cstr(mrb, &c);
+    RSTR_SET_LEN(buf, 1);
+  }
+
+  return c;
+}
+
+static mrb_value
+io_each_byte(mrb_state *mrb, mrb_value self)
+{
+  mrb_value line;
+  mrb_value buf = mrb_str_new(mrb, NULL, 0);
+  mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+
+  while (1) {
+    line = mrb_funcall(mrb, self, "getc", 0);
+    if (mrb_nil_p(line)) break;
+    mrb_yield(mrb, mrb_proc_ptr(mrb_attr_get(mrb, self, mrb_intern_lit(mrb, "proc"))), line);
+  }
+
+  return self;
+}
+
+static mrb_value
+io_each_char(mrb_state *mrb, mrb_value self)
+{
+  mrb_value line;
+  mrb_value buf = mrb_str_new(mrb, NULL, 0);
+  mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+
+  while (1) {
+    line = mrb_funcall(mrb, self, "readchar", 0);
+    if (mrb_nil_p(line)) break;
+    mrb_yield(mrb, mrb_proc_ptr(mrb_attr_get(mrb, self, mrb_intern_lit(mrb, "proc"))), line);
+  }
+
+  return self;
+}
+
+static mrb_value
+io_each_line(mrb_state *mrb, mrb_value self)
+{
+  mrb_value line;
+  mrb_value buf = mrb_str_new(mrb, NULL, 0);
+  mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+
+  while (1) {
+    line = mrb_funcall(mrb, self, "readline", 0);
+    if (mrb_nil_p(line)) break;
+    mrb_yield(mrb, mrb_proc_ptr(mrb_attr_get(mrb, self, mrb_intern_lit(mrb, "proc"))), line);
+  }
+
+  return self;
+}
+
+static mrb_value
+io_eof(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr;
+  fptr = io_get_open_fptr(mrb, self);
+  if (fptr->fd < 0) {
+    return mrb_true_value();
+  }
+  return mrb_false_value();
+}
+
+static mrb_value
+io_eof_mark(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr;
+  fptr = io_get_open_fptr(mrb, self);
+  fptr->eof_mark = TRUE;
+  return mrb_true_value();
+}
+
+static mrb_value
+io_eof_restore(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr;
+  fptr = io_get

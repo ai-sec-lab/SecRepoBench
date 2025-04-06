@@ -1,0 +1,87 @@
+exr_result_t
+internal_huf_decompress (
+    exr_decode_pipeline_t* decode,
+    const uint8_t*         compressed,
+    uint64_t               nCompressed,
+    uint16_t*              raw,
+    uint64_t               nRawSize,
+    void*                  spare,
+    uint64_t               sparebytes)
+{
+    uint32_t                            im, iM, nBits;
+    uint64_t                            nBytes;
+    const uint8_t*                      ptr;
+    exr_result_t                        rv;
+    const struct _internal_exr_context* pctxt = NULL;
+    // Retrieve the context from the decode structure if available.
+    // Check if the compressed data size is at least 20 bytes for a valid header.
+    // Validate that 'im' and 'iM' are within acceptable limits.
+    // Ensure there is enough data in the buffer to perform decompression.
+    // Check if fast Huffman decoding is enabled and applicable based on the data size.
+    // If so, initialize and perform fast Huffman decoding.
+    // If not, use a slower, standard Huffman decoding method.
+    // Clear and unpack the Huffman encoding table for use in decoding.
+    // Build the Huffman decoding table based on frequency data.
+    // Execute the appropriate decoding function (fast or standard) and return the result.
+    // <MASK>
+
+    if (nCompressed < 20) return EXR_ERR_CORRUPT_CHUNK;
+
+    ptr = compressed;
+
+    im = readUInt (ptr);
+    ptr += 4;
+    iM = readUInt (ptr);
+    ptr += 4;
+    uint32_t tableLength = readUInt (ptr);
+    ptr += 4;
+    nBits = readUInt (ptr);
+    ptr += 4;
+
+    if (im > iM || iM > HUF_ENCSIZE || nBits > 64 * nCompressed)
+        return EXR_ERR_CORRUPT_CHUNK;
+
+    if (sparebytes < internal_exr_huf_decompress_spare_bytes ())
+        return EXR_ERR_INVALID_ARGUMENT;
+
+    uint64_t* freq = (uint64_t*) spare;
+    HufDec* hdecod = (HufDec*) (freq + HUF_ENCSIZE);
+
+    memset (freq, 0, HUF_ENCSIZE * sizeof (uint64_t));
+    hufClearDecTable (hdecod);
+
+    if (fasthuf_decode_enabled ())
+    {
+        FastHufDecoder fhd;
+        rv = fasthuf_initialize (
+            pctxt, &fhd, (const uint8_t**)&ptr, tableLength, im, iM, 65536);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        rv = fasthuf_decode (
+            pctxt, &fhd, (const uint8_t*)compressed, nBits, raw, nRawSize);
+        hufFreeDecTable (hdecod);
+        return rv;
+    }
+    else
+    {
+        uint64_t* scode = freq + HUF_ENCSIZE;
+        uint32_t* hlink = (uint32_t*) (scode + HUF_ENCSIZE);
+        uint64_t** fHeap = (uint64_t**) (hlink + HUF_ENCSIZE);
+
+        ptr = (const uint8_t*)tableStart;
+        rv = hufUnpackEncTable (&ptr, &nBytes, im, iM, scode);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        rv = hufBuildDecTable (scode, im, iM, hdecod);
+        if (rv != EXR_ERR_SUCCESS)
+        {
+            hufFreeDecTable (hdecod);
+            return rv;
+        }
+
+        rv = hufDecode (
+            scode, hdecod, (const uint8_t*)compressed, nBits, 65536, raw, nRawSize);
+        hufFreeDecTable (hdecod);
+        return rv;
+    }
+}

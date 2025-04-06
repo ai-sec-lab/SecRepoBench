@@ -1,0 +1,391 @@
+filename = (char *) URI;
+    inputStream->directory = directory;
+
+    xmlBufResetInput(inputStream->buf->buffer, inputStream);
+    return(inputStream);
+}
+
+/**
+ * xmlCheckHTTPInput:
+ * @ctxt:  an XML parser context
+ * @input:  an XML parser input
+ *
+ * Check if the input is an HTTP input and if so, handle it.
+ *
+ * Returns the new input stream or NULL in case of error
+ */
+xmlParserInputPtr
+xmlCheckHTTPInput(xmlParserCtxtPtr ctxt, xmlParserInputPtr input) {
+    xmlParserInputBufferPtr buf = input->buf;
+    const char *contentType = NULL;
+    xmlCharEncoding enc = XML_CHAR_ENCODING_NONE;
+    int res;
+
+    if (buf == NULL) return(NULL);
+    contentType = xmlGetCharEncodingName(buf->encoder);
+    if (contentType == NULL)
+        return(input);
+    if (xmlStrcasecmp(BAD_CAST "application/xml", contentType) == 0) {
+        enc = XML_CHAR_ENCODING_UTF8;
+    } else if (xmlStrcasecmp(BAD_CAST "text/xml", contentType) == 0) {
+        enc = XML_CHAR_ENCODING_UTF8;
+    } else if (xmlStrcasecmp(BAD_CAST "application/x-www-form-urlencoded",
+                             contentType) == 0) {
+        enc = XML_CHAR_ENCODING_US_ASCII;
+    } else if (xmlStrcasecmp(BAD_CAST "text/html", contentType) == 0) {
+        enc = XML_CHAR_ENCODING_UTF8;
+    } else if (xmlStrcasecmp(BAD_CAST "application/xhtml+xml", contentType) == 0) {
+        enc = XML_CHAR_ENCODING_UTF8;
+    } else if (xmlStrcasecmp(BAD_CAST "image/svg+xml", contentType) == 0) {
+        enc = XML_CHAR_ENCODING_UTF8;
+    } else {
+        return(input);
+    }
+
+    res = xmlSwitchInputEncoding(ctxt, input, buf->encoder);
+    if (res < 0) {
+        xmlFreeInputStream(input);
+        return(NULL);
+    }
+
+    return(input);
+}
+
+/**
+ * xmlParserGetDirectory:
+ * @filename:  the filename to use as entity
+ *
+ * Extract the directory part of a filename.
+ *
+ * Returns the directory part of the filename or NULL if none
+ */
+char *
+xmlParserGetDirectory(const char *filename) {
+    const char *ptr;
+    char *dir;
+    size_t len;
+
+    if (filename == NULL)
+        return(NULL);
+
+    ptr = filename + strlen(filename);
+    while ((ptr > filename) && (*ptr != '/') && (*ptr != '\\'))
+        ptr--;
+
+    if ((ptr == filename) && (*ptr != '/') && (*ptr != '\\'))
+        return(NULL);
+
+    len = ptr - filename;
+    dir = (char *) xmlMalloc((len + 2) * sizeof(char));
+    if (dir == NULL)
+        return(NULL);
+
+    memcpy(dir, filename, len);
+    dir[len] = '\0';
+    ptr = filename;
+    while ((ptr < filename + len) && (*ptr != '/') && (*ptr != '\\'))
+        ptr++;
+    if (ptr < filename + len) {
+        dir[len] = '/';
+        dir[len + 1] = '\0';
+    }
+
+    return(dir);
+}
+
+/**
+ * xmlLoadExternalEntity:
+ * @URL:  the URL of the external entity
+ * @ExternalID:  the ExternalID of the external entity
+ * @ctxt:  an XML parser context
+ *
+ * Load an external entity from a URL or a systemId.
+ *
+ * Returns the new input stream or NULL in case of error
+ */
+xmlParserInputPtr
+xmlLoadExternalEntity(const char *URL, const char *ExternalID,
+                      xmlParserCtxtPtr ctxt) {
+    xmlParserInputPtr input;
+
+    if (URL == NULL) {
+        if (ExternalID == NULL) {
+            xmlErrInternal(ctxt, "xmlLoadExternalEntity: both URL and "
+                           "ExternalID are NULL\n", NULL);
+            return(NULL);
+        }
+        URL = ExternalID;
+    }
+
+    if (xmlParserDebugEntities)
+	xmlGenericError(xmlGenericErrorContext,
+		"load external entity: %s\n", URL);
+
+    if (ctxt == NULL) {
+        xmlErrInternal(ctxt, "xmlLoadExternalEntity: context is NULL\n",
+                       NULL);
+        return(NULL);
+    }
+
+    if (ctxt->loadExtEntity == NULL) {
+        xmlErrInternal(ctxt, "xmlLoadExternalEntity: no external entity "
+                       "loader defined\n", NULL);
+        return(NULL);
+    }
+
+    input = ctxt->loadExtEntity(ctxt, URL, ExternalID);
+    if (input == NULL) {
+        xmlErrInternal(ctxt, "xmlLoadExternalEntity: failed to load "
+                       "external entity\n", NULL);
+        return(NULL);
+    }
+
+    if (xmlParserDebugEntities)
+	xmlGenericError(xmlGenericErrorContext,
+		"loaded external entity: %s\n", URL);
+
+    return(input);
+}
+
+/**
+ * xmlFreeParserInputBuffer:
+ * @buf:  an xmlParserInputBufferPtr
+ *
+ * Free up an input buffer.
+ */
+void
+xmlFreeParserInputBuffer(xmlParserInputBufferPtr buf) {
+    if (buf == NULL) return;
+    if (buf->encoder != NULL)
+        xmlCharEncCloseFunc(buf->encoder);
+    if (buf->readcallback != NULL)
+        xmlFree(buf->readcallback);
+    if (buf->closecallback != NULL)
+        xmlFree(buf->closecallback);
+    if (buf->buffer != NULL)
+        xmlBufFree(buf->buffer);
+    xmlFree(buf);
+}
+
+/**
+ * xmlParserInputBufferCreateFilename:
+ * @filename:  the filename to use as entity
+ * @encoding:  the charset encoding if known
+ *
+ * Create a new input buffer based on a file or an URL.
+ *
+ * Returns the new input buffer or NULL
+ */
+xmlParserInputBufferPtr
+xmlParserInputBufferCreateFilename(const char *filename,
+                                   xmlCharEncoding encoding) {
+    xmlParserInputBufferPtr buf;
+    xmlCharEncodingHandlerPtr handler;
+    int res;
+
+    if (filename == NULL)
+        return(NULL);
+
+    buf = (xmlParserInputBufferPtr) xmlMalloc(sizeof(xmlParserInputBuffer));
+    if (buf == NULL) {
+        xmlErrMemory(NULL, "couldn't allocate a new input buffer\n");
+        return(NULL);
+    }
+    memset(buf, 0, sizeof(xmlParserInputBuffer));
+
+    res = xmlLookupCharEncodingHandler(encoding, &handler);
+    if (res != 0) {
+        xmlFree(buf);
+        return(NULL);
+    }
+
+    buf->encoder = handler;
+    buf->buffer = xmlBufCreate();
+    if (buf->buffer == NULL) {
+        xmlCharEncCloseFunc(handler);
+        xmlFree(buf);
+        return(NULL);
+    }
+
+    buf->readcallback = xmlFileRead;
+    buf->closecallback = xmlFileClose;
+
+    return(buf);
+}
+
+/**
+ * xmlParserInputBufferCreateFd:
+ * @fd:  the file descriptor
+ * @encoding:  the charset encoding if known
+ *
+ * Create a new input buffer based on a file descriptor.
+ *
+ * Returns the new input buffer or NULL
+ */
+xmlParserInputBufferPtr
+xmlParserInputBufferCreateFd(int fd, xmlCharEncoding encoding) {
+    xmlParserInputBufferPtr buf;
+    xmlCharEncodingHandlerPtr handler;
+    int res;
+
+    buf = (xmlParserInputBufferPtr) xmlMalloc(sizeof(xmlParserInputBuffer));
+    if (buf == NULL) {
+        xmlErrMemory(NULL, "couldn't allocate a new input buffer\n");
+        return(NULL);
+    }
+    memset(buf, 0, sizeof(xmlParserInputBuffer));
+
+    res = xmlLookupCharEncodingHandler(encoding, &handler);
+    if (res != 0) {
+        xmlFree(buf);
+        return(NULL);
+    }
+
+    buf->encoder = handler;
+    buf->buffer = xmlBufCreateFd(fd);
+    if (buf->buffer == NULL) {
+        xmlCharEncCloseFunc(handler);
+        xmlFree(buf);
+        return(NULL);
+    }
+
+    buf->readcallback = xmlFdRead;
+    buf->closecallback = xmlFdClose;
+
+    return(buf);
+}
+
+/**
+ * xmlParserInputBufferCreateMem:
+ * @mem:  the memory buffer
+ * @size:  the size of the memory buffer
+ * @encoding:  the charset encoding if known
+ *
+ * Create a new input buffer based on a memory buffer.
+ *
+ * Returns the new input buffer or NULL
+ */
+xmlParserInputBufferPtr
+xmlParserInputBufferCreateMem(const char *mem, int size,
+                              xmlCharEncoding encoding) {
+    xmlParserInputBufferPtr buf;
+    xmlCharEncodingHandlerPtr handler;
+    int res;
+
+    if (mem == NULL)
+        return(NULL);
+
+    buf = (xmlParserInputBufferPtr) xmlMalloc(sizeof(xmlParserInputBuffer));
+    if (buf == NULL) {
+        xmlErrMemory(NULL, "couldn't allocate a new input buffer\n");
+        return(NULL);
+    }
+    memset(buf, 0, sizeof(xmlParserInputBuffer));
+
+    res = xmlLookupCharEncodingHandler(encoding, &handler);
+    if (res != 0) {
+        xmlFree(buf);
+        return(NULL);
+    }
+
+    buf->encoder = handler;
+    buf->buffer = xmlBufCreateMem((xmlChar *) mem, size);
+    if (buf->buffer == NULL) {
+        xmlCharEncCloseFunc(handler);
+        xmlFree(buf);
+        return(NULL);
+    }
+
+    buf->readcallback = xmlMemRead;
+    buf->closecallback = xmlMemClose;
+
+    return(buf);
+}
+
+/**
+ * xmlParserInputBufferCreateString:
+ * @mem:  the memory buffer
+ *
+ * Create a new input buffer based on a string.
+ *
+ * Returns the new input buffer or NULL
+ */
+xmlParserInputBufferPtr
+xmlParserInputBufferCreateString(const xmlChar *mem) {
+    xmlParserInputBufferPtr buf;
+
+    if (mem == NULL)
+        return(NULL);
+
+    buf = (xmlParserInputBufferPtr) xmlMalloc(sizeof(xmlParserInputBuffer));
+    if (buf == NULL) {
+        xmlErrMemory(NULL, "couldn't allocate a new input buffer\n");
+        return(NULL);
+    }
+    memset(buf, 0, sizeof(xmlParserInputBuffer));
+
+    buf->buffer = xmlBufCreateStatic((xmlChar *) mem, xmlStrlen(mem));
+    if (buf->buffer == NULL) {
+        xmlFree(buf);
+        return(NULL);
+    }
+
+    buf->readcallback = NULL;
+    buf->closecallback = NULL;
+
+    return(buf);
+}
+
+/**
+ * xmlParserInputBufferGrow:
+ * @buf:  an xmlParserInputBufferPtr
+ * @len:  the length to grow
+ *
+ * Grow the input buffer.
+ *
+ * Returns the number of bytes read or -1 in case of error.
+ */
+int
+xmlParserInputBufferGrow(xmlParserInputBufferPtr buf, int len) {
+    int ret;
+
+    if (buf == NULL)
+        return(-1);
+    if (buf->error != 0)
+        return(-1);
+
+    ret = xmlBufGrow(buf->buffer, len);
+    if (ret < 0) {
+        buf->error = XML_ERR_NO_MEMORY;
+        return(-1);
+    }
+
+    return(ret);
+}
+
+/**
+ * xmlParserInputBufferRead:
+ * @buf:  an xmlParserInputBufferPtr
+ * @len:  the length to read
+ *
+ * Read from the input buffer.
+ *
+ * Returns the number of bytes read or -1 in case of error.
+ */
+int
+xmlParserInputBufferRead(xmlParserInputBufferPtr buf, int len) {
+    int ret;
+
+    if (buf == NULL)
+        return(-1);
+    if (buf->error != 0)
+        return(-1);
+
+    ret = xmlBufAdd(buf->buffer, len);
+    if (ret < 0) {
+        buf->error = XML_ERR_NO_MEMORY;
+        return(-1);
+    }
+
+    if (buf->readcallback != NULL) {
+        ret = buf->readcallback(buf->context, buf->buffer->content,

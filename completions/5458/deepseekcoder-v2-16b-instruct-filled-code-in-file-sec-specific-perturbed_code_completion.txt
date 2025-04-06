@@ -1,0 +1,274 @@
+FatalError,
+                      "MemoryAllocationFailed");
+                  root->attributes[i][0]=n;
+                  root->attributes[i][1]=(char *) NULL;
+                  root->attributes[i+1]=(char **) NULL;
+                }
+              if (root->attributes[i][1] == (char *) NULL)
+                {
+                  root->attributes[i][1]=(char *) AcquireQuantumMemory(3,
+                    sizeof(**root->attributes));
+                  if (root->attributes[i][1] == (char *) NULL)
+                    ThrowFatalException(ResourceLimitFatalError,
+                      "MemoryAllocationFailed");
+                  root->attributes[i][1][0]=*c;
+                  root->attributes[i][1][1]=*v;
+                  root->attributes[i][1][2]=(char *) NULL;
+                }
+              else
+                {
+                  j=1;
+                  while (root->attributes[i][1][j] != (char *) NULL)
+                    j++;
+                  root->attributes[i][1]=(char *) ResizeQuantumMemory(
+                    root->attributes[i][1],(size_t) (j+3),
+                    sizeof(**root->attributes));
+                  if (root->attributes[i][1] == (char *) NULL)
+                    ThrowFatalException(ResourceLimitFatalError,
+                      "MemoryAllocationFailed");
+                  root->attributes[i][1][j+2]=(char *) NULL;
+                  root->attributes[i][1][j+1]=*v;
+                  root->attributes[i][1][j]=*c;
+                }
+            }
+          }
+        }
+      else
+        if (strncmp(xml,"<!DOCTYPE",9) == 0)
+          {
+            /*
+              Parse document type definitions.
+            */
+            xml+=strspn(xml+9,XMLWhitespace)+9;
+            c=xml;
+            n=xml+strspn(xml,XMLWhitespace "%");
+            xml=n+strcspn(n,XMLWhitespace);
+            *xml=';';
+            v=xml+strspn(xml+1,XMLWhitespace);
+            if (*v != '"')
+              {
+                /*
+                  Skip externals.
+                */
+                xml=strchr(xml,'>');
+                continue;
+              }
+            xml++;
+            *xml='\0';
+            xml=strchr(v=xml+1,'"');
+            if (xml != (char *) NULL)
+              {
+                *xml='\0';
+                xml++;
+              }
+            if (root->entities[0] == (char *) NULL)
+              {
+                root->entities=(char **) AcquireQuantumMemory(2,sizeof(*root->entities));
+                if (root->entities == (char **) NULL)
+                  ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+                root->entities[0]=n;
+                root->entities[1]=(char *) NULL;
+              }
+            else
+              {
+                for (i=0; root->entities[i] != (char *) NULL; i++) ;
+                root->entities=(char **) ResizeQuantumMemory(root->entities,(size_t) (i+2),
+                  sizeof(*root->entities));
+                if (root->entities == (char **) NULL)
+                  ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+                root->entities[i]=n;
+                root->entities[i+1]=(char *) NULL;
+              }
+            root->entities[i+1]=ParseEntities(v,predefined_entitites,'%');
+            if (ValidateEntities(n,root->entities[i+1],root->entities) != MagickFalse)
+              root->entities[i+1]=DestroyString(root->entities[i+1]);
+            else
+              {
+                (void) ThrowMagickException(exception,GetMagickModule(),
+                  OptionWarning,"ParseError","circular entity declaration &%s",n);
+                predefined_entitites=(char **) RelinquishMagickMemory(
+                  predefined_entitites);
+                return(MagickFalse);
+              }
+          }
+        else
+          if (strncmp(xml,"<!",2) == 0)
+            {
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                OptionWarning,"ParseError","unrecognized DOCTYPE declaration <%s>",xml);
+              predefined_entitites=(char **) RelinquishMagickMemory(
+                predefined_entitites);
+              return(MagickFalse);
+            }
+    xml++;
+  }
+  predefined_entitites=(char **) RelinquishMagickMemory(predefined_entitites);
+  return(MagickTrue);
+}
+
+static XMLTreeInfo *ParseOpenTag(XMLTreeRoot *root,char *tag,
+  ExceptionInfo *exception)
+{
+  XMLTreeInfo
+    *xml_info;
+
+  xml_info=AcquireXMLTreeInfo(root);
+  if (xml_info == (XMLTreeInfo *) NULL)
+    return(&root->root);
+  xml_info->tag=tag;
+  xml_info->attributes=sentinel;
+  xml_info->content=ConstantString("");
+  xml_info->debug=IsEventLogging();
+  xml_info->signature=MagickCoreSignature;
+  xml_info->parent=root->node;
+  if (root->node != (XMLTreeInfo *) NULL)
+    {
+      if (root->node->child == (XMLTreeInfo *) NULL)
+        root->node->child=xml_info;
+      else
+        {
+          xml_info->sibling=root->node->child;
+          root->node->child=xml_info;
+        }
+    }
+  root->node=xml_info;
+  return(xml_info);
+}
+
+static XMLTreeInfo *ParseTag(XMLTreeRoot *root,char *xml,size_t length,
+  ExceptionInfo *exception)
+{
+  char
+    *tag,
+    *xml_start;
+
+  XMLTreeInfo
+    *xml_info;
+
+  xml_start=xml;
+  xml+=strspn(xml,XMLWhitespace);
+  if (*xml == '\0')
+    return(&root->root);
+  tag=xml+strcspn(xml,'>');
+  if (*tag != '>')
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","malformed tag");
+      return(&root->root);
+    }
+  *tag='\0';
+  xml++;
+  xml_info=ParseOpenTag(root,xml_start,exception);
+  if (xml_info == (XMLTreeInfo *) NULL)
+    return(&root->root);
+  ParseCharacterContent(root,xml,length-1,' ');
+  xml_info=ParseCloseTag(root,tag,exception);
+  if (xml_info == (XMLTreeInfo *) NULL)
+    return(&root->root);
+  return(xml_info);
+}
+
+MagickExport XMLTreeInfo *NewXMLTree(const char *xml,ExceptionInfo *exception)
+{
+  XMLTreeRoot
+    *root;
+
+  char
+    *xml_start,
+    *xml_end;
+
+  size_t
+    length;
+
+  xml_start=xml;
+  xml_end=xml;
+  length=strlen(xml);
+  xml_end=(char *) AcquireQuantumMemory(length+1,sizeof(*xml_end));
+  if (xml_end == (char *) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  (void) CopyMagickMemory(xml_end,xml,length);
+  xml_end[length]='\0';
+  xml_end=ParseEntities(xml_end,sentinel,'&');
+  xml_start=xml_end;
+  xml_end=strchr(xml_start,'>');
+  if (xml_end == (char *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","malformed XML");
+      xml_end=xml_start;
+    }
+  else
+    {
+      *xml_end='\0';
+      xml_end++;
+    }
+  root=(XMLTreeRoot *) AcquireXMLTreeInfo(xml_start);
+  if (root == (XMLTreeInfo *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionWarning,
+        "ParseError","malformed XML");
+      xml_end=xml_start;
+    }
+  else
+    {
+      root->root.tag=xml_start;
+      root->root.attributes=(char ***) AcquireQuantumMemory(1,sizeof(*root->root.attributes));
+      if (root->root.attributes == (char ***) NULL)
+        ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+      root->root.attributes[0]=(char **) AcquireQuantumMemory(1,sizeof(**root->root.attributes));
+      if (root->root.attributes[0] == (char **) NULL)
+        ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+      root->root.attributes[0][0]=(char *) NULL;
+      root->root.attributes[0][1]=(char *) NULL;
+      root->root.attributes[0][2]=(char *) NULL;
+      root->root.attributes[0][3]=(char *) NULL;
+      root->root.attributes[0][4]=(char *) NULL;
+      root->root.attributes[0][5]=(char *) NULL;
+      root->root.attributes[0][6]=(char *) NULL;
+      root->root.attributes[0][7]=(char *) NULL;
+      root->root.attributes[0][8]=(char *) NULL;
+      root->root.attributes[0][9]=(char *) NULL;
+      root->root.attributes[0][10]=(char *) NULL;
+      root->root.attributes[0][11]=(char *) NULL;
+      root->root.attributes[0][12]=(char *) NULL;
+      root->root.attributes[0][13]=(char *) NULL;
+      root->root.attributes[0][14]=(char *) NULL;
+      root->root.attributes[0][15]=(char *) NULL;
+      root->root.attributes[0][16]=(char *) NULL;
+      root->root.attributes[0][17]=(char *) NULL;
+      root->root.attributes[0][18]=(char *) NULL;
+      root->root.attributes[0][19]=(char *) NULL;
+      root->root.attributes[0][20]=(char *) NULL;
+      root->root.attributes[0][21]=(char *) NULL;
+      root->root.attributes[0][22]=(char *) NULL;
+      root->root.attributes[0][23]=(char *) NULL;
+      root->root.attributes[0][24]=(char *) NULL;
+      root->root.attributes[0][25]=(char *) NULL;
+      root->root.attributes[0][26]=(char *) NULL;
+      root->root.attributes[0][27]=(char *) NULL;
+      root->root.attributes[0][28]=(char *) NULL;
+      root->root.attributes[0][29]=(char *) NULL;
+      root->root.attributes[0][30]=(char *) NULL;
+      root->root.attributes[0][31]=(char *) NULL;
+      root->root.attributes[0][32]=(char *) NULL;
+      root->root.attributes[0][33]=(char *) NULL;
+      root->root.attributes[0][34]=(char *) NULL;
+      root->root.attributes[0][35]=(char *) NULL;
+      root->root.attributes[0][36]=(char *) NULL;
+      root->root.attributes[0][37]=(char *) NULL;
+      root->root.attributes[0][38]=(char *) NULL;
+      root->root.attributes[0][39]=(char *) NULL;
+      root->root.attributes[0][40]=(char *) NULL;
+      root->root.attributes[0][41]=(char *) NULL;
+      root->root.attributes[0][42]=(char *) NULL;
+      root->root.attributes[0][43]=(char *) NULL;
+      root->root.attributes[0][44]=(char *) NULL;
+      root->root.attributes[0][45]=(char *) NULL;
+      root->root.attributes[0][46]=(char *) NULL;
+      root->root.attributes[0][47]=(char *) NULL;
+      root->root.attributes[0][48]=(char *) NULL;
+      root->root.attributes[0][49]=(char *) NULL;
+      root->root.attributes[0][50]=(char *) NULL;
+      root->root.attributes[0][51]=(char *) NULL;
+      root->root.attributes[0][52]=(char *) NULL;
+      root->root.attributes[0

@@ -1,0 +1,72 @@
+if(handshake_type == 0x01 /* Client Hello */) {
+    offset += 3; /* Skip handshake type and length */
+    ja3.num_cipher = 0;
+    ja3.num_tls_extension = 0;
+    ja3.num_elliptic_curve = 0;
+    ja3.num_elliptic_curve_point_format = 0;
+
+    while (offset < packet->payload_packet_len) {
+      u_int8_t ext_type = packet->payload[offset];
+      u_int16_t ext_len = (packet->payload[offset + 1] << 8) + packet->payload[offset + 2];
+      offset += 3;
+
+      if (ext_type == 0x00 && ext_len == 0) { /* Supported Versions */
+        if (offset + 1 < packet->payload_packet_len) {
+          ja3.tls_handshake_version = ntohs(*(u_int16_t *)(&packet->payload[offset]));
+          offset += 2;
+        }
+      } else if (ext_type == 0x01 && ext_len > 0) { /* Supported Groups */
+        for (u_int16_t i = 0; i < ext_len; i += 2) {
+          u_int16_t curve_id = ntohs(*(u_int16_t *)(&packet->payload[offset + i]));
+          if (ja3.num_elliptic_curve < MAX_NUM_JA3) {
+            ja3.elliptic_curve[ja3.num_elliptic_curve++] = curve_id;
+          }
+        }
+      } else if (ext_type == 0x0a && ext_len > 0) { /* Supported Point Formats */
+        for (u_int16_t i = 0; i < ext_len; i++) {
+          u_int8_t point_format = packet->payload[offset + i];
+          if (ja3.num_elliptic_curve_point_format < MAX_NUM_JA3) {
+            ja3.elliptic_curve_point_format[ja3.num_elliptic_curve_point_format++] = point_format;
+          }
+        }
+      } else if (ext_type == 0x0d && ext_len > 0) { /* Cipher Suites */
+        for (u_int16_t i = 0; i < ext_len; i += 2) {
+          u_int16_t cipher_suite = ntohs(*(u_int16_t *)(&packet->payload[offset + i]));
+          if (ja3.num_cipher < MAX_NUM_JA3 && cipher_suite != 0x0000 && cipher_suite != 0xFFFF) {
+            ja3.cipher[ja3.num_cipher++] = cipher_suite;
+          }
+        }
+      } else if (ext_type == 0x10 && ext_len > 0) { /* TLS Extensions */
+        for (u_int16_t i = 0; i < ext_len; i++) {
+          u_int16_t extension_type = ntohs(*(u_int16_t *)(&packet->payload[offset + i]));
+          if (ja3.num_tls_extension < MAX_NUM_JA3) {
+            ja3.tls_extension[ja3.num_tls_extension++] = extension_type;
+          }
+        }
+      } else {
+        offset += ext_len;
+      }
+    }
+
+    ja3_str_len = 0;
+    ja3_str_len += snprintf(ja3_str + ja3_str_len, JA3_STR_LEN - ja3_str_len, "%u", ja3.tls_handshake_version);
+    for (u_int16_t i = 0; i < ja3.num_cipher; i++) {
+      ja3_str_len += snprintf(ja3_str + ja3_str_len, JA3_STR_LEN - ja3_str_len, ":%u", ja3.cipher[i]);
+    }
+    for (u_int16_t i = 0; i < ja3.num_tls_extension; i++) {
+      ja3_str_len += snprintf(ja3_str + ja3_str_len, JA3_STR_LEN - ja3_str_len, ":%u", ja3.tls_extension[i]);
+    }
+    for (u_int16_t i = 0; i < ja3.num_elliptic_curve; i++) {
+      ja3_str_len += snprintf(ja3_str + ja3_str_len, JA3_STR_LEN - ja3_str_len, ":%u", ja3.elliptic_curve[i]);
+    }
+    for (u_int16_t i = 0; i < ja3.num_elliptic_curve_point_format; i++) {
+      ja3_str_len += snprintf(ja3_str + ja3_str_len, JA3_STR_LEN - ja3_str_len, ":%u", ja3.elliptic_curve_point_format[i]);
+    }
+
+    NDPI_MD5_Init(&ctx);
+    NDPI_MD5_Update(&ctx, (u_char *)ja3_str, ja3_str_len);
+    NDPI_MD5_Final(md5_hash, &ctx);
+
+    flow->ja3_fingerprint = md5_hash;
+    flow->ja3_fingerprint_set = 1;
+  }

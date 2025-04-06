@@ -1,0 +1,324 @@
+// Tolerance: How close we want to be to the target
+// MaxIterations: How many iterations we want to do
+//
+// Returns TRUE if the target was found, FALSE otherwise
+cmsBool CMSEXPORT cmsPipelineEvalReverse(const cmsPipeline* lut, const cmsFloat32Number Target[], cmsFloat32Number Result[], cmsPipelineEvalFloatFn Eval, const void* Data, cmsFloat32Number Tolerance, int MaxIterations)
+{
+    cmsFloat32Number x[3], y[3], J[3*3], InvJ[3*3], Delta[3], Temp[3];
+    int i, j, k, Iterations = 0;
+    cmsFloat32Number Tolerance2 = Tolerance * Tolerance;
+
+    // Initial guess
+    x[0] = x[1] = x[2] = 0.5f;
+
+    // Evaluate initial point
+    Eval(x, y, Data);
+
+    // If initial point is already good enough, we are done
+    if (EuclideanDistance(y, Target, 3) < Tolerance) {
+        memcpy(Result, x, 3 * sizeof(cmsFloat32Number));
+        return TRUE;
+    }
+
+    // Iterate
+    while (Iterations < MaxIterations) {
+
+        // Compute Jacobian
+        for (i=0; i < 3; i++) {
+
+            // Increment x[i]
+            Temp[i] = x[i];
+            IncDelta(&Temp[i]);
+            Eval(Temp, &Delta[0], Data);
+            J[i*3 + 0] = (Delta[0] - y[0]) / JACOBIAN_EPSILON;
+            J[i*3 + 1] = (Delta[1] - y[1]) / JACOBIAN_EPSILON;
+            J[i*3 + 2] = (Delta[2] - y[2]) / JACOBIAN_EPSILON;
+
+            // Decrement x[i]
+            Temp[i] = x[i];
+            IncDelta(&Temp[i]);
+            Eval(Temp, &Delta[0], Data);
+            J[i*3 + 0] -= (Delta[0] - y[0]) / JACOBIAN_EPSILON;
+            J[i*3 + 1] -= (Delta[1] - y[1]) / JACOBIAN_EPSILON;
+            J[i*3 + 2] -= (Delta[2] - y[2]) / JACOBIAN_EPSILON;
+        }
+
+        // Invert Jacobian
+        for (i=0; i < 3; i++) {
+            for (j=0; j < 3; j++) {
+                InvJ[i*3 + j] = J[i*3 + j];
+            }
+        }
+
+        // Invert matrix
+        for (i=0; i < 3; i++) {
+            // Find pivot
+            int max_row = i;
+            for (j = i+1; j < 3; j++) {
+                if (fabsf(InvJ[j*3 + i]) > fabsf(InvJ[max_row*3 + i])) {
+                    max_row = j;
+                }
+            }
+
+            // Swap rows
+            for (j = i; j < 3; j++) {
+                cmsFloat32Number temp = InvJ[i*3 + j];
+                InvJ[i*3 + j] = InvJ[max_row*3 + j];
+                InvJ[max_row*3 + j] = temp;
+            }
+
+            // Divide row by pivot
+            cmsFloat32Number pivot = InvJ[i*3 + i];
+            for (j = i; j < 3; j++) {
+                InvJ[i*3 + j] /= pivot;
+            }
+
+            // Subtract from other rows
+            for (j = i+1; j < 3; j++) {
+                cmsFloat32Number factor = InvJ[j*3 + i];
+                for (k = i; k < 3; k++) {
+                    InvJ[j*3 + k] -= factor * InvJ[i*3 + k];
+                }
+            }
+        }
+
+        // Back-substitute
+        for (i = 2; i >= 0; i--) {
+            for (j = i+1; j < 3; j++) {
+                for (k = 0; k < 3; k++) {
+                    InvJ[i*3 + k] -= InvJ[j*3 + k] * InvJ[i*3 + j];
+                }
+            }
+        }
+
+        // Compute delta
+        for (i=0; i < 3; i++) {
+            Delta[i] = 0;
+            for (j=0; j < 3; j++) {
+                Delta[i] += InvJ[i*3 + j] * (Target[j] - y[j]);
+            }
+        }
+
+        // Update x
+        for (i=0; i < 3; i++) {
+            x[i] += Delta[i];
+        }
+
+        // Evaluate new point
+        Eval(x, y, Data);
+
+        // Check for convergence
+        if (EuclideanDistance(y, Target, 3) < Tolerance2) {
+            memcpy(Result, x, 3 * sizeof(cmsFloat32Number));
+            return TRUE;
+        }
+
+        Iterations++;
+    }
+
+    // If we reach this point, we did not converge
+    return FALSE;
+}
+
+
+// ********************************************************************************
+// Type cmsSigNamedColorElemType
+// ********************************************************************************
+
+
+// This function is used to set the name of a named color element
+cmsBool CMSEXPORT cmsStageSetPtrToColorant(cmsStage* mpe, void* Colorant)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    Data ->Colorant = Colorant;
+    return TRUE;
+}
+
+
+// This function is used to get the name of a named color element
+void* CMSEXPORT cmsStageGetPtrToColorant(cmsStage* mpe)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return NULL;
+
+    return Data ->Colorant;
+}
+
+
+// This function is used to set the colorant index of a named color element
+cmsBool CMSEXPORT cmsStageSetColorantIndex(cmsStage* mpe, cmsUInt32Number ColorantIndex)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    Data ->ColorantIndex = ColorantIndex;
+    return TRUE;
+}
+
+
+// This function is used to get the colorant index of a named color element
+cmsUInt32Number CMSEXPORT cmsStageGetColorantIndex(cmsStage* mpe)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return UINT_MAX;
+
+    return Data ->ColorantIndex;
+}
+
+
+// This function is used to set the color space of a named color element
+cmsBool CMSEXPORT cmsStageSetColorSpace(cmsStage* mpe, cmsColorSpaceSignature ColorSpace)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    Data ->ColorSpace = ColorSpace;
+    return TRUE;
+}
+
+
+// This function is used to get the color space of a named color element
+cmsColorSpaceSignature CMSEXPORT cmsStageGetColorSpace(cmsStage* mpe)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return cmsSigUnknownType;
+
+    return Data ->ColorSpace;
+}
+
+
+// This function is used to set the name of a named color element
+cmsBool CMSEXPORT cmsStageSetName(cmsStage* mpe, const char* Name)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    if (Data ->Name) _cmsFree(mpe ->ContextID, Data ->Name);
+
+    if (Name == NULL) {
+        Data ->Name = NULL;
+        return TRUE;
+    }
+
+    Data ->Name = (char*) _cmsMalloc(mpe ->ContextID, strlen(Name) + 1);
+    if (Data ->Name == NULL) return FALSE;
+
+    strcpy(Data ->Name, Name);
+    return TRUE;
+}
+
+
+// This function is used to get the name of a named color element
+const char* CMSEXPORT cmsStageGetName(cmsStage* mpe)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return NULL;
+
+    return Data ->Name;
+}
+
+
+// This function is used to set the color value of a named color element
+cmsBool CMSEXPORT cmsStageSetColorValue(cmsStage* mpe, const cmsFloat32Number ColorValue[])
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    memcpy(Data ->ColorValue, ColorValue, 3 * sizeof(cmsFloat32Number));
+    return TRUE;
+}
+
+
+// This function is used to get the color value of a named color element
+void CMSEXPORT cmsStageGetColorValue(cmsStage* mpe, cmsFloat32Number ColorValue[])
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return;
+
+    memcpy(ColorValue, Data ->ColorValue, 3 * sizeof(cmsFloat32Number));
+}
+
+
+// This function is used to set the alpha value of a named color element
+cmsBool CMSEXPORT cmsStageSetAlpha(cmsStage* mpe, cmsFloat32Number Alpha)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    Data ->Alpha = Alpha;
+    return TRUE;
+}
+
+
+// This function is used to get the alpha value of a named color element
+cmsFloat32Number CMSEXPORT cmsStageGetAlpha(cmsStage* mpe)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return 1.0f;
+
+    return Data ->Alpha;
+}
+
+
+// This function is used to set the flags of a named color element
+cmsBool CMSEXPORT cmsStageSetFlags(cmsStage* mpe, cmsUInt32Number Flags)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    Data ->Flags = Flags;
+    return TRUE;
+}
+
+
+// This function is used to get the flags of a named color element
+cmsUInt32Number CMSEXPORT cmsStageGetFlags(cmsStage* mpe)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return 0;
+
+    return Data ->Flags;
+}
+
+
+// This function is used to set the media white point of a named color element
+cmsBool CMSEXPORT cmsStageSetMediaWhitePoint(cmsStage* mpe, const cmsCIExyY* MediaWhitePoint)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return FALSE;
+
+    Data ->MediaWhitePoint = *MediaWhitePoint;
+    return TRUE;
+}
+
+
+// This function is used to get the media white point of a named color element
+void CMSEXPORT cmsStageGetMediaWhitePoint(cmsStage* mpe, cmsCIExyY* MediaWhitePoint)
+{
+    _cmsStageNamedColorData* Data = (_cmsStageNamedColorData*) mpe ->Data;
+
+    if (Data == NULL) return;
+
+    *MediaWhitePoint = Data ->MediaWhitePoint;
+}
+
+
+// This function is used to set the media black point of a named color element
+cmsBool CMSEXPORT cmsStageSetMediaBlackPoint(cmsStage* mpe, const cmsCIExyY* MediaBlackPoint

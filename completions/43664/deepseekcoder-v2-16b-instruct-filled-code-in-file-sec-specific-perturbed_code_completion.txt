@@ -1,0 +1,279 @@
+_t cipher_suite_len, cipher_suite_offset = 0;
+  u_int16_t extension_id, extension_len, extension_payload_offset;
+  u_int16_t num_cipher_suites = 0, num_extensions = 0;
+  u_int16_t num_elliptic_curves = 0, num_elliptic_curve_point_formats = 0;
+  u_int16_t num_signature_algorithms = 0;
+  u_int16_t cipher[MAX_NUM_JA3];
+  u_int16_t tls_extension[MAX_NUM_JA3];
+  u_int16_t elliptic_curve[MAX_NUM_JA3];
+  u_int16_t elliptic_curve_point_format[MAX_NUM_JA3];
+  char signature_algorithms[MAX_JA3_STRLEN];
+  char supported_versions[MAX_JA3_STRLEN];
+  char alpn[MAX_JA3_STRLEN];
+  u_int8_t *p = packet->payload;
+  u_int16_t p_len = packet->payload_packet_len;
+
+  if(p_len < 5)
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] Client/Server Hello too short: %u bytes\n", p_len);
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+    return -1;
+  }
+
+  tls_version = (p[0] << 8) | p[1];
+  cipher_suite_offset = 4;
+
+  if(tls_version < 0x0301 || tls_version > 0x0304)
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] Unsupported TLS version: %04x\n", tls_version);
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_UNSUPPORTED_VERSION);
+    return -1;
+  }
+
+  while(cipher_suite_offset < p_len)
+  {
+    cipher_suite_len = (p[cipher_suite_offset] << 8) | p[cipher_suite_offset + 1];
+    if(cipher_suite_offset + cipher_suite_len > p_len)
+    {
+#ifdef DEBUG_TLS
+      printf("[TLS] Cipher suite length exceeds packet length: %u > %u.\n",
+             cipher_suite_len, p_len - cipher_suite_offset);
+#endif
+      ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+      return -1;
+    }
+
+    if(num_cipher_suites < MAX_NUM_JA3)
+    {
+      cipher[num_cipher_suites] = (p[cipher_suite_offset] << 8) | p[cipher_suite_offset + 1];
+      num_cipher_suites++;
+    }
+
+    cipher_suite_offset += cipher_suite_len;
+  }
+
+  if(num_cipher_suites == 0)
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] No cipher suites found.\n");
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+    return -1;
+  }
+
+  extension_payload_offset = cipher_suite_offset;
+
+  while(extension_payload_offset < p_len)
+  {
+    if(extension_payload_offset + 4 > p_len)
+    {
+#ifdef DEBUG_TLS
+      printf("[TLS] Extension length exceeds packet length: %u > %u.\n",
+             extension_payload_offset + 4, p_len);
+#endif
+      ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+      return -1;
+    }
+
+    extension_id = (p[extension_payload_offset] << 8) | p[extension_payload_offset + 1];
+    extension_len = (p[extension_payload_offset + 2] << 8) | p[extension_payload_offset + 3];
+
+    if(extension_payload_offset + extension_len + 4 > p_len)
+    {
+#ifdef DEBUG_TLS
+      printf("[TLS] Extension length exceeds packet length: %u > %u.\n",
+             extension_payload_offset + extension_len + 4, p_len);
+#endif
+      ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+      return -1;
+    }
+
+    checkExtensions(ndpi_struct, flow, packet->udp != NULL, extension_id, extension_len, extension_payload_offset);
+
+    if(extension_id == 0 && extension_len == 0)
+    {
+      /* Ignore empty extensions. */
+      extension_payload_offset += extension_len + 4;
+      continue;
+    }
+
+    if(num_extensions < MAX_NUM_JA3)
+    {
+      tls_extension[num_extensions] = extension_id;
+      num_extensions++;
+    }
+
+    extension_payload_offset += extension_len + 4;
+  }
+
+  if(quic_version != 0)
+  {
+    if(is_version_with_var_int_transport_params(quic_version) == 0)
+    {
+      if(extension_payload_offset != p_len)
+      {
+#ifdef DEBUG_TLS
+        printf("[TLS] Unexpected extensions after QUIC version.\n");
+#endif
+        ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+        return -1;
+      }
+    }
+  }
+  else
+  {
+    if(extension_payload_offset != p_len)
+    {
+#ifdef DEBUG_TLS
+      printf("[TLS] Unexpected extensions after no QUIC version.\n");
+#endif
+      ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+      return -1;
+    }
+  }
+
+  if(num_cipher_suites > 0)
+  {
+    for(i = 0; i < num_cipher_suites; ++i)
+    {
+      if(ja3.client.num_cipher < MAX_NUM_JA3)
+      {
+        ja3.client.cipher[ja3.client.num_cipher] = cipher[i];
+        ja3.client.num_cipher++;
+      }
+    }
+  }
+
+  if(num_extensions > 0)
+  {
+    for(i = 0; i < num_extensions; ++i)
+    {
+      if(ja3.client.num_tls_extension < MAX_NUM_JA3)
+      {
+        ja3.client.tls_extension[ja3.client.num_tls_extension] = tls_extension[i];
+        ja3.client.num_tls_extension++;
+      }
+    }
+  }
+
+  if(flow->host_server_name[0] != '\0')
+  {
+    snprintf(alpn, sizeof(alpn), "%s", flow->host_server_name);
+    if(ja3.client.num_elliptic_curve < MAX_NUM_JA3)
+    {
+      ja3.client.elliptic_curve[ja3.client.num_elliptic_curve] = 0;
+      ja3.client.num_elliptic_curve++;
+    }
+    if(ja3.client.num_elliptic_curve_point_format < MAX_NUM_JA3)
+    {
+      ja3.client.elliptic_curve_point_format[ja3.client.num_elliptic_curve_point_format] = 0;
+      ja3.client.num_elliptic_curve_point_format++;
+    }
+  }
+
+  if(flow->protos.tls_quic.supported_versions[0] != '\0')
+  {
+    snprintf(supported_versions, sizeof(supported_versions), "%s", flow->protos.tls_quic.supported_versions);
+  }
+
+  if(flow->protos.tls_quic.signature_algorithms[0] != '\0')
+  {
+    snprintf(signature_algorithms, sizeof(signature_algorithms), "%s", flow->protos.tls_quic.signature_algorithms);
+  }
+
+  if(flow->protos.tls_quic.alpn[0] != '\0')
+  {
+    snprintf(alpn, sizeof(alpn), "%s", flow->protos.tls_quic.alpn);
+  }
+
+  if(flow->protos.tls_quic.elliptic_curve[0] != '\0')
+  {
+    for(i = 0; i < flow->protos.tls_quic.num_elliptic_curve; ++i)
+    {
+      if(ja3.client.num_elliptic_curve < MAX_NUM_JA3)
+      {
+        ja3.client.elliptic_curve[ja3.client.num_elliptic_curve] = flow->protos.tls_quic.elliptic_curve[i];
+        ja3.client.num_elliptic_curve++;
+      }
+    }
+  }
+
+  if(flow->protos.tls_quic.elliptic_curve_point_format[0] != '\0')
+  {
+    for(i = 0; i < flow->protos.tls_quic.num_elliptic_curve_point_format; ++i)
+    {
+      if(ja3.client.num_elliptic_curve_point_format < MAX_NUM_JA3)
+      {
+        ja3.client.elliptic_curve_point_format[ja3.client.num_elliptic_curve_point_format] = flow->protos.tls_quic.elliptic_curve_point_format[i];
+        ja3.client.num_elliptic_curve_point_format++;
+      }
+    }
+  }
+
+  if(flow->protos.tls_quic.signature_algorithms[0] != '\0')
+  {
+    snprintf(signature_algorithms, sizeof(signature_algorithms), "%s", flow->protos.tls_quic.signature_algorithms);
+  }
+
+  if(flow->protos.tls_quic.supported_versions[0] != '\0')
+  {
+    snprintf(supported_versions, sizeof(supported_versions), "%s", flow->protos.tls_quic.supported_versions);
+  }
+
+  if(flow->protos.tls_quic.alpn[0] != '\0')
+  {
+    snprintf(alpn, sizeof(alpn), "%s", flow->protos.tls_quic.alpn);
+  }
+
+  if(ja3.client.num_cipher == 0)
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] No cipher suites found in Client/Server Hello.\n");
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+    return -1;
+  }
+
+  if(ja3.client.num_tls_extension == 0)
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] No TLS extensions found in Client/Server Hello.\n");
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+    return -1;
+  }
+
+  if(ja3.client.num_elliptic_curve == 0)
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] No elliptic curves found in Client/Server Hello.\n");
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+    return -1;
+  }
+
+  if(ja3.client.num_elliptic_curve_point_format == 0)
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] No elliptic curve point formats found in Client/Server Hello.\n");
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+    return -1;
+  }
+
+  if(alpn[0] == '\0')
+  {
+#ifdef DEBUG_TLS
+    printf("[TLS] No ALPN found in Client/Server Hello.\n");
+#endif
+    ndpi_set_risk(ndpi_struct, flow, NDPI_MALFORMED_PACKET);
+    return -1;
+  }
+
+  if(supported_versions[0] == '\0')
+  {
+#ifdef
