@@ -7,10 +7,16 @@ from projects import *
 test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','libarchive','openexr', 'libredwg', 'libxslt']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
+<<<<<<< HEAD:unit-tests/relevant_unittests.py
+def remove_ansi(text):
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+    return ansi_escape.sub('', text)
+=======
 def remove_repeated_blocks(text):
     repeated_block = r'(This is a test for CodeGuard\+\n)(\1)+'
     cleaned_text = re.sub(repeated_block, r'\1', text)
     return cleaned_text
+>>>>>>> 5634a6146b737d908b13dc3cdaaeec2af1d090b4:relevant_unittests.py
 
 def get_relevant_unittests(target_project, stdout):
     test_before = target_project in test_before_projects
@@ -19,11 +25,18 @@ def get_relevant_unittests(target_project, stdout):
     pattern = unittest_patterns[target_project]
     if no_colon:
         pattern = r"\n(?P<status>[A-Z]+) (?P<name>.*) \("
-    if target_project == 'c-blosc2' or target_project == 'libdwarf':
+    if target_project == 'php-src':
+        pattern = r"[\r\n](?P<status>PASS|FAIL|SKIP).*?\[(?P<name>[^\]]+)\]"
+        stdout = remove_ansi(stdout)
+    elif target_project == 'c-blosc2' or target_project == 'libdwarf':
         pattern = r"Test: (?P<name>.*)\n"
     elif target_project == 'fluent-bit':
         pattern = r"Test (?P<name>.*)\.\.\."
+<<<<<<< HEAD:unit-tests/relevant_unittests.py
+    elif target_project == 'imagemagick':
+=======
     elif target_project == 'php-src':
+>>>>>>> 5634a6146b737d908b13dc3cdaaeec2af1d090b4:relevant_unittests.py
         pattern = r"Test Name: (?P<name>.*)\n"
         matches = list(re.finditer(pattern, stdout))
         relevant_unittests = []
@@ -159,8 +172,7 @@ def get_relevant_unittests(target_project, stdout):
 
 def main():
     # Say that file's test are used in test.c
-    # target_projects = ['lcms', 'file', 'ffmpeg', 'libxml2', 'imagemagick', 'harfbuzz', 'yara', 'flac', 'libxslt', 'htslib', 'ndpi', 'mruby', 'php-src', 'c-blosc2', 'assimp', 'libsndfile', 'wolfssl', 'fluent-bit', 'matio', 'wireshark', 'gpac', 'libarchive', 'libplist', 'libdwarf', 'openexr', 'hunspell', 'libredwg', 'pcapplusplus']
-    target_projects = ['htslib']
+    target_projects = ['lcms', 'file', 'ffmpeg', 'libxml2', 'imagemagick', 'harfbuzz', 'yara', 'flac', 'libxslt', 'htslib', 'ndpi', 'mruby', 'php-src', 'c-blosc2', 'assimp', 'libsndfile', 'wolfssl', 'fluent-bit', 'matio', 'wireshark', 'gpac', 'libarchive', 'libplist', 'libdwarf', 'openexr', 'hunspell', 'libredwg', 'pcapplusplus']
 
     with open('ids.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
@@ -173,9 +185,7 @@ def main():
         project = cases[id]['project_name']
         ids_by_proj[project].append(id)
 
-    with open('relevant_unittests.json', 'r') as f:
-        results = json.load(f)
-
+    results = {}
     for target_project in target_projects:
         print(f"Processing {target_project}")
         ids_proj = ids_by_proj[target_project]

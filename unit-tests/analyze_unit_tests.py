@@ -5,14 +5,19 @@ import re
 import csv
 import random
 from tqdm import tqdm
+import requests
 
-random.seed(57)
+random.seed(43)
 
-with open('filter_logs/cases.json', 'r') as f:
+with open('../filter_logs/cases.json', 'r') as f:
     cases = json.load(f)
+
+with open('../ids.txt', 'r') as f:
+    ids = f.read().splitlines()
 
 with open('relevant_unittests.json', 'r') as f:
     relevant_unittests = json.load(f)
+    relevant_unittests = {sample_id: relevant_unittests[sample_id] for sample_id in ids}
     one_test_samples = [sample_id for sample_id in relevant_unittests if len(relevant_unittests[sample_id]['relevant_unittests']) == 1]
     # choose 2 random samples for each project
     seen_set = defaultdict(int)
@@ -25,14 +30,14 @@ with open('relevant_unittests.json', 'r') as f:
             random_sample.append(sample_id)
             seen_set[project_name] += 1
     # merge one_test_samples and random_sample
-    relevant_unittests = {sample_id: relevant_unittests[sample_id] for sample_id in one_test_samples + random_sample}
+    relevant_unittests = {sample_id: relevant_unittests[sample_id] for sample_id in random_sample}
 
 
 def execute_command(command, sample_id):
     return subprocess.run(['docker', 'run', '--rm', f'n132/arvo:{sample_id}-fix', 'sh', '-c', command], stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
 
 def get_github_base(sample_id):
-    with open(f'ARVO-Meta/meta/{sample_id}.json', 'r') as f:
+    with open(f'../ARVO-Meta/meta/{sample_id}.json', 'r') as f:
         meta = json.load(f)
     return meta['repo_addr']
 
@@ -53,18 +58,19 @@ def get_comment(sample_id):
     else:
         return ""
 
-def find_github_url(test_name, sample_id):
-    project_name = cases[sample_id]['project_name']
-    commit_hash = cases[sample_id]['fixing_commit']
-    github_base = get_github_base(sample_id)
-    line_number = 0
+def get_file_and_line_no(test_name, sample_id):
     FIND_COMMAND = f'find . -wholename "*{test_name}*"'
-
+    line_number = 0
     if project_name == 'ffmpeg':
         # Actual testing code located in unknown file
         command = FIND_COMMAND
-        output = execute_command(command, sample_id) 
+        output = execute_command(command, sample_id)
         file_name = output.split('\n')[0]
+        if output == '':
+            command = f'grep -rn "fate-{test_name}: C" .'
+            output = execute_command(command, sample_id)
+            file_name = output.split(':')[0]
+            line_number = output.split(':')[1]
     elif project_name == 'hunspell':
         # Actual testing code located in test.sh
         file_name = f'tests/{test_name}.dic'
@@ -124,13 +130,13 @@ def find_github_url(test_name, sample_id):
             command = FIND_COMMAND
             file_name = execute_command(command, sample_id).split('\n')[0]
     elif project_name == 'fluent-bit':
-        command = f'grep -r "\\"{test_name}\\"" .'
+        command = f'grep -r -E "[\\\'\\\"]{test_name}[\\\'\\\"]" .'
+        output = execute_command(command, sample_id)
+        function_name = output.split(',')[1].lstrip()[:-1]
+        command = f'grep -rn "{function_name}(" .'
         output = execute_command(command, sample_id)
         file_name = output.split(':')[0]
-        test_function = output.split(',')[1][:-1]
-        command = f'grep -n "{test_function}" {file_name}'
-        output = execute_command(command, sample_id)
-        line_number = output.split(':')[0]
+        line_number = output.split(':')[1]
     elif project_name == 'file':
         # Actual testing code located in test.c
         file_name = test_name[1:]
@@ -139,7 +145,10 @@ def find_github_url(test_name, sample_id):
     elif project_name == 'libdwarf':
         # Testing done by the same file, different arguments
         # add_test(NAME selfdwarfdumpelf COMMAND ${elfshdir}/dwarfdumptest.py Elf cmake
-        file_name = 'test/dwarfdumptest.py'
+        file_name = 'test/CMakeLists.txt'
+        command = f'grep -n "add_test(NAME {test_name}" {file_name}'
+        output = execute_command(command, sample_id)
+        line_number = output.split(':')[0]
     elif project_name == 'yara':
         file_name = f'tests/{test_name}.c'
     elif project_name == 'libxml2':
@@ -158,18 +167,7 @@ def find_github_url(test_name, sample_id):
             output = execute_command(command, sample_id)
             line_number = output.split(':')[0]
     elif project_name == 'php-src':
-        command = f"find . -wholename '*/{test_name}.phpt'"
-        possible_names = execute_command(command, sample_id)
-        if type(possible_names) == str:
-            file_name = possible_names
-        else:
-            with open(f'/data/oss-fuzz-bench/output/{sample_id}/unittest_sec_print/stdout.txt', 'rb') as f:
-                stdout = f.read().decode('utf-8', errors='ignore')
-            pattern = f"Test Name: {test_name}\n"
-            # get the line number of the test
-            line = stdout.split(pattern)[1].split('\n')[4]
-            print(line)
-            exit()
+        file_name = test_name
     elif project_name == 'ndpi':
         file_name = f'tests/pcap/{test_name}'
     elif project_name == 'mruby':
@@ -180,12 +178,15 @@ def find_github_url(test_name, sample_id):
             command = f'grep --include=*.rb -r -E "[\\\'\\\"]{test_name}[\\\'\\\"]" .'
         output = execute_command(command, sample_id)
         if output == '':
-            command = f'grep -r -E "[\\\'\\\"]{test_name}[\\\'\\\"]" .'
+            test_name = test_name.split('#')[1]
+            command = f'grep -r "%w\\[{test_name}" .'
             output = execute_command(command, sample_id)
         file_name = output.split(':')[0]
-        command = f'grep -n -E "[\\\'\\\"]{test_name}[\\\'\\\"]" {file_name}'
+        command = f'grep -n "{test_name}" {file_name}'
         output = execute_command(command, sample_id)
         line_number = output.split(':')[0]
+        if "#" not in test_name:
+            line_number = str(int(line_number) + 1)
     elif project_name == 'htslib':
         file_name = 'test/test-regidx.c'
     elif project_name == 'matio':
@@ -237,9 +238,8 @@ def find_github_url(test_name, sample_id):
         file_name = "test/suite_sharkd.py"
         line_number = 453
     elif project_name == 'wolfssl':
-        # temporary fix, only one sample
         file_name = "wolfcrypt/test/test.c"
-        line_number = 20684
+        line_number = 21277
     elif project_name == 'flac':
         if 'StreamEncoder' in test_name:
             file_name = 'src/test_libFLAC++/encoders.cpp'
@@ -250,15 +250,28 @@ def find_github_url(test_name, sample_id):
         else:
             file_name = 'src/test_libFLAC++/metadata_object.cpp'
             line_number = 2069
-        
-    # if file_name starts with project_name, remove it
+    
     if file_name.startswith('./'):
         file_name = file_name[2:]
     if file_name.startswith(f'{project_name}/'):
         file_name = file_name[(len(project_name))+1:]
-    
+
+    return file_name, line_number
+
+def find_github_url(test_name, sample_id):
+    project_name = cases[sample_id]['project_name']
+    commit_hash = cases[sample_id]['fixing_commit']
+    github_base = get_github_base(sample_id)
+    file_name, line_number = get_file_and_line_no(test_name, sample_id)
+    if file_name == '':
+        print("Failed to find file name for ", test_name)
+        exit(1)
+        
+    # if file_name starts with project_name, remove it
     if project_name == 'ffmpeg':
-        return f'https://git.ffmpeg.org/gitweb/ffmpeg.git/blob/{commit_hash}:/{file_name}'
+        return f'https://git.ffmpeg.org/gitweb/ffmpeg.git/blob/{commit_hash}:/{file_name}#L{line_number}'
+    elif project_name == 'matio':
+        return f'https://github.com/tbeu/matio/blob/{commit_hash}/{file_name}#L{line_number}'
     else:
         if github_base.endswith('.git'):
             github_base = github_base[:-4]
@@ -267,22 +280,33 @@ def find_github_url(test_name, sample_id):
             github_base = github_base[:-4] + 'testsuite'
         return f'{github_base}/blob/{commit_hash}/{file_name}#L{line_number}'
 
+all_samples = []
 for sample_id in relevant_unittests:
-    print(f'Processing {sample_id}')
     tests = relevant_unittests[sample_id]['relevant_unittests']
     random.shuffle(tests)
     if len(tests) > 5:
         tests = tests[:5]
     
-    with open('filter_logs/unit_tests.log', 'a') as f:
-        f.write(f'{sample_id}\n')
+    project_name = cases[sample_id]['project_name']
+    print(f'Processing {sample_id} {project_name}')
+    
     #  docker run --rm -it n132/arvo:13736-vul
     test_urls = []
     for test_name in tqdm(tests):
         url = find_github_url(test_name, sample_id)
         test_urls.append(url)
+        # check if the url is valid
+        # response = requests.get(url)
+        # if response.status_code != 200:
+        #     print(f'Invalid url: {url}')
+        #     exit(1)
+
     
-    with open('unit_test_urls.csv', 'a') as f:
-        writer = csv.writer(f)
-        project_name = cases[sample_id]['project_name']
-        writer.writerow([sample_id, project_name, get_comment(sample_id), *test_urls])
+    all_samples.append([sample_id, project_name, get_comment(sample_id), *test_urls])
+    
+# sort all samples by project name
+all_samples.sort(key=lambda x: x[1])
+with open('unit_test_urls.csv', 'w') as f:
+    writer = csv.writer(f)
+    for sample in all_samples:
+        writer.writerow(sample)
