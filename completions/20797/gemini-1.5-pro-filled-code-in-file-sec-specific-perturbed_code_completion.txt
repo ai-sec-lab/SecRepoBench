@@ -1,0 +1,232 @@
+{
+      offset += session_id_len + 1;
+
+      ja3.num_cipher = (packet->payload[offset] << 8) + packet->payload[offset+1];
+      offset += 2;
+
+      if(ja3.num_cipher > MAX_NUM_JA3) {
+	NDPI_LOG(ndpi_struct, NDPI_LOG_DEBUG, "Too many ciphers (%u). Skipping JA3.\n", ja3.num_cipher);
+	jainvalid = 1;
+      }
+
+      if(!jainvalid) {
+	for(j=0; j<ja3.num_cipher; j++) {
+	  ja3.cipher[j] = (packet->payload[offset+(j*2)] << 8) + packet->payload[offset+(j*2)+1];
+
+	  if(ja3.cipher[j] >= 0x0a0a && ja3.cipher[j] <= 0x0a1a) { /* Skip GREASE values (see RFC8701) */
+	    ja3.cipher[j] = 0;
+	  }
+	}
+
+	offset += (ja3.num_cipher * 2);
+
+	if(offset > total_len) jainvalid = 1;
+      }
+
+      if(!jainvalid) {
+	u_int16_t compression_methods_len = packet->payload[offset];
+
+	offset += 1 + compression_methods_len;
+
+	if(offset > total_len) jainvalid = 1;
+      }
+
+      if((!jainvalid) && (offset < total_len)) {
+	extension_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+	offset += 2;
+
+	if((offset+extension_len) > total_len) jainvalid = 1;
+      } else
+	extension_len = 0;
+
+      if(!jainvalid) {
+	u_int16_t ext_offset = offset;
+
+	while((ext_offset+4) <= (offset+extension_len)) {
+	  u_int16_t extension_type = (packet->payload[ext_offset] << 8) + packet->payload[ext_offset+1];
+	  u_int16_t extension_size = (packet->payload[ext_offset+2] << 8) + packet->payload[ext_offset+3];
+
+	  if((ext_offset+4+extension_size) > (offset+extension_len)) {
+	    jainvalid = 1;
+	    break;
+	  }
+
+#ifdef DEBUG_TLS
+	  printf("SSL extension_type: %04X [size: %u]\n", extension_type, extension_size);
+#endif
+
+	  if(extension_type == 0x000a /* supported_groups */) {
+	    u_int16_t supported_groups_len = (packet->payload[ext_offset+4] << 8) + packet->payload[ext_offset+5];
+	    u_int16_t k;
+
+	    if((supported_groups_len+2) != extension_size) {
+	      jainvalid = 1;
+	      break;
+	    }
+
+	    for(k=0; k<supported_groups_len; k+=2) {
+	      u_int16_t group = (packet->payload[ext_offset+4+2+(k*2)] << 8) + packet->payload[ext_offset+4+2+(k*2)+1];
+
+	      if(group >= 0x0a0a && group <= 0x0a1a) { /* Skip GREASE values (see RFC8701) */
+		group = 0;
+	      }
+
+	      if(ja3.num_elliptic_curve < MAX_NUM_JA3)
+		ja3.elliptic_curve[ja3.num_elliptic_curve++] = group;
+	      else {
+		NDPI_LOG(ndpi_struct, NDPI_LOG_DEBUG, "Too many elliptic curves (%u). Skipping JA3.\n", ja3.num_elliptic_curve);
+		jainvalid = 1;
+		break;
+	      }
+	    }
+	  } else if(extension_type == 0x000b /* ec_point_formats */) {
+	    u_int8_t ec_point_formats_len = packet->payload[ext_offset+4];
+
+	    if((ec_point_formats_len+1) != extension_size) {
+	      jainvalid = 1;
+	      break;
+	    }
+
+	    if(ec_point_formats_len > 0) {
+	      ja3.num_elliptic_curve_point_format = ec_point_formats_len;
+
+	      if(ja3.num_elliptic_curve_point_format > MAX_NUM_JA3) {
+		NDPI_LOG(ndpi_struct, NDPI_LOG_DEBUG, "Too many elliptic curve point formats (%u). Skipping JA3.\n", ja3.num_elliptic_curve_point_format);
+		jainvalid = 1;
+	      } else {
+		u_int8_t k;
+
+		for(k=0; k<ja3.num_elliptic_curve_point_format; k++)
+		  ja3.elliptic_curve_point_format[k] = packet->payload[ext_offset+4+1+k];
+	      }
+	    }
+	  } else if(extension_type >= 0x0a0a && extension_type <= 0x0a1a) { /* Skip GREASE values (see RFC8701) */
+	    extension_type = 0;
+	  }
+
+	  if(jainvalid) break;
+
+	  if(ja3.num_tls_extension < MAX_NUM_JA3)
+	    ja3.tls_extension[ja3.num_tls_extension++] = extension_type;
+	  else {
+	    NDPI_LOG(ndpi_struct, NDPI_LOG_DEBUG, "Too many TLS extensions (%u). Skipping JA3.\n", ja3.num_tls_extension);
+	    jainvalid = 1;
+	    break;
+	  }
+
+	  ext_offset += 4 + extension_size;
+	}
+      }
+
+      if(!jainvalid) {
+	/* Now we have all the info, let's build the JA3 string */
+	ja3_str_len = snprintf(ja3_str, JA3_STR_LEN, "%u,%u",
+			      ja3.tls_handshake_version, ja3.num_cipher);
+
+	for(j=0; j<ja3.num_cipher; j++)
+	  ja3_str_len += snprintf(&ja3_str[ja3_str_len], JA3_STR_LEN - ja3_str_len, "%s%u",
+				  (j > 0) ? "-" : "", ja3.cipher[j]);
+
+	ja3_str_len += snprintf(&ja3_str[ja3_str_len], JA3_STR_LEN - ja3_str_len, ",%u", ja3.num_tls_extension);
+
+	for(j=0; j<ja3.num_tls_extension; j++)
+	  ja3_str_len += snprintf(&ja3_str[ja3_str_len], JA3_STR_LEN - ja3_str_len, "%s%u",
+				  (j > 0) ? "-" : "", ja3.tls_extension[j]);
+
+	ja3_str_len += snprintf(&ja3_str[ja3_str_len], JA3_STR_LEN - ja3_str_len, ",%u", ja3.num_elliptic_curve);
+
+	for(j=0; j<ja3.num_elliptic_curve; j++)
+	  ja3_str_len += snprintf(&ja3_str[ja3_str_len], JA3_STR_LEN - ja3_str_len, "%s%u",
+				  (j > 0) ? "-" : "", ja3.elliptic_curve[j]);
+
+	ja3_str_len += snprintf(&ja3_str[ja3_str_len], JA3_STR_LEN - ja3_str_len, ",%u", ja3.num_elliptic_curve_point_format);
+
+	for(j=0; j<ja3.num_elliptic_curve_point_format; j++)
+	  ja3_str_len += snprintf(&ja3_str[ja3_str_len], JA3_STR_LEN - ja3_str_len, "%s%u",
+				  (j > 0) ? "-" : "", ja3.elliptic_curve_point_format[j]);
+
+#ifdef DEBUG_TLS
+	printf("JA3 string: %s\n", ja3_str);
+#endif
+
+	ndpi_MD5Init(&ctx);
+	ndpi_MD5Update(&ctx, ja3_str, ja3_str_len);
+	ndpi_MD5Final(md5_hash, &ctx);
+
+	if(handshake_type == 0x01)
+	  memcpy(flow->protos.stun_ssl.ssl.ja3_client_fingerprint, md5_hash, 16);
+	else
+	  memcpy(flow->protos.stun_ssl.ssl.ja3_server_fingerprint, md5_hash, 16);
+
+#ifdef DEBUG_TLS
+	printf("JA3 hash: ");
+	for(i=0; i<16; i++) printf("%02x", md5_hash[i]);
+	printf("\n");
+#endif
+      }
+    } else if(handshake_type == 0x01 /* Client Hello */) {
+      offset = base_offset + 1 + session_id_len + 2;
+
+      if(offset < total_len) {
+	u_int16_t cipher_suites_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+
+	if(cipher_suites_len > 0) {
+	  offset += 2;
+
+	  if((offset + cipher_suites_len) <= total_len) {
+	    for(j=0; j<cipher_suites_len; j+=2) {
+	      u_int16_t cipher = (packet->payload[offset+(j*2)] << 8) + packet->payload[offset+(j*2)+1];
+
+	      if(cipher >= 0x0a0a && cipher <= 0x0a1a) { /* Skip GREASE values (see RFC8701) */
+		cipher = 0;
+	      }
+
+	      if(ja3.num_cipher < MAX_NUM_JA3)
+		ja3.cipher[ja3.num_cipher++] = cipher;
+	      else {
+		NDPI_LOG(ndpi_struct, NDPI_LOG_DEBUG, "Too many ciphers (%u). Skipping JA3.\n", ja3.num_cipher);
+		jainvalid = 1;
+		break;
+	      }
+	    }
+
+	    offset += cipher_suites_len;
+	  } else
+	    jainvalid = 1;
+	}
+      } else
+	jainvalid = 1;
+
+      if((!jainvalid) && (offset < total_len)) {
+	u_int8_t compression_methods_len = packet->payload[offset];
+
+	offset += 1 + compression_methods_len;
+
+	if(offset > total_len) jainvalid = 1;
+      }
+
+      if((!jainvalid) && (offset < total_len)) {
+	extension_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+	offset += 2;
+
+	if((offset+extension_len) > total_len) jainvalid = 1;
+      } else
+	extension_len = 0;
+
+      if(!jainvalid) {
+	u_int16_t ext_offset = offset;
+
+	while((ext_offset+4) <= (offset+extension_len)) {
+	  u_int16_t extension_type = (packet->payload[ext_offset] << 8) + packet->payload[ext_offset+1];
+	  u_int16_t extension_size = (packet->payload[ext_offset+2] << 8) + packet->payload[ext_offset+3];
+
+	  if((ext_offset+4+extension_size) > (offset+extension_len)) {
+	    jainvalid = 1;
+	    break;
+	  }
+
+#ifdef DEBUG_TLS
+	  printf("SSL extension_type: %04X [size: %u]\n", extension_type, extension_size);
+#endif
+
+	  if(extension_type == 0x0000 /* server_name */) {

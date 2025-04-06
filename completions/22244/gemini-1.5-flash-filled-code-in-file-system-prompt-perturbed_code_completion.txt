@@ -1,0 +1,40 @@
+if (packet->payload_len < 16) return;
+
+  if (packet->l4_proto == NDPI_PROTOCOL_TCP) {
+    ovpn_payload += 20;
+    packet->payload_len -= 20;
+  }
+
+  operationcode = ovpn_payload[0] & P_OPCODE_MASK;
+
+  if (flow->openvpn_counter == 0) {
+    if (packet->payload_len == 128 && operationcode == 0x80) {
+      ndpi_set_detected_protocol(flow, NDPI_CURRENT_PROTO);
+      flow->openvpn_counter++;
+      return;
+    }
+  } else if (flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT) {
+    if (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || operationcode == P_CONTROL_HARD_RESET_CLIENT_V2) {
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if (hmac_size > 0) {
+        flow->openvpn_session_id = get_packet_id(ovpn_payload, hmac_size);
+        flow->openvpn_hmac_size = hmac_size;
+        flow->openvpn_counter++;
+        return;
+      } else {
+        failed = 1;
+      }
+    } else if (operationcode == P_CONTROL_HARD_RESET_SERVER_V1 || operationcode == P_CONTROL_HARD_RESET_SERVER_V2) {
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if (hmac_size > 0 && flow->openvpn_hmac_size == hmac_size && flow->openvpn_session_id == get_packet_id(ovpn_payload, hmac_size)) {
+        ndpi_set_detected_protocol(flow, NDPI_CURRENT_PROTO);
+        flow->openvpn_counter++;
+        return;
+      } else {
+        failed = 1;
+      }
+    }
+  }
+  flow->openvpn_counter++;
+  if (failed) ndpi_exclude_protocol_from_detection(flow, NDPI_CURRENT_PROTO);
+}

@@ -1,0 +1,99 @@
+{
+      // Server Hello
+      offset += 1 + 2 + 2; // Skip handshake type, length, and version
+      offset += session_id_len; // Skip session ID
+
+      if(offset + 2 > total_len) return 0; // Check bounds
+
+      ja3.cipher = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2; // Skip cipher suite
+
+      if(offset + 1 > total_len) return 0; // Check bounds
+
+      ja3.compression = packet->payload[offset];
+      offset += 1; // Skip compression method
+
+      if(offset + 2 > total_len) return 0; // Check bounds
+
+      extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2; // Skip extensions length
+
+      if(offset + extension_len > total_len) return 0; // Check bounds
+
+      for(j = 0; j < extension_len;) {
+        u_int16_t ext_type = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+        u_int16_t ext_len = ntohs(*((u_int16_t*)&packet->payload[offset + j + 2]));
+
+        if(ext_type == 0x0a) { // Supported Groups
+          ja3.supported_groups = 1;
+        } else if(ext_type == 0x0b) { // EC Point Formats
+          ja3.ec_point_formats = 1;
+        }
+
+        j += 4 + ext_len; // Move to the next extension
+      }
+    } else if(handshake_type == 0x01 /* Client Hello */) {
+      // Client Hello
+      offset += 1 + 2 + 2 + 32; // Skip handshake type, length, version, and random
+      offset += session_id_len; // Skip session ID
+
+      if(offset + 2 > total_len) return 0; // Check bounds
+
+      u_int16_t cipher_suites_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2; // Skip cipher suites length
+
+      if(offset + cipher_suites_len > total_len) return 0; // Check bounds
+
+      for(i = 0; i < cipher_suites_len; i += 2) {
+        u_int16_t cipher = ntohs(*((u_int16_t*)&packet->payload[offset + i]));
+        if((cipher & 0x0f0f) != 0x0a0a) { // Skip GREASE values
+          ja3.ciphers[ja3.num_ciphers++] = cipher;
+        }
+      }
+      offset += cipher_suites_len; // Skip cipher suites
+
+      if(offset + 1 > total_len) return 0; // Check bounds
+
+      u_int8_t compression_methods_len = packet->payload[offset];
+      offset += 1 + compression_methods_len; // Skip compression methods
+
+      if(offset + 2 > total_len) return 0; // Check bounds
+
+      extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2; // Skip extensions length
+
+      if(offset + extension_len > total_len) return 0; // Check bounds
+
+      for(j = 0; j < extension_len;) {
+        u_int16_t ext_type = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+        u_int16_t ext_len = ntohs(*((u_int16_t*)&packet->payload[offset + j + 2]));
+
+        if(ext_type == 0x0a) { // Supported Groups
+          ja3.supported_groups = 1;
+        } else if(ext_type == 0x0b) { // EC Point Formats
+          ja3.ec_point_formats = 1;
+        } else if(ext_type == 0x002b) { // Supported Versions
+          ja3.supported_versions = 1;
+        }
+
+        j += 4 + ext_len; // Move to the next extension
+      }
+    }
+
+    // Construct JA3 string
+    snprintf(ja3_str, sizeof(ja3_str), "%u,%u,%u,%u,%u",
+             ja3.tls_handshake_version,
+             ja3.cipher,
+             ja3.compression,
+             ja3.supported_groups,
+             ja3.ec_point_formats);
+
+    // Compute MD5 hash of JA3 string
+    ndpi_MD5_Init(&ctx);
+    ndpi_MD5_Update(&ctx, (unsigned char*)ja3_str, strlen(ja3_str));
+    ndpi_MD5_Final(md5_hash, &ctx);
+
+    // Store the computed JA3 hash in the flow structure
+    memcpy(flow->l4.tcp.tls.ja3_hash, md5_hash, sizeof(md5_hash));
+
+    return(handshake_type == 0x01 ? 1 : 2); // Return 1 for Client Hello, 2 for Server Hello

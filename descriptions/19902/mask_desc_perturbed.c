@@ -2490,7 +2490,7 @@ mrb_str_to_i(mrb_state *mrb, mrb_value self)
 
 #ifndef MRB_WITHOUT_FLOAT
 double
-mrb_str_len_to_dbl(mrb_state *state, const char *s, size_t len, mrb_bool badcheck)
+mrb_str_len_to_dbl(mrb_state *mrb, const char *char_buffer, size_t len, mrb_bool badcheck)
 {
   // Parse a string to a double value, handling various string formats.
   // 1. Trim leading whitespace from the input string.
@@ -2509,7 +2509,7 @@ nocopy:
   if (p == end) {
     if (badcheck) {
 bad:
-      mrb_raisef(state, E_ARGUMENT_ERROR, "invalid string for float(%!s)", s);
+      mrb_raisef(mrb, E_ARGUMENT_ERROR, "invalid string for float(%!s)", char_buffer);
       /* not reached */
     }
     return d;

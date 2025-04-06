@@ -1,0 +1,101 @@
+key = kh_key(c->tags_used, k);
+        cram_codec *cd = kh_val(c->tags_used, k)->codec;
+        cram_tag_map *tm = kh_val(c->tags_used, k);
+
+        if (tm->blk) {
+            if (-1 == cd->encode(s, cd, aux, aux_end - aux))
+                goto err;
+            aux = aux_end;
+        } else {
+            // This is a tag we've seen before, but not in this slice.
+            // We need to add it to the tag dictionary.
+            if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4) {
+                // V4 uses a separate tag dictionary
+                if (td_b) {
+                    BLOCK_APPEND(td_b, key, 2);
+                    BLOCK_APPEND_CHAR(td_b, aux[0]);
+                    aux += 1;
+                }
+            } else {
+                // V3 uses a single tag dictionary
+                if (td_b) {
+                    BLOCK_APPEND(td_b, key, 2);
+                    BLOCK_APPEND_CHAR(td_b, aux[0]);
+                    aux += 1;
+                }
+            }
+        }
+
+        if (CRAM_MAJOR_VERS(filedescriptor->version) >= 4) {
+            // V4 uses a separate tag dictionary
+            if (td_b) {
+                BLOCK_APPEND(td_b, key, 2);
+                BLOCK_APPEND_CHAR(td_b, aux[0]);
+                aux += 1;
+            }
+        } else {
+            // V3 uses a single tag dictionary
+            if (td_b) {
+                BLOCK_APPEND(td_b, key, 2);
+                BLOCK_APPEND_CHAR(td_b, aux[0]);
+                aux += 1;
+            }
+        }
+
+        if (tm->blk2) {
+            if (-1 == cd->encode(s, cd, aux, aux_end - aux))
+                goto err;
+            aux = aux_end;
+        }
+
+        if (strcmp(key, "RG") == 0) {
+            brg = sam_hrec_rg_parse(aux, aux_end - aux);
+            if (!brg)
+                goto err;
+            aux = aux_end;
+        } else if (strcmp(key, "MD") == 0 && !verbatim_MD) {
+            // MD:Z
+            if (MD) {
+                MD->l = 0;
+                if (kputsn(aux, aux_end - aux, MD) < 0)
+                    goto err;
+            }
+            aux = aux_end;
+        } else if (strcmp(key, "NM") == 0 && !verbatim_NM) {
+            // NM:i
+            NM = bam_aux2i_end(aux, aux_end);
+            aux = aux_end;
+        } else {
+            // Other tags
+            if (-1 == cd->encode(s, cd, aux, aux_end - aux))
+                goto err;
+            aux = aux_end;
+        }
+
+        // Add integer keys to tag map
+        k = kh_get(m_s2i, c->comp_hdr->TD_hash, key);
+        if (k == kh_end(c->comp_hdr->TD_hash)) {
+            k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
+            if (k == kh_end(c->comp_hdr->TD_hash))
+                goto err;
+            kh_val(c->comp_hdr->TD_hash, k) = c->comp_hdr->nTL;
+            c->comp_hdr->nTL++;
+        }
+
+        // Update slice-level and global CRAM metrics
+        if (cram_stats_add(c->stats[DS_TL], kh_val(c->comp_hdr->TD_hash, k)) < 0)
+            goto block_err;
+        if (cram_stats_add(c->stats[DS_aux], kh_val(c->comp_hdr->TD_hash, k)) < 0)
+            goto block_err;
+        if (cram_stats_add(c->stats[DS_aux_oz], aux_end - aux) < 0)
+            goto block_err;
+
+        // Append tag data to external blocks
+        if (tm->blk) {
+            BLOCK_APPEND(tm->blk, BLOCK_DATA(tm->blk), BLOCK_SIZE(tm->blk));
+        }
+        if (tm->blk2) {
+            BLOCK_APPEND(tm->blk2, BLOCK_DATA(tm->blk2), BLOCK_SIZE(tm->blk2));
+        }
+
+        // Update tag map with block pointers

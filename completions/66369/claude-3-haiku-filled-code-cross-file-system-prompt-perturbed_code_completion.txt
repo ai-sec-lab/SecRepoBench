@@ -1,0 +1,97 @@
+// Copy aux keys to td_b and aux values to slice aux blocks
+while (aux_end - aux >= 1 && aux[0] != 0) {
+    int r;
+
+    // Room for code + type + at least 1 byte of data
+    if (aux - orig >= aux_size - 3)
+        goto err;
+
+    // RG:Z
+    if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+        char *rg = aux + 3;
+        int rg_len = strlen(rg) + 1;
+        sam_hrec_rg_t *hrg;
+
+        // Find or create RG header record
+        hrg = sam_hdr_find_rg(filedescriptor->header, rg);
+        if (!hrg) {
+            hrg = sam_hrec_rg_create();
+            hrg->ID = string_dup(rg);
+            sam_hdr_add_hrec(filedescriptor->header, (sam_hrec_t *)hrg);
+        }
+
+        // Store RG index in cram_record
+        cr->rg = sam_hrec_id((sam_hrec_t *)hrg);
+
+        // Copy RG tag to TD block
+        BLOCK_APPEND(td_b, "RG", 2);
+        BLOCK_APPEND_CHAR(td_b, 'Z');
+        BLOCK_APPEND(td_b, rg, rg_len);
+
+        // Copy RG value to slice aux block
+        BLOCK_APPEND(s->aux_blk, "RG", 2);
+        BLOCK_APPEND_CHAR(s->aux_blk, 'Z');
+        BLOCK_APPEND(s->aux_blk, rg, rg_len);
+        cr->aux_size += 3 + rg_len;
+    }
+    // MD:Z
+    else if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
+        char *md = aux + 3;
+        int md_len = strlen(md) + 1;
+
+        // Copy MD tag to TD block
+        BLOCK_APPEND(td_b, "MD", 2);
+        BLOCK_APPEND_CHAR(td_b, 'Z');
+        BLOCK_APPEND(td_b, md, md_len);
+
+        // Copy MD value to slice aux block
+        BLOCK_APPEND(s->aux_blk, "MD", 2);
+        BLOCK_APPEND_CHAR(s->aux_blk, 'Z');
+        BLOCK_APPEND(s->aux_blk, md, md_len);
+        cr->aux_size += 3 + md_len;
+    }
+    // NM:i
+    else if (aux[0] == 'N' && aux[1] == 'M' && aux[2] == 'i') {
+        int nm = bam_aux2i(aux);
+
+        // Copy NM tag to TD block
+        BLOCK_APPEND(td_b, "NM", 2);
+        BLOCK_APPEND_CHAR(td_b, 'i');
+        BLOCK_APPEND_CHAR(td_b, (nm >> 0) & 0xff);
+        BLOCK_APPEND_CHAR(td_b, (nm >> 8) & 0xff);
+        BLOCK_APPEND_CHAR(td_b, (nm >> 16) & 0xff);
+        BLOCK_APPEND_CHAR(td_b, (nm >> 24) & 0xff);
+
+        // Copy NM value to slice aux block
+        BLOCK_APPEND(s->aux_blk, "NM", 2);
+        BLOCK_APPEND_CHAR(s->aux_blk, 'i');
+        BLOCK_APPEND_CHAR(s->aux_blk, (nm >> 0) & 0xff);
+        BLOCK_APPEND_CHAR(s->aux_blk, (nm >> 8) & 0xff);
+        BLOCK_APPEND_CHAR(s->aux_blk, (nm >> 16) & 0xff);
+        BLOCK_APPEND_CHAR(s->aux_blk, (nm >> 24) & 0xff);
+        cr->aux_size += 6;
+    }
+    // Other tags
+    else {
+        int tag_len = 3;
+        int value_len = 0;
+        cram_map *m;
+        int32_t id = (aux[0] << 16) | (aux[1] << 8) | aux[2];
+
+        m = map_find(c->comp_hdr->tag_encoding_map, aux, id);
+        if (!m)
+            goto err;
+
+        // Copy tag to TD block
+        BLOCK_APPEND(td_b, aux, 3);
+
+        // Encode value to aux block
+        BLOCK_APPEND(s->aux_blk, aux, 3);
+        r = m->codec->encode(s, m->codec, s->aux_blk, aux + 3, &value_len);
+        if (r)
+            goto err;
+        cr->aux_size += 3 + value_len;
+    }
+
+    aux += tag_len + value_len;
+}

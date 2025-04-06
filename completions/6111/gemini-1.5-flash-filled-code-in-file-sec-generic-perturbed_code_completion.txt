@@ -1,0 +1,157 @@
+short int
+    hex_digits[256];
+
+  size_t
+    columns,
+    rows;
+
+  ssize_t
+    i;
+
+  unsigned char
+    *buffer;
+
+  /*
+    Initialize hex digits.
+  */
+  for (i=0; i < 16; i++)
+  {
+    hex_digits[(unsigned char) (i+'0')]=i;
+    hex_digits[(unsigned char) (i+'A')]=i+10;
+    hex_digits[(unsigned char) (i+'a')]=i+10;
+  }
+  /*
+    Open the input image file.
+  */
+  (void) CopyMagickString(input_filename,image_info->filename,MagickPathExtent);
+  filedescriptor=AcquireUniqueFileResource(input_filename);
+  if (filedescriptor == -1)
+    ThrowFileException(exception,FileOpenError,"UnableToCreateTemporaryFile",
+      input_filename);
+  (void) CloseFile(filedescriptor);
+  /*
+    Create a symbolic link to the input file.
+  */
+  (void) FormatLocaleString(filename,MagickPathExtent,"%s",input_filename);
+  (void) CreateSymbolicLink(image_info->filename,filename,exception);
+  /*
+    Initialize page density.
+  */
+  columns=0;
+  rows=0;
+  density=(char *) NULL;
+  if (image_info->density != (char *) NULL)
+    density=AcquireString(image_info->density);
+  else
+    {
+      const char
+        *value;
+
+      value=GetImageProperty(image,"density",exception);
+      if (value != (const char *) NULL)
+        density=AcquireString(value);
+    }
+  if (density != (char *) NULL)
+    {
+      GeometryInfo
+        geometry_info;
+
+      MagickStatusType
+        flags;
+
+      flags=ParseGeometry(density,&geometry_info);
+      columns=(size_t) geometry_info.rho;
+      rows=(size_t) geometry_info.sigma;
+      if ((flags & SigmaValue) == 0)
+        rows=columns;
+      density=DestroyString(density);
+    }
+  /*
+    Determine page geometry.
+  */
+  (void) CopyMagickString(geometry,PSPageGeometry,MagickPathExtent);
+  if (image_info->geometry != (char *) NULL)
+    (void) CopyMagickString(geometry,image_info->geometry,MagickPathExtent);
+  /*
+    Initialize variables.
+  */
+  option=GetImageOption(image_info,"ps:options");
+  options=(char *) NULL;
+  if (option != (const char *) NULL)
+    options=AcquireString(option);
+  (void) CopyMagickString(command,MagickPathExtent,"gs -q -dNOPAUSE -dBATCH");
+  if (options != (char *) NULL)
+    (void) ConcatenateMagickString(command," ",MagickPathExtent);
+  (void) ConcatenateMagickString(command,options,MagickPathExtent);
+  if (options != (char *) NULL)
+    options=DestroyString(options);
+  (void) CopyMagickString(postscript_filename,filename,MagickPathExtent);
+  (void) ConcatenateMagickString(postscript_filename,".ps",MagickPathExtent);
+  (void) CopyMagickString(message,MagickPathExtent,"");
+  image=NewImageList();
+  /*
+    Create a control file for Ghostscript.
+  */
+  delegate_info=GetDelegateInfo("ps",exception);
+  if (delegate_info == (DelegateInfo *) NULL)
+    ThrowMagickException(exception,GetMagickModule(),DelegateError,
+      "PostscriptDelegateNotFound","`%s'",image_info->filename);
+  if (IsPostscriptRendered(image_info->filename) != MagickFalse)
+    {
+      read_info=CloneImageInfo(image_info);
+      read_info->filename=AcquireString(image_info->filename);
+      postscript_image=ReadImage(read_info,exception);
+      read_info=DestroyImageInfo(read_info);
+      if (postscript_image == (Image *) NULL)
+        return((Image *) NULL);
+      return(GetFirstImageInList(postscript_image));
+    }
+  /*
+    Render Postscript image.
+  */
+  (void) FormatLocaleString(command,MagickPathExtent,
+    "%s -sDEVICE=ppmraw -dTextAlphaBits=4 -dGraphicsAlphaBits=4 -r%.20gx%.20g "
+    "-sOutputFile=%s %s",delegate_info->decoder,resolution.x,resolution.y,
+    postscript_filename,filename);
+  if (InvokePostscriptDelegate(MagickTrue,command,message,exception) ==
+      MagickFalse)
+    {
+      (void) RelinquishUniqueFileResource(filename);
+      ThrowMagickException(exception,GetMagickModule(),DelegateError,
+        "PostscriptDelegateFailed","`%s'",command);
+    }
+  (void) RelinquishUniqueFileResource(filename);
+  /*
+    Read the rendered images.
+  */
+  read_info=CloneImageInfo(image_info);
+  read_info->filename=AcquireString(postscript_filename);
+  postscript_image=ReadImage(read_info,exception);
+  read_info=DestroyImageInfo(read_info);
+  if (postscript_image == (Image *) NULL)
+    return((Image *) NULL);
+  /*
+    Append images to image list.
+  */
+  AppendImageToList(&image,postscript_image);
+  for (next=GetFirstImageInList(postscript_image); next != (Image *) NULL; )
+  {
+    if (LocaleCompare(next->magick,"PPM") == 0)
+      {
+        (void) SetImageColorspace(next,sRGBColorspace,exception);
+        (void) SetImageType(next,TrueColorType);
+      }
+    if (next->profiles != (void *) NULL)
+      {
+        const char
+          *profile;
+
+        profile=GetImageProfile(next,"icc");
+        if (profile != (const char *) NULL)
+          {
+            (void) DeleteImageProfile(next,"icc");
+            (void) SetImageProfile(next,"icc",profile,exception);
+          }
+      }
+    next=GetNextImageInList(next);
+  }

@@ -1,0 +1,662 @@
+<｜begin▁of▁sentence｜>/*
+ * JPEG 2000 image decoder
+ * Copyright (c) 2007 Kamil Nowosad
+ * Copyright (c) 2013 Nicolas Bertrand <nicoinattendu@gmail.com>
+ *
+ * This file is part of FFmpeg.
+ *
+ * FFmpeg is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * FFmpeg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with FFmpeg; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
+
+/**
+ * @file
+ * JPEG 2000 image decoder
+ */
+
+#include <inttypes.h>
+#include <math.h>
+
+#include "libavutil/attributes.h"
+#include "libavutil/avassert.h"
+#include "libavutil/common.h"
+#include "libavutil/imgutils.h"
+#include "libavutil/opt.h"
+#include "libavutil/pixdesc.h"
+#include "libavutil/thread.h"
+#include "avcodec.h"
+#include "bytestream.h"
+#include "internal.h"
+#include "thread.h"
+#include "jpeg2000.h"
+#include "jpeg2000dsp.h"
+#include "profiles.h"
+
+#define JP2_SIG_TYPE    0x6A502020
+#define JP2_SIG_VALUE   0x0D0A870A
+#define JP2_CODESTREAM  0x6A703263
+#define JP2_HEADER      0x6A703268
+
+#define HAD_COC 0x01
+#define HAD_QCC 0x02
+
+#define MAX_POCS 32
+
+typedef struct Jpeg2000POCEntry {
+    uint16_t LYEpoc;
+    uint16_t CSpoc;
+    uint16_t CEpoc;
+    uint8_t RSpoc;
+    uint8_t REpoc;
+    uint8_t Ppoc;
+} Jpeg2000POCEntry;
+
+typedef struct Jpeg2000POC {
+    Jpeg2000POCEntry poc[MAX_POCS];
+    int nb_poc;
+    int is_default;
+} Jpeg2000POC;
+
+typedef struct Jpeg2000TilePart {
+    uint8_t tile_index;                 // Tile index who refers the tile-part
+    const uint8_t *tp_end;
+    GetByteContext header_tpg;          // bit stream of header if PPM header is used
+    GetByteContext tpg;                 // bit stream in tile-part
+} Jpeg2000TilePart;
+
+/* RMK: For JPEG2000 DCINEMA 3 tile-parts in a tile
+ * one per component, so tile_part elements have a size of 3 */
+typedef struct Jpeg2000Tile {
+    Jpeg2000Component   *comp;
+    uint8_t             properties[4];
+    Jpeg2000CodingStyle codsty[4];
+    Jpeg2000QuantStyle  qntsty[4];
+    Jpeg2000POC         poc;
+    Jpeg2000TilePart    tile_part[32];
+    uint8_t             has_ppt;                // whether this tile has a ppt marker
+    uint8_t             *packed_headers;        // contains packed headers. Used only along with PPT marker
+    int                 packed_headers_size;    // size in bytes of the packed headers
+    GetByteContext      packed_headers_stream;  // byte context corresponding to packed headers
+    uint16_t tp_idx;                    // Tile-part index
+    int coord[2][2];                    // border coordinates {{x0, x1}, {y0, y1}}
+} Jpeg2000Tile;
+
+typedef struct Jpeg2000DecoderContext {
+    AVClass         *class;
+    AVCodecContext  *avctx;
+    GetByteContext  g;
+
+    int             width, height;
+    int             image_offset_x, image_offset_y;
+    int             tile_offset_x, tile_offset_y;
+    uint8_t         cbps[4];    // bits per sample in particular components
+    uint8_t         sgnd[4];    // if a component is signed
+    uint8_t         properties[4];
+
+    uint8_t         has_ppm;
+    uint8_t         *packed_headers; // contains packed headers. Used only along with PPM marker
+    int             packed_headers_size;
+    GetByteContext  packed_headers_stream;
+    uint8_t         in_tile_headers;
+
+    int             cdx[4], cdy[4];
+    int             precision;
+    int             ncomponents;
+    int             colour_space;
+    uint32_t        palette[256];
+    int8_t          pal8;
+    int             cdef[4];
+    int             tile_width, tile_height;
+    unsigned        numXtiles, numYtiles;
+    int             maxtilelen;
+    AVRational      sar;
+
+    Jpeg2000CodingStyle codsty[4];
+    Jpeg2000QuantStyle  qntsty[4];
+    Jpeg2000POC         poc;
+    uint8_t             roi_shift[4];
+
+    int             bit_index;
+
+    int             curtileno;
+
+    Jpeg2000Tile    *tile;
+    Jpeg2000DSPContext dsp;
+
+    /*options parameters*/
+    int             reduction_factor;
+} Jpeg2000DecoderContext;
+
+/* get_bits functions for JPEG2000 packet bitstream
+ * It is a get_bit function with a bit-stuffing routine. If the value of the
+ * byte is 0xFF, the next byte includes an extra zero bit stuffed into the MSB.
+ * cf. ISO-15444-1:2002 / B.10.1 Bit-stuffing routine */
+static int get_bits(Jpeg2000DecoderContext *s, int n)
+{
+    int res = 0;
+
+    while (--n >= 0) {
+        res <<= 1;
+        if (s->bit_index == 0) {
+            s->bit_index = 7 + (bytestream2_get_byte(&s->g) != 0xFFu);
+        }
+        s->bit_index--;
+        res |= (bytestream2_peek_byte(&s->g) >> s->bit_index) & 1;
+    }
+    return res;
+}
+
+static void jpeg2000_flush(Jpeg2000DecoderContext *s)
+{
+    if (bytestream2_get_byte(&s->g) == 0xff)
+        bytestream2_skip(&s->g, 1);
+    s->bit_index = 8;
+}
+
+/* decode the value stored in node */
+static int tag_tree_decode(Jpeg2000DecoderContext *s, Jpeg2000TgtNode *node,
+                           int threshold)
+{
+    Jpeg2000TgtNode *stack[30];
+    int sp = -1, curval = 0;
+
+    if (!node) {
+        av_log(s->avctx, AV_LOG_ERROR, "missing node\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    while (node && !node->vis) {
+        stack[++sp] = node;
+        node        = node->parent;
+    }
+
+    if (node)
+        curval = node->val;
+    else
+        curval = stack[sp]->val;
+
+    while (curval < threshold && sp >= 0) {
+        if (curval < stack[sp]->val)
+            curval = stack[sp]->val;
+        while (curval < threshold) {
+            int ret;
+            if ((ret = get_bits(s, 1)) > 0) {
+                stack[sp]->vis++;
+                break;
+            } else if (!ret)
+                curval++;
+            else
+                return ret;
+        }
+        stack[sp]->val = curval;
+        sp--;
+    }
+    return curval;
+}
+
+static int pix_fmt_match(enum AVPixelFormat pix_fmt, int components,
+                         int bpc, uint32_t log2_chroma_wh, int pal8)
+{
+    int match = 1;
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(pix_fmt);
+
+    av_assert2(desc);
+
+    if (desc->nb_components != components) {
+        return 0;
+    }
+
+    switch (components) {
+    case 4:
+        match = match && desc->comp[3].depth >= bpc &&
+                         (log2_chroma_wh >> 14 & 3) == 0 &&
+                         (log2_chroma_wh >> 12 & 3) == 0;
+    case 3:
+        match = match && desc->comp[2].depth >= bpc &&
+                         (log2_chroma_wh >> 10 & 3) == desc->log2_chroma_w &&
+                         (log2_chroma_wh >>  8 & 3) == desc->log2_chroma_h;
+    case 2:
+        match = match && desc->comp[1].depth >= bpc &&
+                         (log2_chroma_wh >>  6 & 3) == desc->log2_chroma_w &&
+                         (log2_chroma_wh >>  4 & 3) == desc->log2_chroma_h;
+
+    case 1:
+        match = match && desc->comp[0].depth >= bpc &&
+                         (log2_chroma_wh >>  2 & 3) == 0 &&
+                         (log2_chroma_wh       & 3) == 0 &&
+                         (desc->flags & AV_PIX_FMT_FLAG_PAL) == pal8 * AV_PIX_FMT_FLAG_PAL;
+    }
+    return match;
+}
+
+// pix_fmts with lower bpp have to be listed before
+// similar pix_fmts with higher bpp.
+#define RGB_PIXEL_FORMATS   AV_PIX_FMT_PAL8,AV_PIX_FMT_RGB24,AV_PIX_FMT_RGBA,AV_PIX_FMT_RGB48,AV_PIX_FMT_RGBA64
+#define GRAY_PIXEL_FORMATS  AV_PIX_FMT_GRAY8,AV_PIX_FMT_GRAY8A,AV_PIX_FMT_GRAY16,AV_PIX_FMT_YA16
+#define YUV_PIXEL_FORMATS   AV_PIX_FMT_YUV410P,AV_PIX_FMT_YUV411P,AV_PIX_FMT_YUVA420P, \
+                            AV_PIX_FMT_YUV420P,AV_PIX_FMT_YUV422P,AV_PIX_FMT_YUVA422P, \
+                            AV_PIX_FMT_YUV440P,AV_PIX_FMT_YUV444P,AV_PIX_FMT_YUVA444P, \
+                            AV_PIX_FMT_YUV420P9,AV_PIX_FMT_YUV422P9,AV_PIX_FMT_YUV444P9, \
+                            AV_PIX_FMT_YUVA420P9,AV_PIX_FMT_YUVA422P9,AV_PIX_FMT_YUVA444P9, \
+                            AV_PIX_FMT_YUV420P10,AV_PIX_FMT_YUV422P10,AV_PIX_FMT_YUV444P10, \
+                            AV_PIX_FMT_YUVA420P10,AV_PIX_FMT_YUVA422P10,AV_PIX_FMT_YUVA444P10, \
+                            AV_PIX_FMT_YUV420P12,AV_PIX_FMT_YUV422P12,AV_PIX_FMT_YUV444P12, \
+                            AV_PIX_FMT_YUV420P14,AV_PIX_FMT_YUV422P14,AV_PIX_FMT_YUV444P14, \
+                            AV_PIX_FMT_YUV420P16,AV_PIX_FMT_YUV422P16,AV_PIX_FMT_YUV444P16, \
+                            AV_PIX_FMT_YUVA420P16,AV_PIX_FMT_YUVA422P16,AV_PIX_FMT_YUVA444P16
+#define XYZ_PIXEL_FORMATS   AV_PIX_FMT_XYZ12
+
+static const enum AVPixelFormat rgb_pix_fmts[]  = {RGB_PIXEL_FORMATS};
+static const enum AVPixelFormat gray_pix_fmts[] = {GRAY_PIXEL_FORMATS};
+static const enum AVPixelFormat yuv_pix_fmts[]  = {YUV_PIXEL_FORMATS};
+static const enum AVPixelFormat xyz_pix_fmts[]  = {XYZ_PIXEL_FORMATS,
+                                                   YUV_PIXEL_FORMATS};
+static const enum AVPixelFormat all_pix_fmts[]  = {RGB_PIXEL_FORMATS,
+                                                   GRAY_PIXEL_FORMATS,
+                                                   YUV_PIXEL_FORMATS,
+                                                   XYZ_PIXEL_FORMATS};
+
+/* marker segments */
+/* get sizes and offsets of image, tiles; number of components */
+static int get_siz(Jpeg2000DecoderContext *s)
+{
+    int i;
+    int ncomponents;
+    uint32_t log2_chroma_wh = 0;
+    const enum AVPixelFormat *possible_fmts = NULL;
+    int possible_fmts_nb = 0;
+    int ret;
+    int o_dimx, o_dimy; //original image dimensions.
+    int dimx, dimy;
+
+    if (bytestream2_get_bytes_left(&s->g) < 36) {
+        av_log(s->avctx, AV_LOG_ERROR, "Insufficient space for SIZ\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->avctx->profile = bytestream2_get_be16u(&s->g); // Rsiz
+    s->width          = bytestream2_get_be32u(&s->g); // Width
+    s->height         = bytestream2_get_be32u(&s->g); // Height
+    s->image_offset_x = bytestream2_get_be32u(&s->g); // X0Siz
+    s->image_offset_y = bytestream2_get_be32u(&s->g); // Y0Siz
+    s->tile_width     = bytestream2_get_be32u(&s->g); // XTSiz
+    s->tile_height    = bytestream2_get_be32u(&s->g); // YTSiz
+    s->tile_offset_x  = bytestream2_get_be32u(&s->g); // XT0Siz
+    s->tile_offset_y  = bytestream2_get_be32u(&s->g); // YT0Siz
+    ncomponents       = bytestream2_get_be16u(&s->g); // CSiz
+
+    if (av_image_check_size2(s->width, s->height, s->avctx->max_pixels, AV_PIX_FMT_NONE, 0, s->avctx)) {
+        avpriv_request_sample(s->avctx, "Large Dimensions");
+        return AVERROR_PATCHWELCOME;
+    }
+
+    if (ncomponents <= 0) {
+        av_log(s->avctx, AV_LOG_ERROR, "Invalid number of components: %d\n",
+               s->ncomponents);
+        return AVERROR_INVALIDDATA;
+    }
+
+    if (ncomponents > 4) {
+        avpriv_request_sample(s->avctx, "Support for %d components",
+                              ncomponents);
+        return AVERROR_PATCHWELCOME;
+    }
+
+    if (s->tile_offset_x < 0 || s->tile_offset_y < 0 ||
+        s->image_offset_x < s->tile_offset_x ||
+        s->image_offset_y < s->tile_offset_y ||
+        s->tile_width  + (int64_t)s->tile_offset_x <= s->image_offset_x ||
+        s->tile_height + (int64_t)s->tile_offset_y <= s->image_offset_y
+    ) {
+        av_log(s->avctx, AV_LOG_ERROR, "Tile offsets are invalid\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->ncomponents = ncomponents;
+
+    if (s->tile_width <= 0 || s->tile_height <= 0) {
+        av_log(s->avctx, AV_LOG_ERROR, "Invalid tile dimension %dx%d.\n",
+               s->tile_width, s->tile_height);
+        return AVERROR_INVALIDDATA;
+    }
+
+    if (bytestream2_get_bytes_left(&s->g) < 3 * s->ncomponents) {
+        av_log(s->avctx, AV_LOG_ERROR, "Insufficient space for %d components in SIZ\n", s->ncomponents);
+        return AVERROR_INVALIDDATA;
+    }
+
+    for (i = 0; i < s->ncomponents; i++) { // Ssiz_i XRsiz_i, YRsiz_i
+        uint8_t x    = bytestream2_get_byteu(&s->g);
+        s->cbps[i]   = (x & 0x7f) + 1;
+        s->precision = FFMAX(s->cbps[i], s->precision);
+        s->sgnd[i]   = !!(x & 0x80);
+        s->cdx[i]    = bytestream2_get_byteu(&s->g);
+        s->cdy[i]    = bytestream2_get_byteu(&s->g);
+        if (   !s->cdx[i] || s->cdx[i] == 3 || s->cdx[i] > 4
+            || !s->cdy[i] || s->cdy[i] == 3 || s->cdy[i] > 4) {
+            av_log(s->avctx, AV_LOG_ERROR, "Invalid sample separation %d/%d\n", s->cdx[i], s->cdy[i]);
+            return AVERROR_INVALIDDATA;
+        }
+        log2_chroma_wh |= s->cdy[i] >> 1 << i * 4 | s->cdx[i] >> 1 << i * 4 + 2;
+    }
+
+    s->numXtiles = ff_jpeg2000_ceildiv(s->width  - s->tile_offset_x, s->tile_width);
+    s->numYtiles = ff_jpeg2000_ceildiv(s->height - s->tile_offset_y, s->tile_height);
+
+    // There must be at least a SOT and SOD per tile, their minimum size is 14
+    if (s->numXtiles * (uint64_t)s->numYtiles > INT_MAX/sizeof(*s->tile) ||
+        s->numXtiles * s->numYtiles * 14LL > bytestream2_size(&s->g)
+    ) {
+        s->numXtiles = s->numYtiles = 0;
+        return AVERROR(EINVAL);
+    }
+
+    s->tile = av_mallocz_array(s->numXtiles * s->numYtiles, sizeof(*s->tile));
+    if (!s->tile) {
+        s->numXtiles = s->numYtiles = 0;
+        return AVERROR(ENOMEM);
+    }
+
+    for (i = 0; i < s->numXtiles * s->numYtiles; i++) {
+        Jpeg2000Tile *tile = s->tile + i;
+
+        tile->comp = av_mallocz(s->ncomponents * sizeof(*tile->comp));
+        if (!tile->comp)
+            return AVERROR(ENOMEM);
+    }
+
+    /* compute image size with reduction factor */
+    o_dimx = ff_jpeg2000_ceildivpow2(s->width  - s->image_offset_x,
+                                               s->reduction_factor);
+    o_dimy = ff_jpeg2000_ceildivpow2(s->height - s->image_offset_y,
+                                               s->reduction_factor);
+    dimx = ff_jpeg2000_ceildiv(o_dimx, s->cdx[0]);
+    dimy = ff_jpeg2000_ceildiv(o_dimy, s->cdy[0]);
+    for (i = 1; i < s->ncomponents; i++) {
+        dimx = FFMAX(dimx, ff_jpeg2000_ceildiv(o_dimx, s->cdx[i]));
+        dimy = FFMAX(dimy, ff_jpeg2000_ceildiv(o_dimy, s->cdy[i]));
+    }
+
+    ret = ff_set_dimensions(s->avctx, dimx, dimy);
+    if (ret < 0)
+        return ret;
+
+    if (s->avctx->profile == FF_PROFILE_JPEG2000_DCINEMA_2K ||
+        s->avctx->profile == FF_PROFILE_JPEG2000_DCINEMA_4K) {
+        possible_fmts = xyz_pix_fmts;
+        possible_fmts_nb = FF_ARRAY_ELEMS(xyz_pix_fmts);
+    } else {
+        switch (s->colour_space) {
+        case 16:
+            possible_fmts = rgb_pix_fmts;
+            possible_fmts_nb = FF_ARRAY_ELEMS(rgb_pix_fmts);
+            break;
+        case 17:
+            possible_fmts = gray_pix_fmts;
+            possible_fmts_nb = FF_ARRAY_ELEMS(gray_pix_fmts);
+            break;
+        case 18:
+            possible_fmts = yuv_pix_fmts;
+            possible_fmts_nb = FF_ARRAY_ELEMS(yuv_pix_fmts);
+            break;
+        default:
+            possible_fmts = all_pix_fmts;
+            possible_fmts_nb = FF_ARRAY_ELEMS(all_pix_fmts);
+            break;
+        }
+    }
+    if (   s->avctx->pix_fmt != AV_PIX_FMT_NONE
+        && !pix_fmt_match(s->avctx->pix_fmt, ncomponents, s->precision, log2_chroma_wh, s->pal8))
+            s->avctx->pix_fmt = AV_PIX_FMT_NONE;
+    if (s->avctx->pix_fmt == AV_PIX_FMT_NONE)
+        for (i = 0; i < possible_fmts_nb; ++i) {
+            if (pix_fmt_match(possible_fmts[i], ncomponents, s->precision, log2_chroma_wh, s->pal8)) {
+                s->avctx->pix_fmt = possible_fmts[i];
+                break;
+            }
+        }
+
+    if (i == possible_fmts_nb) {
+        if (ncomponents == 4 &&
+            s->cdy[0] == 1 && s->cdx[0] == 1 &&
+            s->cdy[1] == 1 && s->cdx[1] == 1 &&
+            s->cdy[2] == s->cdy[3] && s->cdx[2] == s->cdx[3]) {
+            if (s->precision == 8 && s->cdy[2] == 2 && s->cdx[2] == 2 && !s->pal8) {
+                s->avctx->pix_fmt = AV_PIX_FMT_YUVA420P;
+                s->cdef[0] = 0;
+                s->cdef[1] = 1;
+                s->cdef[2] = 2;
+                s->cdef[3] = 3;
+                i = 0;
+            }
+        } else if (ncomponents == 3 && s->precision == 8 &&
+                   s->cdx[0] == s->cdx[1] && s->cdx[0] == s->cdx[2] &&
+                   s->cdy[0] == s->cdy[1] && s->cdy[0] == s->cdy[2]) {
+            s->avctx->pix_fmt = AV_PIX_FMT_RGB24;
+            i = 0;
+        } else if (ncomponents == 2 && s->precision == 8 &&
+                   s->cdx[0] == s->cdx[1] && s->cdy[0] == s->cdy[1]) {
+            s->avctx->pix_fmt = AV_PIX_FMT_YA8;
+            i = 0;
+        } else if (ncomponents == 1 && s->precision == 8) {
+            s->avctx->pix_fmt = AV_PIX_FMT_GRAY8;
+            i = 0;
+        }
+    }
+
+
+    if (i == possible_fmts_nb) {
+        av_log(s->avctx, AV_LOG_ERROR,
+               "Unknown pix_fmt, profile: %d, colour_space: %d, "
+               "components: %d, precision: %d\n"
+               "cdx[0]: %d, cdy[0]: %d\n"
+               "cdx[1]: %d, cdy[1]: %d\n"
+               "cdx[2]: %d, cdy[2]: %d\n"
+               "cdx[3]: %d, cdy[3]: %d\n",
+               s->avctx->profile, s->colour_space, ncomponents, s->precision,
+               s->cdx[0],
+               s->cdy[0],
+               ncomponents > 1 ? s->cdx[1] : 0,
+               ncomponents > 1 ? s->cdy[1] : 0,
+               ncomponents > 2 ? s->cdx[2] : 0,
+               ncomponents > 2 ? s->cdy[2] : 0,
+               ncomponents > 3 ? s->cdx[3] : 0,
+               ncomponents > 3 ? s->cdy[3] : 0);
+        return AVERROR_PATCHWELCOME;
+    }
+    s->avctx->bits_per_raw_sample = s->precision;
+    return 0;
+}
+
+/* get common part for COD and COC segments */
+static int get_cox(Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *c)
+{
+    uint8_t byte;
+
+    if (bytestream2_get_bytes_left(&s->g) < 5) {
+        av_log(s->avctx, AV_LOG_ERROR, "Insufficient space for COX\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    /*  nreslevels = number of resolution levels
+                   = number of decomposition level +1 */
+    c->nreslevels = bytestream2_get_byteu(&s->g) + 1;
+    if (c->nreslevels >= JPEG2000_MAX_RESLEVELS) {
+        av_log(s->avctx, AV_LOG_ERROR, "nreslevels %d is invalid\n", c->nreslevels);
+        return AVERROR_INVALIDDATA;
+    }
+
+    if (c->nreslevels <= s->reduction_factor) {
+        /* we are forced to update reduction_factor as its requested value is
+           not compatible with this bitstream, and as we might have used it
+           already in setup earlier we have to fail this frame until
+           reinitialization is implemented */
+        av_log(s->avctx, AV_LOG_ERROR, "reduction_factor too large for this bitstream, max is %d\n", c->nreslevel
+
+// --- CODE TRUNCATED HERE ---
+
+static int jpeg2000_read_main_headers(Jpeg2000DecoderContext *decodercontext)
+{
+    Jpeg2000CodingStyle *codsty = decodercontext->codsty;
+    Jpeg2000QuantStyle *qntsty  = decodercontext->qntsty;
+    Jpeg2000POC         *poc    = &decodercontext->poc;
+    uint8_t *properties         = decodercontext->properties;
+
+    for (;;) {
+        int len, ret = 0;
+        uint16_t marker;
+        int oldpos;
+
+        if (bytestream2_get_bytes_left(&decodercontext->g) < 2) {
+            av_log(decodercontext->avctx, AV_LOG_ERROR, "Missing EOC\n");
+            break;
+        }
+
+        marker = bytestream2_get_be16u(&decodercontext->g);
+        oldpos = bytestream2_tell(&decodercontext->g);
+        if (marker >= 0xFF30 && marker <= 0xFF3F)
+            continue;
+        if (marker == JPEG2000_SOD) {
+            Jpeg2000Tile *tile;
+            Jpeg2000TilePart *tp;
+
+            if (!decodercontext->tile) {
+                av_log(decodercontext->avctx, AV_LOG_ERROR, "Missing SIZ\n");
+                return AVERROR_INVALIDDATA;
+            }
+            if (decodercontext->curtileno < 0) {
+                av_log(decodercontext->avctx, AV_LOG_ERROR, "Missing SOT\n");
+                return AVERROR_INVALIDDATA;
+            }
+
+            tile = decodercontext->tile + decodercontext->curtileno;
+            tp = tile->tile_part + tile->tp_idx;
+            if (tp->tp_end < decodercontext->g.buffer) {
+                av_log(decodercontext->avctx, AV_LOG_ERROR, "Invalid tpend\n");
+                return AVERROR_INVALIDDATA;
+            }
+
+            // Initialize the bytestream for tile-part headers using packed header streams if PPM is present.
+            // Initialize the bytestream for packed packet headers if PPT is present and it's the first tile-part.
+            // Set up the data stream for the current tile-part by calculating its size and skipping to its end in the buffer.
+            // Continue to the next iteration of the loop to process more headers or reach the end marker.
+            // <MASK>
+        }
+        if (marker == JPEG2000_EOC)
+            break;
+
+        len = bytestream2_get_be16(&decodercontext->g);
+        if (len < 2 || bytestream2_get_bytes_left(&decodercontext->g) < len - 2) {
+            if (decodercontext->avctx->strict_std_compliance >= FF_COMPLIANCE_STRICT) {
+                av_log(decodercontext->avctx, AV_LOG_ERROR, "Invalid len %d left=%d\n", len, bytestream2_get_bytes_left(&decodercontext->g));
+                return AVERROR_INVALIDDATA;
+            }
+            av_log(decodercontext->avctx, AV_LOG_WARNING, "Missing EOC Marker.\n");
+            break;
+        }
+
+        switch (marker) {
+        case JPEG2000_SIZ:
+            if (decodercontext->ncomponents) {
+                av_log(decodercontext->avctx, AV_LOG_ERROR, "Duplicate SIZ\n");
+                return AVERROR_INVALIDDATA;
+            }
+            ret = get_siz(decodercontext);
+            if (!decodercontext->tile)
+                decodercontext->numXtiles = decodercontext->numYtiles = 0;
+            break;
+        case JPEG2000_COC:
+            ret = get_coc(decodercontext, codsty, properties);
+            break;
+        case JPEG2000_COD:
+            ret = get_cod(decodercontext, codsty, properties);
+            break;
+        case JPEG2000_RGN:
+            ret = get_rgn(decodercontext, len);
+            break;
+        case JPEG2000_QCC:
+            ret = get_qcc(decodercontext, len, qntsty, properties);
+            break;
+        case JPEG2000_QCD:
+            ret = get_qcd(decodercontext, len, qntsty, properties);
+            break;
+        case JPEG2000_POC:
+            ret = get_poc(decodercontext, len, poc);
+            break;
+        case JPEG2000_SOT:
+            if (!decodercontext->in_tile_headers) {
+                decodercontext->in_tile_headers = 1;
+                if (decodercontext->has_ppm) {
+                    bytestream2_init(&decodercontext->packed_headers_stream, decodercontext->packed_headers, decodercontext->packed_headers_size);
+                }
+            }
+            if (!(ret = get_sot(decodercontext, len))) {
+                av_assert1(decodercontext->curtileno >= 0);
+                codsty = decodercontext->tile[decodercontext->curtileno].codsty;
+                qntsty = decodercontext->tile[decodercontext->curtileno].qntsty;
+                poc    = &decodercontext->tile[decodercontext->curtileno].poc;
+                properties = decodercontext->tile[decodercontext->curtileno].properties;
+            }
+            break;
+        case JPEG2000_PLM:
+            // the PLM marker is ignored
+        case JPEG2000_COM:
+            // the comment is ignored
+            bytestream2_skip(&decodercontext->g, len - 2);
+            break;
+        case JPEG2000_CRG:
+            ret = read_crg(decodercontext, len);
+            break;
+        case JPEG2000_TLM:
+            // Tile-part lengths
+            ret = get_tlm(decodercontext, len);
+            break;
+        case JPEG2000_PLT:
+            // Packet length, tile-part header
+            ret = get_plt(decodercontext, len);
+            break;
+        case JPEG2000_PPM:
+            // Packed headers, main header
+            if (decodercontext->in_tile_headers) {
+                av_log(decodercontext->avctx, AV_LOG_ERROR, "PPM Marker can only be in Main header\n");
+                return AVERROR_INVALIDDATA;
+            }
+            ret = get_ppm(decodercontext, len);
+            break;
+        case JPEG2000_PPT:
+            // Packed headers, tile-part header
+            if (decodercontext->has_ppm) {
+                av_log(decodercontext->avctx, AV_LOG_ERROR,
+                       "Cannot have both PPT and PPM marker.\n");
+                return AVERROR_INVALIDDATA;
+            }
+
+            ret = get_ppt(decodercontext, len);
+            break;
+        default:
+            av_log(decodercontext->avctx, AV_LOG_ERROR,
+                   "unsupported marker 0x%.4"PRIX16" at pos 0x%X\n",
+                   marker, bytestream2_tell(&decodercontext->g) - 4);
+            bytestream2_skip(&decodercontext->g, len - 2);
+            break;
+        }
+        if (bytestream2_tell(&decodercontext->g) - oldpos != len || ret) {
+            av_log(decodercontext->avctx, AV_LOG_ERROR,
+                   "error during processing marker segment %.4"PRIx16"\n",
+                   marker);
+            return ret ? ret : -1;
+        }
+    }
+    return 0;
+}

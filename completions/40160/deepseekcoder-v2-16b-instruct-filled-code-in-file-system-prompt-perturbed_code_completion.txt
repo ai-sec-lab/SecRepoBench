@@ -1,0 +1,231 @@
+: %u][version: %u][session_id_len: %u]\n",
+           total_len,
+           (packet->payload[version_offset] << 8) + packet->payload[version_offset+1],
+           session_id_len);
+#endif
+
+    tls_version = (packet->payload[version_offset] << 8) + packet->payload[version_offset+1];
+
+    if(tls_version < 0x0300) {
+#ifdef DEBUG_TLS
+      printf("TLS [version: %u] is not supported\n", tls_version);
+#endif
+      return 0; /* Not supported */
+    }
+
+    if(tls_version >= 0x0304) {
+      if(quic_version == 0) {
+#ifdef DEBUG_TLS
+        printf("TLS [version: %u] requires QUIC\n", tls_version);
+#endif
+        return 0; /* Requires QUIC */
+      }
+    }
+
+    if(session_id_len > 0) {
+      offset += 1; /* Skip session_id_len */
+    }
+
+    if((offset + 3) >= total_len)
+      return 0; /* Not found */
+
+    tot_extension_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+    offset += 2;
+
+    if((offset + tot_extension_len) > total_len)
+      return 0; /* Not found */
+
+    for(j = 0; j < tot_extension_len; j++) {
+      u_int16_t extension_id = (packet->payload[offset] << 8) + packet->payload[offset+1];
+      u_int16_t extension_len = (packet->payload[offset+2] << 8) + packet->payload[offset+3];
+      u_int16_t extension_payload_offset = offset + 4;
+
+      checkExtensions(ndpi_struct, flow, is_dtls, extension_id, extension_len, extension_payload_offset);
+
+      offset += 4 + extension_len;
+    }
+
+    if(offset >= total_len)
+      return 0; /* Not found */
+
+    if(handshake_type == 0x01) { /* Client Hello */
+      u_int16_t cipher_suites_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+      u_int16_t i;
+
+      offset += 2;
+
+      if((offset + cipher_suites_len) > total_len)
+        return 0; /* Not found */
+
+      for(i = 0; i < cipher_suites_len; i += 2) {
+        u_int16_t cipher_suite = (packet->payload[offset] << 8) + packet->payload[offset+1];
+
+        if(ndpi_is_cipher_suite_supported(ndpi_struct, cipher_suite)) {
+          ja3.client.cipher[ja3.client.num_cipher++] = cipher_suite;
+        } else {
+#ifdef DEBUG_TLS
+          printf("TLS [cipher_suite: %u] is not supported\n", cipher_suite);
+#endif
+        }
+
+        offset += 2;
+      }
+
+      if(offset >= total_len)
+        return 0; /* Not found */
+
+      u_int16_t compression_methods_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+      offset += 2;
+
+      if((offset + compression_methods_len) > total_len)
+        return 0; /* Not found */
+
+      for(i = 0; i < compression_methods_len; i += 1) {
+        u_int8_t compression_method = packet->payload[offset];
+
+        if(compression_method == 0x00) {
+          ja3.client.num_elliptic_curve_point_format++;
+        }
+
+        offset += 1;
+      }
+
+      if(offset >= total_len)
+        return 0; /* Not found */
+
+      u_int16_t extensions_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+      offset += 2;
+
+      if((offset + extensions_len) > total_len)
+        return 0; /* Not found */
+
+      for(i = 0; i < extensions_len; i += 4) {
+        u_int16_t extension_id = (packet->payload[offset] << 8) + packet->payload[offset+1];
+        u_int16_t extension_len = (packet->payload[offset+2] << 8) + packet->payload[offset+3];
+        u_int16_t extension_payload_offset = offset + 4;
+
+        checkExtensions(ndpi_struct, flow, is_dtls, extension_id, extension_len, extension_payload_offset);
+
+        if(extension_id == 0x000a) { /* Supported Versions */
+          u_int16_t num_versions = extension_len / 2;
+
+          for(j = 0; j < num_versions; j++) {
+            u_int16_t version = (packet->payload[extension_payload_offset + j * 2] << 8) + packet->payload[extension_payload_offset + j * 2 + 1];
+
+            if(ndpi_is_tls_version_supported(ndpi_struct, version)) {
+              ja3.client.num_tls_extension++;
+              ja3.client.tls_extension[ja3.client.num_tls_extension - 1] = version;
+            } else {
+#ifdef DEBUG_TLS
+              printf("TLS [version: %u] is not supported\n", version);
+#endif
+            }
+          }
+        } else if(extension_id == 0x000d) { /* Elliptic Curves */
+          u_int16_t num_curves = extension_len / 2;
+
+          for(j = 0; j < num_curves; j++) {
+            u_int16_t curve = (packet->payload[extension_payload_offset + j * 2] << 8) + packet->payload[extension_payload_offset + j * 2 + 1];
+
+            if(ndpi_is_elliptic_curve_supported(ndpi_struct, curve)) {
+              ja3.client.num_elliptic_curve++;
+              ja3.client.elliptic_curve[ja3.client.num_elliptic_curve - 1] = curve;
+            } else {
+#ifdef DEBUG_TLS
+              printf("TLS [curve: %u] is not supported\n", curve);
+#endif
+            }
+          }
+        } else if(extension_id == 0x000e) { /* EC Point Formats */
+          u_int16_t num_point_formats = extension_len / 2;
+
+          for(j = 0; j < num_point_formats; j++) {
+            u_int16_t point_format = (packet->payload[extension_payload_offset + j * 2] << 8) + packet->payload[extension_payload_offset + j * 2 + 1];
+
+            if(point_format == 0x00) {
+              ja3.client.num_elliptic_curve_point_format++;
+            }
+          }
+        } else if(extension_id == 0x0010) { /* Signature Algorithms */
+          u_int16_t num_sig_algs = extension_len / 2;
+
+          for(j = 0; j < num_sig_algs; j++) {
+            u_int16_t sig_alg = (packet->payload[extension_payload_offset + j * 2] << 8) + packet->payload[extension_payload_offset + j * 2 + 1];
+
+            if(ndpi_is_signature_algorithm_supported(ndpi_struct, sig_alg)) {
+              ja3.client.num_tls_extension++;
+              ja3.client.tls_extension[ja3.client.num_tls_extension - 1] = sig_alg;
+            } else {
+#ifdef DEBUG_TLS
+              printf("TLS [sig_alg: %u] is not supported\n", sig_alg);
+#endif
+            }
+          }
+        } else if(extension_id == 0x001b) { /* ALPN */
+          u_int16_t alpn_len = extension_len;
+
+          if(alpn_len > sizeof(buffer) - 1)
+            alpn_len = sizeof(buffer) - 1;
+
+          memcpy(buffer, &packet->payload[extension_payload_offset], alpn_len);
+          buffer[alpn_len] = '\0';
+
+          ja3.client.num_tls_extension++;
+          ja3.client.tls_extension[ja3.client.num_tls_extension - 1] = extension_id;
+          strncpy(ja3.client.alpn, buffer, sizeof(ja3.client.alpn) - 1);
+        } else if(extension_id == 0x001c) { /* SNI */
+          u_int16_t sni_len = extension_len;
+
+          if(sni_len > sizeof(buffer) - 1)
+            sni_len = sizeof(buffer) - 1;
+
+          memcpy(buffer, &packet->payload[extension_payload_offset], sni_len);
+          buffer[sni_len] = '\0';
+
+          ja3.client.num_tls_extension++;
+          ja3.client.tls_extension[ja3.client.num_tls_extension - 1] = extension_id;
+          strncpy(ja3.client.supported_versions, buffer, sizeof(ja3.client.supported_versions) - 1);
+        } else if(extension_id == 0x0033) { /* Session Ticket */
+          /* Ignore for now */
+        } else if(extension_id == 0x0039) { /* PSK Key Exchange Modes */
+          /* Ignore for now */
+        } else if(extension_id == 0x003b) { /* Certificate Authorities */
+          /* Ignore for now */
+        } else if(extension_id == 0x003c) { /* OCSP Stapling */
+          /* Ignore for now */
+        } else if(extension_id == 0x0040) { /* Post-Handshake Authentication */
+          /* Ignore for now */
+        } else if(extension_id == 0x0041) { /* Signature Algorithms Cert */
+          /* Ignore for now */
+        } else if(extension_id == 0x0045) { /* Client Certificate URL */
+          /* Ignore for now */
+        } else if(extension_id == 0x0046) { /* Server Certificate URL */
+          /* Ignore for now */
+        } else if(extension_id == 0x0047) { /* Channel ID */
+          /* Ignore for now */
+        } else if(extension_id == 0x0048) { /* Next Protocol Negotiation */
+          /* Ignore for now */
+        } else if(extension_id == 0x0049) { /* Certificate Transparency */
+          /* Ignore for now */
+        } else if(extension_id == 0x004a) { /* Session Ticket TLS */
+          /* Ignore for now */
+        } else if(extension_id == 0x004b) { /* Pre Shared Key */
+          /* Ignore for now */
+        } else if(extension_id == 0x004c) { /* Early Data */
+          /* Ignore for now */
+        } else if(extension_id == 0x004d) { /* Supported Groups */
+          /* Ignore for now */
+        } else if(extension_id == 0x004e) { /* Supported Point Formats */
+          /* Ignore for now */
+        } else if(extension_id == 0x0050) { /* Padding */
+          /* Ignore for now */
+        } else if(extension_id == 0x0067) { /* Certificate Status Request */
+          /* Ignore for now */
+        } else if(extension_id == 0x0068) { /* Server Name Indication */
+          u_int16_t sni_len = extension_len;
+
+          if(sni_len > sizeof(buffer) - 1)
+            sni_len = sizeof(buffer) - 1;
+
+          memcpy(buffer, &packet->payload[extension_payload_offset], sni_len);
+          buffer

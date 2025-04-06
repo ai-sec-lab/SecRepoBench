@@ -1,0 +1,47 @@
+memset(dNSName, 0, sizeof(dNSName));
+if(general_name_type == 0x82) { /* dNSName */
+    u_int8_t name_len = packet->payload[i+1];
+    if(name_len > 0 && name_len < sizeof(dNSName)) {
+        strncpy(dNSName, (const char*)&packet->payload[i+2], name_len);
+        dNSName[name_len] = '\0';
+        ndpi_trim_string(dNSName);
+        if(ndpi_is_printable_string(dNSName, strlen(dNSName)) == 0)
+            memset(dNSName, 0, sizeof(dNSName));
+    }
+} else if(general_name_type == 0x87) { /* ipAddress */
+    u_int8_t addr_type = (len == 4) ? AF_INET : (len == 16) ? AF_INET6 : 0;
+    if(addr_type) {
+        char ip_str[INET6_ADDRSTRLEN];
+        if(inet_ntop(addr_type, &packet->payload[i+2], ip_str, sizeof(ip_str)))
+            snprintf(dNSName, sizeof(dNSName), "%s", ip_str);
+    }
+}
+
+if(dNSName[0] != '\0') {
+    if(strcasecmp(dNSName, connection->host_server_name) == 0)
+        matched_name = 1;
+
+    if(connection->protos.tls_quic.server_names == NULL) {
+        connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+    } else {
+        char *new_str = ndpi_realloc(connection->protos.tls_quic.server_names,
+                                   strlen(connection->protos.tls_quic.server_names) + strlen(dNSName) + 2);
+        if(new_str) {
+            strcat(new_str, ",");
+            strcat(new_str, dNSName);
+            connection->protos.tls_quic.server_names = new_str;
+        }
+    }
+
+    u_int32_t val;
+    if(ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+                              dNSName, strlen(dNSName), &val) == 0) {
+        ndpi_protocol ret = { NDPI_PROTOCOL_TLS, (u_int16_t)val, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED };
+        if(connection->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+            connection->detected_protocol_stack[0] = ret.master_protocol;
+            connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+            connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+            ndpi_check_subprotocol_risk(ndpi_struct, connection, ret.master_protocol);
+        }
+    }
+}

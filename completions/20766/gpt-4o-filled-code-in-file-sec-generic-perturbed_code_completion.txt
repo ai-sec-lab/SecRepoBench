@@ -1,0 +1,45 @@
+struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset];
+    u_int16_t sport = ntohs(udp->source), dport = ntohs(udp->dest);
+
+    if((sport == GTP_U_V1_PORT) || (dport == GTP_U_V1_PORT)) {
+      struct ndpi_gtpv1_hdr *gtp = (struct ndpi_gtpv1_hdr *)&packet[ip_offset + sizeof(struct ndpi_udphdr)];
+
+      if(gtp->v_pt_rsv_flags == 0x30) { /* GTPv1, no piggyback */
+        u_int16_t gtp_len = ntohs(gtp->length);
+
+        if(gtp->msg_type == 0xFF) { /* T-PDU */
+          ip_offset += sizeof(struct ndpi_udphdr) + sizeof(struct ndpi_gtpv1_hdr);
+
+          if(gtp_len > 8) {
+            ip_offset += 8; /* Skip GTP-U header */
+            tunnel_type = ndpi_gtp_tunnel;
+            goto iph_check;
+          }
+        }
+      }
+    } else if((sport == TZSP_PORT) || (dport == TZSP_PORT)) {
+      struct ndpi_tzsp_hdr *tzsp = (struct ndpi_tzsp_hdr *)&packet[ip_offset + sizeof(struct ndpi_udphdr)];
+
+      if(tzsp->version == 1) {
+        u_int8_t *tag = (u_int8_t *)&tzsp->tag;
+        u_int8_t *end = (u_int8_t *)packet + header->caplen;
+
+        while(tag < end && *tag != 1) { /* 1 = end of tags */
+          tag += 2 + tag[1];
+        }
+
+        if(tag < end) {
+          ip_offset = (tag - (u_int8_t *)packet) + 2;
+          tunnel_type = ndpi_tzsp_tunnel;
+          goto datalink_check;
+        }
+      }
+    } else if(sport == NDPI_CAPWAP_DATA_PORT) {
+      struct ndpi_capwap_hdr *capwap = (struct ndpi_capwap_hdr *)&packet[ip_offset + sizeof(struct ndpi_udphdr)];
+
+      if(capwap->version == 0 && capwap->type == 0) {
+        ip_offset += sizeof(struct ndpi_udphdr) + sizeof(struct ndpi_capwap_hdr);
+        tunnel_type = ndpi_capwap_tunnel;
+        goto iph_check;
+      }
+    }

@@ -1003,8 +1003,8 @@ prepare_tagged_break(mrb_state *mrb, uint32_t tag, const struct RProc *proc, mrb
 
 #ifndef DIRECT_THREADED
 
-#define INIT_DISPATCH for (;;) { insn = BYTECODE_DECODER(*pc); CODE_FETCH_HOOK(mrb, irep, pc, regs); switch (insn) {
-#define CASE(insn,ops) case insn: pc++; FETCH_ ## ops (); mrb->c->ci->pc = pc; L_ ## insn ## _BODY:
+#define INIT_DISPATCH for (;;) { instruction = BYTECODE_DECODER(*pc); CODE_FETCH_HOOK(mrb, irep, pc, regs); switch (instruction) {
+#define CASE(instruction,ops) case instruction: pc++; FETCH_ ## ops (); mrb->c->ci->pc = pc; L_ ## instruction ## _BODY:
 #define NEXT goto L_END_DISPATCH
 #define JUMP NEXT
 #define END_DISPATCH L_END_DISPATCH:;}}
@@ -1012,8 +1012,8 @@ prepare_tagged_break(mrb_state *mrb, uint32_t tag, const struct RProc *proc, mrb
 #else
 
 #define INIT_DISPATCH JUMP; return mrb_nil_value();
-#define CASE(insn,ops) L_ ## insn: pc++; FETCH_ ## ops (); mrb->c->ci->pc = pc; L_ ## insn ## _BODY:
-#define NEXT insn=BYTECODE_DECODER(*pc); CODE_FETCH_HOOK(mrb, irep, pc, regs); goto *optable[insn]
+#define CASE(instruction,ops) L_ ## instruction: pc++; FETCH_ ## ops (); mrb->c->ci->pc = pc; L_ ## instruction ## _BODY:
+#define NEXT instruction=BYTECODE_DECODER(*pc); CODE_FETCH_HOOK(mrb, irep, pc, regs); goto *optable[instruction]
 #define JUMP NEXT
 
 #define END_DISPATCH

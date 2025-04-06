@@ -1,0 +1,272 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/ndpi_utils.c
+void load_common_alpns(struct ndpi_detection_module_struct *ndpi_str) {
+  /* see: https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml */
+  const char* const common_alpns[] = {
+    "http/0.9", "http/1.0", "http/1.1",
+    "spdy/1", "spdy/2", "spdy/3", "spdy/3.1",
+    "stun.turn", "stun.nat-discovery",
+    "h2", "h2c", "h2-16", "h2-15", "h2-14", "h2-fb",
+    "webrtc", "c-webrtc",
+    "ftp", "imap", "pop3", "managesieve", "coap",
+    "xmpp-client", "xmpp-server",
+    "acme-tls/1",
+    "mqtt", "dot", "ntske/1", "sunrpc",
+    "h3",
+    "smb",
+    "irc",
+
+    /* QUIC ALPNs */
+    "h3-T051", "h3-T050",
+    "h3-32", "h3-30", "h3-29", "h3-28", "h3-27", "h3-24", "h3-22",
+    "hq-30", "hq-29", "hq-28", "hq-27",
+    "h3-fb-05", "h1q-fb",
+    "doq-i00",
+
+    /* ApplePush */
+    "apns-security-v3", "apns-pack-v1",
+
+    NULL /* end */
+  };
+  u_int i;
+
+  for(i=0; common_alpns[i] != NULL; i++) {
+    AC_PATTERN_t ac_pattern;
+
+    memset(&ac_pattern, 0, sizeof(ac_pattern));
+    ac_pattern.astring      = ndpi_strdup((char*)common_alpns[i]);
+    ac_pattern.length       = strlen(common_alpns[i]);
+
+    if(ac_automata_add(ndpi_str->common_alpns_automa.ac_automa, &ac_pattern) != ACERR_SUCCESS)
+      printf("%s(): unable to add %s\n", __FUNCTION__, common_alpns[i]);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static int ndpi_search_tls_udp(struct ndpi_detection_module_struct *ndpi_struct,
+			       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int32_t handshake_len;
+  u_int16_t p_len, processed;
+  const u_int8_t *p;
+  u_int8_t no_dtls = 0, change_cipher_found = 0;
+
+#ifdef DEBUG_TLS
+  printf("[TLS] %s()\n", __FUNCTION__);
+#endif
+
+  /* Overwriting packet payload */
+  p = packet->payload, p_len = packet->payload_packet_len; /* Backup */
+
+  /* Split the element in blocks */
+  processed = 0;
+  while(processed + 13 < p_len) {
+    u_int32_t block_len;
+    const u_int8_t *block = (const u_int8_t *)&p[processed];
+
+    if((block[0] != 0x16 && block[0] != 0x14) || /* Handshake, change-cipher-spec */
+       (block[1] != 0xfe) || /* We ignore old DTLS versions */
+       ((block[2] != 0xff) && (block[2] != 0xfd))) {
+#ifdef DEBUG_TLS
+      printf("[TLS] DTLS invalid block 0x%x or old version 0x%x-0x%x-0x%x\n",
+             block[0], block[1], block[2], block[3]);
+#endif
+      no_dtls = 1;
+      break;
+    }
+    block_len = ntohs(*((u_int16_t*)&block[11]));
+#ifdef DEBUG_TLS
+    printf("[TLS] DTLS block len: %d\n", block_len);
+#endif
+    if(block_len == 0 || (processed + block_len + 12 >= p_len)) {
+#ifdef DEBUG_TLS
+      printf("[TLS] DTLS invalid block len %d (processed %d, p_len %d)\n",
+             block_len, processed, p_len);
+#endif
+      no_dtls = 1;
+      break;
+    }
+    /* We process only handshake msgs */
+    if(block[0] == 0x16) {
+      if(processed + block_len + 13 > p_len) {
+#ifdef DEBUG_TLS
+        printf("[TLS] DTLS invalid len %d %d %d\n", processed, block_len, p_len);
+#endif
+        no_dtls = 1;
+        break;
+      }
+      /* TODO: handle (certificate) fragments */
+      if(block_len > 16) {
+        handshake_len = (block[14] << 16) + (block[15] << 8) + block[16];
+        if((handshake_len + 12) != block_len) {
+#ifdef DEBUG_TLS
+          printf("[TLS] DTLS invalid handshake_len %d, %d)\n",
+                 handshake_len, block_len);
+#endif
+          no_dtls = 1;
+          break;
+        }
+        packet->payload = &block[13];
+        packet->payload_packet_len = block_len;
+        processTLSBlock(ndpi_struct, flow);
+      }
+    } else {
+      /* Change-cipher-spec: any subsequent block might be encrypted */
+#ifdef DEBUG_TLS
+      printf("[TLS] Change-cipher-spec\n");
+#endif
+      change_cipher_found = 1;
+      processed += block_len + 13;
+      break;
+    }
+
+    processed += block_len + 13;
+  }
+  if(processed != p_len) {
+#ifdef DEBUG_TLS
+    printf("[TLS] DTLS invalid processed len %d/%d (%d)\n", processed, p_len, change_cipher_found);
+#endif
+    if(!change_cipher_found)
+      no_dtls = 1;
+  }
+
+  packet->payload = p;
+  packet->payload_packet_len = p_len; /* Restore */
+
+  if(no_dtls || change_cipher_found) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return(0); /* That's all */
+  } else {
+    return(1); /* Keep working */
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/tls.c
+static void ndpi_int_tls_add_connection(struct ndpi_detection_module_struct *ndpi_struct,
+					struct ndpi_flow_struct *flow, u_int32_t protocol) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+#if DEBUG_TLS
+  printf("[TLS] %s()\n", __FUNCTION__);
+#endif
+
+  if((packet->udp != NULL) && (protocol == NDPI_PROTOCOL_TLS))
+    protocol = NDPI_PROTOCOL_DTLS;
+
+  if((flow->detected_protocol_stack[0] == protocol)
+     || (flow->detected_protocol_stack[1] == protocol)) {
+    if(!flow->check_extra_packets)
+      tlsInitExtraPacketProcessing(ndpi_struct, flow);
+    return;
+  }
+
+  if(protocol != NDPI_PROTOCOL_TLS)
+    ;
+  else
+    protocol = ndpi_tls_refine_master_protocol(ndpi_struct, flow, protocol);
+
+  ndpi_set_detected_protocol(ndpi_struct, flow, protocol, protocol, NDPI_CONFIDENCE_DPI);
+
+  tlsInitExtraPacketProcessing(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/gtp.c
+static void ndpi_check_gtp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int32_t payload_len = packet->payload_packet_len;
+
+  if((packet->udp != NULL) && (payload_len > sizeof(struct gtp_header_generic))) {
+    u_int32_t gtp_u  = ntohs(2152);
+    u_int32_t gtp_c  = ntohs(2123);
+    u_int32_t gtp_prime = ntohs(3386);
+
+    struct gtp_header_generic *gtp = (struct gtp_header_generic *)packet->payload;
+    u_int8_t version = (gtp->flags & 0xE0) >> 5;
+    u_int8_t pt = (gtp->flags & 0x10) >> 4;
+    u_int16_t message_len = ntohs(gtp->message_len);
+
+    if((packet->udp->source == gtp_u) || (packet->udp->dest == gtp_u)) {
+      if((version == 1) && (pt == 1) &&
+         (payload_len >= HEADER_LEN_GTP_U) &&
+         (message_len <= (payload_len - HEADER_LEN_GTP_U))) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-u\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_U, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+    if((packet->udp->source == gtp_c) || (packet->udp->dest == gtp_c)) {
+      if(((version == 1) &&
+          (payload_len >= HEADER_LEN_GTP_C_V1) &&
+          (message_len == (payload_len - HEADER_LEN_GTP_C_V1)) &&
+          (message_len >= 4 * (!!(gtp->flags & 0x07))) &&
+          (gtp->message_type > 0 && gtp->message_type <= 129)) || /* Loose check based on TS 29.060 7.1 */
+         ((version == 2) &&
+          /* payload_len is always valid, because HEADER_LEN_GTP_C_V2 == sizeof(struct gtp_header_generic) */
+          (message_len == (payload_len - HEADER_LEN_GTP_C_V2)))) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-c\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_C, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+    if((packet->udp->source == gtp_prime) || (packet->udp->dest == gtp_prime)) {
+      if((pt == 0) &&
+         ((gtp->flags & 0x0E) >> 1 == 0x7) && /* Spare bits */
+         (payload_len >= HEADER_LEN_GTP_PRIME) &&
+         (message_len <= (payload_len - HEADER_LEN_GTP_PRIME)) &&
+         ((gtp->message_type > 0 && gtp->message_type <= 7) || /* Check based on TS 32.295 6.2.1 */
+          gtp->message_type == 240 || gtp->message_type == 241)) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-prime\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_PRIME, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  return;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static void process_tls(struct ndpi_detection_module_struct *ndpi_struct,
+			struct ndpi_flow_struct *flow,
+			const u_int8_t *crypto_data, uint32_t crypto_data_len,
+			uint32_t version)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  /* Overwriting packet payload */
+  u_int16_t p_len;
+  const u_int8_t *p;
+  p = packet->payload;
+  p_len = packet->payload_packet_len;
+  packet->payload = crypto_data;
+  packet->payload_packet_len = crypto_data_len;
+
+  processClientServerHello(ndpi_struct, flow, version);
+  flow->protos.tls_quic.hello_processed = 1; /* Allow matching of custom categories */
+
+  /* Restore */
+  packet->payload = p;
+  packet->payload_packet_len = p_len;
+
+  /* ServerHello is not needed to sub-classified QUIC, so we ignore it:
+     this way we lose JA3S and negotiated ciphers...
+     Negotiated version is only present in the ServerHello message too, but
+     fortunately, QUIC always uses TLS version 1.3 */
+  flow->protos.tls_quic.ssl_version = 0x0304;
+
+  /* DNS-over-QUIC: ALPN is "doq" or "doq-XXX" (for drafts versions) */
+  if(flow->protos.tls_quic.alpn &&
+     strncmp(flow->protos.tls_quic.alpn, "doq", 3) == 0) {
+    NDPI_LOG_DBG(ndpi_struct, "Found DOQ (ALPN: [%s])\n", flow->protos.tls_quic.alpn);
+    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_DOH_DOT, NDPI_PROTOCOL_QUIC, NDPI_CONFIDENCE_DPI);
+  }
+}
+

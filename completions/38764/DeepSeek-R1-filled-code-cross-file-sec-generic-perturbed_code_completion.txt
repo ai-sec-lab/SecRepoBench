@@ -1,0 +1,66 @@
+p = b;
+		if (p[0] == 0) {
+			/* Skip remaining padding */
+			step = 0;
+			break;
+		}
+		size_t entry_len = p[0];
+		if (entry_len < 33 || entry_len > step) {
+			archive_set_error(&archivereader->archive,
+			    ARCHIVE_ERRNO_MISC,
+			    "Invalid directory entry length");
+			return (ARCHIVE_FATAL);
+		}
+
+		/* Skip '.' and '..' entries */
+		uint8_t name_len = p[32];
+		if (name_len == 1) {
+			if (p[33] == 0 || p[33] == 1) {
+				b += entry_len;
+				step -= entry_len;
+				continue;
+			}
+		}
+
+		struct file_info *file = calloc(1, sizeof(*file));
+		if (file == NULL) {
+			archive_set_error(&archivereader->archive, ENOMEM,
+			    "No memory for file entry");
+			return (ARCHIVE_FATAL);
+		}
+
+		file->offset = archive_le32dec(p + 2);
+		file->size = archive_le32dec(p + 10);
+		file->flags = p[25];
+
+		/* Handle multi-extent files */
+		if (file->flags & 0x80) {
+			if (multi == NULL) {
+				multi = file;
+				parent->contents.first = multi;
+				parent->contents.last = &multi->next;
+			} else {
+				*parent->contents.last = file;
+				parent->contents.last = &file->next;
+			}
+		} else {
+			multi = NULL;
+			if (parent->contents.first == NULL) {
+				parent->contents.first = file;
+				parent->contents.last = &file->next;
+			} else {
+				*parent->contents.last = file;
+				parent->contents.last = &file->next;
+			}
+		}
+
+		/* Process filename */
+		if (name_len > 0) {
+			const char *name_ptr = (const char *)(p + 33);
+			char *semi = memchr(name_ptr, ';', name_len);
+			size_t name_size = semi ? (size_t)(semi - name_ptr) : name_len;
+			archive_strncpy(&file->name, name_ptr, name_size);
+		}
+
+		b += entry_len;
+		step -= entry_len;

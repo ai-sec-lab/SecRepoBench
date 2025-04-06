@@ -1,0 +1,49 @@
+/* Process the TLS extensions in the client's "Client Hello" message.
+ * For the "supported versions" extension, extract and store the supported TLS versions in the flow structure.
+ * For the "encrypted server name" extension, extract and store the encrypted SNI details if present.
+ * For the "QUIC transport parameters" extension, extract transport parameters and process the user agent if available.
+ * Continue processing any additional extensions that are part of the Client Hello message.
+ */
+else if(extension_id == 43 /* supported versions */) {
+  if(extension_len >= 2) {
+    u_int16_t tls_version = ntohs(*((u_int16_t*)&packet->payload[offset+4]));
+
+#ifdef DEBUG_TLS
+    printf("Client TLS [TLS version: 0x%04X]\n", tls_version);
+#endif
+
+    flow->protos.tls_quic.ssl_version = tls_version;
+  }
+} else if(extension_id == 0x0028 /* encrypted server name */) {
+  if(extension_len >= 1) {
+    u_int8_t esni_len = packet->payload[offset+4];
+    if(esni_len > 0 && (offset+4+esni_len) <= total_len) {
+      flow->protos.tls_quic.encrypted_sni.esni = ndpi_malloc(esni_len);
+      if(flow->protos.tls_quic.encrypted_sni.esni) {
+        memcpy(flow->protos.tls_quic.encrypted_sni.esni, &packet->payload[offset+5], esni_len);
+        flow->protos.tls_quic.encrypted_sni.esni_len = esni_len;
+#ifdef DEBUG_ENCRYPTED_SNI
+        printf("[TLS] Encrypted SNI found, length %u\n", esni_len);
+#endif
+      }
+    }
+  }
+} else if(extension_id == 0x0057 /* QUIC transport parameters */) {
+  if(extension_len >= 2) {
+    u_int16_t quic_params_len = ntohs(*((u_int16_t*)&packet->payload[offset+4]));
+    if(quic_params_len > 0 && (offset+4+quic_params_len) <= total_len) {
+      u_int8_t *quic_params = &packet->payload[offset+6];
+      u_int64_t quic_version;
+      int rc = quic_len(quic_params, &quic_version);
+      if(rc == 0) {
+        flow->protos.tls_quic.quic_version = quic_version;
+#ifdef DEBUG_TLS
+        printf("[QUIC] Version 0x%"PRIx64"\n", quic_version);
+#endif
+        http_process_user_agent(ndpi_struct, flow, quic_params, quic_params_len);
+      }
+    }
+  }
+} else {
+  /* Process any other extensions */
+}

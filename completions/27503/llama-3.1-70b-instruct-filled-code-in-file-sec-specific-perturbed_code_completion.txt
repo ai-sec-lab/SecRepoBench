@@ -1,0 +1,172 @@
+switch (tag)
+{
+	case 0x0:
+	case 0x1:
+		// mono or low-frequency element
+		{
+			// read header parameters
+			unusedHeader = BitBufferReadSmall (bits, 16) ;
+			escapeFlag = BitBufferReadOne (bits) ;
+			chanBits = BitBufferReadSmall (bits, 4) ;
+			partialFrame = BitBufferReadOne (bits) ;
+			extraBits = BitBufferReadSmall (bits, 3) ;
+
+			// read and process header parameters
+			if (escapeFlag)
+			{
+				// read and process escape parameters
+				shift = BitBufferReadSmall (bits, 5) ;
+				bytesShifted = BitBufferReadSmall (bits, 3) ;
+				BitBufferAdvance (bits, shift) ;
+			}
+
+			// read and process compressed or uncompressed frame
+			if (partialFrame)
+			{
+				// read and process partial frame
+				val = BitBufferReadSmall (bits, chanBits) ;
+				out32 = sampleBuffer + channelIndex ;
+				*out32 = val ;
+			}
+			else
+			{
+				// read and process full frame
+				for (i = 0 ; i < numSamples ; i++)
+				{
+					val = BitBufferReadSmall (bits, chanBits) ;
+					out32 = sampleBuffer + (i * numChannels) + channelIndex ;
+					*out32 = val ;
+				}
+			}
+
+			// apply prediction to reconstruct audio samples
+			if (p->mConfig.pb > 0)
+			{
+				// read and process prediction parameters
+				pbFactorU = BitBufferReadSmall (bits, 5) ;
+				pbFactorV = BitBufferReadSmall (bits, 5) ;
+				denShiftU = BitBufferReadSmall (bits, 5) ;
+				denShiftV = BitBufferReadSmall (bits, 5) ;
+
+				// apply prediction
+				for (i = 0 ; i < numSamples ; i++)
+				{
+					out32 = sampleBuffer + (i * numChannels) + channelIndex ;
+					val = *out32 ;
+					val = (val * pbFactorU) >> denShiftU ;
+					*out32 = val ;
+				}
+			}
+
+			// handle stereo channel pairs
+			if (numChannels > 1)
+			{
+				// ensure channel limit is not exceeded
+				RequireAction (channelIndex < numChannels - 1, status = kALAC_ParamError ; goto Exit ;) ;
+
+				// process each channel separately
+				channelIndex++ ;
+				goto MonoOrLowFrequencyElement ;
+			}
+		}
+		break ;
+
+	case 0x2:
+		// stereo channel pair
+		{
+			// read header parameters
+			unusedHeader = BitBufferReadSmall (bits, 16) ;
+			escapeFlag = BitBufferReadOne (bits) ;
+			chanBits = BitBufferReadSmall (bits, 4) ;
+			partialFrame = BitBufferReadOne (bits) ;
+			extraBits = BitBufferReadSmall (bits, 3) ;
+
+			// read and process header parameters
+			if (escapeFlag)
+			{
+				// read and process escape parameters
+				shift = BitBufferReadSmall (bits, 5) ;
+				bytesShifted = BitBufferReadSmall (bits, 3) ;
+				BitBufferAdvance (bits, shift) ;
+			}
+
+			// read and process compressed or uncompressed frame
+			if (partialFrame)
+			{
+				// read and process partial frame
+				val = BitBufferReadSmall (bits, chanBits) ;
+				out32 = sampleBuffer + channelIndex ;
+				*out32 = val ;
+				out32 = sampleBuffer + channelIndex + 1 ;
+				*out32 = val ;
+			}
+			else
+			{
+				// read and process full frame
+				for (i = 0 ; i < numSamples ; i++)
+				{
+					val = BitBufferReadSmall (bits, chanBits) ;
+					out32 = sampleBuffer + (i * numChannels) + channelIndex ;
+					*out32 = val ;
+					out32 = sampleBuffer + (i * numChannels) + channelIndex + 1 ;
+					*out32 = val ;
+				}
+			}
+
+			// apply prediction to reconstruct audio samples
+			if (p->mConfig.pb > 0)
+			{
+				// read and process prediction parameters
+				pbFactorU = BitBufferReadSmall (bits, 5) ;
+				pbFactorV = BitBufferReadSmall (bits, 5) ;
+				denShiftU = BitBufferReadSmall (bits, 5) ;
+				denShiftV = BitBufferReadSmall (bits, 5) ;
+
+				// apply prediction
+				for (i = 0 ; i < numSamples ; i++)
+				{
+					out32 = sampleBuffer + (i * numChannels) + channelIndex ;
+					val = *out32 ;
+					val = (val * pbFactorU) >> denShiftU ;
+					*out32 = val ;
+					out32 = sampleBuffer + (i * numChannels) + channelIndex + 1 ;
+					val = *out32 ;
+					val = (val * pbFactorV) >> denShiftV ;
+					*out32 = val ;
+				}
+			}
+
+			// increment channel index
+			channelIndex += 2 ;
+		}
+		break ;
+
+	case 0x3:
+		// unsupported element
+		status = kALAC_UnsupportedElement ;
+		goto Exit ;
+
+	case 0x4:
+		// fill element
+		status = alac_fill_element (bits) ;
+		break ;
+
+	case 0x5:
+		// data stream element
+		status = alac_data_stream_element (bits) ;
+		break ;
+
+	default:
+		status = kALAC_ParamError ;
+		goto Exit ;
+}
+
+// align bitstream to byte boundaries
+BitBufferByteAlign (bits, false) ;
+
+// check if all channels are processed or frame end is reached
+if (channelIndex >= numChannels || bits->cur >= bits->end)
+{
+	status = ALAC_noErr ;
+	goto Exit ;
+}

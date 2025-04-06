@@ -1,0 +1,293 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// MagickCore/magick.c
+MagickExport const MagickInfo *GetMagickInfo(const char *name,
+  ExceptionInfo *exception)
+{
+  const MagickInfo
+    *magick_info;
+
+  /*
+    Find named module attributes.
+  */
+  assert(exception != (ExceptionInfo *) NULL);
+  if (IsMagickTreeInstantiated(exception) == MagickFalse)
+    return((const MagickInfo *) NULL);
+  magick_info=(const MagickInfo *) NULL;
+  if ((name != (const char *) NULL) && (*name != '\0'))
+    {
+      LockSemaphoreInfo(magick_semaphore);
+      if (LocaleCompare(name,"*") == 0)
+#if defined(MAGICKCORE_BUILD_MODULES)
+        (void) OpenModules(exception);
+#else
+        RegisterStaticModules();
+#endif
+      else
+        {
+          magick_info=(const MagickInfo *) GetValueFromSplayTree(magick_list,
+            name);
+          if (magick_info == (const MagickInfo *) NULL)
+#if defined(MAGICKCORE_BUILD_MODULES)
+            (void) OpenModule(name,exception);
+#else
+            (void) RegisterStaticModule(name,exception);
+#endif
+        }
+      UnlockSemaphoreInfo(magick_semaphore);
+    }
+
+// the below code fragment can be found in:
+// MagickCore/mime.c
+MagickExport const MimeInfo *GetMimeInfo(const char *filename,
+  const unsigned char *magic,const size_t length,ExceptionInfo *exception)
+{
+  const MimeInfo
+    *mime_info;
+
+  EndianType
+    endian;
+
+  const MimeInfo
+    *p;
+
+  const unsigned char
+    *q;
+
+  ssize_t
+    i;
+
+  ssize_t
+    value;
+
+  unsigned long
+    lsb_first;
+
+  assert(exception != (ExceptionInfo *) NULL);
+  if (IsMimeCacheInstantiated(exception) == MagickFalse)
+    return((const MimeInfo *) NULL);
+  /*
+    Search for mime tag.
+  */
+  mime_info=(const MimeInfo *) NULL;
+  lsb_first=1;
+  LockSemaphoreInfo(mime_semaphore);
+  ResetLinkedListIterator(mime_cache);
+  p=(const MimeInfo *) GetNextValueInLinkedList(mime_cache);
+  if ((magic == (const unsigned char *) NULL) || (length == 0))
+    {
+      UnlockSemaphoreInfo(mime_semaphore);
+      return(p);
+    }
+  while (p != (const MimeInfo *) NULL)
+  {
+    assert(p->offset >= 0);
+    if (mime_info != (const MimeInfo *) NULL)
+      if (p->priority > mime_info->priority)
+        {
+          p=(const MimeInfo *) GetNextValueInLinkedList(mime_cache);
+          continue;
+        }
+    if ((p->pattern != (char *) NULL) && (filename != (char *) NULL))
+      {
+        if (GlobExpression(filename,p->pattern,MagickFalse) != MagickFalse)
+          mime_info=p;
+        p=(const MimeInfo *) GetNextValueInLinkedList(mime_cache);
+        continue;
+      }
+    switch (p->data_type)
+    {
+      case ByteData:
+      {
+        if ((size_t) (p->offset+4) > length)
+          break;
+        q=magic+p->offset;
+        value=(ssize_t) (*q++);
+        if (p->mask == 0)
+          {
+            if (p->value == value)
+              mime_info=p;
+          }
+        else
+          {
+            if ((p->value & p->mask) == value)
+              mime_info=p;
+          }
+        break;
+      }
+      case ShortData:
+      {
+        if ((size_t) (p->offset+4) > length)
+          break;
+        q=magic+p->offset;
+        endian=p->endian;
+        if (p->endian == UndefinedEndian)
+          endian=(*(char *) &lsb_first) == 1 ? LSBEndian : MSBEndian;
+        if (endian == LSBEndian)
+          {
+            value=(ssize_t) (*q++);
+            value|=(*q++) << 8;
+          }
+        else
+          {
+            value=(ssize_t) (*q++) << 8;
+            value|=(*q++);
+          }
+        if (p->mask == 0)
+          {
+            if (p->value == value)
+              mime_info=p;
+          }
+        else
+          {
+            if ((p->value & p->mask) == value)
+              mime_info=p;
+          }
+        break;
+      }
+      case LongData:
+      {
+        if ((size_t) (p->offset+4) > length)
+          break;
+        q=magic+p->offset;
+        endian=p->endian;
+        if (p->endian == UndefinedEndian)
+          endian=(*(char *) &lsb_first) == 1 ? LSBEndian : MSBEndian;
+        if (endian == LSBEndian)
+          {
+            value=(ssize_t) (*q++);
+            value|=((ssize_t) *q++) << 8;
+            value|=((ssize_t) *q++) << 16;
+            value|=((ssize_t) *q++) << 24;
+          }
+        else
+          {
+            value=(ssize_t) (*q++) << 24;
+            value|=((ssize_t) *q++) << 16;
+            value|=((ssize_t) *q++) << 8;
+            value|=((ssize_t) *q++);
+          }
+        if (p->mask == 0)
+          {
+            if (p->value == value)
+              mime_info=p;
+          }
+        else
+          {
+            if ((p->value & p->mask) == value)
+              mime_info=p;
+          }
+        break;
+      }
+      case StringData:
+      default:
+      {
+        for (i=0; i <= (ssize_t) p->extent; i++)
+        {
+          if ((size_t) (p->offset+i+p->length) > length)
+            break;
+          if (memcmp(magic+p->offset+i,p->magic,p->length) == 0)
+            {
+              mime_info=p;
+              break;
+            }
+        }
+        break;
+      }
+    }
+    p=(const MimeInfo *) GetNextValueInLinkedList(mime_cache);
+  }
+  if (mime_info != (const MimeInfo *) NULL)
+    (void) InsertValueInLinkedList(mime_cache,0,
+      RemoveElementByValueFromLinkedList(mime_cache,p));
+  UnlockSemaphoreInfo(mime_semaphore);
+  return(mime_info);
+}
+
+// the below code fragment can be found in:
+// MagickCore/magic.c
+MagickExport MagickBooleanType ListMagicInfo(FILE *file,
+  ExceptionInfo *exception)
+{
+  const MagicInfo
+    **magic_info;
+
+  ssize_t
+    i;
+
+  size_t
+    number_aliases;
+
+  ssize_t
+    j;
+
+  if (file == (const FILE *) NULL)
+    file=stdout;
+  magic_info=GetMagicInfoList("*",&number_aliases,exception);
+  if (magic_info == (const MagicInfo **) NULL)
+    return(MagickFalse);
+  (void) FormatLocaleFile(file,"Name      Offset Target\n");
+  (void) FormatLocaleFile(file,
+    "-------------------------------------------------"
+    "------------------------------\n");
+  for (i=0; i < (ssize_t) number_aliases; i++)
+  {
+    (void) FormatLocaleFile(file,"%s",magic_info[i]->name);
+    for (j=(ssize_t) strlen(magic_info[i]->name); j <= 9; j++)
+      (void) FormatLocaleFile(file," ");
+    (void) FormatLocaleFile(file,"%6ld ",(long) magic_info[i]->offset);
+    if (magic_info[i]->magic != (unsigned char *) NULL)
+      {
+        for (j=0; magic_info[i]->magic[j] != '\0'; j++)
+          if (isprint((int) (magic_info[i]->magic[j])) != 0)
+            (void) FormatLocaleFile(file,"%c",magic_info[i]->magic[j]);
+          else
+            (void) FormatLocaleFile(file,"\\%03o",(unsigned int)
+              ((unsigned char) magic_info[i]->magic[j]));
+      }
+    (void) FormatLocaleFile(file,"\n");
+  }
+  (void) fflush(file);
+  magic_info=(const MagicInfo **) RelinquishMagickMemory((void *) magic_info);
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// MagickCore/magick.c
+MagickExport MagickInfo *AcquireMagickInfo(const char *magick_module,
+  const char *name,const char *description)
+{
+  MagickInfo
+    *magick_info;
+
+  assert(magick_module != (const char *) NULL);
+  assert(name != (const char *) NULL);
+  assert(description != (const char *) NULL);
+  if (IsEventLogging() != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",name);
+  magick_info=(MagickInfo *) AcquireCriticalMemory(sizeof(*magick_info));
+  (void) memset(magick_info,0,sizeof(*magick_info));
+  magick_info->magick_module=ConstantString(magick_module);
+  magick_info->name=ConstantString(name);
+  magick_info->description=ConstantString(description);
+  magick_info->flags=CoderAdjoinFlag | CoderBlobSupportFlag |
+    CoderDecoderThreadSupportFlag | CoderEncoderThreadSupportFlag |
+    CoderUseExtensionFlag;
+  magick_info->signature=MagickCoreSignature;
+  return(magick_info);
+}
+
+// the below code fragment can be found in:
+// MagickCore/exception.c
+MagickExport ExceptionInfo *AcquireExceptionInfo(void)
+{
+  ExceptionInfo
+    *exception;
+
+  exception=(ExceptionInfo *) AcquireCriticalMemory(sizeof(*exception));
+  InitializeExceptionInfo(exception);
+  exception->relinquish=MagickTrue;
+  return(exception);
+}
+

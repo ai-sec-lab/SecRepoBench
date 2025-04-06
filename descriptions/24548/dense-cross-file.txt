@@ -1,0 +1,172 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/hb-ot-cmap-table.hh
+void serialize (hb_serialize_context_t *c,
+		  Iterator it)
+  {
+    if (it.len () == 0) return;
+    unsigned table_initpos = c->length ();
+    if (unlikely (!c->extend_min (*this))) return;
+
+    hb_codepoint_t startCharCode = 0xFFFF, endCharCode = 0xFFFF;
+    hb_codepoint_t glyphID = 0;
+
+    for (const hb_item_type<Iterator> _ : +it)
+    {
+      if (startCharCode == 0xFFFF)
+      {
+	startCharCode = _.first;
+	endCharCode = _.first;
+	glyphID = _.second;
+      }
+      else if (!_is_gid_consecutive (endCharCode, startCharCode, glyphID, _.first, _.second))
+      {
+	CmapSubtableLongGroup  grouprecord;
+	grouprecord.startCharCode = startCharCode;
+	grouprecord.endCharCode = endCharCode;
+	grouprecord.glyphID = glyphID;
+	c->copy<CmapSubtableLongGroup> (grouprecord);
+
+	startCharCode = _.first;
+	endCharCode = _.first;
+	glyphID = _.second;
+      }
+      else
+	endCharCode = _.first;
+    }
+
+    CmapSubtableLongGroup record;
+    record.startCharCode = startCharCode;
+    record.endCharCode = endCharCode;
+    record.glyphID = glyphID;
+    c->copy<CmapSubtableLongGroup> (record);
+
+    this->format = 12;
+    this->reserved = 0;
+    this->length = c->length () - table_initpos;
+    this->groups.len = (this->length - min_size)/CmapSubtableLongGroup::static_size;
+  }
+
+// the below code fragment can be found in:
+// src/hb-ot-layout-gpos-table.hh
+void serialize (hb_serialize_context_t *c,
+		  Iterator it,
+		  const void *src_base,
+		  const hb_map_t *layout_variation_idx_map)
+  {
+    if (unlikely (!c->extend_min ((*this)))) return;
+    this->format = 1;
+    this->entryExitRecord.len = it.len ();
+
+    for (const EntryExitRecord& entry_record : + it
+					       | hb_map (hb_second))
+      c->copy (entry_record, src_base, this, layout_variation_idx_map);
+
+    auto glyphs =
+    + it
+    | hb_map_retains_sorting (hb_first)
+    ;
+
+    coverage.serialize (c, this).serialize (c, glyphs);
+  }
+
+// the below code fragment can be found in:
+// src/hb-ot-layout-gpos-table.hh
+void serialize (hb_serialize_context_t *c,
+		  const void *src,
+		  Iterator it,
+		  ValueFormat valFormat,
+		  const hb_map_t *layout_variation_idx_map)
+  {
+    auto out = c->extend_min (*this);
+    if (unlikely (!out)) return;
+    if (unlikely (!c->check_assign (valueFormat, valFormat))) return;
+
+    + it
+    | hb_map (hb_second)
+    | hb_apply ([&] (hb_array_t<const Value> _)
+		{ valFormat.serialize_copy (c, src, &_, layout_variation_idx_map); })
+    ;
+
+    auto glyphs =
+    + it
+    | hb_map_retains_sorting (hb_first)
+    ;
+
+    coverage.serialize (c, this).serialize (c, glyphs);
+  }
+
+// the below code fragment can be found in:
+// src/hb-ot-layout-gpos-table.hh
+void serialize (hb_serialize_context_t *c,
+		  const void *src,
+		  Iterator it,
+		  ValueFormat valFormat,
+		  const hb_map_t *layout_variation_idx_map)
+  {
+    auto out = c->extend_min (*this);
+    if (unlikely (!out)) return;
+    if (unlikely (!c->check_assign (valueFormat, valFormat))) return;
+    if (unlikely (!c->check_assign (valueCount, it.len ()))) return;
+
+    + it
+    | hb_map (hb_second)
+    | hb_apply ([&] (hb_array_t<const Value> _)
+		{ valFormat.serialize_copy (c, src, &_, layout_variation_idx_map); })
+    ;
+
+    auto glyphs =
+    + it
+    | hb_map_retains_sorting (hb_first)
+    ;
+
+    coverage.serialize (c, this).serialize (c, glyphs);
+  }
+
+// the below code fragment can be found in:
+// src/hb-ot-cmap-table.hh
+void serialize (hb_serialize_context_t *c,
+		  Iterator it)
+  {
+    auto format4_iter =
+    + it
+    | hb_filter ([&] (const hb_pair_t<hb_codepoint_t, hb_codepoint_t> _)
+		 { return _.first <= 0xFFFF; })
+    ;
+
+    if (format4_iter.len () == 0) return;
+
+    unsigned table_initpos = c->length ();
+    if (unlikely (!c->extend_min (*this))) return;
+    this->format = 4;
+
+    //serialize endCode[]
+    HBUINT16 *endCode = serialize_endcode_array (c, format4_iter);
+    if (unlikely (!endCode)) return;
+
+    unsigned segcount = (c->length () - min_size) / HBUINT16::static_size;
+
+    // 2 bytes of padding.
+    if (unlikely (!c->allocate_size<HBUINT16> (HBUINT16::static_size))) return; // 2 bytes of padding.
+
+   // serialize startCode[]
+    HBUINT16 *startCode = serialize_startcode_array (c, format4_iter);
+    if (unlikely (!startCode)) return;
+
+    //serialize idDelta[]
+    HBINT16 *idDelta = serialize_idDelta_array (c, format4_iter, endCode, startCode, segcount);
+    if (unlikely (!idDelta)) return;
+
+    HBUINT16 *idRangeOffset = serialize_rangeoffset_glyid (c, format4_iter, endCode, startCode, idDelta, segcount);
+    if (unlikely (!c->check_success (idRangeOffset))) return;
+
+    if (unlikely (!c->check_assign(this->length, c->length () - table_initpos))) return;
+    this->segCountX2 = segcount * 2;
+    this->entrySelector = hb_max (1u, hb_bit_storage (segcount)) - 1;
+    this->searchRange = 2 * (1u << this->entrySelector);
+    this->rangeShift = segcount * 2 > this->searchRange
+		       ? 2 * segcount - this->searchRange
+		       : 0;
+  }
+

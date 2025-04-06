@@ -1,0 +1,40 @@
+struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset + ip_len];
+u_int16_t sport = ntohs(udp->source), dport = ntohs(udp->dest);
+
+if((sport == GTP_U_V1_PORT) || (dport == GTP_U_V1_PORT)) {
+  u_int8_t *gtp_packet = (u_int8_t *)&packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr)];
+  u_int8_t gtp_version = (gtp_packet[0] & 0xE0) >> 5;
+  u_int8_t gtp_msg_type = gtp_packet[1];
+
+  if((gtp_version == 1) && (gtp_msg_type == 0xFF)) {
+    ip_offset += ip_len + sizeof(struct ndpi_udphdr) + 8; /* GTP-U header size */
+    tunnel_type = ndpi_gtp_tunnel;
+    goto iph_check;
+  }
+} else if((sport == TZSP_PORT) || (dport == TZSP_PORT)) {
+  u_int8_t *tzsp = (u_int8_t *)&packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr)];
+
+  if((tzsp[0] == 1) && (tzsp[1] == 0)) { /* TZSP v1, type 0 */
+    u_int8_t *end_of_tzsp = (u_int8_t *)&packet[header->caplen - 1];
+    u_int8_t *next_tag = &tzsp[4];
+
+    while((next_tag < end_of_tzsp) && (next_tag[0] != 1)) {
+      next_tag += next_tag[1] + 2;
+    }
+
+    if(next_tag[0] == 1) { /* We found the tag with the encapsulated Ethernet frame */
+      ip_offset = (next_tag - packet) + 3;
+      tunnel_type = ndpi_tzsp_tunnel;
+      goto datalink_check;
+    }
+  }
+} else if(sport == NDPI_CAPWAP_DATA_PORT) {
+  u_int8_t *capwap = (u_int8_t *)&packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr)];
+  u_int8_t capwap_type = (capwap[0] & 0xF0) >> 4;
+
+  if(capwap_type == 0) { /* CAPWAP data packet */
+    ip_offset += ip_len + sizeof(struct ndpi_udphdr) + 8; /* CAPWAP header size */
+    tunnel_type = ndpi_capwap_tunnel;
+    goto iph_check;
+  }
+}

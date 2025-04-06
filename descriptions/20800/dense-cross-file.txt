@@ -1,0 +1,621 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libyara/modules/pe/pe_utils.c
+PIMAGE_DATA_DIRECTORY pe_get_directory_entry(
+    PE* pe,
+    int entry)
+{
+  PIMAGE_DATA_DIRECTORY directory_start;
+  uint8_t* optional_header_start;
+  uint16_t optional_header_size;
+
+  // We are specifically NOT checking NumberOfRvaAndSizes here because it can
+  // lie. 7ff1bf680c80fd73c0b35084904848b3705480ddeb6d0eff62180bd14cd18570 has
+  // NumberOfRvaAndSizes set to 11 when in fact there is a valid
+  // IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR entry (which is more than 11). If we
+  // are overly strict here and only parse entries which are less than
+  // NumberOfRvaAndSizes we run the risk of missing otherwise perfectly valid
+  // files. Instead of being strict we check to make sure the entry is within
+  // the OptionalHeader, since SizeOfOptionalHeader includes the DataDirectory
+  // array.
+
+  // In case someone requests an entry which is, by definition, invalid.
+  if (entry >= IMAGE_NUMBEROF_DIRECTORY_ENTRIES)
+    return NULL;
+
+  if (IS_64BITS_PE(pe))
+  {
+    optional_header_start = (uint8_t*) &pe->header64->OptionalHeader;
+    optional_header_size = pe->header64->FileHeader.SizeOfOptionalHeader;
+    directory_start = pe->header64->OptionalHeader.DataDirectory;
+  }
+  else
+  {
+    optional_header_start = (uint8_t*) &pe->header->OptionalHeader;
+    optional_header_size = pe->header->FileHeader.SizeOfOptionalHeader;
+    directory_start = pe->header->OptionalHeader.DataDirectory;
+  }
+
+  // Make sure the entry doesn't point outside of the OptionalHeader.
+  if ((uint8_t*) (directory_start + entry) <= optional_header_start + optional_header_size)
+  {
+    if (IS_64BITS_PE(pe))
+      return &pe->header64->OptionalHeader.DataDirectory[entry];
+    else
+      return &pe->header->OptionalHeader.DataDirectory[entry];
+  }
+
+  return NULL;
+}
+
+// the below code fragment can be found in:
+// libyara/modules/pe/pe.c
+static void pe_parse_header(
+    PE* pe,
+    uint64_t base_address,
+    int flags)
+{
+  PIMAGE_SECTION_HEADER section;
+  PIMAGE_DATA_DIRECTORY data_dir;
+
+  char section_name[IMAGE_SIZEOF_SHORT_NAME + 1];
+  int i, scount, ddcount;
+
+  uint64_t highest_sec_siz = 0;
+  uint64_t highest_sec_ofs = 0;
+  uint64_t section_end;
+  uint64_t last_section_end;
+
+
+  set_integer(1, pe->object, "is_pe");
+
+  set_integer(
+      yr_le16toh(pe->header->FileHeader.Machine),
+      pe->object, "machine");
+
+  set_integer(
+      yr_le16toh(pe->header->FileHeader.NumberOfSections),
+      pe->object, "number_of_sections");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.TimeDateStamp),
+      pe->object, "timestamp");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.PointerToSymbolTable),
+      pe->object, "pointer_to_symbol_table");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.NumberOfSymbols),
+      pe->object, "number_of_symbols");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.SizeOfOptionalHeader),
+      pe->object, "size_of_optional_header");
+
+  set_integer(
+      yr_le16toh(pe->header->FileHeader.Characteristics),
+      pe->object, "characteristics");
+
+  set_integer(
+      flags & SCAN_FLAGS_PROCESS_MEMORY ?
+      base_address + yr_le32toh(OptionalHeader(pe, AddressOfEntryPoint)) :
+      pe_rva_to_offset(pe, yr_le32toh(OptionalHeader(pe, AddressOfEntryPoint))),
+      pe->object, "entry_point");
+
+  set_integer(
+      IS_64BITS_PE(pe) ?
+      yr_le64toh(OptionalHeader(pe, ImageBase)) :
+      yr_le32toh(OptionalHeader(pe, ImageBase)),
+      pe->object, "image_base");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, NumberOfRvaAndSizes)),
+      pe->object, "number_of_rva_and_sizes");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, Magic)),
+      pe->object, "opthdr_magic");
+
+  set_integer(
+      OptionalHeader(pe, MajorLinkerVersion),
+      pe->object, "linker_version.major");
+
+  set_integer(
+      OptionalHeader(pe, MinorLinkerVersion),
+      pe->object, "linker_version.minor");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfCode)),
+      pe->object, "size_of_code");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfInitializedData)),
+      pe->object, "size_of_initialized_data");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfUninitializedData)),
+      pe->object, "size_of_uninitialized_data");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, BaseOfCode)),
+      pe->object, "base_of_code");
+
+  if (!IS_64BITS_PE(pe))
+  {
+      set_integer(
+        yr_le32toh(pe->header->OptionalHeader.BaseOfData),
+        pe->object, "base_of_data");
+  }
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SectionAlignment)),
+      pe->object, "section_alignment");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, FileAlignment)),
+      pe->object, "file_alignment");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MajorOperatingSystemVersion)),
+      pe->object, "os_version.major");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MinorOperatingSystemVersion)),
+      pe->object, "os_version.minor");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MajorImageVersion)),
+      pe->object, "image_version.major");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MinorImageVersion)),
+      pe->object, "image_version.minor");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MajorSubsystemVersion)),
+      pe->object, "subsystem_version.major");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MinorSubsystemVersion)),
+      pe->object, "subsystem_version.minor");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, Win32VersionValue)),
+      pe->object, "win32_version_value");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfImage)),
+      pe->object, "size_of_image");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfHeaders)),
+      pe->object, "size_of_headers");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, CheckSum)),
+      pe->object, "checksum");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, Subsystem)),
+      pe->object, "subsystem");
+
+  set_integer(
+      OptionalHeader(pe, DllCharacteristics),
+      pe->object, "dll_characteristics");
+
+  set_integer(
+      IS_64BITS_PE(pe) ?
+      yr_le64toh(OptionalHeader(pe, SizeOfStackReserve)) :
+      yr_le32toh(OptionalHeader(pe, SizeOfStackReserve)),
+      pe->object, "size_of_stack_reserve");
+
+  set_integer(
+      IS_64BITS_PE(pe) ?
+      yr_le64toh(OptionalHeader(pe, SizeOfStackCommit)) :
+      yr_le32toh(OptionalHeader(pe, SizeOfStackCommit)),
+      pe->object, "size_of_stack_commit");
+
+  set_integer(
+      IS_64BITS_PE(pe) ?
+      yr_le64toh(OptionalHeader(pe, SizeOfHeapReserve)) :
+      yr_le32toh(OptionalHeader(pe, SizeOfHeapReserve)),
+      pe->object, "size_of_heap_reserve");
+
+  set_integer(
+      IS_64BITS_PE(pe) ?
+      yr_le64toh(OptionalHeader(pe, SizeOfHeapCommit)) :
+      yr_le32toh(OptionalHeader(pe, SizeOfHeapCommit)),
+      pe->object, "size_of_heap_commit");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, LoaderFlags)),
+      pe->object, "loader_flags");
+
+  data_dir = IS_64BITS_PE(pe) ?
+      pe->header64->OptionalHeader.DataDirectory:
+      pe->header->OptionalHeader.DataDirectory;
+
+  ddcount = yr_le16toh(OptionalHeader(pe, NumberOfRvaAndSizes));
+  ddcount = yr_min(ddcount, IMAGE_NUMBEROF_DIRECTORY_ENTRIES);
+
+  for (i = 0; i < ddcount; i++)
+  {
+    if (!struct_fits_in_pe(pe, data_dir, IMAGE_DATA_DIRECTORY))
+      break;
+
+    set_integer(
+      yr_le32toh(data_dir->VirtualAddress),
+      pe->object, "data_directories[%i].virtual_address", i);
+
+    set_integer(
+      yr_le32toh(data_dir->Size),
+      pe->object, "data_directories[%i].size", i);
+
+    data_dir++;
+  }
+
+  pe_iterate_resources(
+      pe,
+      (RESOURCE_CALLBACK_FUNC) pe_collect_resources,
+      (void*) pe);
+
+  set_integer(pe->resources, pe->object, "number_of_resources");
+
+  section = IMAGE_FIRST_SECTION(pe->header);
+
+  scount = yr_min(
+      yr_le16toh(pe->header->FileHeader.NumberOfSections), MAX_PE_SECTIONS);
+
+  for (i = 0; i < scount; i++)
+  {
+    if (!struct_fits_in_pe(pe, section, IMAGE_SECTION_HEADER))
+      break;
+
+    strncpy(section_name, (char*) section->Name, IMAGE_SIZEOF_SHORT_NAME);
+    section_name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
+
+    set_string(
+        section_name,
+        pe->object, "sections[%i].name", i);
+
+    set_integer(
+        yr_le32toh(section->Characteristics),
+        pe->object, "sections[%i].characteristics", i);
+
+    set_integer(
+        yr_le32toh(section->SizeOfRawData),
+        pe->object, "sections[%i].raw_data_size", i);
+
+    set_integer(
+        yr_le32toh(section->PointerToRawData),
+        pe->object, "sections[%i].raw_data_offset", i);
+
+    set_integer(
+        yr_le32toh(section->VirtualAddress),
+        pe->object, "sections[%i].virtual_address", i);
+
+    set_integer(
+        yr_le32toh(section->Misc.VirtualSize),
+        pe->object, "sections[%i].virtual_size", i);
+
+    set_integer(
+        yr_le32toh(section->PointerToRelocations),
+        pe->object, "sections[%i].pointer_to_relocations", i);
+
+    set_integer(
+        yr_le32toh(section->PointerToLinenumbers),
+        pe->object, "sections[%i].pointer_to_line_numbers", i);
+
+    set_integer(
+        yr_le32toh(section->NumberOfRelocations),
+        pe->object, "sections[%i].number_of_relocations", i);
+
+    set_integer(
+        yr_le32toh(section->NumberOfLinenumbers),
+        pe->object, "sections[%i].number_of_line_numbers", i);
+
+    // This will catch the section with the highest raw offset to help checking
+    // if overlay data is present. If two sections have the same raw pointer
+    // but different raw sizes the largest one is used. An example of this case
+    // is file: cf62bf1815a93e68e6c5189f689286b66c4088b9507cf3ecf835e4ac3f9ededa
+
+    section_end = yr_le32toh(section->PointerToRawData) +
+                  yr_le32toh(section->SizeOfRawData);
+
+    if (section_end > highest_sec_ofs + highest_sec_siz)
+    {
+      highest_sec_ofs = yr_le32toh(section->PointerToRawData);
+      highest_sec_siz = yr_le32toh(section->SizeOfRawData);
+    }
+
+    section++;
+  }
+
+  // An overlay is data appended to a PE file. Its location is at
+  // RawData + RawOffset of the last section on the physical file
+  last_section_end = highest_sec_siz + highest_sec_ofs;
+
+  // "overlay.offset" is set to UNDEFINED for files that do not have an overlay
+  if (last_section_end && (pe->data_size > last_section_end))
+    set_integer(last_section_end, pe->object, "overlay.offset");
+
+  // "overlay.size" is zero for well formed PE files that don not have an
+  // overlay and UNDEFINED for malformed PE files or non-PE files.
+  if (last_section_end && (pe->data_size >= last_section_end))
+    set_integer(pe->data_size - last_section_end, pe->object, "overlay.size");
+}
+
+// the below code fragment can be found in:
+// libyara/modules/pe/pe.c
+static void pe_parse_version_info(
+    PIMAGE_RESOURCE_DATA_ENTRY rsrc_data,
+    PE* pe)
+{
+  PVERSION_INFO version_info;
+
+  int64_t version_info_offset = pe_rva_to_offset(
+      pe, yr_le32toh(rsrc_data->OffsetToData));
+
+  if (version_info_offset < 0)
+    return;
+
+  version_info = (PVERSION_INFO) (pe->data + version_info_offset);
+
+  if (!struct_fits_in_pe(pe, version_info, VERSION_INFO))
+    return;
+
+  if (!fits_in_pe(pe, version_info->Key, sizeof("VS_VERSION_INFO") * 2))
+    return;
+
+  if (strcmp_w(version_info->Key, "VS_VERSION_INFO") != 0)
+    return;
+
+  version_info = ADD_OFFSET(
+      version_info, sizeof(VERSION_INFO) + 86);
+
+  while(fits_in_pe(pe, version_info->Key, sizeof("VarFileInfo") * 2) &&
+        strcmp_w(version_info->Key, "VarFileInfo") == 0 &&
+        yr_le16toh(version_info->Length) != 0)
+  {
+    version_info = ADD_OFFSET(
+        version_info,
+        yr_le16toh(version_info->Length));
+  }
+
+  while(fits_in_pe(pe, version_info->Key, sizeof("StringFileInfo") * 2) &&
+        strcmp_w(version_info->Key, "StringFileInfo") == 0 &&
+        yr_le16toh(version_info->Length) != 0)
+  {
+    PVERSION_INFO string_table = ADD_OFFSET(
+        version_info,
+        sizeof(VERSION_INFO) + 30);
+
+    version_info = ADD_OFFSET(
+        version_info,
+        yr_le16toh(version_info->Length));
+
+    while (struct_fits_in_pe(pe, string_table, VERSION_INFO) &&
+           wide_string_fits_in_pe(pe, string_table->Key) &&
+           yr_le16toh(string_table->Length) != 0 &&
+           string_table < version_info)
+    {
+      PVERSION_INFO string = ADD_OFFSET(
+          string_table,
+          sizeof(VERSION_INFO) + 2 * (strnlen_w(string_table->Key) + 1));
+
+      string_table = ADD_OFFSET(
+          string_table,
+          yr_le16toh(string_table->Length));
+
+      while (struct_fits_in_pe(pe, string, VERSION_INFO) &&
+             wide_string_fits_in_pe(pe, string->Key) &&
+             yr_le16toh(string->Length) != 0 &&
+             string < string_table)
+      {
+        if (yr_le16toh(string->ValueLength) > 0)
+        {
+          char* string_value = (char*) ADD_OFFSET(string,
+              sizeof(VERSION_INFO) + 2 * (strnlen_w(string->Key) + 1));
+
+          if (wide_string_fits_in_pe(pe, string_value))
+          {
+            char key[64];
+            char value[256];
+
+            strlcpy_w(key, string->Key, sizeof(key));
+            strlcpy_w(value, string_value, sizeof(value));
+
+            set_string(value, pe->object, "version_info[%s]", key);
+          }
+        }
+
+        string = ADD_OFFSET(string, yr_le16toh(string->Length));
+      }
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// libyara/modules/pe/pe.c
+static void pe_parse_certificates(
+    PE* pe)
+{
+  int counter = 0;
+
+  const uint8_t* eod;
+  const unsigned char* cert_p;
+  uintptr_t end;
+
+  PWIN_CERTIFICATE win_cert;
+
+  PIMAGE_DATA_DIRECTORY directory = pe_get_directory_entry(
+      pe, IMAGE_DIRECTORY_ENTRY_SECURITY);
+
+  if (directory == NULL)
+    return;
+
+  // Default to 0 signatures until we know otherwise.
+  set_integer(0, pe->object, "number_of_signatures");
+
+  // directory->VirtualAddress is a file offset. Don't call pe_rva_to_offset().
+  if (yr_le32toh(directory->VirtualAddress) == 0 ||
+      yr_le32toh(directory->VirtualAddress) > pe->data_size ||
+      yr_le32toh(directory->Size) > pe->data_size ||
+      yr_le32toh(directory->VirtualAddress) + yr_le32toh(directory->Size) > pe->data_size)
+  {
+    return;
+  }
+
+  // Store the end of directory, making comparisons easier.
+  eod = pe->data + \
+      yr_le32toh(directory->VirtualAddress) + \
+      yr_le32toh(directory->Size);
+
+  win_cert = (PWIN_CERTIFICATE) \
+      (pe->data + yr_le32toh(directory->VirtualAddress));
+
+  //
+  // Walk the directory, pulling out certificates.
+  //
+  // Make sure WIN_CERTIFICATE fits within the directory.
+  // Make sure the Length specified fits within directory too.
+  //
+  // The docs say that the length is only for the Certificate, but the next
+  // paragraph contradicts that. All the binaries I've seen have the Length
+  // being the entire structure (Certificate included).
+  //
+
+  while (struct_fits_in_pe(pe, win_cert, WIN_CERTIFICATE) &&
+         yr_le32toh(win_cert->Length) > sizeof(WIN_CERTIFICATE) &&
+         fits_in_pe(pe, win_cert, yr_le32toh(win_cert->Length)) &&
+         (uint8_t*) win_cert + sizeof(WIN_CERTIFICATE) < eod &&
+         (uint8_t*) win_cert + yr_le32toh(win_cert->Length) <= eod)
+  {
+    PKCS7* pkcs7;
+
+    // Some sanity checks
+
+    if (yr_le32toh(win_cert->Length) == 0 ||
+        (yr_le16toh(win_cert->Revision) != WIN_CERT_REVISION_1_0 &&
+         yr_le16toh(win_cert->Revision) != WIN_CERT_REVISION_2_0))
+    {
+      break;
+    }
+
+    // Don't support legacy revision for now.
+    // Make sure type is PKCS#7 too.
+
+    if (yr_le16toh(win_cert->Revision) != WIN_CERT_REVISION_2_0 ||
+        yr_le16toh(win_cert->CertificateType) != WIN_CERT_TYPE_PKCS_SIGNED_DATA)
+    {
+      end = (uintptr_t)((uint8_t*) win_cert) + yr_le32toh(win_cert->Length);
+
+      win_cert = (PWIN_CERTIFICATE) (end + (end % 8));
+      continue;
+    }
+
+    cert_p = win_cert->Certificate;
+    end = (uintptr_t)((uint8_t*) win_cert) + yr_le32toh(win_cert->Length);
+    while ((uintptr_t) cert_p < end && counter < MAX_PE_CERTS)
+    {
+      pkcs7 = d2i_PKCS7(NULL, &cert_p, (win_cert->Length));
+      if (pkcs7 == NULL)
+        break;
+      _parse_pkcs7(pe, pkcs7, &counter);
+      PKCS7_free(pkcs7);
+    }
+
+    win_cert = (PWIN_CERTIFICATE) (end + (end % 8));
+  }
+
+  set_integer(counter, pe->object, "number_of_signatures");
+}
+
+// the below code fragment can be found in:
+// libyara/modules/dotnet/dotnet.c
+void dotnet_parse_com(
+    PE* pe,
+    size_t base_address)
+{
+  PIMAGE_DATA_DIRECTORY directory;
+  PCLI_HEADER cli_header;
+  PNET_METADATA metadata;
+  int64_t metadata_root, offset;
+  char* end;
+  STREAMS headers;
+  WORD num_streams;
+  uint32_t md_len;
+
+  directory = pe_get_directory_entry(pe, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR);
+  if (directory == NULL)
+    return;
+
+  offset = pe_rva_to_offset(pe, yr_le32toh(directory->VirtualAddress));
+
+  if (offset < 0 || !struct_fits_in_pe(pe, pe->data + offset, CLI_HEADER))
+    return;
+
+  cli_header = (PCLI_HEADER) (pe->data + offset);
+
+  offset = metadata_root = pe_rva_to_offset(
+      pe, yr_le32toh(cli_header->MetaData.VirtualAddress));
+
+  if (!struct_fits_in_pe(pe, pe->data + offset, NET_METADATA))
+    return;
+
+  metadata = (PNET_METADATA) (pe->data + offset);
+
+  if (yr_le32toh(metadata->Magic) != NET_METADATA_MAGIC)
+    return;
+
+  // Version length must be between 1 and 255, and be a multiple of 4.
+  // Also make sure it fits in pe.
+  md_len = yr_le32toh(metadata->Length);
+  if (md_len == 0 ||
+      md_len > 255 ||
+      md_len % 4 != 0 ||
+      !fits_in_pe(pe, pe->data + offset, md_len))
+  {
+    return;
+  }
+
+  // The length includes the NULL terminator and is rounded up to a multiple of
+  // 4. We need to exclude the terminator and the padding, so search for the
+  // first NULL byte.
+  end = (char*) memmem((void*) metadata->Version, md_len, "\0", 1);
+  if (end != NULL)
+      set_sized_string(metadata->Version,
+          (end - metadata->Version),
+          pe->object,
+          "version");
+
+  // The metadata structure has some variable length records after the version.
+  // We must manually parse things from here on out.
+  //
+  // Flags are 2 bytes (always 0).
+  offset += sizeof(NET_METADATA) + md_len + 2;
+
+  // 2 bytes for Streams.
+  if (!fits_in_pe(pe, pe->data + offset, 2))
+    return;
+
+  num_streams = (WORD) *(pe->data + offset);
+  offset += 2;
+
+  headers = dotnet_parse_stream_headers(pe, offset, metadata_root, num_streams);
+
+  if (headers.guid != NULL)
+    dotnet_parse_guid(pe, metadata_root, headers.guid);
+
+  // Parse the #~ stream, which includes various tables of interest.
+  // These tables reference the blob and string streams, so we need to ensure
+  // those are not NULL also.
+  if (headers.tilde != NULL && headers.string != NULL && headers.blob != NULL)
+    dotnet_parse_tilde(pe, metadata_root, cli_header, &headers);
+
+  if (headers.us != NULL)
+    dotnet_parse_us(pe, metadata_root, headers.us);
+}
+

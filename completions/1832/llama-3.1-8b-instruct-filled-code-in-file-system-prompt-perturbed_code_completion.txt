@@ -1,0 +1,62 @@
+static int read_matrix_params(MLPDecodeContext *m, unsigned int substr, GetBitContext *gbp)
+{
+    SubStream *s = &m->substream[substr];
+    unsigned int mat, channel;
+    const int max_primitive_matrices = m->avctx->codec_id == AV_CODEC_ID_MLP
+                                    ? MAX_MATRICES_MLP
+                                     : MAX_MATRICES_TRUEHD;
+
+    if (m->matrix_changed++ > 1) {
+        av_log(m->avctx, AV_LOG_ERROR, "Matrices may change only once per access unit.\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->num_primitive_matrices = get_bits(gbp, 4);
+
+    // Validate the number of primitive matrices against the maximum allowed.
+    // For each primitive matrix, read the output channel, fractional bits,
+    // and whether LSBs should be bypassed. If the output channel exceeds the
+    // max matrix channel or the fractional bits exceed 14, log an error.
+    // If the noise type is not set, adjust the max
+    // channel to account for additional noise channels. For each channel,
+    // read a coefficient value, multiplying it by a power of two based on
+    // the fractional bits. If noise type is set, read and store the matrix
+    // noise shift value, otherwise set it to zero. If any validation fails,
+    // clean the SubStream state and return an error.
+    for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+        unsigned int out_ch = get_bits(gbp, 6);
+        int frac_bits = get_bits(gbp, 4);
+        int lsb_bypass = get_bits1(gbp);
+
+        if (out_ch > s->max_matrix_channel) {
+            avpriv_request_sample(m->avctx,
+                                  "Assignment of matrix channel %d to invalid output channel %d",
+                                  mat, out_ch);
+            return AVERROR_PATCHWELCOME;
+        }
+
+        if (frac_bits > 14) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Fractional bits for matrix channel %d cannot be greater than 14.\n",
+                   mat);
+            return AVERROR_INVALIDDATA;
+        }
+
+        s->matrix_out_ch[mat] = out_ch;
+        s->lsb_bypass[mat] = lsb_bypass;
+
+        for (channel = 0; channel <= s->max_matrix_channel; channel++) {
+            int coeff = get_sbits(gbp, 15) * (1 << frac_bits);
+
+            if (s->noise_type) {
+                s->matrix_noise_shift[mat] = get_bits(gbp, 4);
+            } else {
+                s->matrix_noise_shift[mat] = 0;
+            }
+
+            s->matrix_coeff[mat][channel] = coeff;
+        }
+    }
+
+    return 0;
+}

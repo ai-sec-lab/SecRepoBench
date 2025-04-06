@@ -1,16 +1,16 @@
-unsigned int iBone  = 0;
-    SkipSpacesAndLineEnd(currentChar,&currentChar);
-    if ( !ParseUnsignedInt(currentChar,&currentChar,iBone) || !SkipSpaces(currentChar,&currentChar)) {
+unsigned int boneNameLength  = 0;
+    SkipSpacesAndLineEnd(szCurrent,&szCurrent);
+    if ( !ParseUnsignedInt(szCurrent,&szCurrent,boneNameLength) || !SkipSpaces(szCurrent,&szCurrent)) {
         throw DeadlyImportError("Unexpected EOF/EOL while parsing bone index");
     }
-    if (iBone == UINT_MAX) {
+    if (boneNameLength == UINT_MAX) {
         LogErrorNoThrow("Invalid bone number while parsing bone index");
         SMDI_PARSE_RETURN;
     }
     // add our bone to the list
-    if (iBone >= asBones.size()) {
-        asBones.resize(iBone+1);
+    if (boneNameLength >= asBones.size()) {
+        asBones.resize(boneNameLength+1);
     }
-    SMD::Bone& bone = asBones[iBone];
+    SMD::Bone& bone = asBones[boneNameLength];
 
     bool bQuota = true;

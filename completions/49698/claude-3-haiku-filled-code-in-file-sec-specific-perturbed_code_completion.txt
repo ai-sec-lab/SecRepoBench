@@ -1,0 +1,55 @@
+// Retrieve the context from the decode structure if available.
+if (decode && decode->pctxt) pctxt = decode->pctxt;
+
+// Check if the compressed data size is at least 20 bytes for a valid header.
+if (nCompressed < 20)
+{
+    if (pctxt)
+        pctxt->print_error(pctxt, EXR_ERR_CORRUPT_CHUNK, "Huffman decompress: Compressed data too small");
+    return EXR_ERR_CORRUPT_CHUNK;
+}
+
+// Validate that 'im' and 'iM' are within acceptable limits.
+im = readUInt(compressed);
+iM = readUInt(compressed + 4);
+if (im > iM || iM >= HUF_ENCSIZE)
+{
+    if (pctxt)
+        pctxt->print_error(pctxt, EXR_ERR_CORRUPT_CHUNK, "Huffman decompress: Invalid header values");
+    return EXR_ERR_CORRUPT_CHUNK;
+}
+
+// Ensure there is enough data in the buffer to perform decompression.
+nBits = readUInt(compressed + 12);
+nBytes = (nBits + 7) / 8;
+if (nCompressed < 20 + readUInt(compressed + 8) + nBytes)
+{
+    if (pctxt)
+        pctxt->print_error(pctxt, EXR_ERR_CORRUPT_CHUNK, "Huffman decompress: Compressed data too small");
+    return EXR_ERR_CORRUPT_CHUNK;
+}
+
+// Check if fast Huffman decoding is enabled and applicable based on the data size.
+// If so, initialize and perform fast Huffman decoding.
+if (fasthuf_decode_enabled() && nRawSize >= 1024)
+{
+    FastHufDecoder fhd;
+    rv = fasthuf_initialize(pctxt, &fhd, &compressed[20 + readUInt(compressed + 8)], nBytes, im, iM, iM + 1);
+    if (rv == EXR_ERR_SUCCESS)
+        rv = fasthuf_decode(pctxt, &fhd, compressed, nCompressed * 8, raw, nRawSize);
+}
+else
+{
+    // If not, use a slower, standard Huffman decoding method.
+    HufDec* hdecod = (HufDec*)spare;
+    if (sparebytes != internal_exr_huf_decompress_spare_bytes())
+        return EXR_ERR_INVALID_ARGUMENT;
+
+    hufClearDecTable(hdecod);
+    ptr = compressed + 20 + readUInt(compressed + 8);
+    rv = hufUnpackEncTable(&ptr, &nBytes, im, iM, freq);
+    if (rv == EXR_ERR_SUCCESS)
+        rv = hufDecode(freq, hdecod, ptr, nBits, raw, nRawSize);
+}
+
+return rv;

@@ -1,0 +1,50 @@
+struct ndpi_udphdr *udphdr;
+
+udphdr = (struct ndpi_udphdr *)(&packet[ip_offset + ip_len]);
+sport = ntohs(udphdr->source), dport = ntohs(udphdr->dest);
+
+if(sport == GTP_U_V1_PORT || dport == GTP_U_V1_PORT) {
+  u_int8_t message_type = packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr) + 1];
+
+  /* Check GTP version */
+  if(packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr)] == 1 /* version 1 */) {
+    if(message_type == 2 /* T-PDU */) {
+      workflow->stats.gtp_count++;
+      ip_offset += ip_len + sizeof(struct ndpi_udphdr) + 8; /* + 8 for GTP header */
+      tunnel_type = ndpi_gtp_tunnel;
+      goto iph_check;
+    }
+  }
+} else if(sport == TZSP_PORT || dport == TZSP_PORT) {
+  u_int8_t tzsp_version = packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr)];
+  u_int8_t tzsp_proto_encap = packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr) + 1];
+
+  if(tzsp_version == 1 || tzsp_version == 2) {
+    if(tzsp_proto_encap == 0 /* Ethernet */) {
+      u_int16_t tzsp_tag_len = 0;
+
+      workflow->stats.tzsp_count++;
+      ip_offset += ip_len + sizeof(struct ndpi_udphdr) + 4; /* + 4 for TZSP header */
+
+      /* Check for tags */
+      while(packet[ip_offset] == 0 /* Type */ && packet[ip_offset+1] == 1 /* Length */) {
+	tzsp_tag_len = ntohs(*((u_int16_t*)&packet[ip_offset+2]));
+	ip_offset += 4 + tzsp_tag_len;
+      }
+
+      tunnel_type = ndpi_tzsp_tunnel;
+      datalink_type = DLT_EN10MB;
+      eth_offset = ip_offset;
+      goto datalink_check;
+    }
+  }
+} else if(sport == NDPI_CAPWAP_DATA_PORT) {
+  u_int8_t capwap_message_type = packet[ip_offset + ip_len + sizeof(struct ndpi_udphdr) + 4];
+
+  if(capwap_message_type == 0 /* Data */) {
+    workflow->stats.capwap_count++;
+    ip_offset += ip_len + sizeof(struct ndpi_udphdr) + 8; /* + 8 for CAPWAP header */
+    tunnel_type = ndpi_capwap_tunnel;
+    goto iph_check;
+  }
+}

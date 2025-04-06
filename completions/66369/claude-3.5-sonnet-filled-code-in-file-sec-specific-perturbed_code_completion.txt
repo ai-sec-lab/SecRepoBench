@@ -1,0 +1,105 @@
+if (!strncmp(aux, "RG", 2)) {
+            char *rg = (char *)aux+3;
+            brg = sam_hrecs_find_rg(fd->header->hrecs, rg);
+            if (!brg) {
+                hts_log_warning("Read group '%s' not present in header", rg);
+            }
+        } else if (!strncmp(aux, "MD", 2) && !verbatim_MD) {
+            // Not decoded, but we need to add to the MD block
+            uint32_t len = bam_auxB_len(aux);
+            if (len > 0) {
+                if (BLOCK_APPEND(s->aux_blk[DS_MD], aux+3, len) < 0)
+                    return NULL;
+            }
+        } else if (!strncmp(aux, "NM", 2) && !verbatim_NM) {
+            // Not decoded, but we need to add to the NM block
+            uint32_t len = bam_auxB_len(aux);
+            if (len > 0) {
+                if (BLOCK_APPEND(s->aux_blk[DS_NM], aux+3, len) < 0)
+                    return NULL;
+            }
+        } else {
+            // Generic aux block
+            int r;
+            int32_t i32;
+            int r2 = 0;
+            uint32_t auxlen = bam_auxB_len(aux);
+            if (auxlen > 0) {
+                // Store the tag in the TD block
+                BLOCK_APPEND(td_b, aux, 2);
+                BLOCK_APPEND_CHAR(td_b, aux[2]);
+
+                // Look for tag in hash table
+                khint_t k = kh_get(m_s2i, c->tags_used, (char *)aux);
+                int new;
+                if (k == kh_end(c->tags_used)) {
+                    // Not found, add a new entry
+                    char *key = string_ndup(c->comp_hdr->TD_keys,
+                                            (char *)aux, 2);
+                    if (!key)
+                        return NULL;
+                    k = kh_put(m_s2i, c->tags_used, key, &new);
+                    if (new < 0)
+                        return NULL;
+                    if (new > 0) {
+                        kh_val(c->tags_used, k) = c->tags_used->n_occupied-1;
+                    }
+                }
+
+                i32 = kh_val(c->tags_used, k);
+                r |= (fd->vv.varint_put32_blk(s->aux_blk[DS_TN], i32) < 0);
+
+                // Append the data to the appropriate block
+                switch(aux[2]) {
+                case 'Z': case 'H':
+                    r |= (fd->vv.varint_put32_blk(s->aux_blk[DS_TL],
+                                                  auxlen) < 0);
+                    r |= (BLOCK_APPEND(s->aux_blk[DS_TV], aux+3, auxlen) < 0);
+                    break;
+                case 'A': case 'c': case 'C':
+                    r |= (BLOCK_APPEND(s->aux_blk[DS_TV], aux+3, 1) < 0);
+                    break;
+                case 's': case 'S':
+                    r |= (BLOCK_APPEND(s->aux_blk[DS_TV], aux+3, 2) < 0);
+                    break;
+                case 'i': case 'I': case 'f':
+                    r |= (BLOCK_APPEND(s->aux_blk[DS_TV], aux+3, 4) < 0);
+                    break;
+                case 'd':
+                    r |= (BLOCK_APPEND(s->aux_blk[DS_TV], aux+3, 8) < 0);
+                    break;
+                case 'B': {
+                    int type = aux[3];
+                    uint32_t count = le_to_u32((uint8_t *)aux+4);
+                    r |= (BLOCK_APPEND(s->aux_blk[DS_TV], &type, 1) < 0);
+                    r |= (fd->vv.varint_put32_blk(s->aux_blk[DS_TV],
+                                                  count) < 0);
+                    r |= (BLOCK_APPEND(s->aux_blk[DS_TV], aux+8,
+                                       count*aux_type_size(type)) < 0);
+                    break;
+                }
+                default:
+                    hts_log_error("Unknown aux type '%c'", aux[2]);
+                    return NULL;
+                }
+            }
+            r2 |= r;
+        }
+        aux = aux + bam_aux_type2size(aux[2]) + 3;
+    }
+
+    if (r2)
+        return NULL;
+
+    cr->ntags = c->tags_used->n_occupied;
+    cram_stats_add(c->stats[DS_TC], cr->ntags);
+
+    if (!(cr->cram_flags & CRAM_FLAG_PRESERVE_QUAL_SCORES)) {
+        if (cr->cram_flags & CRAM_FLAG_DETACHED)
+            BLOCK_APPEND_CHAR(s->qual_blk, 30);
+        else
+            BLOCK_APPEND_CHAR(s->qual_blk, -1);
+    }
+
+    // Append to tag block
+    BLOCK_APPEND(td_b, "\0", 1);

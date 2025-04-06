@@ -1,0 +1,209 @@
+tls_version = (packet->payload[version_offset] << 8) + packet->payload[version_offset+1];
+
+    if(tls_version < 0x0200 || tls_version > 0x0303) {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_UNSUPPORTED_VERSION);
+      return(0);
+    }
+
+    if(tls_version >= 0x0304) {
+      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_TLS13_OR_HIGHER);
+    }
+
+    if(handshake_type == 0x01) { /* Client Hello */
+      flow->protos.tls_quic_stun.tls_quic.ssl_version = tls_version;
+      flow->protos.tls_quic_stun.tls_quic.is_client_hello = 1;
+
+      if(packet->payload[offset] == 0x00) {
+	session_id_len = packet->payload[offset+1];
+	offset += 2;
+      } else {
+	ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+      }
+
+      if(session_id_len > 0) {
+	if(offset + session_id_len > total_len) {
+	  ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	  return(0);
+	}
+	offset += session_id_len;
+      }
+
+      if(offset >= total_len) {
+	ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	return(0);
+      }
+
+      tot_extension_len = (packet->payload[offset] << 8) + packet->payload[offset+1];
+      offset += 2;
+
+      if(offset + tot_extension_len > total_len) {
+	ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	return(0);
+      }
+
+      for(i = 0; i < tot_extension_len; i += 4) {
+	u_int16_t extension_id = (packet->payload[offset+i] << 8) + packet->payload[offset+i+1];
+	u_int16_t extension_len = (packet->payload[offset+i+2] << 8) + packet->payload[offset+i+3];
+	u_int16_t extension_payload_offset = offset + i + 4;
+
+	checkExtensions(ndpi_struct, flow, is_dtls, extension_id, extension_len, extension_payload_offset);
+
+	if(extension_id == 0x000d) { /* Supported Versions */
+	  if(extension_len < 2) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  for(j = 0; j < (extension_len / 2); j++) {
+	    u_int16_t version = (packet->payload[extension_payload_offset + j * 2] << 8) +
+				packet->payload[extension_payload_offset + j * 2 + 1];
+
+	    if(version < 0x0300) {
+	      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_UNSUPPORTED_VERSION);
+	      return(0);
+	    }
+	  }
+	} else if(extension_id == 0x000f) { /* Renegotiation Info */
+	  if(extension_len != 0) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+	} else if(extension_id == 0x0010) { /* Supported Groups */
+	  if(extension_len % 2) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  for(j = 0; j < (extension_len / 2); j++) {
+	    u_int16_t group = (packet->payload[extension_payload_offset + j * 2] << 8) +
+			      packet->payload[extension_payload_offset + j * 2 + 1];
+
+	    if(group == 0x0000) {
+	      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	      return(0);
+	    }
+	  }
+	} else if(extension_id == 0x001c) { /* Key Share */
+	  if(extension_len % 6) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  for(j = 0; j < (extension_len / 6); j++) {
+	    u_int16_t group = (packet->payload[extension_payload_offset + j * 6] << 8) +
+			      packet->payload[extension_payload_offset + j * 6 + 1];
+	    u_int16_t key_exchange_len = (packet->payload[extension_payload_offset + j * 6 + 2] << 8) +
+					 packet->payload[extension_payload_offset + j * 6 + 3];
+	    u_int16_t signature_scheme_len = (packet->payload[extension_payload_offset + j * 6 + 4] << 8) +
+					     packet->payload[extension_payload_offset + j * 6 + 5];
+
+	    if(group == 0x0000 || key_exchange_len == 0 || signature_scheme_len == 0) {
+	      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	      return(0);
+	    }
+	  }
+	} else if(extension_id == 0x001d) { /* PSK Key Exchange Modes */
+	  if(extension_len % 3) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  for(j = 0; j < (extension_len / 3); j++) {
+	    u_int16_t mode = (packet->payload[extension_payload_offset + j * 3] << 8) +
+			     packet->payload[extension_payload_offset + j * 3 + 1];
+	    u_int16_t psk_key_len = (packet->payload[extension_payload_offset + j * 3 + 2] << 8) +
+				    packet->payload[extension_payload_offset + j * 3 + 3];
+
+	    if(mode == 0x0000 || psk_key_len == 0) {
+	      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	      return(0);
+	    }
+	  }
+	} else if(extension_id == 0x001e) { /* Certificate Authorities */
+	  if(extension_len != 0) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+	} else if(extension_id == 0x001f) { /* OID Filters */
+	  if(extension_len != 0) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+	} else if(extension_id == 0x0023) { /* Post-Handshake Auth */
+	  if(extension_len != 0) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+	} else if(extension_id == 0x0024) { /* Signature Algorithms */
+	  if(extension_len % 2) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  for(j = 0; j < (extension_len / 2); j++) {
+	    u_int16_t signature_scheme = (packet->payload[extension_payload_offset + j * 2] << 8) +
+					 packet->payload[extension_payload_offset + j * 2 + 1];
+
+	    if(signature_scheme == 0x0000) {
+	      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	      return(0);
+	    }
+	  }
+	} else if(extension_id == 0x002b) { /* ALPN */
+	  if(extension_len < 1) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  if(extension_len > sizeof(flow->protos.tls_quic_stun.tls_quic.alpn) - 1) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  strncpy(flow->protos.tls_quic_stun.tls_quic.alpn,
+		  (const char*)&packet->payload[extension_payload_offset],
+		  extension_len);
+	  flow->protos.tls_quic_stun.tls_quic.alpn[extension_len] = '\0';
+
+	  tlsCheckUncommonALPN(ndpi_struct, flow);
+	} else if(extension_id == 0x002c) { /* SCT */
+	  if(extension_len != 0) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+	} else if(extension_id == 0x0033) { /* Session Ticket */
+	  if(extension_len != 0) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+	} else if(extension_id == 0x0034) { /* Certificate Transparency */
+	  if(extension_len != 0) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+	} else if(extension_id == 0x0035) { /* Pre Shared Key */
+	  if(extension_len % 4) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  for(j = 0; j < (extension_len / 4); j++) {
+	    u_int16_t key_name_len = (packet->payload[extension_payload_offset + j * 4] << 8) +
+				     packet->payload[extension_payload_offset + j * 4 + 1];
+	    u_int16_t psk_key_len = (packet->payload[extension_payload_offset + j * 4 + 2] << 8) +
+				    packet->payload[extension_payload_offset + j * 4 + 3];
+
+	    if(key_name_len == 0 || psk_key_len == 0) {
+	      ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	      return(0);
+	    }
+	  }
+	} else if(extension_id == 0x0039) { /* Supported Groups */
+	  if(extension_len % 2) {
+	    ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_SUSPICIOUS_EXTENSION);
+	    return(0);
+	  }
+
+	  for(j = 0; j < (extension_len / 2); j++) {
+	    u_int16_t group = (packet->payload[extension_payload_offset + j * 2] << 8) +
+			      packet->payload[extension_payload_offset + j * 2 +

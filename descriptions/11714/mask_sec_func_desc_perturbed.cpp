@@ -1,0 +1,10 @@
+static inline void process_blend (CFF2CSInterpEnv &interp_env, PARAM& param)
+  {
+    // Process blending operations within the environment and parameter context.
+    // Retrieve the count of regions and a numeric value from the argument stack.
+    // Transfer blend values from the argument stack to a blend array associated
+    // with default values, based on the retrieved counts.
+    // Remove the blend values from the argument stack, leaving only the default
+    // values with their blend modifications applied.
+    // <MASK>
+  }

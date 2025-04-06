@@ -1,0 +1,53 @@
+if (packet->payload_packet_len < 14) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+}
+
+if (packet->tcp != 0)
+    ovpn_payload = &packet->payload[2];
+
+operationcode = ovpn_payload[0] & P_OPCODE_MASK;
+
+if (packet->udp != 0) {
+    if ((packet->payload_packet_len == 14 || packet->payload_packet_len == 18) &&
+        (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+        NDPI_LOG_INFO(ndpi_struct, "found openvpn\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+        return;
+    }
+
+    if (flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT &&
+        (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+        hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+        if (hmac_size > 0) {
+            alen = ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size)];
+            if (alen > 0 && alen <= 64) {  // Ensure alen is within a reasonable range
+                session_remote = &ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size) + 1];
+                if (flow->openvpn_counter == 0) {
+                    memcpy(flow->openvpn_session_id, session_remote, alen);
+                    flow->openvpn_session_id_len = alen;
+                }
+            }
+        }
+    } else if (flow->openvpn_counter > 0 && flow->openvpn_counter <= P_HARD_RESET_CLIENT_MAX_COUNT &&
+               (operationcode == P_CONTROL_HARD_RESET_SERVER_V1 || operationcode == P_CONTROL_HARD_RESET_SERVER_V2)) {
+        hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+        if (hmac_size > 0) {
+            alen = ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size)];
+            if (alen > 0 && alen <= 64 && alen == flow->openvpn_session_id_len) {
+                session_remote = &ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size) + 1];
+                if (memcmp(flow->openvpn_session_id, session_remote, alen) == 0) {
+                    NDPI_LOG_INFO(ndpi_struct, "found openvpn\n");
+                    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+                    return;
+                }
+            }
+        }
+        failed = 1;
+    }
+}
+
+flow->openvpn_counter++;
+
+if (failed)
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);

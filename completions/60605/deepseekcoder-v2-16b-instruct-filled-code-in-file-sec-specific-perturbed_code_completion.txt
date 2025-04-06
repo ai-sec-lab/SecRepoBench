@@ -1,0 +1,240 @@
+if(flow->detected_protocol_stack[1] != NDPI_PROTOCOL_UNKNOWN)
+     master_protocol = flow->detected_protocol_stack[1];
+   else if(flow->detected_protocol_stack[0] == NDPI_PROTOCOL_HTTP_CONNECT ||
+           flow->detected_protocol_stack[0] == NDPI_PROTOCOL_HTTP_PROXY)
+     master_protocol = flow->detected_protocol_stack[0];
+ 
+   if(filename_start > 0) {
+     flow->http.url = ndpi_malloc(filename_start + 1);
+     if(flow->http.url) {
+       strncpy(flow->http.url, (const char *)packet->payload, filename_start);
+       flow->http.url[filename_start] = '\0';
+       ndpi_check_http_url(ndpi_struct, flow, flow->http.url);
+     }
+   }
+ 
+   if(packet->server_line.ptr != NULL)
+     ndpi_check_http_server(ndpi_struct, flow, (const char *)packet->server_line.ptr, packet->server_line.len);
+ 
+   if(packet->user_agent_line.ptr != NULL) {
+     http_process_user_agent(ndpi_struct, flow, packet->user_agent_line.ptr, packet->user_agent_line.len);
+   }
+ 
+   if(packet->forwarded_line.ptr != NULL) {
+     if(flow->http.nat_ip == NULL) {
+       u_int len = packet->forwarded_line.len;
+       flow->http.nat_ip = ndpi_malloc(len + 1);
+       if(flow->http.nat_ip != NULL) {
+         strncpy(flow->http.nat_ip, (char*)packet->forwarded_line.ptr, len);
+         flow->http.nat_ip[len] = '\0';
+       }
+     }
+   }
+ 
+   if(packet->server_line.ptr != NULL) {
+     if(flow->http.server == NULL) {
+       u_int len = packet->server_line.len + 1;
+       flow->http.server = ndpi_malloc(len);
+       if(flow->http.server) {
+         strncpy(flow->http.server, (char*)packet->server_line.ptr,
+                 packet->server_line.len);
+         flow->http.server[packet->server_line.len] = '\0';
+       }
+     }
+   }
+ 
+   if(packet->authorization_line.ptr != NULL) {
+     NDPI_LOG_DBG2(ndpi_struct, "Authorization line found %.*s\n",
+       packet->authorization_line.len, packet->authorization_line.ptr);
+ 
+     if(ndpi_strncasestr((const char*)packet->authorization_line.ptr,
+       "Basic", packet->authorization_line.len)
+        || ndpi_strncasestr((const char*)packet->authorization_line.ptr,
+          "Digest", packet->authorization_line.len)) {
+       ndpi_set_risk(ndpi_struct, flow, NDPI_CLEAR_TEXT_CREDENTIALS,
+         "Found credentials in HTTP Auth Line");
+     }
+   }
+ 
+   if(packet->content_line.ptr != NULL) {
+     NDPI_LOG_DBG2(ndpi_struct, "Content Type line found %.*s\n",
+       packet->content_line.len, packet->content_line.ptr);
+ 
+     if(flow->http.response_status_code == 0) {
+       /* Request */
+       if((flow->http.request_content_type == NULL) && (packet->content_line.len > 0)) {
+   int len = packet->content_line.len + 1;
+ 
+   flow->http.request_content_type = ndpi_malloc(len);
+   if(flow->http.request_content_type) {
+     strncpy(flow->http.request_content_type, (char*)packet->content_line.ptr,
+       packet->content_line.len);
+     flow->http.request_content_type[packet->content_line.len] = '\0';
+   }
+       }
+     } else {
+       /* Response */
+       if((flow->http.content_type == NULL) && (packet->content_line.len > 0)) {
+   int len = packet->content_line.len + 1;
+ 
+   flow->http.content_type = ndpi_malloc(len);
+   if(flow->http.content_type) {
+     strncpy(flow->http.content_type, (char*)packet->content_line.ptr,
+       packet->content_line.len);
+     flow->http.content_type[packet->content_line.len] = '\0';
+ 
+     flow->guessed_category = flow->category = ndpi_http_check_content(ndpi_struct, flow);
+   }
+       }
+     }
+   }
+ 
+   /* check for host line (only if we don't already have an hostname) */
+   if(packet->host_line.ptr != NULL && flow->host_server_name[0] == '\0') {
+ 
+     NDPI_LOG_DBG2(ndpi_struct, "HOST line found %.*s\n",
+       packet->host_line.len, packet->host_line.ptr);
+ 
+     /* Copy result for nDPI apps */
+     ndpi_hostname_sni_set(flow, packet->host_line.ptr, packet->host_line.len);
+ 
+     if(strlen(flow->host_server_name) > 0) {
+       char *double_col;
+       int a, b, c, d;
+ 
+       double_col = strchr((char*)flow->host_server_name, ':');
+       if(double_col) double_col[0] = '\0';
+       if(ndpi_struct->packet.iph
+          && (sscanf(flow->host_server_name, "%d.%d.%d.%d", &a, &b, &c, &d) == 4)) {
+         /* IPv4 */
+ 
+         if(ndpi_struct->packet.iph->daddr != inet_addr(flow->host_server_name)) {
+     char buf[64], msg[128];
+ 
+     snprintf(msg, sizeof(msg), "Expected %s, found %s",
+        ndpi_intoav4(ntohl(ndpi_struct->packet.iph->daddr), buf, sizeof(buf)), flow->host_server_name);
+     ndpi_set_risk(ndpi_struct, flow, NDPI_HTTP_SUSPICIOUS_HEADER, msg);
+         }
+       }
+     }
+   }
+ 
+   ndpi_http_parse_subprotocol(ndpi_struct, flow, 1);
+ 
+   if(hostname_just_set && strlen(flow->host_server_name) > 0) {
+     ndpi_check_dga_name(ndpi_struct, flow, flow->host_server_name, 1, 0);
+   }
+ 
+   if(flow->guessed_protocol_id == NDPI_PROTOCOL_UNKNOWN)
+     flow->guessed_protocol_id = NDPI_PROTOCOL_HTTP;
+ 
+   ndpi_check_http_header(ndpi_struct, flow);
+ }
+ 
+ static void process_response(struct ndpi_detection_module_struct *ndpi_struct,
+           struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+ 
+   ndpi_parse_packet_line_info(ndpi_struct, flow);
+ 
+   parse_response_code(ndpi_struct, flow);
+ 
+   if(packet->server_line.ptr != NULL)
+     ndpi_check_http_server(ndpi_struct, flow, (const char *)packet->server_line.ptr, packet->server_line.len);
+ 
+   if(packet->user_agent_line.ptr != NULL) {
+     http_process_user_agent(ndpi_struct, flow, packet->user_agent_line.ptr, packet->user_agent_line.len);
+   }
+ 
+   if(packet->forwarded_line.ptr != NULL) {
+     if(flow->http.nat_ip == NULL) {
+       u_int len = packet->forwarded_line.len;
+       flow->http.nat_ip = ndpi_malloc(len + 1);
+       if(flow->http.nat_ip != NULL) {
+         strncpy(flow->http.nat_ip, (char*)packet->forwarded_line.ptr, len);
+         flow->http.nat_ip[len] = '\0';
+       }
+     }
+   }
+ 
+   if(packet->server_line.ptr != NULL) {
+     if(flow->http.server == NULL) {
+       u_int len = packet->server_line.len + 1;
+       flow->http.server = ndpi_malloc(len);
+       if(flow->http.server) {
+         strncpy(flow->http.server, (char*)packet->server_line.ptr,
+                 packet->server_line.len);
+         flow->http.server[packet->server_line.len] = '\0';
+       }
+     }
+   }
+ 
+   if(packet->authorization_line.ptr != NULL) {
+     NDPI_LOG_DBG2(ndpi_struct, "Authorization line found %.*s\n",
+       packet->authorization_line.len, packet->authorization_line.ptr);
+ 
+     if(ndpi_strncasestr((const char*)packet->authorization_line.ptr,
+       "Basic", packet->authorization_line.len)
+        || ndpi_strncasestr((const char*)packet->authorization_line.ptr,
+          "Digest", packet->authorization_line.len)) {
+       ndpi_set_risk(ndpi_struct, flow, NDPI_CLEAR_TEXT_CREDENTIALS,
+         "Found credentials in HTTP Auth Line");
+     }
+   }
+ 
+   if(packet->content_line.ptr != NULL) {
+     NDPI_LOG_DBG2(ndpi_struct, "Content Type line found %.*s\n",
+       packet->content_line.len, packet->content_line.ptr);
+ 
+     if(flow->http.response_status_code == 0) {
+       /* Request */
+       if((flow->http.request_content_type == NULL) && (packet->content_line.len > 0)) {
+   int len = packet->content_line.len + 1;
+ 
+   flow->http.request_content_type = ndpi_malloc(len);
+   if(flow->http.request_content_type) {
+     strncpy(flow->http.request_content_type, (char*)packet->content_line.ptr,
+       packet->content_line.len);
+     flow->http.request_content_type[packet->content_line.len] = '\0';
+   }
+       }
+     } else {
+       /* Response */
+       if((flow->http.content_type == NULL) && (packet->content_line.len > 0)) {
+   int len = packet->content_line.len + 1;
+ 
+   flow->http.content_type = ndpi_malloc(len);
+   if(flow->http.content_type) {
+     strncpy(flow->http.content_type, (char*)packet->content_line.ptr,
+       packet->content_line.len);
+     flow->http.content_type[packet->content_line.len] = '\0';
+ 
+     flow->guessed_category = flow->category = ndpi_http_check_content(ndpi_struct, flow);
+   }
+       }
+     }
+   }
+ 
+   ndpi_check_http_header(ndpi_struct, flow);
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_search_http_tcp(struct ndpi_detection_module_struct *ndpi_struct,
+          struct ndpi_flow_struct *flow) {
+   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+   u_int16_t filename_start;
+ 
+   if(packet->payload_packet_len == 0)
+     return;
+ 
+   if(is_request(ndpi_struct, flow)) {
+     process_request(ndpi_struct, flow, filename_start);
+   } else if(is_response(ndpi_struct, flow)) {
+     process_response(ndpi_struct, flow);
+   }
+ }
+ 
+ /* ************************************************************* */
+ 
+ static void ndpi_check_

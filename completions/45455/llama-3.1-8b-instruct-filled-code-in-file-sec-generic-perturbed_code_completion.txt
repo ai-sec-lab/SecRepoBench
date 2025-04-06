@@ -1,0 +1,371 @@
+/**
+ * xmlParseBalancedChunkMemoryInternal:
+ * @ctxt:  an XML parser context
+ * @str:  a string to parse
+ * @user_data:  user data to pass to the SAX callbacks
+ * @lst:  a pointer to store the list of nodes
+ *
+ * Parse a balanced chunk of memory.
+ *
+ * [14] CharData ::= [^<&]* - ([^<&]* ']]>' [^<&]*)
+ *
+ * [ VC: Proper Group/PE Nesting ] applies to [14] too (see [49])
+ *
+ * [ VC: No Duplicate Types ]
+ * The same name must not appear more than once in a single
+ * mixed-content declaration.
+ *
+ * Returns the list of the xmlNodePtr describing the element hierarchy.
+ */
+static xmlNodePtr
+xmlParseBalancedChunkMemoryInternal(xmlParserCtxtPtr ctxt, const xmlChar *str,
+                                    void *user_data, xmlNodePtr *lst) {
+    xmlNodePtr ret = NULL;
+    xmlNodePtr cur = NULL;
+    xmlNodePtr last = NULL;
+    xmlNodePtr first = NULL;
+    xmlNodePtr tmp;
+    xmlChar *buf = NULL;
+    int len = 0;
+    int size = XML_PARSER_BUFFER_SIZE;
+    int c, l;
+    int count = 0;
+    int inputid;
+
+    if (str == NULL) return(NULL);
+
+    if (ctxt->instate == XML_PARSER_EOF)
+        return(NULL);
+
+    if (ctxt->input->id!= ctxt->input->id) {
+        xmlFatalErrMsg(ctxt, XML_ERR_ENTITY_BOUNDARY,
+                       "Entity declaration doesn't start and stop in"
+                       " the same entity\n");
+    }
+
+    GROW;
+    if (ctxt->instate == XML_PARSER_EOF)
+        return(NULL);
+    SKIP_BLANKS;
+    if (RAW == '<') {
+        if (NXT(1) == '!') {
+	    switch (NXT(2)) {
+	        case 'E':
+		    if (NXT(3) == 'L')
+			xmlParseElementDecl(ctxt);
+		    else if (NXT(3) == 'N')
+			xmlParseEntityDecl(ctxt);
+		    break;
+	        case 'A':
+		    xmlParseAttributeListDecl(ctxt);
+		    break;
+	        case 'N':
+		    xmlParseNotationDecl(ctxt);
+		    break;
+	        case '-':
+		    xmlParseComment(ctxt);
+		    break;
+		default:
+		    /* there is an error but it will be detected later */
+		    break;
+	    }
+	} else if (NXT(1) == '?') {
+	    xmlParsePI(ctxt);
+	}
+    }
+
+    /*
+     * detect requirement to exit there and act accordingly
+     * and avoid having instate overridden later on
+     */
+    if (ctxt->instate == XML_PARSER_EOF)
+        return(NULL);
+
+    ctxt->instate = XML_PARSER_DTD;
+    GROW;
+
+    /*
+     * Accelerated common case where input don't need to be
+     * modified before passing it to the handler.
+     */
+    c = CUR_CHAR(l);
+    while ((c!= '<') && (c!= '&') && (IS_CHAR(c))) {
+	COPY_BUF(l,buf,len,c);
+	NEXTL(l);
+	c = CUR_CHAR(l);
+	if (len >= XML_PARSER_BUFFER_SIZE) {
+	    buf[len] = 0;
+
+	    /*
+	     * OK the segment is to be consumed as chars.
+	     */
+	    if ((ctxt->sax!= NULL) && (!ctxt->disableSAX)) {
+		if (areBlanks(ctxt, buf, len, 1)) {
+		    if (ctxt->sax->ignorableWhitespace!= NULL)
+			ctxt->sax->ignorableWhitespace(ctxt->userData,
+						       buf, len);
+		} else {
+		    if (ctxt->sax->characters!= NULL)
+			ctxt->sax->characters(ctxt->userData, buf, len);
+		    if ((ctxt->sax->characters!=
+		         ctxt->sax->ignorableWhitespace) &&
+			(*ctxt->space == -1))
+			*ctxt->space = -2;
+		}
+	    }
+	    nbchar = 0;
+            /* something really bad happened in the SAX callback */
+            if (ctxt->instate!= XML_PARSER_CONTENT)
+                return(NULL);
+	}
+	count++;
+	if (count > 50) {
+	    SHRINK;
+	    GROW;
+            if (ctxt->instate == XML_PARSER_EOF) {
+		xmlFree(buf);
+		return(NULL);
+            }
+	}
+    }
+    if (nbchar!= 0) {
+        buf[len] = 0;
+	/*
+	 * OK the segment is to be consumed as chars.
+	 */
+	if ((ctxt->sax!= NULL) && (!ctxt->disableSAX)) {
+	    if (areBlanks(ctxt, buf, nbchar, 0)) {
+		if (ctxt->sax->ignorableWhitespace!= NULL)
+		    ctxt->sax->ignorableWhitespace(ctxt->userData, buf, nbchar);
+	    } else {
+		if (ctxt->sax->characters!= NULL)
+		    ctxt->sax->characters(ctxt->userData, buf, nbchar);
+		if ((ctxt->sax->characters!=
+		     ctxt->sax->ignorableWhitespace) &&
+		    (*ctxt->space == -1))
+		    *ctxt->space = -2;
+	    }
+	}
+    }
+    if ((c!= 0) && (!IS_CHAR(c))) {
+	/* Generate the error and skip the offending character */
+        xmlFatalErrMsgInt(ctxt, XML_ERR_INVALID_CHAR,
+                          "PCDATA invalid Char value %d\n",
+	                  c);
+	NEXTL(l);
+    }
+
+    /*
+     * We are now in a CDATA section.
+     */
+    if (c == '<') {
+        if (NXT(1) == '!') {
+	    switch (NXT(2)) {
+	        case 'C':
+		    if (NXT(3) == 'D') {
+			if (NXT(4) == 'A') {
+			    if (NXT(5) == 'T') {
+				if (NXT(6) == 'A') {
+				    if (NXT(7) == '[') {
+					if (ctxt->sax!= NULL) {
+					    if (ctxt->sax->cdataBlock!= NULL)
+						ctxt->sax->cdataBlock(ctxt->userData,
+								      buf, len);
+					    else if (ctxt->sax->characters!= NULL)
+						ctxt->sax->characters(ctxt->userData,
+								      buf, len);
+					}
+					return(NULL);
+				    }
+				    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+				}
+			    }
+			    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+			}
+			xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		    }
+		    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		}
+		break;
+	    case 'E':
+		if (NXT(3) == 'N') {
+		    if (NXT(4) == 'D') {
+			if (NXT(5) == 'T') {
+			    if (NXT(6) == 'A') {
+				if (NXT(7) == 'G') {
+				    if (ctxt->sax!= NULL) {
+					if (ctxt->sax->cdataBlock!= NULL)
+					    ctxt->sax->cdataBlock(ctxt->userData,
+								      buf, len);
+					else if (ctxt->sax->characters!= NULL)
+					    ctxt->sax->characters(ctxt->userData,
+								      buf, len);
+				    }
+				    return(NULL);
+				}
+			    }
+			    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+			}
+			xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		    }
+		    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		}
+		break;
+	    case 'C':
+		if (NXT(3) == 'O') {
+		    if (NXT(4) == 'M') {
+			if (NXT(5) == 'M') {
+			    if (ctxt->sax!= NULL) {
+				if (ctxt->sax->cdataBlock!= NULL)
+				    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+				else if (ctxt->sax->characters!= NULL)
+				    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+			    }
+			    return(NULL);
+			}
+			xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		    }
+		    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		}
+		break;
+	    case 'S':
+		if (NXT(3) == 'E') {
+		    if (NXT(4) == 'C') {
+			if (NXT(5) == 'T') {
+			    if (ctxt->sax!= NULL) {
+				if (ctxt->sax->cdataBlock!= NULL)
+				    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+				else if (ctxt->sax->characters!= NULL)
+				    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+			    }
+			    return(NULL);
+			}
+			xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		    }
+		    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		}
+		break;
+	    case 'T') {
+		if (NXT(3) == 'A') {
+		    if (NXT(4) == 'G') {
+			if (ctxt->sax!= NULL) {
+			    if (ctxt->sax->cdataBlock!= NULL)
+				ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			    else if (ctxt->sax->characters!= NULL)
+				ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+			}
+			return(NULL);
+		    }
+		    xmlFatalErr(ctxt, XML_ERR_MISPLACED_CDATA_END, NULL);
+		}
+		break;
+	    case 'A') {
+		if (NXT(3) == 'G') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;
+	    case 'G') {
+		if (NXT(3) == 'E') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;
+	    case 'E') {
+		if (NXT(3) == 'N') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;
+	    case 'D') {
+		if (NXT(3) == 'A') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;
+	    case 'T') {
+		if (NXT(3) == 'A') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;
+	    case 'A') {
+		if (NXT(3) == 'G') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;
+	    case 'G') {
+		if (NXT(3) == 'E') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;
+	    case 'E') {
+		if (NXT(3) == 'N') {
+		    if (ctxt->sax!= NULL) {
+			if (ctxt->sax->cdataBlock!= NULL)
+			    ctxt->sax->cdataBlock(ctxt->userData,
+						      buf, len);
+			else if (ctxt->sax->characters!= NULL)
+			    ctxt->sax->characters(ctxt->userData,
+						      buf, len);
+		    }
+		    return(NULL);
+		}
+		break;

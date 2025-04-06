@@ -1,0 +1,1027 @@
+<｜begin▁of▁sentence｜>//---------------------------------------------------------------------------------
+//
+//  Little Color Management System
+//  Copyright (c) 1998-2023 Marti Maria Saguer
+//
+// Permission is hereby granted, free of charge, to any person obtaining
+// a copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the Software
+// is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+// THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+// LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+// WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+//---------------------------------------------------------------------------------
+//
+
+#include "lcms2_internal.h"
+
+
+// IT8.7 / CGATS.17-200x handling -----------------------------------------------------------------------------
+
+
+#define MAXID        128     // Max length of identifier
+#define MAXSTR      1024     // Max length of string
+#define MAXTABLES    255     // Max Number of tables in a single stream
+#define MAXINCLUDE    20     // Max number of nested includes
+
+#define DEFAULT_DBL_FORMAT  "%.10g" // Double formatting
+
+#ifdef CMS_IS_WINDOWS_
+#    include <io.h>
+#    define DIR_CHAR    '\\'
+#else
+#    define DIR_CHAR    '/'
+#endif
+
+
+// Symbols
+typedef enum {
+
+        SUNDEFINED,
+        SINUM,      // Integer
+        SDNUM,      // Real
+        SIDENT,     // Identifier
+        SSTRING,    // string
+        SCOMMENT,   // comment
+        SEOLN,      // End of line
+        SEOF,       // End of stream
+        SSYNERROR,  // Syntax error found on stream
+
+        // Keywords
+
+        SBEGIN_DATA,
+        SBEGIN_DATA_FORMAT,
+        SEND_DATA,
+        SEND_DATA_FORMAT,
+        SKEYWORD,
+        SDATA_FORMAT_ID,
+        SINCLUDE
+
+    } SYMBOL;
+
+
+// How to write the value
+typedef enum {
+
+        WRITE_UNCOOKED,
+        WRITE_STRINGIFY,
+        WRITE_HEXADECIMAL,
+        WRITE_BINARY,
+        WRITE_PAIR
+
+    } WRITEMODE;
+
+// Linked list of variable names
+typedef struct _KeyVal {
+
+        struct _KeyVal*  Next;
+        char*            Keyword;       // Name of variable
+        struct _KeyVal*  NextSubkey;    // If key is a dictionary, points to the next item
+        char*            Subkey;        // If key is a dictionary, points to the subkey name
+        char*            Value;         // Points to value
+        WRITEMODE        WriteAs;       // How to write the value
+
+   } KEYVALUE;
+
+
+// Linked list of memory chunks (Memory sink)
+typedef struct _OwnedMem {
+
+        struct _OwnedMem* Next;
+        void *            Ptr;          // Point to value
+
+   } OWNEDMEM;
+
+// Suballocator
+typedef struct _SubAllocator {
+
+         cmsUInt8Number* Block;
+         cmsUInt32Number BlockSize;
+         cmsUInt32Number Used;
+
+    } SUBALLOCATOR;
+
+// Table. Each individual table can hold properties and rows & cols
+typedef struct _Table {
+
+        char SheetType[MAXSTR];               // The first row of the IT8 (the type)
+
+        int            nSamples, nPatches;    // Cols, Rows
+        int            SampleID;              // Pos of ID
+
+        KEYVALUE*      HeaderList;            // The properties
+
+        char**         DataFormat;            // The binary stream descriptor
+        char**         Data;                  // The binary stream
+
+    } TABLE;
+
+// File stream being parsed
+typedef struct _FileContext {
+        char           FileName[cmsMAX_PATH];    // File name if being read from file
+        FILE*          Stream;                   // File stream or NULL if holded in memory
+    } FILECTX;
+
+//Very simple string 
+typedef struct {
+
+        struct struct_it8* it8;
+        cmsInt32Number max;
+        cmsInt32Number len;
+        char* begin;
+    } string;
+
+
+// This struct hold all information about an open IT8 handler.
+typedef struct struct_it8 {
+
+        cmsUInt32Number  TablesCount;                     // How many tables in this stream
+        cmsUInt32Number  nTable;                          // The actual table
+
+        TABLE Tab[MAXTABLES];
+
+        // Memory management
+        OWNEDMEM*      MemorySink;            // The storage backend
+        SUBALLOCATOR   Allocator;             // String suballocator -- just to keep it fast
+
+        // Parser state machine
+        SYMBOL             sy;                // Current symbol
+        int                ch;                // Current character
+
+        cmsInt32Number     inum;              // integer value
+        cmsFloat64Number   dnum;              // real value
+
+        string*        id;            // identifier
+        string*        str;           // string
+
+        // Allowed keywords & datasets. They have visibility on whole stream
+        KEYVALUE*      ValidKeywords;
+        KEYVALUE*      ValidSampleID;
+
+        char*          Source;                // Points to loc. being parsed
+        cmsInt32Number lineno;                // line counter for error reporting
+
+        FILECTX*       FileStack[MAXINCLUDE]; // Stack of files being parsed
+        cmsInt32Number IncludeSP;             // Include Stack Pointer
+
+        char*          MemoryBlock;           // The stream if holded in memory
+
+        char           DoubleFormatter[MAXID];// Printf-like 'cmsFloat64Number' formatter
+
+        cmsContext    ContextID;              // The threading context
+
+   } cmsIT8;
+
+
+// The stream for save operations
+typedef struct {
+
+        FILE* stream;   // For save-to-file behaviour
+
+        cmsUInt8Number* Base;
+        cmsUInt8Number* Ptr;        // For save-to-mem behaviour
+        cmsUInt32Number Used;
+        cmsUInt32Number Max;
+
+    } SAVESTREAM;
+
+
+// ------------------------------------------------------ cmsIT8 parsing routines
+
+
+// A keyword
+typedef struct {
+
+        const char *id;
+        SYMBOL sy;
+
+   } KEYWORD;
+
+// The keyword->symbol translation table. Sorting is required.
+static const KEYWORD TabKeys[] = {
+
+        {"$INCLUDE",               SINCLUDE},   // This is an extension!
+        {".INCLUDE",               SINCLUDE},   // This is an extension!
+
+        {"BEGIN_DATA",             SBEGIN_DATA },
+        {"BEGIN_DATA_FORMAT",      SBEGIN_DATA_FORMAT },
+        {"DATA_FORMAT_IDENTIFIER", SDATA_FORMAT_ID},
+        {"END_DATA",               SEND_DATA},
+        {"END_DATA_FORMAT",        SEND_DATA_FORMAT},
+        {"KEYWORD",                SKEYWORD}
+        };
+
+#define NUMKEYS (sizeof(TabKeys)/sizeof(KEYWORD))
+
+// Predefined properties
+
+// A property
+typedef struct {
+        const char *id;    // The identifier
+        WRITEMODE as;      // How is supposed to be written
+    } PROPERTY;
+
+static PROPERTY PredefinedProperties[] = {
+
+        {"NUMBER_OF_FIELDS", WRITE_UNCOOKED},    // Required - NUMBER OF FIELDS
+        {"NUMBER_OF_SETS",   WRITE_UNCOOKED},    // Required - NUMBER OF SETS
+        {"ORIGINATOR",       WRITE_STRINGIFY},   // Required - Identifies the specific system, organization or individual that created the data file.
+        {"FILE_DESCRIPTOR",  WRITE_STRINGIFY},   // Required - Describes the purpose or contents of the data file.
+        {"CREATED",          WRITE_STRINGIFY},   // Required - Indicates date of creation of the data file.
+        {"DESCRIPTOR",       WRITE_STRINGIFY},   // Required  - Describes the purpose or contents of the data file.
+        {"DIFFUSE_GEOMETRY", WRITE_STRINGIFY},   // The diffuse geometry used. Allowed values are "sphere" or "opal".
+        {"MANUFACTURER",     WRITE_STRINGIFY},
+        {"MANUFACTURE",      WRITE_STRINGIFY},   // Some broken Fuji targets does store this value
+        {"PROD_DATE",        WRITE_STRINGIFY},   // Identifies year and month of production of the target in the form yyyy:mm.
+        {"SERIAL",           WRITE_STRINGIFY},   // Uniquely identifies individual physical target.
+
+        {"MATERIAL",         WRITE_STRINGIFY},    // Identifies the material on which the target was produced using a code
+                                                  // uniquely identifying th e material. This is intend ed to be used for IT8.7
+                                                  // physical targets only (i.e . IT8.7/1 and IT8.7/2).
+
+        {"INSTRUMENTATION",  WRITE_STRINGIFY},    // Used to report the specific instrumentation used (manufacturer and
+                                                  // model number) to generate the data reported. This data will often
+                                                  // provide more information about the particular data collected than an
+                                                  // extensive list of specific details. This is particularly important for
+                                                  // spectral data or data derived from spectrophotometry.
+
+        {"MEASUREMENT_SOURCE", WRITE_STRINGIFY},  // Illumination used for spectral measurements. This data helps provide
+                                                  // a guide to the potential for issues of paper fluorescence, etc.
+
+        {"PRINT_CONDITIONS", WRITE_STRINGIFY},     // Used to define the characteristics of the printed sheet being reported.
+                                                   // Where standard conditions have been defined (e.g., SWOP at nominal)
+                                                   // named conditions may suffice. Otherwise, detailed information is
+                                                   // needed.
+
+        {"SAMPLE_BACKING",   WRITE_STRINGIFY},     // Identifies the backing material used behind the sample during
+                                                   // measurement. Allowed values are "black", "white", or {"na".
+                                                  
+        {"CHISQ_DOF",        WRITE_STRINGIFY},     // Degrees of freedom associated with the Chi squared statistic
+                                                   // below properties are new in recent specs:
+
+        {"MEASUREMENT_GEOMETRY", WRITE_STRINGIFY}, // The type of measurement, either reflection or transmission, should be indicated
+                                                   // along with details of the geometry and the aperture size and shape. For example,
+                                                   // for transmission measurements it is important to identify 0/diffuse, diffuse/0,
+                                                   // opal or integrating sphere, etc. For reflection it is important to identify 0/45,
+                                                   // 45/0, sphere (specular included or excluded), etc.
+
+       {"FILTER",            WRITE_STRINGIFY},     // Identifies the use of physical filter(s) during measurement. Typically used to
+                                                   // denote the use of filters such as none, D65, Red, Green or Blue.
+                                                  
+       {"POLARIZATION",      WRITE_STRINGIFY},     // Identifies the use of a physical polarization filter during measurement. Allowed
+                                                   // values are {"yes", "white", "none" or "na".
+
+       {"WEIGHTING_FUNCTION", WRITE_PAIR},         // Indicates such functions as: the CIE standard observer functions used in the
+                                                   // calculation of various data parameters (2 degree and 10 degree), CIE standard
+                                                   // illuminant functions used in the calculation of various data parameters (e.g., D50,
+                                                   // D65, etc.), density status response, etc. If used there shall be at least one
+                                                   // name-value pair following the WEIGHTING_FUNCTION tag/keyword. The first attribute
+                                                   // in the set shall be {"name" and shall identify the particular parameter used.
+                                                   // The second shall be {"value" and shall provide the value associated with that name.
+                                                   // For ASCII data, a string containing the Name and Value attribute pairs shall follow
+                                                   // the weighting function keyword. A semi-colon separates attribute pairs from each
+                                                   // other and within the attribute the name and value are separated by a comma.
+
+       {"COMPUTATIONAL_PARAMETER", WRITE_PAIR},    // Parameter that is used in computing a value from measured data. Name is the name
+                                                   // of the calculation, parameter is the name of the parameter used in the calculation
+                                                   // and value is the value of the parameter.
+                                                   
+       {"TARGET_TYPE",        WRITE_STRINGIFY},    // The type of target being measured, e.g. IT8.7/1, IT8.7/3, user defined, etc.
+                                                  
+       {"COLORANT",           WRITE_STRINGIFY},    // Identifies the colorant(s) used in creating the target.
+                                                  
+       {"TABLE_DESCRIPTOR",   WRITE_STRINGIFY},    // Describes the purpose or contents of a data table.
+                                                  
+       {"TABLE_NAME",         WRITE_STRINGIFY}     // Provides a short name for a data table.
+};
+
+#define NUMPREDEFINEDPROPS (sizeof(PredefinedProperties)/sizeof(PROPERTY))
+
+
+// Predefined sample types on dataset
+static const char* PredefinedSampleID[] = {
+        "SAMPLE_ID",      // Identifies sample that data represents
+        "STRING",         // Identifies label, or other non-machine readable value.
+                          // Value must begin and end with a " symbol
+
+        "CMYK_C",         // Cyan component of CMYK data expressed as a percentage
+        "CMYK_M",         // Magenta component of CMYK data expressed as a percentage
+        "CMYK_Y",         // Yellow component of CMYK data expressed as a percentage
+        "CMYK_K",         // Black component of CMYK data expressed as a percentage
+        "D_RED",          // Red filter density
+        "D_GREEN",        // Green filter density
+        "D_BLUE",         // Blue filter density
+        "D_VIS",          // Visual filter density
+        "D_MAJOR_FILTER", // Major filter d ensity
+        "RGB_R",          // Red component of RGB data
+        "RGB_G",          // Green component of RGB data
+        "RGB_B",          // Blue com ponent of RGB data
+        "SPECTRAL_NM",    // Wavelength of measurement expressed in nanometers
+        "SPECTRAL_PCT",   // Percentage reflectance/transmittance
+        "SPECTRAL_DEC",   // Reflectance/transmittance
+        "XYZ_X",          // X component of tristimulus data
+        "XYZ_Y",          // Y component of tristimulus data
+        "XYZ_Z",          // Z component of tristimulus data
+        "XYY_X",          // x component of chromaticity data
+        "XYY_Y",          // y component of chromaticity data
+        "XYY_CAPY",       // Y component of tristimulus data
+        "LAB_L",          // L* component of Lab data
+        "LAB_A",          // a* component of Lab data
+        "LAB_B",          // b* component of Lab data
+        "LAB_C",          // C*ab component of Lab data
+        "LAB_H",          // hab component of Lab data
+        "LAB_DE",         // CIE dE
+        "LAB_DE_94",      // CIE dE using CIE 94
+        "LAB_DE_CMC",     // dE using CMC
+        "LAB_DE_2000",    // CIE dE using CIE DE 2000
+        "MEAN_DE",        // Mean Delta E (LAB_DE) of samples compared to batch average
+                          // (Used for data files for ANSI IT8.7/1 and IT8.7/2 targets)
+        "STDEV_X",        // Standard deviation of X (tristimulus data)
+        "STDEV_Y",        // Standard deviation of Y (tristimulus data)
+        "STDEV_Z",        // Standard deviation of Z (tristimulus data)
+        "STDEV_L",        // Standard deviation of L*
+        "STDEV_A",        // Standard deviation of a*
+        "STDEV_B",        // Standard deviation of b*
+        "STDEV_DE",       // Standard deviation of CIE dE
+        "CHI_SQD_PAR"};   // The average of the standard deviations of L*, a* and b*. It is
+                          // used to derive an estimate of the chi-squared parameter which is
+                          // recommended as the predictor of the variability of dE
+
+#define NUMPREDEFINEDSAMPLEID (sizeof(PredefinedSampleID)/sizeof(char *))
+
+//Forward declaration of some internal functions
+static void* AllocChunk(cmsIT8* it8, cmsUInt32Number size);
+
+static
+string* StringAlloc(cmsIT8* it8, int max)
+{
+    string* s = (string*) AllocChunk(it8, sizeof(string));
+    if (s == NULL) return NULL;
+
+    s->it8 = it8;
+    s->max = max;
+    s->len = 0;
+    s->begin = (char*) AllocChunk(it8, s->max);
+
+    return s;
+}
+
+static
+void StringClear(string* s)
+{
+    s->len = 0;
+}
+
+static
+void StringAppend(string* s, char c)
+{
+    if (s->len + 1 >= s->max)
+    {
+        char* new_ptr;
+
+        s->max *= 10;
+        new_ptr = (char*) AllocChunk(s->it8, s->max);
+        if (new_ptr != NULL && s->begin != NULL)
+            memcpy(new_ptr, s->begin, s->len);
+
+        s->begin = new_ptr;
+    }
+
+    if (s->begin != NULL)
+    {
+        s->begin[s->len++] = c;
+        s->begin[s->len] = 0;
+    }
+}
+
+static
+char* StringPtr(string* s)
+{
+    return s->begin;
+}
+
+static
+void StringCat(string* s, const char* c)
+{
+    while (*c)
+    {
+        StringAppend(s, *c);
+        c++;
+    }
+}
+
+
+// Checks whatever c is a separator
+static
+cmsBool isseparator(int c)
+{
+    return (c == ' ') || (c == '\t');
+}
+
+// Checks whatever c is a valid identifier char
+static
+cmsBool ismiddle(int c)
+{
+   return (!isseparator(c) && (c != '#') && (c !='\"') && (c != '\'') && (c > 32) && (c < 127));
+}
+
+// Checks whatsever c is a valid identifier middle char.
+static
+cmsBool isidchar(int c)
+{
+   return isalnum(c) || ismiddle(c);
+}
+
+// Checks whatsever c is a valid identifier first char.
+static
+cmsBool isfirstidchar(int c)
+{
+     return !isdigit(c) && ismiddle(c);
+}
+
+// Guess whether the supplied path looks like an absolute path
+static
+cmsBool isabsolutepath(const char *path)
+{
+    char ThreeChars[4];
+
+    if(path == NULL)
+        return FALSE;
+    if (path[0] == 0)
+        return FALSE;
+
+    strncpy(ThreeChars, path, 3);
+    ThreeChars[3] = 0;
+
+    if(ThreeChars[0] == DIR_CHAR)
+        return TRUE;
+
+#ifdef  CMS_IS_WINDOWS_
+    if (isalpha((int) ThreeChars[0]) && ThreeChars[1] == ':')
+        return TRUE;
+#endif
+    return FALSE;
+}
+
+
+// Makes a file path based on a given reference path
+// NOTE: this function doesn't check if the path exists or even if it's legal
+static
+cmsBool BuildAbsolutePath(const char *relPath, const char *basePath, char *buffer, cmsUInt32Number MaxLen)
+{
+    char *tail;
+    cmsUInt32Number len;
+
+    // Already absolute?
+    if (isabsolutepath(relPath)) {
+
+        memcpy(buffer, relPath, MaxLen);
+        buffer[MaxLen-1] = 0;
+        return TRUE;
+    }
+
+    // No, search for last
+    memcpy(buffer, basePath, MaxLen);
+    buffer[MaxLen-1] = 0;
+
+    tail = strrchr(buffer, DIR_CHAR);
+    if (tail == NULL) return FALSE;    // Is not absolute and has no separators??
+
+    len = (cmsUInt32Number) (tail - buffer);
+    if (len >= MaxLen) return FALSE;
+
+    // No need to assure zero terminator over here
+    strncpy(tail + 1, relPath, MaxLen - len);
+
+    return TRUE;
+}
+
+
+// Make sure no exploit is being even tried
+static
+const char* NoMeta(const char* str)
+{
+    if (strchr(str, '%') != NULL)
+        return "**** CORRUPTED FORMAT STRING ***";
+
+    return str;
+}
+
+// Syntax error
+static
+cmsBool SynError(cmsIT8* it8, const char *Txt, ...)
+{
+    char Buffer[256], ErrMsg[1024];
+    va_list args;
+
+    va_start(args, Txt);
+    vsnprintf(Buffer, 255, Txt, args);
+    Buffer[255] = 0;
+    va_end(args);
+
+    snprintf(ErrMsg, 1023, "%s: Line %d, %s", it8->FileStack[it8 ->IncludeSP]->FileName, it8->lineno, Buffer);
+    ErrMsg[1023] = 0;
+    it8->sy = SSYNERROR;
+    cmsSignalError(it8 ->ContextID, cmsERROR_CORRUPTION_DETECTED, "%s", ErrMsg);
+    return FALSE;
+}
+
+// Check if current symbol is same as specified. issue an error else.
+static
+cmsBool Check(cmsIT8* it8, SYMBOL sy, const char* Err)
+{
+        if (it8 -> sy != sy)
+                return SynError(it8, NoMeta(Err));
+        return TRUE;
+}
+
+// Read Next character from stream
+static
+void NextCh(cmsIT8* it8)
+{
+    if (it8 -> FileStack[it8 ->IncludeSP]->Stream) {
+
+        it8 ->ch = fgetc(it8 ->FileStack[it8 ->IncludeSP]->Stream);
+
+        if (feof(it8 -> FileStack[it8 ->IncludeSP]->Stream))  {
+
+            if (it8 ->IncludeSP > 0) {
+
+                fclose(it8 ->FileStack[it8->IncludeSP--]->Stream);
+                it8 -> ch = ' ';                            // Whitespace to be ignored
+
+            } else
+                it8 ->ch = 0;   // EOF
+        }
+    }
+    else {
+        it8->ch = *it8->Source;
+        if (it8->ch) it8->Source++;
+    }
+}
+
+
+// Try to see if current identifier is a keyword, if so return the referred symbol
+static
+SYMBOL BinSrchKey(const char *id)
+{
+    int l = 1;
+    int r = NUMKEYS;
+    int x, res;
+
+    while (r >= l)
+    {
+        x = (l+r)/2;
+        res = cmsstrcasecmp(id, TabKeys[x-1].id);
+        if (res == 0) return TabKeys[x-1].sy;
+        if (res < 0) r = x - 1;
+        else l = x + 1;
+    }
+
+    return SUNDEFINED;
+}
+
+
+// 10 ^n
+static
+cmsFloat64Number xpow10(int n)
+{
+    return pow(10, (cmsFloat64Number) n);
+}
+
+
+//  Reads a Real number, tries to follow from integer number
+static
+void ReadReal(cmsIT8* it8, cmsInt32Number inum)
+{
+    it8->dnum = (cmsFloat64Number)inum;
+
+    while (isdigit(it8->ch)) {
+
+        it8->dnum = (cmsFloat64Number)it8->dnum * 10.0 + (cmsFloat64Number)(it8->ch - '0');
+        NextCh(it8);
+    }
+
+    if (it8->ch == '.') {        // Decimal point
+
+        cmsFloat64Number frac = 0.0;      // fraction
+        int prec = 0;                     // precision
+
+        NextCh(it8);               // Eats dec. point
+
+        while (isdigit(it8->ch)) {
+
+            frac = frac * 10.0 + (cmsFloat64Number)(it8->ch - '0');
+            prec++;
+            NextCh(it8);
+        }
+
+        it8->dnum = it8->dnum + (frac / xpow10(prec));
+    }
+
+    // Exponent, example 34.00E+20
+    if (toupper(it8->ch) == 'E') {
+
+        cmsInt32Number e;
+        cmsInt32Number sgn;
+
+        NextCh(it8); sgn = 1;
+
+        if (it8->ch == '-') {
+
+            sgn = -1; NextCh(it8);
+        }
+        else
+            if (it8->ch == '+') {
+
+                sgn = +1;
+                NextCh(it8);
+            }
+
+        e = 0;
+        while (isdigit(it8->ch)) {
+
+            cmsInt32Number digit = (it8->ch - '0');
+
+            if ((cmsFloat64Number)e * 10.0 + (cmsFloat64Number)digit < (cmsFloat64Number)+2147483647.0)
+                e = e * 10 + digit;
+
+            NextCh(it8);
+        }
+
+        e = sgn*e;
+        it8->dnum = it8->dnum * xpow10(e);
+    }
+}
+
+// Parses a float number
+// This can not call directly atof because it uses locale dependent
+// parsing, while CCMX files always use . as decimal separator
+static
+cmsFloat64Number ParseFloatNumber(const char *Buffer)
+{
+    cmsFloat64Number dnum = 0.0;
+    int sign = 1;
+
+    // keep safe
+    if (Buffer == NULL) return 0.0;
+
+    if (*Buffer == '-' || *Buffer == '+') {
+
+        sign = (*Buffer == '-') ? -1 : 1;
+        Buffer++;
+    }
+
+
+    while (*Buffer && isdigit((int)*Buffer)) {
+
+        dnum = dnum * 10.0 + (*Buffer - '0');
+        if (*Buffer) Buffer++;
+    }
+
+    if (*Buffer == '.') {
+
+        cmsFloat64Number frac = 0.0;      // fraction
+        int prec = 0;                     // precision
+
+        if (*Buffer) Buffer++;
+
+        while (*Buffer && isdigit((int)*Buffer)) {
+
+            frac = frac * 10.0 + (*Buffer - '0');
+            prec++;
+            if (*Buffer) Buffer++;
+        }
+
+        dnum = dnum + (frac / xpow10(prec));
+    }
+
+    // Exponent, example 34.00E+20
+    if (*Buffer && toupper(*Buffer) == 'E') {
+
+        int e;
+        int sgn;
+
+        if (*Buffer) Buffer++;
+        sgn = 1;
+
+        if (*Buffer == '-') {
+
+            sgn = -1;
+            if (*Buffer) Buffer++;
+        }
+        else
+            if (*Buffer == '+') {
+
+                sgn = +1;
+                if (*Buffer) Buffer++;
+            }
+
+        e = 0;
+        while (*Buffer && isdigit((int)*Buffer)) {
+
+            cmsInt32Number digit = (*Buffer - '0');
+
+            if ((cmsFloat64Number)e * 10.0 + digit < (cmsFloat64Number)+2147483647.0)
+                e = e * 10 + digit;
+
+            if (*Buffer) Buffer++;
+        }
+
+        e = sgn*e;
+        dnum = dnum * xpow10(e);
+    }
+
+    return sign * dnum;
+}
+
+
+// Reads a string, special case to avoid infinite recursion on .include
+static
+void InStringSymbol(cmsIT8* it8)
+{
+    while (isseparator(it8->ch))
+        NextCh(it8);
+
+    if (it8->ch == '\'' || it8->ch == '\"')
+    {
+        int sng;
+
+        sng = it8->ch;
+        StringClear(it8->str);
+
+        NextCh(it8);
+
+        while (it8->ch != sng) {
+
+            if (it8->ch == '\n' || it8->ch == '\r' || it8->ch == 0) break;
+            else {
+                StringAppend(it8->str, (char)it8->ch);
+                NextCh(it8);
+            }
+        }
+
+        it8->sy = SSTRING;
+        NextCh(it8);        
+    }
+    else
+        SynError(it8, "String expected");
+
+}
+
+// Reads next symbol
+static
+void InSymbol(cmsIT8* it8)
+{
+    SYMBOL key;
+    
+    do {
+
+        while (isseparator(it8->ch))
+            NextCh(it8);
+
+        if (isfirstidchar(it8->ch)) {          // Identifier
+
+            StringClear(it8->id);
+
+            do {
+
+                StringAppend(it8->id, (char) it8->ch);
+
+                NextCh(it8);
+
+            } while (isidchar(it8->ch));
+
+
+            key = BinSrchKey(StringPtr(it8->id));
+            if (key == SUNDEFINED) it8->sy = SIDENT;
+            else it8->sy = key;
+
+        }
+        else                         // Is a number?
+            if (isdigit(it8->ch) || it8->ch == '.' || it8->ch == '-' || it8->ch == '+')
+            {
+                int sign = 1;
+
+                if (it8->ch == '-') {
+                    sign = -1;
+                    NextCh(it8);
+                }
+
+                it8->inum = 0;
+                it8->sy   = SINUM;
+
+                if (it8->ch == '0') {          // 0xnnnn (Hexa) or 0bnnnn (Binary)
+
+                    NextCh(it8);
+                    if (toupper(it8->ch) == 'X') {
+
+                        int j;
+
+                        NextCh(it8);
+                        while (isxdigit(it8->ch))
+                        {
+                            it8->ch = toupper(it8->ch);
+                            if (it8->ch >= 'A' && it8->ch <= 'F')  j = it8->ch -'A'+10;
+                            else j = it8->ch - '0';
+
+                            if ((cmsFloat64Number) it8->inum * 16.0 + (cmsFloat64Number) j > (cmsFloat64Number)+2147483647.0)
+                            {
+                                SynError(it8, "Invalid hexadecimal number");
+                                it8->sy = SEOF;
+                                return;
+                            }
+
+                            it8->inum = it8->inum * 16 + j;
+                            NextCh(it8);
+                        }
+                        return;
+                    }
+
+                    if (toupper(it8->ch) == 'B') {  // Binary
+
+                        int j;
+
+                        NextCh(it8);
+                        while (it8->ch == '0' || it8->ch == '1')
+                        {
+                            j = it8->ch - '0';
+
+                            if ((cmsFloat64Number) it8->inum * 2.0 + j > (cmsFloat64Number)+2147483647.0)
+                            {
+                                SynError(it8, "Invalid binary number");
+                                it8->sy = SEOF;
+                                return;
+                            }
+
+                            it8->inum = it8->inum * 2 + j;
+                            NextCh(it8);
+                        }
+                        return;
+                    }
+                }
+
+
+                while (isdigit(it8->ch)) {
+
+                    cmsInt32Number digit = (it8->ch - '0');
+
+                    if ((cmsFloat64Number) it8->inum * 10.0 + (cmsFloat64Number) digit > (cmsFloat64Number) +2147483647.0) {
+                        ReadReal(it8, it8->inum);
+                        it8->sy = SDNUM;
+                        it8->dnum *= sign;
+                        return;
+                    }
+
+                    it8->inum = it8->inum * 10 + digit;
+                    NextCh(it8);
+                }
+
+                if (it8->ch == '.') {
+
+                    ReadReal(it8, it8->inum);
+                    it8->sy = SDNUM;
+                    it8->dnum *= sign;
+                    return;
+                }
+
+                it8 -> inum *= sign;
+
+                // Special case. Numbers followed by letters are taken as identifiers
+
+                if (isidchar(it8 ->ch)) {
+
+                    char buffer[127];
+
+                    if (it8 ->sy == SINUM) {
+
+                        snprintf(buffer, sizeof(buffer), "%d", it8->inum);
+                    }
+                    else {
+
+                        snprintf(buffer, sizeof(buffer), it8 ->DoubleFormatter, it8->dnum);
+                    }
+
+                    StringClear(it8->id);
+                    StringCat(it8->id, buffer);
+
+                    do {
+
+                        StringAppend(it8->id, (char) it8->ch);
+
+                        NextCh(it8);
+
+                    } while (isidchar(it8->ch));
+
+                    it8->sy = SIDENT;
+                }
+                return;
+
+            }
+            else
+                switch ((int) it8->ch) {
+        
+        // Eof stream markers
+        case '\x1a':
+        case 0:
+        case -1:
+            it8->sy = SEOF;
+            break;
+
+
+        // Next line
+        case '\r':
+            NextCh(it8);
+            if (it8->ch == '\n')
+                NextCh(it8);
+            it8->sy = SEOLN;
+            it8->lineno++;
+            break;
+
+        case '\n':
+            NextCh(it8);
+            it8->sy = SEOLN;
+            it8->lineno++;
+            break;
+
+        // Comment
+        case '#':
+            NextCh(it8);
+            while (it8->ch && it8->ch != '\n' && it8->ch != '\r')
+                NextCh(it8);
+
+            it8->sy = SCOMMENT;
+            break;
+
+        // String.
+        case '\'':
+        case '\"':
+            InStringSymbol(it8);
+            break;
+
+
+        default:
+            SynError(it8, "Unrecognized character: 0x%x", it8 ->ch);
+            it8->sy = SEOF;
+            return;
+            }
+
+    } while (it8->sy == SCOMMENT);
+
+    // Handle the include special token
+
+    if (it8 -> sy == SINCLUDE) {
+
+                FILECTX* FileNest;
+
+                if(it8 -> IncludeSP >= (MAXINCLUDE-1)) {
+
+                    SynError(it8, "Too many recursion levels");
+                    it8->sy = SEOF;
+                    return;
+                }
+
+                InStringSymbol(it8);
+                if (!Check(it8, SSTRING, "Filename expected"))
+                {
+                    it8->sy = SEOF;
+                    return;
+                }
+
+                FileNest = it8 -> FileStack[it8 -> IncludeSP + 1];
+                if(FileNest == NULL) {
+
+                    FileNest = it8 ->FileStack[it8 -> IncludeSP + 1] = (FILECTX*)AllocChunk(it8, sizeof(FILECTX));
+                    if (FileNest == NULL) {
+                        SynError(it8, "Out of memory");
+                        it8->sy = SEOF;
+                        return;
+                    }
+                }
+
+                if (BuildAbsolutePath(StringPtr(it8->str),
+                                      it8->FileStack[it8->IncludeSP]->FileName,
+                                      FileNest->FileName, cmsMAX_PATH-1) == FALSE)
+
+// --- CODE TRUNCATED HERE ---
+
+static
+char* GetData(cmsIT8* it8, int setIndex, int nField)
+{
+    TABLE* t = GetTable(it8);
+    // Retrieves data from the specified row and column in the table.
+    // Checks if the specified row and column indices are valid.
+    // <MASK>
+    return t->Data [setIndex * nSamples + nField];
+}

@@ -1,0 +1,98 @@
+key = aux;
+        k = kh_get(m_s2i, c->comp_hdr->TD_hash, key);
+        if (k == kh_end(c->comp_hdr->TD_hash)) {
+            int new;
+            k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
+            if (new < 0)
+                goto err;
+            else if (new == 0) {
+                // Key already exists.
+                // This should not happen, but if it does, we'll just skip
+                // this tag.
+                aux += 3 + bam_aux2i(aux + 3);
+                continue;
+            }
+            c->comp_hdr->nTL++;
+        }
+        int len = bam_aux2i(aux + 3);
+        cram_map *tm = map_find(c->comp_hdr->tag_encoding_map, key,
+                                 (key[0]<<16) | (key[1]<<8) | key[2]);
+        if (!tm) {
+            // This should not happen, but if it does, we'll just skip this tag.
+            aux += 3 + len;
+            continue;
+        }
+        if (!tm->codec) {
+            // This should not happen, but if it does, we'll just skip this tag.
+            aux += 3 + len;
+            continue;
+        }
+        if (tm->codec->encode(s, tm->codec, aux + 3, len,
+                              (char *)BLOCK_DATA(td_b) + TD_blk_size,
+                              &TD_blk_size) < 0)
+            goto err;
+        BLOCK_APPEND(td_b, aux, 3 + len);
+        aux += 3 + len;
+        if (BLOCK_SIZE(td_b) > (1u<<31)) {
+            hts_log_error("CRAM->BAM aux block size overflow");
+            goto block_err;
+        }
+        if (cram_stats_add(c->stats[DS_TL], kh_val(c->comp_hdr->TD_hash, k)) < 0)
+            goto block_err;
+        cr->TL = kh_val(c->comp_hdr->TD_hash, k);
+        if (key[0] == 'R' && key[1] == 'G') {
+            brg = (sam_hrec_rg_t *)(((char *)BLOCK_DATA(td_b)) + cr->TL);
+            brg->id = cr->rg;
+        }
+        if (key[0] == 'M' && key[1] == 'D' && verbatim_MD == 0) {
+            cr->MD = kh_val(c->comp_hdr->TD_hash, k);
+        }
+        if (key[0] == 'N' && key[1] == 'M' && verbatim_NM == 0) {
+            cr->NM = kh_val(c->comp_hdr->TD_hash, k);
+        }
+
+        // Add to slice aux block
+        tm->blk->m++;
+        if (tm->blk->m > tm->blk->n) {
+            tm->blk->n = tm->blk->m * 2;
+            tm->blk->data = (char **)realloc(tm->blk->data,
+                                             tm->blk->n * sizeof(char *));
+            if (!tm->blk->data)
+                goto err;
+        }
+        tm->blk->data[tm->blk->m - 1] = (char *)BLOCK_DATA(td_b) + cr->TL;
+        if (cram_stats_add(c->stats[DS_aux], tm->blk->m) < 0)
+            goto block_err;
+        
+        // Update the total number of bytes in the aux block
+        c->s_aux_bytes += 3 + len;
+        
+        // Update the total number of tags in the slice
+        s->n_tags++;
+        
+        // Update the tag map for the current slice
+        s->tag_map[tm->id] = tm->blk->m;
+        
+        // Update the total number of tags in the container
+        c->n_tags++;
+        
+        // Update the tag map for the current container
+        c->tag_map[tm->id] = c->n_tags;
+        
+        // Update the total number of bytes in the container's aux block
+        c->aux_bytes += 3 + len;
+        
+        // Update the total number of tags in the cram file
+        fd->n_tags++;
+        
+        // Update the tag map for the cram file
+        fd->tag_map[tm->id] = fd->n_tags;
+        
+        // Update the total number of bytes in the cram file's aux block
+        fd->aux_bytes += 3 + len;
+        
+        // Update the total number of tags in the cram file's aux block
+        fd->aux_bytes += 3 + len;
+        
+        // Update the total number of bytes in the cram file's aux block
+        fd->aux_bytes += 3 + len;

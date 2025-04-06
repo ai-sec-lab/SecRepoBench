@@ -1,0 +1,62 @@
+// <MASK>
+  if(packet->payload_packet_len < 12) {
+    NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Insufficient payload length.\n");
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+    return;
+  }
+
+  operationcode = (ovpn_payload[0] & P_OPCODE_MASK);
+  hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+  if(hmac_size < 0) {
+    NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Could not detect HMAC size.\n");
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+    return;
+  }
+
+  if(packet->tcp_retransmission) {
+    NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: TCP retransmission, skipping.\n");
+    return;
+  }
+
+  if(packet->udp && (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+    if(flow->openvpn_counter < P_HARD_RESET_CLIENT_MAX_COUNT) {
+      session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size);
+      alen = ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size)];
+      if(alen == 8) {
+        NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Storing session ID.\n");
+        memcpy(flow->protos.openvpn.session_id, session_remote, alen);
+        flow->protos.openvpn.session_id_len = alen;
+      } else {
+        NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Invalid session ID length.\n");
+        failed = 1;
+      }
+    } else {
+      NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Client reset counter exceeded.\n");
+      failed = 1;
+    }
+  } else if(packet->udp && (operationcode == P_CONTROL_HARD_RESET_SERVER_V1 || operationcode == P_CONTROL_HARD_RESET_SERVER_V2)) {
+    if(flow->openvpn_counter > 0 && flow->openvpn_counter <= P_HARD_RESET_CLIENT_MAX_COUNT) {
+      session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size);
+      alen = ovpn_payload[P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size)];
+      if(alen == flow->protos.openvpn.session_id_len && memcmp(flow->protos.openvpn.session_id, session_remote, alen) == 0) {
+        NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Session ID match, protocol identified.\n");
+        ndpi_int_openvpn_add_connection(ndpi_struct, flow);
+      } else {
+        NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Session ID mismatch, detection failed.\n");
+        failed = 1;
+      }
+    } else {
+      NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Server reset counter out of range.\n");
+      failed = 1;
+    }
+  } else {
+    NDPI_LOG(NDPI_PROTOCOL_OPENVPN, ndpi_struct, NDPI_LOG_DEBUG, "OpenVPN: Unrecognized operation code.\n");
+    failed = 1;
+  }
+
+  flow->openvpn_counter++;
+
+  if(failed) {
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+  }
+// </MASK>

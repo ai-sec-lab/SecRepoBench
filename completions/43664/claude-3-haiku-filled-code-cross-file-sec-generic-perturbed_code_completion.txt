@@ -1,0 +1,134 @@
+// Process the TLS extensions in the client's "Client Hello" message.
+for(i=0; i<tot_extension_len; ) {
+    u_int16_t extension_id;
+    u_int32_t extension_len;
+
+    if((offset+4) > packet->payload_packet_len) break;
+
+    extension_id  = ntohs(*((u_int16_t*)&packet->payload[offset]));
+    extension_len = ntohs(*((u_int16_t*)&packet->payload[offset+2]));
+    if(offset+4+extension_len > packet->payload_packet_len) {
+        break;
+    }
+
+    if(extension_id == 43 /* supported versions */) {
+        if(extension_len >= 2) {
+            u_int16_t tls_version = ntohs(*((u_int16_t*)&packet->payload[offset+4]));
+
+#ifdef DEBUG_TLS
+            printf("Client TLS [TLS version: 0x%04X]\n", tls_version);
+#endif
+
+            flow->protos.tls_quic.ssl_version = ja3.client.tls_supported_version = tls_version;
+        }
+    } else if(extension_id == 0 /* server name */) {
+        u_int16_t len;
+
+#ifdef DEBUG_TLS
+        printf("[TLS] Extensions: found server name\n");
+#endif
+        if((offset+4) < packet->payload_packet_len) {
+            len = (packet->payload[offset+3] << 8) + packet->payload[offset+4];
+
+            if((offset+5+len) <= packet->payload_packet_len) {
+                char *sni = ndpi_hostname_sni_set(flow, &packet->payload[offset+5], len);
+                int sni_len = strlen(sni);
+#ifdef DEBUG_TLS
+                printf("[TLS] SNI: [%s]\n", sni);
+#endif
+                if(ndpi_is_printable_string(sni, sni_len) == 0)
+                {
+                    ndpi_set_risk(ndpi_struct, flow, NDPI_INVALID_CHARACTERS);
+                }
+
+                if(!is_quic) {
+                    if(ndpi_match_hostname_protocol(ndpi_struct, flow, NDPI_PROTOCOL_TLS, sni, sni_len))
+                        flow->protos.tls_quic.subprotocol_detected = 1;
+                } else {
+                    if(ndpi_match_hostname_protocol(ndpi_struct, flow, NDPI_PROTOCOL_QUIC, sni, sni_len))
+                        flow->protos.tls_quic.subprotocol_detected = 1;
+                }
+
+                if(ndpi_check_dga_name(ndpi_struct, flow,
+                                       sni, 1)) {
+#ifdef DEBUG_TLS
+                    printf("[TLS] SNI: (DGA) [%s]\n", sni);
+#endif
+
+                    if((sni_len >= 4)
+                       /* Check if it ends in .com or .net */
+                       && ((strcmp(&sni[sni_len-4], ".com") == 0) || (strcmp(&sni[sni_len-4], ".net") == 0))
+                       && (strncmp(sni, "www.", 4) == 0)) /* Not starting with www.... */
+                        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_TOR, NDPI_PROTOCOL_TLS, NDPI_CONFIDENCE_DPI);
+                } else {
+#ifdef DEBUG_TLS
+                    printf("[TLS] SNI: (NO DGA) [%s]\n", sni);
+#endif
+                }
+            } else {
+#ifdef DEBUG_TLS
+                printf("[TLS] Extensions server len too short: %u vs %u\n",
+                       (offset+5+len),
+                       packet->payload_packet_len);
+#endif
+            }
+        }
+    } else if(extension_id == 27 /* QUIC transport parameters */) {
+        u_int16_t s_offset = offset+4;
+        u_int16_t tot_quic_params_len = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+
+#ifdef DEBUG_TLS
+        printf("Client TLS [QUIC Transport Parameters: len=%u]\n", tot_quic_params_len);
+#endif
+
+        s_offset += 2;
+        tot_quic_params_len = ndpi_min(tot_quic_params_len, packet->payload_packet_len - s_offset);
+
+        while(s_offset < tot_quic_params_len && s_offset < packet->payload_packet_len) {
+            u_int16_t param_id = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+            u_int16_t param_len = ntohs(*((u_int16_t*)&packet->payload[s_offset+2]));
+
+#ifdef DEBUG_TLS
+            printf("Client TLS [QUIC Transport Parameter: id=%u, len=%u]\n", param_id, param_len);
+#endif
+
+            if(param_id == 0x0a /* original_destination_connection_id */) {
+                if(param_len <= 255) {
+                    flow->protos.tls_quic.encrypted_sni.esni = ndpi_malloc(param_len + 1);
+                    flow->protos.tls_quic.encrypted_sni.esni_len = param_len;
+                    memcpy(flow->protos.tls_quic.encrypted_sni.esni, &packet->payload[s_offset+4], param_len);
+                    flow->protos.tls_quic.encrypted_sni.esni[param_len] = '\0';
+#ifdef DEBUG_TLS
+                    printf("Client TLS [QUIC Transport Parameter: original_destination_connection_id=%.*s]\n",
+                           param_len, flow->protos.tls_quic.encrypted_sni.esni);
+#endif
+                } else {
+#ifdef DEBUG_TLS
+                    printf("Client TLS [QUIC Transport Parameter: original_destination_connection_id too long %u]\n",
+                           param_len);
+#endif
+                }
+            } else if(param_id == 0x08 /* transport_parameters */) {
+                if(param_len <= 255) {
+                    flow->protos.tls_quic.encrypted_sni.user_agent = ndpi_malloc(param_len + 1);
+                    flow->protos.tls_quic.encrypted_sni.user_agent_len = param_len;
+                    memcpy(flow->protos.tls_quic.encrypted_sni.user_agent, &packet->payload[s_offset+4], param_len);
+                    flow->protos.tls_quic.encrypted_sni.user_agent[param_len] = '\0';
+#ifdef DEBUG_TLS
+                    printf("Client TLS [QUIC Transport Parameter: transport_parameters=%.*s]\n",
+                           param_len, flow->protos.tls_quic.encrypted_sni.user_agent);
+#endif
+                } else {
+#ifdef DEBUG_TLS
+                    printf("Client TLS [QUIC Transport Parameter: transport_parameters too long %u]\n",
+                           param_len);
+#endif
+                }
+            }
+
+            s_offset += 4 + param_len;
+        }
+    }
+
+    i += 4 + extension_len, offset += 4 + extension_len;
+}

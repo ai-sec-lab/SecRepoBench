@@ -1,0 +1,51 @@
+int32_t coffsets_cbytes;
+  int64_t* offsets = NULL;
+  uint8_t* coffsets = get_coffsets(frame, headerlength, cbytes, &coffsets_cbytes);
+  if (coffsets == NULL) {
+    BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+    return BLOSC2_ERROR_DATA;
+  }
+
+  if (coffsets_cbytes == 0) {
+    *offset = cbytes * nchunk;  // offsets are implicit
+    return 0;
+  }
+
+  /* We are going to decompress the offsets and store them
+     in a int64_t array.  There are several reasons for doing this:
+
+     1. The metadata for the offsets can use a different
+        compression scheme than the chunks themselves (and this
+        is actually the case for the super-chunks).
+     2. The offsets may be not aligned to typesize, so we
+        need to take care of this.
+     3. We can reuse the internal _blosc2_decompress()
+        function. */
+
+  offsets = malloc(coffsets_cbytes);
+  if (offsets == NULL) {
+    BLOSC_TRACE_ERROR("Failed to allocate memory for offsets.");
+    return BLOSC2_ERROR_MEMORY_ALLOC;
+  }
+
+  blosc2_dparams off_dparams = BLOSC2_DPARAMS_DEFAULTS;
+  blosc2_context *dctx = blosc2_create_dctx(off_dparams);
+  int32_t nbytes_ = blosc2_decompress_ctx(dctx, coffsets, coffsets_cbytes, offsets, coffsets_cbytes);
+  blosc2_free_ctx(dctx);
+
+  if (nbytes_ < 0) {
+    BLOSC_TRACE_ERROR("Decompression of offsets failed: %d", nbytes_);
+    free(offsets);
+    return nbytes_;
+  }
+
+  if (nchunk >= nbytes_ / sizeof(int64_t)) {
+    BLOSC_TRACE_ERROR("nchunk ('%d') exceeds the number of chunks.", nchunk);
+    free(offsets);
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  *offset = offsets[nchunk];
+  free(offsets);
+
+  return 0;

@@ -1,0 +1,277 @@
+Type)) {
+
+        _cmsTagSignature2String(SigString, sig);
+        _cmsTagSignature2String(TypeString, Type);
+        cmsSignalError(Icc ->ContextID, cmsERROR_UNKNOWN_EXTENSION, "Unsupported type '%s' for tag '%s'", TypeString, SigString);
+        goto Error;
+    }
+
+    // Get the handler
+    TypeHandler = _cmsGetTagTypeHandler(Icc->ContextID, Type);
+    if (TypeHandler == NULL) {
+        cmsSignalError(Icc ->ContextID, cmsERROR_INTERNAL, "(Internal) no handler for tag %x", sig);
+        goto Error;
+    }
+
+    // Save the type
+    Icc ->TagTypeHandlers[i] = TypeHandler;
+
+    // Write the type base
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+
+    if (!_cmsWriteTypeBase(Icc ->IOhandler, Type)) goto Error;
+
+    // Write the tag
+    if (!TypeHandler ->WritePtr(&LocalTypeHandler, Icc ->IOhandler, (void*) data, TagDescriptor ->ElemCount)) {
+
+        _cmsTagSignature2String(SigString, sig);
+        cmsSignalError(Icc ->ContextID, cmsERROR_WRITE, "Couldn't write type for tag '%s'", SigString);
+        goto Error;
+    }
+
+    // Save the size and offset
+    Icc ->TagSizes[i] = TypeHandler ->SizeOf(Type, TagDescriptor ->ElemCount);
+    Icc ->TagOffsets[i] = Icc ->IOhandler ->UsedSpace;
+
+    // Align to 32 bit boundary.
+    if (!_cmsWriteAlignment(Icc ->IOhandler))
+        goto Error;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return FALSE;
+}
+
+
+// Link a tag to another. This is useful for ICC v2 profiles, where tags are linked
+// to avoid duplicating data.
+cmsBool CMSEXPORT cmsLinkTag(cmsHPROFILE hProfile, cmsTagSignature sig, cmsTagSignature linkedSig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    n = _cmsSearchTag(Icc, sig, FALSE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    Icc ->TagLinked[n] = linkedSig;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Unlink a tag. This is useful for ICC v2 profiles, where tags are linked
+// to avoid duplicating data.
+cmsBool CMSEXPORT cmsUnlinkTag(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    n = _cmsSearchTag(Icc, sig, FALSE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    Icc ->TagLinked[n] = (cmsTagSignature) 0;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Save a tag as raw data. This is useful for ICC v2 profiles, where tags are linked
+// to avoid duplicating data.
+cmsBool CMSEXPORT cmsSaveTagAsRaw(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number size)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    n = _cmsSearchTag(Icc, sig, FALSE);
+    if (n < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    Icc ->TagSaveAsRaw[n] = TRUE;
+
+    if (data != NULL) {
+
+        if (!Icc ->IOhandler ->Write(Icc ->IOhandler, size, data)) {
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return FALSE;
+        }
+    }
+
+    Icc ->TagSizes[n] = size;
+    Icc ->TagOffsets[n] = Icc ->IOhandler ->UsedSpace;
+
+    // Align to 32 bit boundary.
+    if (!_cmsWriteAlignment(Icc ->IOhandler)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+
+// Returns the number of bytes used by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileSize(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    return Icc ->IOhandler ->UsedSpace;
+}
+
+// Returns the number of bytes used by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileUsedSpace(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    return Icc ->IOhandler ->UsedSpace;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileReportedSize(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    return Icc ->IOhandler ->ReportedSize;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfilePhysicalSize(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    return Icc ->IOhandler ->ReportedSize;
+}
+
+// Returns the number of bytes reported by the profile
+const char* CMSEXPORT cmsGetProfilePhysicalFile(cmsHPROFILE hProfile)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    return Icc ->IOhandler ->PhysicalFile;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileID(cmsHPROFILE hProfile, cmsUInt8Number* ProfileID)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    memmove(ProfileID, Icc ->ProfileID.ID8, 16);
+    return 16;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileIDSize(cmsHPROFILE hProfile)
+{
+    return 16;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileIDHex(cmsHPROFILE hProfile, char* Buffer)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    cmsUInt32Number i;
+
+    for (i=0; i < 16; i++) {
+        sprintf(Buffer + i*2, "%02x", Icc ->ProfileID.ID8[i]);
+    }
+
+    return 32;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileIDString(cmsHPROFILE hProfile, char* Buffer)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    cmsUInt32Number i;
+
+    for (i=0; i < 16; i++) {
+        sprintf(Buffer + i*3, "%02x", Icc ->ProfileID.ID8[i]);
+    }
+
+    return 30;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileIDBase64(cmsHPROFILE hProfile, char* Buffer)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    cmsUInt32Number i;
+    cmsUInt32Number j;
+    cmsUInt8Number* p = Icc ->ProfileID.ID8;
+    static const char Base64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    for (i=0, j=0; i < 16; i+=3, j+=4) {
+
+        Buffer[j]   = Base64[(p[i] >> 2) & 0x3F];
+        Buffer[j+1] = Base64[((p[i] & 0x03) << 4) | ((p[i+1] & 0xF0) >> 4)];
+        Buffer[j+2] = (i+1 < 16) ? Base64[((p[i+1] & 0x0F) << 2) | ((p[i+2] & 0xC0) >> 6)] : '=';
+        Buffer[j+3] = (i+2 < 16) ? Base64[p[i+2] & 0x3F] : '=';
+    }
+
+    Buffer[j] = 0;
+    return j;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileIDBase64URL(cmsHPROFILE hProfile, char* Buffer)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    cmsUInt32Number i;
+    cmsUInt32Number j;
+    cmsUInt8Number* p = Icc ->ProfileID.ID8;
+    static const char Base64URL[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    for (i=0, j=0; i < 16; i+=3, j+=4) {
+
+        Buffer[j]   = Base64URL[(p[i] >> 2) & 0x3F];
+        Buffer[j+1] = Base64URL[((p[i] & 0x03) << 4) | ((p[i+1] & 0xF0) >> 4)];
+        Buffer[j+2] = (i+1 < 16) ? Base64URL[((p[i+1] & 0x0F) << 2) | ((p[i+2] & 0xC0) >> 6)] : '=';
+        Buffer[j+3] = (i+2 < 16) ? Base64URL[p[i+2] & 0x3F] : '=';
+    }
+
+    Buffer[j] = 0;
+    return j;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileIDMD5(cmsHPROFILE hProfile, cmsUInt8Number* Buffer)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    cmsMD5Context Context;
+    cmsUInt8Number Digest[16];
+
+    cmsMD5Init(&Context);
+    cmsMD5Update(&Context, Icc ->ProfileID.ID8, 16);
+    cmsMD5Final(Digest, &Context);
+
+    memmove(Buffer, Digest, 16);
+    return 16;
+}
+
+// Returns the number of bytes reported by the profile
+cmsUInt32Number CMSEXPORT cmsGetProfileIDMD5Hex(cmsHPROFILE hProfile, char* Buffer)
+{
+    cmsUInt8Number Digest[16];
+    cmsUInt32Number i;
+
+    cmsGetProfileIDMD5(hProfile, Digest);
+
+    for (i=0;

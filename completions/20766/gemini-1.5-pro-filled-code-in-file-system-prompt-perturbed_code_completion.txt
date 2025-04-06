@@ -1,0 +1,48 @@
+struct ndpi_udphdr *udph = (struct ndpi_udphdr *)&packet[ip_offset + ip_len];
+    u_int16_t sport = ntohs(udph->source), dport = ntohs(udph->dest);
+
+    if(dport == GTP_U_V1_PORT || sport == GTP_U_V1_PORT) {
+      u_int8_t *gtp_hdr = (u_int8_t*)udph + sizeof(struct ndpi_udphdr);
+      u_int8_t  gtp_flags = gtp_hdr[0];
+      u_int8_t  gtp_msgtype = gtp_hdr[1];
+      u_int16_t gtp_len = ntohs(*((u_int16_t*)&gtp_hdr[2]));
+
+      if((gtp_flags & 0xE0) == 0x20 && gtp_msgtype == 0x01 /* GTP Data packet */) {
+	ip_offset += (ip_len+8+gtp_len);
+	tunnel_type = ndpi_gtp_tunnel;
+	goto iph_check;
+      }
+    } else if(dport == TZSP_PORT || sport == TZSP_PORT) {
+      u_int8_t *tzsp_hdr = (u_int8_t*)udph + sizeof(struct ndpi_udphdr);
+      u_int8_t  tzsp_version = tzsp_hdr[0];
+      u_int8_t  tzsp_encap_proto = tzsp_hdr[1];
+
+      if(tzsp_version == 1 && tzsp_encap_proto == 0 /* Ethernet */) {
+	u_int16_t tzsp_tag_len = 0;
+
+	ip_offset += (ip_len+sizeof(struct ndpi_udphdr)+4);
+	tunnel_type = ndpi_tzsp_tunnel;
+
+	while(tzsp_tag_len < header->caplen) {
+	  u_int8_t *tzsp_tag = (u_int8_t*)&packet[ip_offset+tzsp_tag_len];
+	  u_int16_t tag_type = ntohs(*((u_int16_t*)&tzsp_tag[0]));
+	  u_int16_t tag_len  = ntohs(*((u_int16_t*)&tzsp_tag[2]));
+
+	  if(tag_type == 0) {
+	    ip_offset += (tzsp_tag_len+4);
+	    datalink_type = DLT_EN10MB;
+	    goto datalink_check;
+	  }
+
+	  tzsp_tag_len += (tag_len+4);
+	}
+      }
+    } else if(sport == NDPI_CAPWAP_DATA_PORT) {
+      u_int8_t *capwap_hdr = (u_int8_t*)udph + sizeof(struct ndpi_udphdr);
+
+      if((capwap_hdr[0] & 0xF0) == 0x20 /* CAPWAP data */) {
+	ip_offset += (ip_len+sizeof(struct ndpi_udphdr)+4 /* CAPWAP HDR */);
+	tunnel_type = ndpi_capwap_tunnel;
+	goto iph_check;
+      }
+    }

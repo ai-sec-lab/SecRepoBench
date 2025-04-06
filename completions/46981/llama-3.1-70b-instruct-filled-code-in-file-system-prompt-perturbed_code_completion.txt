@@ -1,0 +1,415 @@
+static MagickBooleanType WriteMNGImage(const ImageInfo *image_info,Image *image,ExceptionInfo *exception)
+{
+  Image
+    *current_image;
+
+  MagickBooleanType
+    logging,
+    status;
+
+  MngInfo
+    *mng_info;
+
+  char
+    magic_number[MagickPathExtent];
+
+  ssize_t
+    count;
+
+  /*
+    Open image file.
+  */
+  assert(image_info!= (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+     image_info->filename);
+  assert(exception!= (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  logging=LogMagickEvent(CoderEvent,GetMagickModule(),"Enter WriteMNGImage()");
+  current_image=image;
+  mng_info=(MngInfo *) NULL;
+  status=OpenBlob(image_info,current_image,WriteBinaryBlobMode,exception);
+
+  if (status == MagickFalse)
+    return(DestroyImageList(current_image));
+
+  /* Verify MNG signature.  */
+
+  count=(size_t) ReadBlob(current_image,8,(unsigned char *) magic_number);
+
+  if ((count < 8) || (memcmp(magic_number,"\212MNG\r\n\032\n",8)!= 0))
+    ThrowWriterException(CorruptImageError,"ImproperImageHeader");
+
+  /*
+     Verify that file size large enough to contain a MNG datastream.
+  */
+  if (GetBlobSize(current_image) < 61)
+    ThrowWriterException(CorruptImageError,"InsufficientImageDataInFile");
+
+  /* Allocate a MngInfo structure.  */
+
+  mng_info=(MngInfo *) AcquireMagickMemory(sizeof(MngInfo));
+
+  if (mng_info == (MngInfo *) NULL)
+    ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+
+  /* Initialize members of the MngInfo structure.  */
+
+  (void) memset(mng_info,0,sizeof(MngInfo));
+  mng_info->image=current_image;
+
+  if (GetAuthenticPixelQueue(current_image)!= (Quantum *) NULL)
+    {
+      /* Allocate next image structure.  */
+      AcquireNextImage(image_info,current_image,exception);
+
+      if (GetNextImageInList(current_image) == (Image *) NULL)
+        return(DestroyImageList(current_image));
+
+      current_image=SyncNextImageInList(current_image);
+    }
+  mng_info->image=current_image;
+
+  if (LocaleCompare(image_info->magick,"MNG") == 0)
+    {
+      char
+        type[MagickPathExtent];
+
+      unsigned char
+        *chunk;
+
+      unsigned int
+        count;
+
+      /*
+        Write a new MNG chunk.
+      */
+      type[0]='\0';
+      (void) ConcatenateMagickString(type,"errr",MagickPathExtent);
+      count=(size_t) ReadBlob(current_image,4,(unsigned char *) type);
+
+      if (logging!= MagickFalse)
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+          "  Writing MNG chunk type %c%c%c%c, length: %.20g",
+          type[0],type[1],type[2],type[3],(double) count);
+
+      if (count > PNG_UINT_31_MAX || count > GetBlobSize(current_image) ||
+          count < 4)
+        ThrowWriterException(CorruptImageError,"CorruptImage");
+
+      p=NULL;
+      chunk=(unsigned char *) NULL;
+
+      if (count!= 0)
+        {
+          chunk=(unsigned char *) AcquireQuantumMemory(count,sizeof(*chunk));
+
+          if (chunk == (unsigned char *) NULL)
+            ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+
+          for (i=0; i < (ssize_t) count; i++)
+          {
+            int
+              c;
+
+            c=ReadBlobByte(current_image);
+            if (c == EOF)
+              break;
+            chunk[i]=(unsigned char) c;
+          }
+
+          for ( ; i < (ssize_t) count; i++)
+            chunk[i]='\0';
+
+          p=chunk;
+        }
+
+        (void) ReadBlobMSBLong(current_image);  /* read crc word */
+
+#if!defined(JNG_SUPPORTED)
+        if (memcmp(type,mng_JHDR,4) == 0)
+          {
+            skip_to_iend=MagickTrue;
+
+            if (mng_info->jhdr_warning == 0)
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                CoderError,"JNGCompressNotSupported","`%s'",current_image->filename);
+
+            mng_info->jhdr_warning++;
+          }
+#endif
+        if (memcmp(type,mng_DHDR,4) == 0)
+          {
+            skip_to_iend=MagickTrue;
+
+            if (mng_info->dhdr_warning == 0)
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                CoderError,"DeltaPNGNotSupported","`%s'",current_image->filename);
+
+            mng_info->dhdr_warning++;
+          }
+        if (memcmp(type,mng_MEND,4) == 0)
+          {
+            chunk=(unsigned char *) RelinquishMagickMemory(chunk);
+            break;
+          }
+
+        if (skip_to_iend)
+          {
+            if (memcmp(type,mng_IEND,4))
+              {
+                chunk=(unsigned char *) RelinquishMagickMemory(chunk);
+
+                if (logging!= MagickFalse)
+                  (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                    "  Skip to IEND.");
+
+                continue;
+              }
+
+            skip_to_iend=MagickFalse;
+          }
+
+        if (memcmp(type,mng_IHDR,4)
+#if defined(JNG_SUPPORTED)
+            && memcmp(type,mng_JHDR,4)
+#endif
+            )
+          {
+            /* Process IHDR */
+            if (logging!= MagickFalse)
+              (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                "  Processing %c%c%c%c chunk",type[0],type[1],type[2],type[3]);
+
+            mng_info->exists[object_id]=MagickTrue;
+            mng_info->viewable[object_id]=MagickTrue;
+
+            if (mng_info->invisible[object_id])
+              {
+                if (logging!= MagickFalse)
+                  (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                    "  Skipping invisible object");
+
+                skip_to_iend=MagickTrue;
+                chunk=(unsigned char *) RelinquishMagickMemory(chunk);
+                continue;
+              }
+#if defined(MNG_INSERT_LAYERS)
+            if (insert_layers && mng_type && first_mng_object)
+              {
+                if (logging!= MagickFalse)
+                  (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                    "  Insert background layer, L=%.20g, R=%.20g T=%.20g, B=%.20g",
+                    (double) mng_info->clip.left,
+                    (double) mng_info->clip.right,
+                    (double) mng_info->clip.top,
+                    (double) mng_info->clip.bottom);
+              }
+#endif
+            first_mng_object=MagickFalse;
+
+            if (GetAuthenticPixelQueue(current_image)!= (Quantum *) NULL)
+              {
+                /* Allocate next image structure.  */
+                AcquireNextImage(image_info,current_image,exception);
+
+                if (GetNextImageInList(current_image) == (Image *) NULL)
+                  return(DestroyImageList(current_image));
+
+                current_image=SyncNextImageInList(current_image);
+              }
+            mng_info->image=current_image;
+
+            if (term_chunk_found)
+              {
+                current_image->start_loop=MagickTrue;
+                current_image->iterations=mng_iterations;
+                term_chunk_found=MagickFalse;
+              }
+
+            else
+                current_image->start_loop=MagickFalse;
+
+            if (mng_info->framing_mode == 1 || mng_info->framing_mode == 3)
+              {
+                current_image->delay=frame_delay;
+                frame_delay=default_frame_delay;
+              }
+
+            else
+              current_image->delay=0;
+
+            current_image->page.width=mng_info->mng_width;
+            current_image->page.height=mng_info->mng_height;
+            current_image->page.x=mng_info->x_off[object_id];
+            current_image->page.y=mng_info->y_off[object_id];
+            current_image->iterations=mng_iterations;
+
+            /*
+              Seek back to the beginning of the IHDR or JHDR chunk's length field.
+            */
+
+            if (logging!= MagickFalse)
+              (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                "  Seeking back to beginning of %c%c%c%c chunk",type[0],type[1],
+                type[2],type[3]);
+
+            offset=SeekBlob(current_image,-((ssize_t) count+12),SEEK_CUR);
+
+            if (offset < 0)
+              ThrowWriterException(CorruptImageError,"ImproperImageHeader");
+          }
+
+          chunk=(unsigned char *) RelinquishMagickMemory(chunk);
+
+          continue;
+        }
+
+        if (memcmp(type,mng_FRAM,4) == 0)
+          {
+            if (mng_type == 3)
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                CoderError,"FRAM chunk found in MNG-VLC datastream","`%s'",
+                current_image->filename);
+            if ((mng_info->framing_mode == 2) || (mng_info->framing_mode == 4))
+              current_image->delay=frame_delay;
+
+            frame_delay=default_frame_delay;
+            frame_timeout=default_frame_timeout;
+            fb=default_fb;
+
+            if (count!= 0)
+              if (p[0])
+                mng_info->framing_mode=p[0];
+
+            if (logging!= MagickFalse)
+              (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                "    Framing_mode=%d",mng_info->framing_mode);
+
+            if (count > 6)
+              {
+                /* Note the delay and frame clipping boundaries.  */
+
+                p++; /* framing mode */
+
+                while (((p-chunk) < (long) count) && *p)
+                  p++;  /* frame name */
+
+                p++;  /* frame name terminator */
+
+                if ((p-chunk) < (ssize_t) (count-4))
+                  {
+                    int
+                      change_delay,
+                      change_timeout,
+                      change_clipping;
+
+                    change_delay=(*p++);
+                    change_timeout=(*p++);
+                    change_clipping=(*p++);
+                    p++; /* change_sync */
+
+                    if (change_delay && ((p-chunk) < (ssize_t) (count-4)))
+                      {
+                        frame_delay=1UL*current_image->ticks_per_second*
+                          mng_get_long(p);
+
+                        if (mng_info->ticks_per_second!= 0)
+                          frame_delay/=mng_info->ticks_per_second;
+
+                        else
+                          frame_delay=PNG_UINT_31_MAX;
+
+                        if (change_delay == 2)
+                          default_frame_delay=frame_delay;
+
+                        p+=4;
+
+                        if (logging!= MagickFalse)
+                          (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                            "    Framing_delay=%.20g",(double) frame_delay);
+                      }
+
+                    if (change_timeout && ((p-chunk) < (ssize_t) (count-4)))
+                      {
+                        frame_timeout=1UL*current_image->ticks_per_second*
+                          mng_get_long(p);
+
+                        if (mng_info->ticks_per_second!= 0)
+                          frame_timeout/=mng_info->ticks_per_second;
+
+                        else
+                          frame_timeout=PNG_UINT_31_MAX;
+
+                        if (change_timeout == 2)
+                          default_frame_timeout=frame_timeout;
+
+                        p+=4;
+
+                        if (logging!= MagickFalse)
+                          (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                            "    Framing_timeout=%.20g",(double) frame_timeout);
+                      }
+
+                    if (change_clipping && ((p-chunk) < (ssize_t) (count-16)))
+                      {
+                        fb=mng_read_box(previous_fb,(char) p[0],&p[1]);
+                        p+=16;
+                        previous_fb=fb;
+
+                        if (logging!= MagickFalse)
+                          (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                            "    Frame_clip: L=%.20g R=%.20g T=%.20g B=%.20g",
+                            (double) fb.left,(double) fb.right,(double) fb.top,
+                            (double) fb.bottom);
+
+                        if (change_clipping == 2)
+                          default_fb=fb;
+                      }
+                  }
+              }
+            mng_info->clip=fb;
+            mng_info->clip=mng_minimum_box(fb,mng_info->frame);
+
+            subframe_width=(size_t) (mng_info->clip.right
+               -mng_info->clip.left);
+
+            subframe_height=(size_t) (mng_info->clip.bottom
+               -mng_info->clip.top);
+            /*
+              Insert a background layer behind the frame if framing_mode is 4.
+            */
+#if defined(MNG_INSERT_LAYERS)
+            if (insert_layers && (mng_info->framing_mode == 4) &&
+                (subframe_width) && (subframe_height))
+              {
+                /* Allocate next image structure.  */
+                if (GetAuthenticPixelQueue(current_image)!= (Quantum *) NULL)
+                  {
+                    AcquireNextImage(image_info,current_image,exception);
+
+                    if (GetNextImageInList(current_image) == (Image *) NULL)
+                      return(DestroyImageList(current_image));
+
+                    current_image=SyncNextImageInList(current_image);
+                  }
+                mng_info->image=current_image;
+
+                if (term_chunk_found)
+                  {
+                    current_image->start_loop=MagickTrue;
+                    current_image->iterations=mng_iterations;
+                    term_chunk_found=MagickFalse;
+                  }
+
+                else
+                    current_image->start_loop=MagickFalse;
+
+                current_image->columns=subframe_width;
+                current_image->rows=subframe_height;
+
+                current_image->page.width=subframe_width;
+                current_image->page.height=subframe_height;
+                current_image->page.x=mng_info->clip.left;
+                current_image->page.y=mng_info->clip.top;
+                current_image->background_color=mng_background_colo

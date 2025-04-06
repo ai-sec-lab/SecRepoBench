@@ -1,0 +1,244 @@
+*score = GF_FPROBE_NOT_SUPPORTED;
+	return NULL;
+}
+
+GF_Err mpgviddmx_init_filter(GF_Filter *filter)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	ctx->is_mpg12 = GF_FALSE;
+	ctx->forced_packed = GF_FALSE;
+	ctx->is_packed = GF_FALSE;
+	ctx->is_vfr = GF_FALSE;
+	ctx->vparser = NULL;
+	ctx->pck_queue = NULL;
+	ctx->src_pck = NULL;
+	ctx->indexes = NULL;
+	ctx->index_alloc_size = 0;
+	ctx->index_size = 0;
+	ctx->bitrate = 0;
+	ctx->trash_trailer = GF_FALSE;
+	ctx->frame_started = GF_FALSE;
+	ctx->nb_i = ctx->nb_p = ctx->nb_b = ctx->nb_frames = ctx->max_b = 0;
+	ctx->bytes_in_header = 0;
+	ctx->hdr_store = NULL;
+	ctx->hdr_store_size = 0;
+	ctx->hdr_store_alloc = 0;
+	ctx->is_playing = GF_FALSE;
+	ctx->is_file = GF_FALSE;
+	ctx->file_loaded = GF_FALSE;
+	ctx->initial_play_done = GF_FALSE;
+	ctx->input_is_au_start = GF_FALSE;
+	ctx->input_is_au_end = GF_FALSE;
+	ctx->recompute_cts = GF_FALSE;
+	ctx->copy_props = GF_FALSE;
+	ctx->cur_fps.num = 0;
+	ctx->cur_fps.den = 0;
+	ctx->timescale = 0;
+	ctx->resume_from = 0;
+	ctx->start_range = 0;
+	ctx->in_seek = GF_FALSE;
+	ctx->last_ref_cts = 0;
+	ctx->prev_dts = 0;
+	ctx->cts = 0;
+	ctx->dts = 0;
+	ctx->duration.num = 0;
+	ctx->duration.den = 0;
+	ctx->notime = GF_FALSE;
+	ctx->importer = GF_FALSE;
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_destroy_filter(GF_Filter *filter)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	mpgviddmx_finalize(filter);
+	gf_free(ctx);
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_get_info(GF_Filter *filter, GF_FilterInfo *info)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	info->name = "MPG Video Decoder";
+	info->category = GF_FILTER_VISUAL;
+	info->description = "This filter decodes MPEG-1/2 video streams.";
+	info->input_caps = GF_CAPS_VIDEO_MPEG12;
+	info->output_caps = GF_CAPS_VIDEO_MPEG12;
+	info->props = gf_filter_pid_get_properties(ctx->ipid);
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_set_property(GF_Filter *filter, const GF_PropertyValue *prop)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	if (!gf_filter_pid_check_caps(gf_filter_pid_get_parent(filter)))
+		return GF_NOT_SUPPORTED;
+
+	switch (prop->id) {
+	case GF_PROP_FILTER_FPS:
+		ctx->fps = prop->value.frac;
+		break;
+	case GF_PROP_FILTER_INDEX:
+		ctx->index = prop->value.double_;
+		break;
+	case GF_PROP_FILTER_VFR:
+		ctx->vfr = prop->value.boolean;
+		break;
+	case GF_PROP_FILTER_NO_TIME:
+		ctx->notime = prop->value.boolean;
+		break;
+	case GF_PROP_FILTER_RECOMPUTE_CTS:
+		ctx->recompute_cts = prop->value.boolean;
+		break;
+	default:
+		return GF_NOT_SUPPORTED;
+	}
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_get_property(GF_Filter *filter, GF_PropertyValue *prop)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	switch (prop->id) {
+	case GF_PROP_FILTER_FPS:
+		prop->value.frac = ctx->fps;
+		break;
+	case GF_PROP_FILTER_INDEX:
+		prop->value.double_ = ctx->index;
+		break;
+	case GF_PROP_FILTER_VFR:
+		prop->value.boolean = ctx->vfr;
+		break;
+	case GF_PROP_FILTER_NO_TIME:
+		prop->value.boolean = ctx->notime;
+		break;
+	case GF_PROP_FILTER_RECOMPUTE_CTS:
+		prop->value.boolean = ctx->recompute_cts;
+		break;
+	default:
+		return GF_NOT_SUPPORTED;
+	}
+	return GF_OK;
+}
+
+GF_Err mpgviddmx_process_event(GF_Filter *filter, const GF_FilterEvent *evt)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	if (evt->base.type == GF_FEVT_PLAY) {
+		if (ctx->is_file) {
+			if (!ctx->initial_play_done) {
+				ctx->initial_play_done = GF_TRUE;
+				if (evt->play.start_range>0.1) ctx->resume_from = 0;
+			}
+			ctx->start_range = evt->play.start_range;
+			ctx->in_seek = GF_TRUE;
+		}
+		return GF_OK;
+	}
+	return GF_NOT_SUPPORTED;
+}
+
+GF_Err mpgviddmx_process_packet(GF_Filter *filter, GF_FilterPacket *pck)
+{
+	GF_MPGVidDmxCtx *ctx = gf_filter_get_udta(filter);
+	if (!ctx->opid) {
+		ctx->opid = gf_filter_pid_new(filter);
+		mpgviddmx_check_dur(filter, ctx);
+	}
+
+	if ((ctx->width == ctx->dsi.width) && (ctx->height == ctx->dsi.height) && !ctx->copy_props) return GF_OK;
+
+	//copy properties at init or reconfig
+	gf_filter_pid_copy_properties(ctx->opid, ctx->ipid);
+	ctx->copy_props = GF_FALSE;
+	if (ctx->duration.num)
+		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_DURATION, & PROP_FRAC64(ctx->duration));
+	if (!ctx->timescale)
+		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_CAN_DATAREF, & PROP_BOOL(GF_TRUE ) );
+	gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_STREAM_TYPE, & PROP_UINT(GF_STREAM_VISUAL));
+	gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_TIMESCALE, & PROP_UINT(ctx->timescale ? ctx->timescale : ctx->cur_fps.num));
+
+	//if we have a FPS prop, use it
+	if (!gf_filter_pid_get_property(ctx->ipid, GF_PROP_PID_FPS))
+		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_FPS, & PROP_FRAC(ctx->cur_fps));
+
+	gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_UNFRAMED, NULL);
+
+	if (ctx->width && ctx->height) {
+		mpgviddmx_enqueue_or_dispatch(ctx, NULL, GF_TRUE, GF_FALSE);
+	} else {
+		flush_after = GF_TRUE;
+	}
+	ctx->width = ctx->dsi.width;
+	ctx->height = ctx->dsi.height;
+
+	gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_WIDTH, & PROP_UINT( ctx->dsi.width));
+	gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_HEIGHT, & PROP_UINT( ctx->dsi.height));
+	gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_SAR, & PROP_FRAC_INT(ctx->dsi.par_num, ctx->dsi.par_den));
+
+	if (ctx->is_mpg12) {
+		const GF_PropertyValue *cid = gf_filter_pid_get_property(ctx->ipid, GF_PROP_PID_CODECID);
+		u32 PL = 0;
+		if (cid) {
+			switch (cid->value.uint) {
+			case GF_CODECID_MPEG2_MAIN:
+			case GF_CODECID_MPEG2_422:
+			case GF_CODECID_MPEG2_SNR:
+			case GF_CODECID_MPEG2_HIGH:
+				//keep same signaling
+				PL = cid->value.uint;
+				break;
+			default:
+				break;
+			}
+		} else {
+			u32 prof = (ctx->dsi.VideoPL>>4) & 0x7;
+			if (prof==1) PL = GF_CODECID_MPEG2_HIGH;
+			else if (prof==2) PL = GF_CODECID_MPEG2_SNR;
+			else if (prof==3) PL = GF_CODECID_MPEG2_SNR;
+			else if (prof==4) PL = GF_CODECID_MPEG2_MAIN;
+			else if (prof==5) PL = GF_CODECID_MPEG2_SIMPLE;
+		}
+
+		if (!PL)
+			PL = (ctx->dsi.VideoPL == GF_CODECID_MPEG1) ? GF_CODECID_MPEG1 : GF_CODECID_MPEG2_MAIN;
+		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_CODECID, & PROP_UINT(PL));
+	} else {
+		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_CODECID, & PROP_UINT(GF_CODECID_MPEG4_PART2));
+	}
+	gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_PROFILE_LEVEL, & PROP_UINT (ctx->dsi.VideoPL) );
+
+	if (ctx->bitrate) {
+		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_BITRATE, & PROP_UINT(ctx->bitrate));
+	}
+
+	ctx->b_frames = 0;
+
+	if (vosh_size) {
+		u32 i;
+		char * dcfg = gf_malloc(sizeof(char)*vosh_size);
+		memcpy(dcfg, data, sizeof(char)*vosh_size);
+
+		/*remove packed flag if any (VOSH user data)*/
+		ctx->is_packed = ctx->is_vfr = ctx->forced_packed = GF_FALSE;
+		i=0;
+		while (1) {
+			char *frame = dcfg;
+			while ((i+3<vosh_size)  && ((frame[i]!=0) || (frame[i+1]!=0) || (frame[i+2]!=1))) i++;
+			if (i+4>=vosh_size) break;
+			if (strncmp(frame+i+4, "DivX", 4)) {
+				i += 4;
+				continue;
+			}
+			frame = memchr(dcfg + i + 4, 'p', vosh_size - i - 4);
+			if (frame) {
+				ctx->forced_packed = GF_TRUE;
+				frame[0] = 'n';
+			}
+			break;
+		}
+		gf_filter_pid_set_property(ctx->opid, GF_PROP_PID_DECODER_CONFIG, & PROP_DATA_NO_COPY(dcfg, vosh_size));
+	}
+
+	if (ctx->is_file && ctx->index) {
+		gf_filter_pid_set_property(ctx->opid, GF_PROP

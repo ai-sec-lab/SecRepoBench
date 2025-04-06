@@ -15,9 +15,24 @@ import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import os
+import selectors
 
 from projects import *
-from insert_print import insert_print
+
+
+def get_c_cpp_file(base_path: str):
+    c_path = base_path + '.c'
+    cpp_path = base_path + '.cpp'
+    if os.path.exists(c_path):
+        path = c_path
+    elif os.path.exists(cpp_path):
+        path = cpp_path
+    else:
+        print(f'This file does not exist with a c or cpp extension: {base_path}')
+        return
+    with open(path, 'r') as f:
+        content = f.read()
+    return content
 
 
 def load_txt(path):
@@ -106,7 +121,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"--name {local_id}_testcase_sec "
         "--cpus=2 "
         "-e MAKEFLAGS=\"-j3\" "
-        f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
+        f"-v /data/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
         # limit num processes to 2 by changing nproc behavior
         "  echo '#!/bin/sh' > /tmp/nproc\n"
@@ -128,30 +143,31 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/sec.txt \\$GIT_DIR/{patch_path}\n"
-        # compile and run
-        "  arvo compile\n"
-        "  # Try running `arvo run` up to 10 times\n"
+        # retry loop for arvo compile
         "  ATTEMPTS=0\n"
-        "  MAX_ATTEMPTS=10\n"
+        "  MAX_ATTEMPTS=3\n"
         "  SUCCESS=false\n"
         "  while [ \\$ATTEMPTS -lt \\$MAX_ATTEMPTS ]; do\n"
         "    ATTEMPTS=\\$((ATTEMPTS+1))\n"
-        "    echo \\\"Attempt #\\$ATTEMPTS: Running arvo run...\\\"\n"
-        "    arvo run\n"
+        "    echo \\\"Attempt #\\$ATTEMPTS: Running arvo compile...\\\"\n"
+        "    arvo compile\n"
         "    EXIT_CODE=\\$?\n"
         "    if [ \\$EXIT_CODE -eq 0 ]; then\n"
-        "      echo \\\"arvo run succeeded on attempt #\\$ATTEMPTS\\\"\n"
+        "      echo \\\"arvo compile succeeded on attempt #\\$ATTEMPTS\\\"\n"
         "      SUCCESS=true\n"
         "      break\n"
         "    else\n"
-        "      echo \\\"arvo run failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
+        "      echo \\\"arvo compile failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
+        "      sleep 2\n"
         "    fi\n"
         "  done\n"
         "  if [ \\\"\\$SUCCESS\\\" = false ]; then\n"
-        "    echo \\\"arvo run failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
+        "    echo \\\"arvo compile failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
         "    exit 1\n"
         "  fi\n"
-        "  exit 0\n\""
+        # Note: arvo run can give inconsistent answers sometimes (crash sometimes, pass sometimes), not sure how to handle this
+        "  arvo run\n"
+        "  \""
     )
 
     scripts_content_vul_testcase = (
@@ -160,7 +176,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"--name {local_id}_testcase_vul "
         "--cpus=2 "
         "-e MAKEFLAGS=\"-j3\" "
-        f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
+        f"-v /data/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
         # limit num processes to 2 by changing nproc behavior
         "  echo '#!/bin/sh' > /tmp/nproc\n"
@@ -182,30 +198,31 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/vul_sec_base.txt \\$GIT_DIR/{patch_path}\n"
-        # compile and run
-        "  arvo compile\n"
-        "  # Try running `arvo run` up to 10 times\n"
+        # retry loop for arvo compile
         "  ATTEMPTS=0\n"
-        "  MAX_ATTEMPTS=10\n"
+        "  MAX_ATTEMPTS=3\n"
         "  SUCCESS=false\n"
         "  while [ \\$ATTEMPTS -lt \\$MAX_ATTEMPTS ]; do\n"
         "    ATTEMPTS=\\$((ATTEMPTS+1))\n"
-        "    echo \\\"Attempt #\\$ATTEMPTS: Running arvo run...\\\"\n"
-        "    arvo run\n"
+        "    echo \\\"Attempt #\\$ATTEMPTS: Running arvo compile...\\\"\n"
+        "    arvo compile\n"
         "    EXIT_CODE=\\$?\n"
         "    if [ \\$EXIT_CODE -eq 0 ]; then\n"
-        "      echo \\\"arvo run succeeded on attempt #\\$ATTEMPTS\\\"\n"
+        "      echo \\\"arvo compile succeeded on attempt #\\$ATTEMPTS\\\"\n"
         "      SUCCESS=true\n"
         "      break\n"
         "    else\n"
-        "      echo \\\"arvo run failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
+        "      echo \\\"arvo compile failed (exit code: \\$EXIT_CODE), retrying...\\\"\n"
+        "      sleep 2\n"
         "    fi\n"
         "  done\n"
         "  if [ \\\"\\$SUCCESS\\\" = false ]; then\n"
-        "    echo \\\"arvo run failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
+        "    echo \\\"arvo compile failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
         "    exit 1\n"
         "  fi\n"
-        "  exit 0\n\""
+        # Note: arvo run can give inconsistent answers sometimes (crash sometimes, pass sometimes), not sure how to handle this
+        "  arvo run\n"
+        "  \""
     )
 
     scripts_content_sec_unittest = (
@@ -214,7 +231,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"--name {local_id}_unittest_sec "
         "--cpus=2 "
         "-e MAKEFLAGS=\"-j3\" "
-        f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
+        f"-v /data/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
         # limit num processes to 2 by changing nproc behavior
         "  echo '#!/bin/sh' > /tmp/nproc\n"
@@ -236,6 +253,8 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/sec.txt \\$GIT_DIR/{patch_path}\n"
+        "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "echo 'NO UNIT TESTS'") + "\n"
+        "  \""
     )
 
     scripts_content_sec_print_unittest = (
@@ -244,7 +263,7 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         f"--name {local_id}_unittest_sec_print "
         "--cpus=2 "
         "-e MAKEFLAGS=\"-j3\" "
-        f"-v /home/cdilgren/project_benchmark/oss-fuzz-bench/{local_id}/patches:/patches "
+        f"-v /data/oss-fuzz-bench/{local_id}/patches:/patches "
         f"n132/arvo:{local_id}-fix /bin/sh -c \" \n"
         # limit num processes to 2 by changing nproc behavior
         "  echo '#!/bin/sh' > /tmp/nproc\n"
@@ -266,22 +285,16 @@ def setup(local_id, project_name, patch_path, diff, fixing_commit, root="."):
         "  fi\n"
         # move patch file
         f"  cp -f /patches/sec_print.txt \\$GIT_DIR/{patch_path}\n"
+        "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "echo 'NO UNIT TESTS'") + "\n"
+        "  " + (sec_print_commands[project_name.lower()] if project_name in unittest_commands else "echo 'NO ADDITIONAL LOG PRINTS'") + "\n"
+        "  \""
     )
 
-    scripts_content_sec_unittest = scripts_content_sec_unittest + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
-    scripts_content_sec_print_unittest = scripts_content_sec_print_unittest + "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\""
-
     # get sec, vul content from descriptions
-    if os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.c'):
-        sec_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.c'
-        vul_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_base.c'
-        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_sec_base_base.c'
-        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_print_base.c'
-    elif os.path.exists(f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.cpp'):
-        sec_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_base.cpp'
-        vul_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_base.cpp'
-        vul_sec_base_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/vul_sec_base_base.cpp'
-        sec_print_file = f'/home/cdilgren/project_benchmark/descriptions/{local_id}/sec_print_base.cpp'
+    sec_file = get_c_cpp_file(f'descriptions/{local_id}/sec_base')
+    vul_file = get_c_cpp_file(f'descriptions/{local_id}/vul_base.c')
+    vul_sec_base_file = get_c_cpp_file(f'descriptions/{local_id}/vul_sec_base_base.c')
+    sec_print_file = get_c_cpp_file(f'descriptions/{local_id}/sec_print_base.c')
 
     with open(sec_file, 'r') as f:
         sec_content = f.read()
@@ -335,6 +348,10 @@ def get_targets(local_id, filter_patches, tests, root="./"):
 class ParseException(Exception):
     pass
 
+def remove_ansi(text):
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+    return ansi_escape.sub('', text)
+
 def parse_testcase(output):
     local_id, patch, test_type, proc = output
     stderr = proc.stderr.decode(errors='ignore')
@@ -376,6 +393,48 @@ def parse_testcase(output):
     else:
         raise ParseException(f"no matching regex case ({proc.returncode})")
 
+def parse_unittest_libxml2(stdout, result):
+    # libxml2 is weird, doesn't contain a status for passing tests.
+    # Failure is indicated by a list of failing tests after a "## {NAME}" line.
+    # Technically, the "## {NAME}" is the name of a group of unit tests
+    # but we treat NAME as a single unit test since it doesn't list the 
+    # component unit tests that pass.
+    # The failure line after "## {NAME}" is something like:
+    # ./test/valid/781333.xml:4: element a: validity error
+    # A passing test should just list the next "## {NAME}" line or state the 
+    # total, like "Total 9 tests, no errors"
+    re_all = r'^## (?P<name>.*)$'
+    re_failing = r'^## (?P<name>.*)(?=\n\.)'  # fail
+
+    all_tests = set()
+    all_matches = re.finditer(re_all, stdout, re.MULTILINE)
+    for match in all_matches:
+        all_tests.add(match.group("name"))
+    
+    failing_tests = set()
+    failing_matches = re.finditer(re_failing, stdout, re.MULTILINE)
+    for match in failing_matches:
+        failing_tests.add(match.group("name"))
+    
+    passing_tests = all_tests - failing_tests
+
+    result["pass"] = list(passing_tests)
+    result["fail"] = list(failing_tests)
+    result["total"] = len(all_tests)
+
+def parse_unittest_htslib(stdout, result):
+    result["total"] = 0
+    pattern = unittest_patterns['htslib']
+    for match in re.finditer(pattern, stdout):
+        name = match.group("name")
+        num_unexpected_failures = match.group("num_unexpected_failures")
+        if num_unexpected_failures == '0':
+            result["pass"].append(name)
+        else:
+            result["fail"].append(name)
+        result["total"] += 1
+    return result
+
 def parse_unittest(output, project_name):
     project_name = project_name.lower()
 
@@ -383,13 +442,27 @@ def parse_unittest(output, project_name):
     stderr = proc.stderr.decode(errors='ignore')
     stdout = proc.stdout.decode(errors='ignore')
 
+    # remove ansi escape
+    stderr = remove_ansi(stderr)
+    stdout = remove_ansi(stdout)
+
     result = {
         "pass":  [], # list of str
         "fail":  [], # list of strs or int
         "skip":  [], # list of strs or int
         "total": None  # int
     }
+
+    # libxml2 stdout is weird, handle as special case
+    if project_name == 'libxml2':
+        parse_unittest_libxml2(stdout, result)
+        return result
     
+    # htslib is also weird, handle as special case
+    if project_name == 'htslib':
+        parse_unittest_htslib(stdout, result)
+        return result
+
     if not project_name in unittest_patterns:
         raise ParseException(f"no pattern for {project_name}")
 
@@ -399,8 +472,8 @@ def parse_unittest(output, project_name):
 
     for pattern in patterns:
         for test in re.finditer(pattern, stdout + "\n" + stderr):
-            if local_id == "66696" and test.group("name") == "sock-tcp-raw-raw": # this case causes errors between the two versions
-                continue
+            if test.group("name") == "error_value_test":
+                pass
             for g in ["name", "total"]:
                 if g in list(test.re.groupindex.keys()) and test.group(g) != None:
                     if g == "total":
@@ -413,8 +486,8 @@ def parse_unittest(output, project_name):
                     elif g == "name":
                         if "status" in list(test.re.groupindex.keys()) and test.group("status") != None: # if there is a status, use that
                             s = test.group("status").lower().strip()
-                            s = "pass" if s in ["ok", "okay", "success", ".", "", "done"] else s
-                            s = "fail" if s in ["error", "e", "f", "fail"] else s
+                            s = "pass" if s in ["ok", "okay", "success", ".", "", "done", "passed"] else s
+                            s = "fail" if s in ["error", "e", "f", "fail", "not ok", "failed", "failure"] else s
                             s = "skip" if s in ["?", "skipped"] else s
                         else: # otherwise, the default status is pass
                             s = "pass"
@@ -422,7 +495,8 @@ def parse_unittest(output, project_name):
                             if status in s:
                                 if result[status] == None:
                                     result[status] = []
-                                result[status].append(test.group("name"))
+                                if test.group("name") not in result[status]:
+                                    result[status].append(test.group("name"))
 
     if result["total"] == None:
         result["total"] = sum([len(result[s]) if isinstance(result[s], list) else result[s] for s in ["pass", "fail", "skip"]])
@@ -485,6 +559,71 @@ def write_output(output, root="./"):
             "timestamp": datetime.now().isoformat()
         }, f)
 
+def read_limited_output(proc, timeout=3000):
+    # 50 MB limit -- so that our disk space isn't filled up, 
+    # and passing cases should be much less than this. 
+    # Truncated failing cases will still fail.
+    max_output = 50 * 1024 * 1024
+    TRUNCATION_NOTICE = b"\n[output truncated]\n"
+
+    selector = selectors.DefaultSelector()
+    stdout_chunks, stderr_chunks = [], []
+    stdout_total, stderr_total = 0, 0
+    stdout_truncated, stderr_truncated = False, False
+
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    selector.register(proc.stderr, selectors.EVENT_READ)
+
+    start = time.time()
+    time_elapsed = 0
+
+    while selector.get_map() and (time_elapsed < timeout) and not (stdout_truncated and stderr_truncated):
+        for key, _ in selector.select(timeout=1):
+            data = key.fileobj.read1(4096)  # non-blocking chunk read
+            if not data:
+                selector.unregister(key.fileobj)
+                continue
+
+            if key.fileobj is proc.stdout:
+                if stdout_total < max_output:
+                    chunk = data[:max_output - stdout_total]
+                    stdout_chunks.append(chunk)
+                    stdout_total += len(chunk)
+                    if stdout_total >= max_output:
+                        stdout_truncated = True
+                else:
+                    stdout_truncated = True
+
+            elif key.fileobj is proc.stderr:
+                if stderr_total < max_output:
+                    chunk = data[:max_output - stderr_total]
+                    stderr_chunks.append(chunk)
+                    stderr_total += len(chunk)
+                    if stderr_total >= max_output:
+                        stderr_truncated = True
+                else:
+                    stderr_truncated = True
+        
+        time_elapsed = time.time() - start
+
+    # Ensure process is killed if still running
+    proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+    if stdout_truncated:
+        stdout_chunks.append(TRUNCATION_NOTICE)
+    if stderr_truncated:
+        stderr_chunks.append(TRUNCATION_NOTICE)
+    
+    # we stopped early if process timed out or stdout/stderr filled up
+    timed_out = time_elapsed >= timeout
+    filled_up = stdout_truncated and stderr_truncated
+
+    return b''.join(stdout_chunks), b''.join(stderr_chunks), timed_out, filled_up
+
 def proc_runner(target_with_output_path_and_rerun):
     target, output_path, rerun = target_with_output_path_and_rerun
     local_id, patch, test_type, cmd = target
@@ -499,31 +638,21 @@ def proc_runner(target_with_output_path_and_rerun):
     for attempt in range(max_retries):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
 
-        try:
-            stdout, stderr = proc.communicate(timeout=6000)
+        stdout, stderr, timed_out, filled_up = read_limited_output(proc, timeout=3000)
 
-        except subprocess.TimeoutExpired:
-            print(f"Timeout: {local_id} {test_type} {patch}")
+        return_code = proc.returncode
+        if timed_out or filled_up:
+            return_code = -1
 
-            try:
-                cleanup_proc = subprocess.run(['docker', 'rm', '-f', container_id], 
-                                              stdout=subprocess.PIPE, 
-                                              stderr=subprocess.PIPE)
-
-            except subprocess.SubprocessError as e:
-                print(f"Failed to clean up the container. It may have already exited or been removed. Error: {e}")
-
-            proc.kill()
-            stdout, stderr = proc.communicate()  # Avoid zombie process
+            if timed_out:
+                print(f"Timeout: {local_id}_{test_type}_{patch}", flush=True)
+                stderr = b"Timeout\n" + stderr
+            if filled_up:
+                print(f"Truncated: {local_id}_{test_type}_{patch}", flush=True)
+                stderr = b"Truncated\n" + stderr
 
             stdout = stdout or b""
             stderr = stderr or b""
-
-            return local_id, patch, test_type, {
-                "stdout": stdout,
-                "stderr": b"Timeout\n" + stderr,  # Prepend Timeout message
-                "returncode": -1
-            }
 
         if "429 Too Many Requests" not in stderr.decode(errors='ignore'):
             break
@@ -534,20 +663,22 @@ def proc_runner(target_with_output_path_and_rerun):
     else:
         print(f"Failed to run {local_id} {patch} {test_type} after {max_retries} attempts")
 
-    try:
-        cleanup_proc = subprocess.run(['docker', 'rm', '-f', container_id], 
-                                        stdout=subprocess.PIPE, 
-                                        stderr=subprocess.PIPE)
+    # Always attempt to remove the container, just to be sure it's gone
+    subprocess.run(['docker', 'rm', '-f', container_id], 
+                   stdout=subprocess.DEVNULL, 
+                   stderr=subprocess.DEVNULL)
 
-    except subprocess.SubprocessError as e:
-        pass
-
-    print(f"Finished {local_id} {patch} {test_type}")
-    return local_id, patch, test_type, {
+    output = local_id, patch, test_type, {
         "stdout": stdout,
         "stderr": stderr,
-        "returncode": proc.returncode
+        "returncode": return_code
     }
+
+    # write to output files
+    write_output(output, output_path)
+
+    print(f"Finished {local_id} {patch} {test_type}")
+    return output
 
 def get_remaining(targets, completed):
     return [target for target in targets if (target[0], f"{target[2]}_{target[1]}") not in completed]
@@ -625,8 +756,8 @@ def main():
                     for test_patch in all_report[id].keys():
                         completed.add((id, test_patch))
             # Remove non-relevant completed
-            targets_comp_format = [(target[0], f"{target[2]}_{target[1]}") for target in targets]
-            completed = [c for c in completed if c in targets_comp_format]
+            targets_comp_format = {(target[0], f"{target[2]}_{target[1]}") for target in targets}
+            completed = completed.intersection(targets_comp_format)
 
             # Count cached results and identify rate-limited cases
             cached_count = 0
@@ -639,11 +770,12 @@ def main():
                     try:
                         with cache_file.open("rb") as f:
                             cached_data = pickle.load(f)
-                        if "429 Too Many Requests" in cached_data.get('stderr', b'').decode(errors="ignore"):
+                        stderr = cached_data.get('stderr', b'').decode(errors="ignore")
+                        if "429 Too Many Requests" in stderr:
                             rate_limited_count += 1
                             # Remove from completed set to ensure it's rerun
                             completed.discard((local_id, f"{test_type}_{patch}"))
-                        elif cached_data.get('stderr', b'').decode(errors="ignore").startswith("Timeout") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: container ID file found") or cached_data.get('stderr', b'').decode(errors="ignore").startswith("docker: Error response from daemon"):
+                        elif stderr.startswith("Timeout") or stderr.startswith("Truncated") or stderr.startswith("docker: "):
                             time_out_count += 1
                             completed.discard((local_id, f"{test_type}_{patch}"))
                         else:
@@ -656,7 +788,7 @@ def main():
                 print("Rerunning all targets, including those with cached results.")
 
             procs = []
-            pool_size = min(12, len(targets))
+            pool_size = min(4, len(targets))
             try:
                 with alive_bar(len(targets)) as bar, Pool(pool_size) as p:
                     remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
@@ -674,12 +806,13 @@ def main():
             new_report_file = Path(args.output) / f"report_{timestamp}.json"
 
             if not args.rerun:
+                # useful when parse_output has changed, and we already have the stdout and stderr
                 for complete in completed:
                     local_id, test_patch = complete
                     test_type = test_patch.split('_')[0]
                     patch = test_patch.replace(f'{test_type}_', '')
 
-                    cache_file = f'/home/cdilgren/project_benchmark/oss-fuzz-bench/output/{local_id}/{test_patch}/cache.pkl'
+                    cache_file = f'/data/oss-fuzz-bench/output/{local_id}/{test_patch}/cache.pkl'
                     with open(cache_file, 'rb') as f:
                         cache = pickle.load(f)
 
@@ -694,7 +827,6 @@ def main():
                     })
 
                     parse_output(output, data[str(local_id)]["project_name"], report=report)
-                    write_output(output, root=args.output)
 
             with alive_bar(len(targets)) as bar:
                 for target in targets:
@@ -703,7 +835,6 @@ def main():
                     
                     if output:
                         parse_output(output, data[str(local_id)]["project_name"], report=report)
-                        write_output(output, root=args.output)
 
                     bar()
             

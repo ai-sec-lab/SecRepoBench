@@ -1,0 +1,222 @@
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   A s s i g n I m a g e C o l o r s                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AssignImageColors() generates the output image from the pruned tree.  The
+%  output image consists of two parts: (1)  A color map, which is an array
+%  of color descriptions (RGB triples) for each color present in the
+%  output image;  (2)  A pixel array, which represents each pixel as an
+%  index into the color map array.
+%
+%  First, the assignment phase makes one pass over the pruned color
+%  description tree to establish the image's color map.  For each node
+%  with n2  > 0, it divides Sr, Sg, and Sb by n2 .  This produces the mean
+%  color of all pixels that classify no lower than this node.  Each of
+%  these colors becomes an entry in the color map.
+%
+%  Finally,  the assignment phase reclassifies each pixel in the pruned
+%  tree to identify the deepest node containing the pixel's color.  The
+%  pixel's value in the pixel array becomes the index of this node's mean
+%  color in the color map.
+%
+%  The format of the AssignImageColors() method is:
+%
+%      MagickBooleanType AssignImageColors(Image *image,CubeInfo *cube_info)
+%
+%  A description of each parameter follows.
+%
+%    o image: the image.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+*/
+
+static MagickBooleanType AssignImageColors(Image *image,CubeInfo *cube_info,
+  ExceptionInfo *exception)
+{
+#define AssignImageTag  "Assign/Image"
+
+  ssize_t
+    y;
+
+  /*
+    Allocate image colormap.
+  */
+  if ((cube_info->quantize_info->colorspace != UndefinedColorspace) &&
+      (cube_info->quantize_info->colorspace != CMYKColorspace))
+    (void) TransformImageColorspace(image,cube_info->quantize_info->colorspace,
+      exception);
+  else
+    if (IssRGBCompatibleColorspace(image->colorspace) == MagickFalse)
+      (void) TransformImageColorspace(image,sRGBColorspace,exception);
+  if (AcquireImageColormap(image,cube_info->colors,exception) == MagickFalse)
+    ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+      image->filename);
+  image->colors=0;
+  cube_info->transparent_pixels=0;
+  cube_info->transparent_index=(-1);
+  (void) DefineImageColormap(image,cube_info,cube_info->root);
+  /*
+    Create a reduced color image.
+  */
+  if (cube_info->quantize_info->dither_method != NoDitherMethod)
+    (void) DitherImage(image,cube_info,exception);
+  else
+    {
+      CacheView
+        *image_view;
+
+      MagickBooleanType
+        status;
+
+      status=MagickTrue;
+      image_view=AcquireAuthenticCacheView(image,exception);
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+      #pragma omp parallel for schedule(static,4) shared(status) \
+        magick_number_threads(image,image,image->rows,1)
+#endif
+      for (y=0; y < (ssize_t) image->rows; y++)
+      {
+        CubeInfo
+          cube;
+
+        register Quantum
+          *magick_restrict q;
+
+        register ssize_t
+          x;
+
+        ssize_t
+          count;
+
+        if (status == MagickFalse)
+          continue;
+        q=GetCacheViewAuthenticPixels(image_view,0,y,image->columns,1,
+          exception);
+        if (q == (Quantum *) NULL)
+          {
+            status=MagickFalse;
+            continue;
+          }
+        cube=(*cube_info);
+        for (x=0; x < (ssize_t) image->columns; x+=count)
+        {
+          DoublePixelPacket
+            pixel;
+
+          register const NodeInfo
+            *node_info;
+
+          register ssize_t
+            i;
+
+          size_t
+            id,
+            index;
+
+          /*
+            Identify the deepest node containing the pixel's color.
+          */
+          for (count=1; (x+count) < (ssize_t) image->columns; count++)
+          {
+            PixelInfo
+              packet;
+
+            GetPixelInfoPixel(image,q+count*GetPixelChannels(image),&packet);
+            if (IsPixelEquivalent(image,q,&packet) == MagickFalse)
+              break;
+          }
+          AssociateAlphaPixel(image,&cube,q,&pixel);
+          node_info=cube.root;
+          for (index=MaxTreeDepth-1; (ssize_t) index > 0; index--)
+          {
+            id=ColorToNodeId(&cube,&pixel,index);
+            if (node_info->child[id] == (NodeInfo *) NULL)
+              break;
+            node_info=node_info->child[id];
+          }
+          /*
+            Find closest color among siblings and their children.
+          */
+          cube.target=pixel;
+          cube.distance=(double) (4.0*(QuantumRange+1.0)*(QuantumRange+1.0)+
+            1.0);
+          ClosestColor(image,&cube,node_info->parent);
+          index=cube.color_number;
+          for (i=0; i < (ssize_t) count; i++)
+          {
+            if (image->storage_class == PseudoClass)
+              SetPixelIndex(image,(Quantum) index,q);
+            if (cube.quantize_info->measure_error == MagickFalse)
+              {
+                SetPixelRed(image,ClampToQuantum(
+                  image->colormap[index].red),q);
+                SetPixelGreen(image,ClampToQuantum(
+                  image->colormap[index].green),q);
+                SetPixelBlue(image,ClampToQuantum(
+                  image->colormap[index].blue),q);
+                if (cube.associate_alpha != MagickFalse)
+                  SetPixelAlpha(image,ClampToQuantum(
+                    image->colormap[index].alpha),q);
+              }
+            q+=GetPixelChannels(image);
+          }
+        }
+        if (SyncCacheViewAuthenticPixels(image_view,exception) == MagickFalse)
+          status=MagickFalse;
+        if (image->progress_monitor != (MagickProgressMonitor) NULL)
+          {
+            MagickBooleanType
+              proceed;
+
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+            #pragma omp critical (MagickCore_AssignImageColors)
+#endif
+            proceed=SetImageProgress(image,AssignImageTag,(MagickOffsetType) y,
+              image->rows);
+            if (proceed == MagickFalse)
+              status=MagickFalse;
+          }
+      }
+      image_view=DestroyCacheView(image_view);
+    }
+  if (cube_info->quantize_info->measure_error != MagickFalse)
+    (void) GetImageQuantizeError(image,exception);
+  if ((cube_info->quantize_info->number_colors == 2) &&
+      ((cube_info->quantize_info->colorspace == LinearGRAYColorspace) ||
+       (cube_info->quantize_info->colorspace == GRAYColorspace)))
+    {
+      double
+        intensity;
+
+      /*
+        Monochrome image.
+      */
+      intensity=0.0;
+      if ((image->colors > 1) &&
+          (GetPixelInfoLuma(image->colormap+0) >
+           GetPixelInfoLuma(image->colormap+1)))
+        intensity=(double) QuantumRange;
+      image->colormap[0].red=intensity;
+      image->colormap[0].green=intensity;
+      image->colormap[0].blue=intensity;
+      if (image->colors > 1)
+        {
+          image->colormap[1].red=(double) QuantumRange-intensity;
+          image->colormap[1].green=(double) QuantumRange-intensity;
+          image->colormap[1].blue=(double) QuantumRange-intensity;
+        }
+    }
+  (void) SyncImage(image,exception);
+  if ((cube_info->quantize_info->colorspace != UndefinedColorspace) &&
+      (cube_info->quantize_info->colorspace != CMYKColorspace))
+    (void) TransformImageColorspace((Image *) image,sRGBColorspace,exception);
+  return(MagickTrue);
+}

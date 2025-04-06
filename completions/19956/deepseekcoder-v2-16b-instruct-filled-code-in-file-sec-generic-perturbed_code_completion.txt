@@ -1,0 +1,338 @@
+_INVALID;
+      if (!hb_set_next (glyphs, &g)) return false;
+      if (g < rangeRecord[0].first) return true;
+      g = rangeRecord[count - 1].last;
+      if (hb_set_next (glyphs, &g)) return true;
+      /* Fall through. */
+    }
+    for (unsigned int i = 0; i < count; i++)
+      if (rangeRecord[i].value == klass && rangeRecord[i].intersects (glyphs))
+	return true;
+    return false;
+  }
+
+  protected:
+  HBUINT16	classFormat;	/* Format identifier--format = 2 */
+  SortedArrayOf<RangeRecord>
+		rangeRecord;	/* Array of glyph ranges--ordered by
+				 * Start GlyphID. rangeCount entries
+				 * long */
+  public:
+  DEFINE_SIZE_ARRAY (4, rangeRecord);
+};
+
+struct ClassDef
+{
+  /* Has interface. */
+  static constexpr unsigned SENTINEL = NOT_COVERED;
+  typedef unsigned int value_t;
+  value_t operator [] (hb_codepoint_t k) const { return get (k); }
+  bool has (hb_codepoint_t k) const { return (*this)[k] != SENTINEL; }
+  /* Predicate. */
+  bool operator () (hb_codepoint_t k) const { return has (k); }
+
+  unsigned int get (hb_codepoint_t k) const { return get_class (k); }
+  unsigned int get_class (hb_codepoint_t glyph_id) const
+  {
+    switch (u.format) {
+    case 1: return u.format1.get_class (glyph_id);
+    case 2: return u.format2.get_class (glyph_id);
+    default:return NOT_COVERED;
+    }
+  }
+
+  template<typename Iterator,
+	   hb_requires (hb_is_iterator (Iterator))>
+  bool serialize (hb_serialize_context_t *c,
+                  Iterator it)
+  {
+    TRACE_SERIALIZE (this);
+    if (unlikely (!c->extend_min (*this))) return_trace (false);
+
+    u.format = (it ? 1 : 0);
+    switch (u.format)
+    {
+    case 1: return_trace (u.format1.serialize (c, it));
+    case 2: return_trace (u.format2.serialize (c, it));
+    default:return_trace (false);
+    }
+  }
+
+  bool subset (hb_subset_context_t *c,
+               hb_map_t *klass_map = nullptr /*OUT*/) const
+  {
+    TRACE_SUBSET (this);
+    const hb_set_t &glyphset = *c->plan->glyphset ();
+    const hb_map_t &glyph_map = *c->plan->glyph_map;
+
+    hb_sorted_vector_t<HBGlyphID> glyphs;
+    hb_sorted_vector_t<unsigned> orig_klasses;
+    hb_map_t gid_org_klass_map;
+
+    switch (u.format)
+    {
+    case 1:
+      if (!u.format1.subset (c, klass_map)) return_trace (false);
+      for (const auto gid_klass_pair : + u.format1.iter ())
+      {
+        glyphs.push (glyph_map[gid_klass_pair.first]);
+        gid_org_klass_map.set (glyph_map[gid_klass_pair.first], gid_klass_pair.second);
+        orig_klasses.push (gid_klass_pair.second);
+      }
+      break;
+    case 2:
+      if (!u.format2.subset (c, klass_map)) return_trace (false);
+      for (const auto &range : + u.format2.iter ())
+      {
+        hb_codepoint_t start = range.first;
+        hb_codepoint_t end   = range.last + 1;
+        for (hb_codepoint_t g = start; g < end; g++)
+        {
+          if (!glyphset.has (g)) continue;
+          glyphs.push (glyph_map[g]);
+          gid_org_klass_map.set (glyph_map[g], range.value);
+          orig_klasses.push (range.value);
+        }
+      }
+      break;
+    default:
+      return_trace (false);
+    }
+
+    ClassDef_remap_and_serialize (c->serializer, glyphset, gid_org_klass_map,
+                                  glyphs, orig_klasses, klass_map);
+    return_trace ((bool) glyphs);
+  }
+
+  bool sanitize (hb_sanitize_context_t *c) const
+  {
+    TRACE_SANITIZE (this);
+    if (!u.format.sanitize (c)) return_trace (false);
+    switch (u.format)
+    {
+    case 1: return_trace (u.format1.sanitize (c));
+    case 2: return_trace (u.format2.sanitize (c));
+    default:return_trace (true);
+    }
+  }
+
+  bool intersects (const hb_set_t *glyphs) const
+  {
+    switch (u.format)
+    {
+    case 1: return u.format1.intersects (glyphs);
+    case 2: return u.format2.intersects (glyphs);
+    default:return false;
+    }
+  }
+  bool intersects_class (const hb_set_t *glyphs, unsigned int klass) const
+  {
+    switch (u.format)
+    {
+    case 1: return u.format1.intersects_class (glyphs, klass);
+    case 2: return u.format2.intersects_class (glyphs, klass);
+    default:return false;
+    }
+  }
+
+  template <typename set_t>
+  bool add_coverage (set_t *glyphs) const
+  {
+    switch (u.format)
+    {
+    case 1: return u.format1.add_coverage (glyphs);
+    case 2: return u.format2.add_coverage (glyphs);
+    default:return false;
+    }
+  }
+
+  template <typename set_t>
+  bool add_class (set_t *glyphs, unsigned int klass) const
+  {
+    switch (u.format)
+    {
+    case 1: return u.format1.add_class (glyphs, klass);
+    case 2: return u.format2.add_class (glyphs, klass);
+    default:return false;
+    }
+  }
+
+  struct iter_t : hb_iter_with_fallback_t<iter_t, hb_codepoint_t>
+  {
+    static constexpr bool is_sorted_iterator = true;
+    iter_t (const ClassDef &c_ = Null(ClassDef))
+    {
+      memset (this, 0, sizeof (*this));
+      format = c_.u.format;
+      switch (format)
+      {
+      case 1: u.format1.init (c_.u.format1); return;
+      case 2: u.format2.init (c_.u.format2); return;
+      default:				     return;
+      }
+    }
+    bool __more__ () const
+    {
+      switch (format)
+      {
+      case 1: return u.format1.more ();
+      case 2: return u.format2.more ();
+      default:return false;
+      }
+    }
+    void __next__ ()
+    {
+      switch (format)
+      {
+      case 1: u.format1.next (); break;
+      case 2: u.format2.next (); break;
+      default:			 break;
+      }
+    }
+    typedef hb_codepoint_t __item_t__;
+    __item_t__ __item__ () const { return get_glyph (); }
+
+    hb_codepoint_t get_glyph () const
+    {
+      switch (format)
+      {
+      case 1: return u.format1.get_glyph ();
+      case 2: return u.format2.get_glyph ();
+      default:return 0;
+      }
+    }
+    bool operator != (const iter_t& o) const
+    {
+      if (format != o.format) return true;
+      switch (format)
+      {
+      case 1: return u.format1 != o.u.format1;
+      case 2: return u.format2 != o.u.format2;
+      default:return false;
+      }
+    }
+
+    private:
+    unsigned int format;
+    union {
+    ClassDefFormat2::iter_t	format2; /* Put this one first since it's larger; helps shut up compiler. */
+    ClassDefFormat1::iter_t	format1;
+    } u;
+  };
+  iter_t iter () const { return iter_t (*this); }
+
+  protected:
+  union {
+  HBUINT16		format;		/* Format identifier */
+  ClassDefFormat1	format1;
+  ClassDefFormat2	format2;
+  } u;
+  public:
+  DEFINE_SIZE_UNION (2, format);
+};
+
+} /* namespace OT */
+/* This has to be outside the namespace. */
+HB_MARK_AS_FLAG_T (OT::ClassDef::value_t);
+
+
+/*
+ * GDEF Table
+ */
+
+struct GDEF
+{
+  bool sanitize (hb_sanitize_context_t *c) const
+  {
+    TRACE_SANITIZE (this);
+    return_trace (c->check_struct (this) &&
+		  glyphClassDef.sanitize (c) &&
+		  markAttachClassDef.sanitize (c));
+  }
+
+  bool subset (hb_subset_context_t *c) const
+  {
+    TRACE_SUBSET (this);
+    if (!glyphClassDef.subset (c)) return_trace (false);
+    if (!markAttachClassDef.subset (c)) return_trace (false);
+    return_trace (true);
+  }
+
+  protected:
+  HBUINT16	version;		/* Version of the GDEF table--0x00010000u */
+  ClassDef	glyphClassDef;	/* Class definition table for glyphs */
+  ClassDef	markAttachClassDef;	/* Class definition table for mark attachment */
+  public:
+  DEFINE_SIZE_STATIC (8);
+};
+
+
+/*
+ * GSUB Table
+ */
+
+struct GSUB
+{
+  bool sanitize (hb_sanitize_context_t *c) const
+  {
+    TRACE_SANITIZE (this);
+    return_trace (c->check_struct (this) &&
+		  scriptList.sanitize (c) &&
+		  featureList.sanitize (c));
+  }
+
+  bool subset (hb_subset_context_t *c) const
+  {
+    TRACE_SUBSET (this);
+    if (!scriptList.subset (c)) return_trace (false);
+    if (!featureList.subset (c)) return_trace (false);
+    return_trace (true);
+  }
+
+  protected:
+  HBUINT16	version;		/* Version of the GSUB table--0x00010000u */
+  ScriptList	scriptList;	/* List of script records */
+  FeatureList	featureList;	/* List of feature records */
+  public:
+  DEFINE_SIZE_STATIC (6);
+};
+
+
+/*
+ * GPOS Table
+ */
+
+struct GPOS
+{
+  bool sanitize (hb_sanitize_context_t *c) const
+  {
+    TRACE_SANITIZE (this);
+    return_trace (c->check_struct (this) &&
+		  scriptList.sanitize (c) &&
+		  featureList.sanitize (c));
+  }
+
+  bool subset (hb_subset_context_t *c) const
+  {
+    TRACE_SUBSET (this);
+    if (!scriptList.subset (c)) return_trace (false);
+    if (!featureList.subset (c)) return_trace (false);
+    return_trace (true);
+  }
+
+  protected:
+  HBUINT16	version;		/* Version of the GPOS table--0x00010000u */
+  ScriptList	scriptList;	/* List of script records */
+  FeatureList	featureList;	/* List of feature records */
+  public:
+  DEFINE_SIZE_STATIC (6);
+};
+
+
+/*
+ * GSUB and GPOS Tables
+ */
+
+struct GSUBGPOS
+{
+  bool sanitize (hb_sanitize

@@ -1,0 +1,472 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+struct ndpi_proto ndpi_workflow_process_packet(struct ndpi_workflow * workflow,
+					       const struct pcap_pkthdr *header,
+					       const u_char *packet) {
+  /*
+   * Declare pointers to packet headers
+   */
+  /* --- Ethernet header --- */
+  const struct ndpi_ethhdr *ethernet;
+  /* --- LLC header --- */
+  const struct ndpi_llc_header_snap *llc;
+
+  /* --- Cisco HDLC header --- */
+  const struct ndpi_chdlc *chdlc;
+
+  /* --- Radio Tap header --- */
+  const struct ndpi_radiotap_header *radiotap;
+  /* --- Wifi header --- */
+  const struct ndpi_wifi_header *wifi;
+
+  /* --- MPLS header --- */
+  union mpls {
+    uint32_t u32;
+    struct ndpi_mpls_header mpls;
+  } mpls;
+
+  /** --- IP header --- **/
+  struct ndpi_iphdr *iph;
+  /** --- IPv6 header --- **/
+  struct ndpi_ipv6hdr *iph6;
+
+  struct ndpi_proto nproto = { NDPI_PROTOCOL_UNKNOWN, NDPI_PROTOCOL_UNKNOWN };
+  ndpi_packet_tunnel tunnel_type = ndpi_no_tunnel;
+
+  /* lengths and offsets */
+  u_int16_t eth_offset = 0;
+  u_int16_t radio_len;
+  u_int16_t fc;
+  u_int16_t cprototype = 0;
+  int wifi_len = 0;
+  int pyld_eth_len = 0;
+  int check;
+  u_int64_t time;
+  u_int16_t ip_offset = 0, ip_len;
+  u_int16_t frag_off = 0, vlan_id = 0;
+  u_int8_t proto = 0, recheck_type;
+  /*u_int32_t label;*/
+
+  /* counters */
+  u_int8_t vlan_packet = 0;
+
+  /* Increment raw packet counter */
+  workflow->stats.raw_packet_count++;
+
+  /* setting time */
+  time = ((uint64_t) header->ts.tv_sec) * TICK_RESOLUTION + header->ts.tv_usec / (1000000 / TICK_RESOLUTION);
+
+  /* safety check */
+  if(workflow->last_time > time) {
+    /* printf("\nWARNING: timestamp bug in the pcap file (ts delta: %llu, repairing)\n", ndpi_thread_info[thread_id].last_time - time); */
+    time = workflow->last_time;
+  }
+  /* update last time value */
+  workflow->last_time = time;
+
+  /*** check Data Link type ***/
+  int datalink_type;
+
+#ifdef USE_DPDK
+  datalink_type = DLT_EN10MB;
+#else
+  datalink_type = (int)pcap_datalink(workflow->pcap_handle);
+#endif
+
+  if(header->caplen < 40)
+    return(nproto); /* Too short */
+
+ datalink_check:
+  switch(datalink_type) {
+  case DLT_NULL:
+    if(ntohl(*((u_int32_t*)&packet[eth_offset])) == 2)
+      cprototype = ETH_P_IP;
+    else
+      cprototype = ETH_P_IPV6;
+
+    ip_offset = 4 + eth_offset;
+    break;
+
+    /* Cisco PPP in HDLC-like framing - 50 */
+  case DLT_PPP_SERIAL:
+    chdlc = (struct ndpi_chdlc *) &packet[eth_offset];
+    ip_offset = sizeof(struct ndpi_chdlc); /* CHDLC_OFF = 4 */
+    cprototype = ntohs(chdlc->proto_code);
+    break;
+
+    /* Cisco PPP - 9 or 104 */
+  case DLT_C_HDLC:
+  case DLT_PPP:
+    chdlc = (struct ndpi_chdlc *) &packet[eth_offset];
+    ip_offset = sizeof(struct ndpi_chdlc); /* CHDLC_OFF = 4 */
+    cprototype = ntohs(chdlc->proto_code);
+    break;
+
+    /* IEEE 802.3 Ethernet - 1 */
+  case DLT_EN10MB:
+    ethernet = (struct ndpi_ethhdr *) &packet[eth_offset];
+    ip_offset = sizeof(struct ndpi_ethhdr) + eth_offset;
+    check = ntohs(ethernet->h_proto);
+
+    if(check <= 1500)
+      pyld_eth_len = check;
+    else if(check >= 1536)
+      cprototype = check;
+
+    if(pyld_eth_len != 0) {
+      llc = (struct ndpi_llc_header_snap *)(&packet[ip_offset]);
+      /* check for LLC layer with SNAP extension */
+      if(llc->dsap == SNAP || llc->ssap == SNAP) {
+	cprototype = llc->snap.proto_ID;
+	ip_offset += + 8;
+      }
+      /* No SNAP extension - Spanning Tree pkt must be discarted */
+      else if(llc->dsap == BSTP || llc->ssap == BSTP) {
+	goto v4_warning;
+      }
+    }
+    break;
+
+    /* Linux Cooked Capture - 113 */
+  case DLT_LINUX_SLL:
+    cprototype = (packet[eth_offset+14] << 8) + packet[eth_offset+15];
+    ip_offset = 16 + eth_offset;
+    break;
+
+    /* Radiotap link-layer - 127 */
+  case DLT_IEEE802_11_RADIO:
+    radiotap = (struct ndpi_radiotap_header *) &packet[eth_offset];
+    radio_len = radiotap->len;
+
+    /* Check Bad FCS presence */
+    if((radiotap->flags & BAD_FCS) == BAD_FCS) {
+      workflow->stats.total_discarded_bytes +=  header->len;
+      return(nproto);
+    }
+
+    if(header->caplen < (eth_offset + radio_len + sizeof(struct ndpi_wifi_header)))
+      return(nproto);
+    
+
+    /* Calculate 802.11 header length (variable) */
+    wifi = (struct ndpi_wifi_header*)( packet + eth_offset + radio_len);
+    fc = wifi->fc;
+
+    /* check wifi data presence */
+    if(FCF_TYPE(fc) == WIFI_DATA) {
+      if((FCF_TO_DS(fc) && FCF_FROM_DS(fc) == 0x0) ||
+	 (FCF_TO_DS(fc) == 0x0 && FCF_FROM_DS(fc)))
+	wifi_len = 26; /* + 4 byte fcs */
+    } else   /* no data frames */
+      break;
+
+    /* Check ether_type from LLC */
+    llc = (struct ndpi_llc_header_snap*)(packet + eth_offset + wifi_len + radio_len);
+    if(llc->dsap == SNAP)
+      cprototype = ntohs(llc->snap.proto_ID);
+
+    /* Set IP header offset */
+    ip_offset = wifi_len + radio_len + sizeof(struct ndpi_llc_header_snap) + eth_offset;
+    break;
+
+  case DLT_RAW:
+    ip_offset = eth_offset = 0;
+    break;
+
+  default:
+    /* printf("Unknown datalink %d\n", datalink_type); */
+    return(nproto);
+  }
+
+ether_type_check:
+  recheck_type = 0;
+
+  /* check ether type */
+  switch(cprototype) {
+  case VLAN:
+    vlan_id = ((packet[ip_offset] << 8) + packet[ip_offset+1]) & 0xFFF;
+    cprototype = (packet[ip_offset+2] << 8) + packet[ip_offset+3];
+    ip_offset += 4;
+    vlan_packet = 1;
+
+    // double tagging for 802.1Q
+    while((cprototype == 0x8100) && (((bpf_u_int32)ip_offset) < header->caplen)) {
+      vlan_id = ((packet[ip_offset] << 8) + packet[ip_offset+1]) & 0xFFF;
+      cprototype = (packet[ip_offset+2] << 8) + packet[ip_offset+3];
+      ip_offset += 4;
+    }
+    recheck_type = 1;
+    break;
+
+  case MPLS_UNI:
+  case MPLS_MULTI:
+    mpls.u32 = *((uint32_t *) &packet[ip_offset]);
+    mpls.u32 = ntohl(mpls.u32);
+    workflow->stats.mpls_count++;
+    cprototype = ETH_P_IP, ip_offset += 4;
+
+    while(!mpls.mpls.s) {
+      mpls.u32 = *((uint32_t *) &packet[ip_offset]);
+      mpls.u32 = ntohl(mpls.u32);
+      ip_offset += 4;
+    }
+    recheck_type = 1;
+    break;
+
+  case PPPoE:
+    workflow->stats.pppoe_count++;
+    cprototype = ETH_P_IP;
+    ip_offset += 8;
+    recheck_type = 1;
+    break;
+
+  default:
+    break;
+  }
+
+  // If a recheck of the Ethernet type is needed, jump to the ether_type_check label.
+  // Update the VLAN packet count in the workflow statistics if applicable.
+  // Label for IP header checking and setting operations.
+  // Verify the presence of a complete IP header at the current offset.
+  // Set the IP header pointer to the current packet offset.
+  // Continue processing only if the packet contains Ethernet with IP protocol.
+  // Retrieve fragment offset from the IP header and store it.
+  // Extract the IP protocol type from the IP header.
+  // Check if the captured packet size is less than the actual packet size.
+  // Log a warning message if this is the first time encountering a capture size issue.
+  // <MASK>
+
+  if(iph->version == IPVERSION) {
+    ip_len = ((u_int16_t)iph->ihl * 4);
+    iph6 = NULL;
+
+    if(iph->protocol == IPPROTO_IPV6) {
+      ip_offset += ip_len;
+      if (ip_len > 0)
+        goto iph_check;
+    }
+
+    if((frag_off & 0x1FFF) != 0) {
+      static u_int8_t ipv4_frags_warning_used = 0;
+      workflow->stats.fragmented_count++;
+
+      if(ipv4_frags_warning_used == 0) {
+	if(!workflow->prefs.quiet_mode)
+	  NDPI_LOG(0, workflow->ndpi_struct, NDPI_LOG_DEBUG, "\n\nWARNING: IPv4 fragments are not handled by this demo (nDPI supports them)\n");
+	ipv4_frags_warning_used = 1;
+      }
+
+      workflow->stats.total_discarded_bytes +=  header->len;
+      return(nproto);
+    }
+  } else if(iph->version == 6) {
+    iph6 = (struct ndpi_ipv6hdr *)&packet[ip_offset];
+    proto = iph6->ip6_hdr.ip6_un1_nxt;
+    ip_len = sizeof(struct ndpi_ipv6hdr);
+
+    if(proto == IPPROTO_DSTOPTS /* IPv6 destination option */) {
+      u_int8_t *options = (u_int8_t*)&packet[ip_offset+ip_len];
+      proto = options[0];
+      ip_len += 8 * (options[1] + 1);
+    }
+
+    iph = NULL;
+  } else {
+    static u_int8_t ipv4_warning_used = 0;
+
+  v4_warning:
+    if(ipv4_warning_used == 0) {
+      if(!workflow->prefs.quiet_mode)
+        NDPI_LOG(0, workflow->ndpi_struct, NDPI_LOG_DEBUG,
+		 "\n\nWARNING: only IPv4/IPv6 packets are supported in this demo (nDPI supports both IPv4 and IPv6), all other packets will be discarded\n\n");
+      ipv4_warning_used = 1;
+    }
+    workflow->stats.total_discarded_bytes +=  header->len;
+    return(nproto);
+  }
+
+  if(workflow->prefs.decode_tunnels && (proto == IPPROTO_UDP)) {
+    struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset+ip_len];
+    u_int16_t sport = ntohs(udp->source), dport = ntohs(udp->dest);
+
+    if((sport == GTP_U_V1_PORT) || (dport == GTP_U_V1_PORT)) {
+      /* Check if it's GTPv1 */
+      u_int offset = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+      u_int8_t flags = packet[offset];
+      u_int8_t message_type = packet[offset+1];
+
+      tunnel_type = ndpi_gtp_tunnel;
+
+      if((((flags & 0xE0) >> 5) == 1 /* GTPv1 */) &&
+	 (message_type == 0xFF /* T-PDU */)) {
+
+	ip_offset = ip_offset+ip_len+sizeof(struct ndpi_udphdr)+8; /* GTPv1 header len */
+	if(flags & 0x04) ip_offset += 1; /* next_ext_header is present */
+	if(flags & 0x02) ip_offset += 4; /* sequence_number is present (it also includes next_ext_header and pdu_number) */
+	if(flags & 0x01) ip_offset += 1; /* pdu_number is present */
+
+	iph = (struct ndpi_iphdr *) &packet[ip_offset];
+
+	if(iph->version != IPVERSION) {
+	  // printf("WARNING: not good (packet_id=%u)!\n", (unsigned int)workflow->stats.raw_packet_count);
+	  goto v4_warning;
+	}
+      }
+    } else if((sport == TZSP_PORT) || (dport == TZSP_PORT)) {
+      /* https://en.wikipedia.org/wiki/TZSP */
+      u_int offset           = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+      u_int8_t version       = packet[offset];
+      u_int8_t ts_type       = packet[offset+1];
+      u_int16_t encapsulates = ntohs(*((u_int16_t*)&packet[offset+2]));
+
+      tunnel_type = ndpi_tzsp_tunnel;
+
+      if((version == 1) && (ts_type == 0) && (encapsulates == 1)) {
+	u_int8_t stop = 0;
+
+	offset += 4;
+
+	while((!stop) && (offset < header->caplen)) {
+	  u_int8_t tag_type = packet[offset];
+	  u_int8_t tag_len;
+
+	  switch(tag_type) {
+	  case 0: /* PADDING Tag */
+	    tag_len = 1;
+	    break;
+	  case 1: /* END Tag */
+	    tag_len = 1, stop = 1;
+	    break;
+	  default:
+	    tag_len = packet[offset+1];
+	    break;
+	  }
+
+	  offset += tag_len;
+
+	  if(offset >= header->caplen)
+	    return(nproto); /* Invalid packet */
+	  else {
+	    eth_offset = offset;
+	    goto datalink_check;
+	  }
+	}
+      }
+    } else if(sport == NDPI_CAPWAP_DATA_PORT) {
+      /* We dissect ONLY CAPWAP traffic */
+      u_int offset           = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+
+      if((offset+40) < header->caplen) {
+	u_int16_t msg_len = packet[offset+1] >> 1;
+
+	offset += msg_len;
+
+	if(packet[offset] == 0x02) {
+	  /* IEEE 802.11 Data */
+
+	  offset += 24;
+	  /* LLC header is 8 bytes */
+	  cprototype = ntohs((u_int16_t)*((u_int16_t*)&packet[offset+6]));
+
+	  ip_offset = offset + 8;
+
+	  tunnel_type = ndpi_capwap_tunnel;
+	  goto iph_check;
+	}
+      }
+    }
+  }
+
+  /* process the packet */
+  return(packet_processing(workflow, time, vlan_id, tunnel_type, iph, iph6,
+			   ip_offset, header->caplen - ip_offset,
+			   header->caplen, header, packet, header->ts));
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// example/reader_util.c
+static u_int8_t is_ndpi_proto(struct ndpi_flow_info *flow, u_int16_t id) {
+  if((flow->detected_protocol.master_protocol == id)
+     || (flow->detected_protocol.app_protocol == id))
+    return(1);
+  else
+    return(0);
+}
+
+// the below code fragment can be found in:
+// example/reader_util.c
+static uint32_t crc32_for_byte(uint32_t r) {
+  int j;
+  for(j = 0; j < 8; ++j)
+    r = ((r & 1) ? 0 : (uint32_t)0xEDB88320L) ^ r >> 1;
+  return r ^ (uint32_t)0xFF000000L;
+}
+
+// the below code fragment can be found in:
+// example/ndpiReader.c
+static void runPcapLoop(u_int16_t thread_id) {
+  if((!shutdown_app) && (ndpi_thread_info[thread_id].workflow->pcap_handle != NULL))
+    if(pcap_loop(ndpi_thread_info[thread_id].workflow->pcap_handle, -1, &ndpi_process_packet, (u_char*)&thread_id) < 0)
+      printf("Error while reading pcap file: '%s'\n", pcap_geterr(ndpi_thread_info[thread_id].workflow->pcap_handle));
+}
+
+// the below code fragment can be found in:
+// example/reader_util.c
+static struct ndpi_flow_info *get_ndpi_flow_info6(struct ndpi_workflow * workflow,
+						  u_int16_t vlan_id,
+						  ndpi_packet_tunnel tunnel_type,
+						  const struct ndpi_ipv6hdr *iph6,
+						  u_int16_t ip_offset,
+						  u_int16_t ipsize,
+						  struct ndpi_tcphdr **tcph,
+						  struct ndpi_udphdr **udph,
+						  u_int16_t *sport, u_int16_t *dport,
+						  struct ndpi_id_struct **src,
+						  struct ndpi_id_struct **dst,
+						  u_int8_t *proto,
+						  u_int8_t **payload,
+						  u_int16_t *payload_len,
+						  u_int8_t *src_to_dst_direction,
+                                                  struct timeval when) {
+  struct ndpi_iphdr iph;
+
+  memset(&iph, 0, sizeof(iph));
+  iph.version = IPVERSION;
+  iph.saddr = iph6->ip6_src.u6_addr.u6_addr32[2] + iph6->ip6_src.u6_addr.u6_addr32[3];
+  iph.daddr = iph6->ip6_dst.u6_addr.u6_addr32[2] + iph6->ip6_dst.u6_addr.u6_addr32[3];
+  iph.protocol = iph6->ip6_hdr.ip6_un1_nxt;
+
+  if(iph.protocol == IPPROTO_DSTOPTS /* IPv6 destination option */) {
+    const u_int8_t *options = (const u_int8_t*)iph6 + sizeof(const struct ndpi_ipv6hdr);
+
+    iph.protocol = options[0];
+  }
+
+  return(get_ndpi_flow_info(workflow, 6, vlan_id, tunnel_type,
+			    &iph, iph6, ip_offset, ipsize,
+			    ntohs(iph6->ip6_hdr.ip6_un1_plen),
+			    tcph, udph, sport, dport,
+			    src, dst, proto, payload,
+			    payload_len, src_to_dst_direction, when));
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/netflow.c
+void init_netflow_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask)
+{
+  ndpi_set_bitmask_protocol_detection("NetFlow", ndpi_struct, detection_bitmask, *id,
+				      NDPI_PROTOCOL_NETFLOW,
+				      ndpi_search_netflow,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_UDP_WITH_PAYLOAD,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

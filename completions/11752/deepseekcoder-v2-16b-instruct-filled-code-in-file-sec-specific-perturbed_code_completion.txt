@@ -1,0 +1,415 @@
+OPCODE_NON_SPACE:
+          prolog;
+          match = ((*input == ' ') == (opcode == RE_OPCODE_SPACE));
+          action = match ? ACTION_NONE : ACTION_KILL;
+          fiber->ip += 1;
+          break;
+
+        case RE_OPCODE_DIGIT:
+          prolog;
+          match = isdigit(*input);
+          action = match ? ACTION_NONE : ACTION_KILL;
+          fiber->ip += 1;
+          break;
+
+        case RE_OPCODE_NON_DIGIT:
+          prolog;
+          match = !isdigit(*input);
+          action = match ? ACTION_NONE : ACTION_KILL;
+          fiber->ip += 1;
+          break;
+
+        case RE_OPCODE_MATCH_AT_START:
+          prolog;
+          match = (input == input_data);
+          action = match ? ACTION_NONE : ACTION_KILL;
+          fiber->ip += 1;
+          break;
+
+        case RE_OPCODE_MATCH_AT_END:
+          prolog;
+          match = (input + bytes_matched == input_data + input_forwards_size);
+          action = match ? ACTION_NONE : ACTION_KILL;
+          fiber->ip += 1;
+          break;
+
+        case RE_OPCODE_SPLIT_A:
+        case RE_OPCODE_SPLIT_B:
+          prolog;
+          action = ACTION_CONTINUE;
+          break;
+
+        case RE_OPCODE_JUMP:
+          prolog;
+          fiber->ip += *(int16_t*)(ip + 1);
+          break;
+
+        case RE_OPCODE_MATCH:
+          if (callback != NULL)
+          {
+            match = (input + bytes_matched == input_data + input_forwards_size);
+            if (match)
+            {
+              callback(
+                  context,
+                  input_data,
+                  input - input_data,
+                  input_forwards_size - bytes_matched,
+                  callback_args);
+            }
+          }
+
+          action = ACTION_CONTINUE;
+          break;
+
+        default:
+          action = ACTION_KILL;
+      }
+
+      if (action == ACTION_KILL)
+      {
+        _yr_re_fiber_kill(&fibers, &context->re_fiber_pool, fiber);
+      }
+      else if (action == ACTION_KILL_TAIL)
+      {
+        _yr_re_fiber_kill_tail(&fibers, &context->re_fiber_pool, fiber);
+      }
+      else
+      {
+        fiber->ip += 1;
+        fiber->ip += (flags & RE_FLAGS_BACKWARDS) ? -input_incr : input_incr;
+      }
+    }
+
+    bytes_matched += input_incr;
+    input += input_incr;
+
+    if (flags & RE_FLAGS_BACKWARDS)
+    {
+      if (bytes_matched <= -max_bytes_matched)
+        break;
+    }
+    else
+    {
+      if (bytes_matched >= max_bytes_matched)
+        break;
+    }
+  }
+
+  if (matches != NULL)
+    *matches = fibers.head != NULL ? 1 : 0;
+
+  return ERROR_SUCCESS;
+}
+
+
+//
+// yr_re_match_atom
+//
+// Verifies if the target string matches the pattern
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    char* target              - Target string
+//    size_t target_length      - Length of the target string
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_atom(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    const char* target,
+    size_t target_length)
+{
+  return yr_re_exec(
+      context,
+      re->code,
+      (const uint8_t*) target,
+      target_length,
+      0,
+      re->flags | RE_FLAGS_SCAN,
+      NULL,
+      NULL,
+      NULL);
+}
+
+
+//
+// yr_re_match_stream
+//
+// Verifies if the target stream matches the pattern
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    YR_STREAM* stream         - Target stream
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_stream(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    YR_STREAM* stream)
+{
+  return yr_re_exec(
+      context,
+      re->code,
+      stream->buffer,
+      stream->buffer_size,
+      0,
+      re->flags | RE_FLAGS_SCAN,
+      NULL,
+      NULL,
+      NULL);
+}
+
+
+//
+// yr_re_match_file
+//
+// Verifies if the target file matches the pattern
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    const char* file_name     - Name of the target file
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_file(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    const char* file_name)
+{
+  YR_STREAM stream;
+  int result;
+
+  yr_stream_open(file_name, &stream);
+
+  result = yr_re_match_stream(context, re, &stream);
+
+  yr_stream_close(&stream);
+
+  return result;
+}
+
+
+//
+// yr_re_match_callback
+//
+// Verifies if the target string matches the pattern and calls a callback
+// function for each match found.
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    char* target              - Target string
+//    size_t target_length      - Length of the target string
+//    RE_MATCH_CALLBACK_FUNC callback  - Callback function
+//    void* callback_args       - Callback argument
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_callback(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    const char* target,
+    size_t target_length,
+    RE_MATCH_CALLBACK_FUNC callback,
+    void* callback_args)
+{
+  return yr_re_exec(
+      context,
+      re->code,
+      (const uint8_t*) target,
+      target_length,
+      0,
+      re->flags | RE_FLAGS_SCAN,
+      callback,
+      callback_args,
+      NULL);
+}
+
+
+//
+// yr_re_match_stream_callback
+//
+// Verifies if the target stream matches the pattern and calls a callback
+// function for each match found.
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    YR_STREAM* stream         - Target stream
+//    RE_MATCH_CALLBACK_FUNC callback  - Callback function
+//    void* callback_args       - Callback argument
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_stream_callback(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    YR_STREAM* stream,
+    RE_MATCH_CALLBACK_FUNC callback,
+    void* callback_args)
+{
+  return yr_re_exec(
+      context,
+      re->code,
+      stream->buffer,
+      stream->buffer_size,
+      0,
+      re->flags | RE_FLAGS_SCAN,
+      callback,
+      callback_args,
+      NULL);
+}
+
+
+//
+// yr_re_match_file_callback
+//
+// Verifies if the target file matches the pattern and calls a callback
+// function for each match found.
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    const char* file_name     - Name of the target file
+//    RE_MATCH_CALLBACK_FUNC callback  - Callback function
+//    void* callback_args       - Callback argument
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_file_callback(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    const char* file_name,
+    RE_MATCH_CALLBACK_FUNC callback,
+    void* callback_args)
+{
+  YR_STREAM stream;
+  int result;
+
+  yr_stream_open(file_name, &stream);
+
+  result = yr_re_match_stream_callback(context, re, &stream, callback, callback_args);
+
+  yr_stream_close(&stream);
+
+  return result;
+}
+
+
+//
+// yr_re_match_callback_ex
+//
+// Verifies if the target string matches the pattern and calls a callback
+// function for each match found. The callback function receives additional
+// information about the match.
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    char* target              - Target string
+//    size_t target_length      - Length of the target string
+//    RE_MATCH_CALLBACK_FUNC callback  - Callback function
+//    void* callback_args       - Callback argument
+//    int*  matches             - Pointer to an integer receiving the number
+//                                of matching bytes. Notice that 0 means a
+//                                zero-length match, while no matches is -1.
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_callback_ex(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    const char* target,
+    size_t target_length,
+    RE_MATCH_CALLBACK_FUNC callback,
+    void* callback_args,
+    int* matches)
+{
+  return yr_re_exec(
+      context,
+      re->code,
+      (const uint8_t*) target,
+      target_length,
+      0,
+      re->flags | RE_FLAGS_SCAN,
+      callback,
+      callback_args,
+      matches);
+}
+
+
+//
+// yr_re_match_stream_callback_ex
+//
+// Verifies if the target stream matches the pattern and calls a callback
+// function for each match found. The callback function receives additional
+// information about the match.
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    YR_STREAM* stream         - Target stream
+//    RE_MATCH_CALLBACK_FUNC callback  - Callback function
+//    void* callback_args       - Callback argument
+//    int*  matches             - Pointer to an integer receiving the number
+//                                of matching bytes. Notice that 0 means a
+//                                zero-length match, while no matches is -1.
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr_re_match_stream_callback_ex(
+    YR_SCAN_CONTEXT* context,
+    RE* re,
+    YR_STREAM* stream,
+    RE_MATCH_CALLBACK_FUNC callback,
+    void* callback_args,
+    int* matches)
+{
+  return yr_re_exec(
+      context,
+      re->code,
+      stream->buffer,
+      stream->buffer_size,
+      0,
+      re->flags | RE_FLAGS_SCAN,
+      callback,
+      callback_args,
+      matches);
+}
+
+
+//
+// yr_re_match_file_callback_ex
+//
+// Verifies if the target file matches the pattern and calls a callback
+// function for each match found. The callback function receives additional
+// information about the match.
+//
+// Args:
+//    YR_SCAN_CONTEXT* context  - Scan context
+//    RE* re                    - A pointer to a compiled regexp
+//    const char* file_name     - Name of the target file
+//    RE_MATCH_CALLBACK_FUNC callback  - Callback function
+//    void* callback_args       - Callback argument
+//    int*  matches             - Pointer to an integer receiving the number
+//                                of matching bytes. Notice that 0 means a
+//                                zero-length match, while no matches is -1.
+//
+// Returns:
+//    See return codes for yr_re_exec
+
+int yr

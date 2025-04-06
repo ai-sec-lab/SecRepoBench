@@ -1,0 +1,359 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libavcodec/mdec.c
+static int decode_frame(AVCodecContext *avctx,
+                        void *data, int *got_frame,
+                        AVPacket *avpkt)
+{
+    MDECContext * const a = avctx->priv_data;
+    const uint8_t *buf    = avpkt->data;
+    int buf_size          = avpkt->size;
+    ThreadFrame frame     = { .f = data };
+    int ret;
+
+    if ((ret = ff_thread_get_buffer(avctx, &frame, 0)) < 0)
+        return ret;
+    frame.f->pict_type = AV_PICTURE_TYPE_I;
+    frame.f->key_frame = 1;
+
+    av_fast_padded_malloc(&a->bitstream_buffer, &a->bitstream_buffer_size, buf_size);
+    if (!a->bitstream_buffer)
+        return AVERROR(ENOMEM);
+    a->bbdsp.bswap16_buf((uint16_t *)a->bitstream_buffer, (uint16_t *)buf, (buf_size + 1) / 2);
+    if ((ret = init_get_bits8(&a->gb, a->bitstream_buffer, buf_size)) < 0)
+        return ret;
+
+    /* skip over 4 preamble bytes in stream (typically 0xXX 0xXX 0x00 0x38) */
+    skip_bits(&a->gb, 32);
+
+    a->qscale  = get_bits(&a->gb, 16);
+    a->version = get_bits(&a->gb, 16);
+
+    a->last_dc[0] = a->last_dc[1] = a->last_dc[2] = 128;
+
+    for (a->mb_x = 0; a->mb_x < a->mb_width; a->mb_x++) {
+        for (a->mb_y = 0; a->mb_y < a->mb_height; a->mb_y++) {
+            if ((ret = decode_mb(a, a->block)) < 0)
+                return ret;
+
+            idct_put(a, frame.f, a->mb_x, a->mb_y);
+        }
+    }
+
+    *got_frame = 1;
+
+    return (get_bits_count(&a->gb) + 31) / 32 * 4;
+}
+
+// the below code fragment can be found in:
+// libavcodec/imm4.c
+static int decode_frame(AVCodecContext *avctx, void *data,
+                        int *got_frame, AVPacket *avpkt)
+{
+    IMM4Context *s = avctx->priv_data;
+    GetBitContext *gb = &s->gb;
+    AVFrame *frame = data;
+    unsigned type;
+    int ret, scaled;
+
+    if (avpkt->size <= 32)
+        return AVERROR_INVALIDDATA;
+
+    av_fast_padded_malloc(&s->bitstream, &s->bitstream_size,
+                          FFALIGN(avpkt->size, 4));
+    if (!s->bitstream)
+        return AVERROR(ENOMEM);
+
+    s->bdsp.bswap_buf((uint32_t *)s->bitstream,
+                      (uint32_t *)avpkt->data,
+                      (avpkt->size + 3) >> 2);
+
+    if ((ret = init_get_bits8(gb, s->bitstream, FFALIGN(avpkt->size, 4))) < 0)
+        return ret;
+
+    avctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    avctx->color_range = AVCOL_RANGE_JPEG;
+
+    scaled = avpkt->data[8];
+    if (scaled < 2) {
+        int width, height;
+        int mode = avpkt->data[10];
+
+        switch (mode) {
+        case 1:
+            width = 352;
+            height = 240;
+            break;
+        case 2:
+            width = 704;
+            height = 240;
+            break;
+        case 4:
+            width = 480;
+            height = 704;
+            break;
+        case 17:
+            width = 352;
+            height = 288;
+            break;
+        case 18:
+            width = 704;
+            height = 288;
+            break;
+        default:
+            width = 704;
+            height = 576;
+            break;
+        }
+
+        if (s->changed_size == 1 &&
+            (avctx->width != width || avctx->height != height)) {
+            av_log(avctx, AV_LOG_ERROR, "Frame size change is unsupported.\n");
+            return AVERROR_INVALIDDATA;
+        }
+        ret = ff_set_dimensions(avctx, width, height);
+        if (ret < 0)
+            return ret;
+    }
+
+    s->changed_size = 1;
+    skip_bits_long(gb, 24 * 8);
+    type = get_bits_long(gb, 32);
+    s->hi = get_bits(gb, 16);
+    s->lo = get_bits(gb, 16);
+
+    switch (type) {
+    case 0x19781977:
+        frame->key_frame = 1;
+        frame->pict_type = AV_PICTURE_TYPE_I;
+        break;
+    case 0x12250926:
+        frame->key_frame = 0;
+        frame->pict_type = AV_PICTURE_TYPE_P;
+        break;
+    default:
+        avpriv_request_sample(avctx, "type %X", type);
+        return AVERROR_PATCHWELCOME;
+    }
+
+    if ((ret = ff_get_buffer(avctx, frame, frame->key_frame ? AV_GET_BUFFER_FLAG_REF : 0)) < 0)
+        return ret;
+
+    if (frame->key_frame) {
+        ret = decode_intra(avctx, gb, frame);
+        if (ret < 0)
+            return ret;
+
+        av_frame_unref(s->prev_frame);
+        if ((ret = av_frame_ref(s->prev_frame, frame)) < 0)
+            return ret;
+    } else {
+        if (!s->prev_frame->data[0]) {
+            av_log(avctx, AV_LOG_ERROR, "Missing reference frame.\n");
+            return AVERROR_INVALIDDATA;
+        }
+
+        ret = decode_inter(avctx, gb, frame, s->prev_frame);
+        if (ret < 0)
+            return ret;
+    }
+
+    *got_frame = 1;
+
+    return avpkt->size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/asvdec.c
+static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
+                        AVPacket *avpkt)
+{
+    ASV1Context *const a = avctx->priv_data;
+    const uint8_t *buf = avpkt->data;
+    int buf_size       = avpkt->size;
+    AVFrame *const p = data;
+    int mb_x, mb_y, ret;
+
+    if (buf_size * 8LL < a->mb_height * a->mb_width * 13LL)
+        return AVERROR_INVALIDDATA;
+
+    if ((ret = ff_get_buffer(avctx, p, 0)) < 0)
+        return ret;
+    p->pict_type = AV_PICTURE_TYPE_I;
+    p->key_frame = 1;
+
+    av_fast_padded_malloc(&a->bitstream_buffer, &a->bitstream_buffer_size,
+                          buf_size);
+    if (!a->bitstream_buffer)
+        return AVERROR(ENOMEM);
+
+    if (avctx->codec_id == AV_CODEC_ID_ASV1) {
+        a->bbdsp.bswap_buf((uint32_t *) a->bitstream_buffer,
+                           (const uint32_t *) buf, buf_size / 4);
+    } else {
+        int i;
+        for (i = 0; i < buf_size; i++)
+            a->bitstream_buffer[i] = ff_reverse[buf[i]];
+    }
+
+    init_get_bits(&a->gb, a->bitstream_buffer, buf_size * 8);
+
+    for (mb_y = 0; mb_y < a->mb_height2; mb_y++) {
+        for (mb_x = 0; mb_x < a->mb_width2; mb_x++) {
+            if ((ret = decode_mb(a, a->block)) < 0)
+                return ret;
+
+            idct_put(a, p, mb_x, mb_y);
+        }
+    }
+
+    if (a->mb_width2 != a->mb_width) {
+        mb_x = a->mb_width2;
+        for (mb_y = 0; mb_y < a->mb_height2; mb_y++) {
+            if ((ret = decode_mb(a, a->block)) < 0)
+                return ret;
+
+            idct_put(a, p, mb_x, mb_y);
+        }
+    }
+
+    if (a->mb_height2 != a->mb_height) {
+        mb_y = a->mb_height2;
+        for (mb_x = 0; mb_x < a->mb_width; mb_x++) {
+            if ((ret = decode_mb(a, a->block)) < 0)
+                return ret;
+
+            idct_put(a, p, mb_x, mb_y);
+        }
+    }
+
+    *got_frame = 1;
+
+    emms_c();
+
+    return (get_bits_count(&a->gb) + 31) / 32 * 4;
+}
+
+// the below code fragment can be found in:
+// libavcodec/cljrdec.c
+static int decode_frame(AVCodecContext *avctx,
+                        void *data, int *got_frame,
+                        AVPacket *avpkt)
+{
+    const uint8_t *buf = avpkt->data;
+    int buf_size       = avpkt->size;
+    GetBitContext gb;
+    AVFrame * const p = data;
+    int x, y, ret;
+
+    if (avctx->height <= 0 || avctx->width <= 0) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid width or height\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    if (buf_size / avctx->height < avctx->width) {
+        av_log(avctx, AV_LOG_ERROR,
+               "Resolution larger than buffer size. Invalid header?\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    if ((ret = ff_get_buffer(avctx, p, 0)) < 0)
+        return ret;
+    p->pict_type = AV_PICTURE_TYPE_I;
+    p->key_frame = 1;
+
+    init_get_bits(&gb, buf, buf_size * 8);
+
+    for (y = 0; y < avctx->height; y++) {
+        uint8_t *luma = &p->data[0][y * p->linesize[0]];
+        uint8_t *cb   = &p->data[1][y * p->linesize[1]];
+        uint8_t *cr   = &p->data[2][y * p->linesize[2]];
+        for (x = 0; x < avctx->width; x += 4) {
+            luma[3] = (get_bits(&gb, 5)*33) >> 2;
+            luma[2] = (get_bits(&gb, 5)*33) >> 2;
+            luma[1] = (get_bits(&gb, 5)*33) >> 2;
+            luma[0] = (get_bits(&gb, 5)*33) >> 2;
+            luma += 4;
+            *(cb++) = get_bits(&gb, 6) << 2;
+            *(cr++) = get_bits(&gb, 6) << 2;
+        }
+    }
+
+    *got_frame = 1;
+
+    return buf_size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/jvdec.c
+static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
+                        AVPacket *avpkt)
+{
+    JvContext *s = avctx->priv_data;
+    const uint8_t *buf = avpkt->data;
+    const uint8_t *buf_end = buf + avpkt->size;
+    int video_size, video_type, i, j, ret;
+
+    if (avpkt->size < 6)
+        return AVERROR_INVALIDDATA;
+
+    video_size = AV_RL32(buf);
+    video_type = buf[4];
+    buf += 5;
+
+    if (video_size) {
+        if (video_size < 0 || video_size > avpkt->size - 5) {
+            av_log(avctx, AV_LOG_ERROR, "video size %d invalid\n", video_size);
+            return AVERROR_INVALIDDATA;
+        }
+        if ((ret = ff_reget_buffer(avctx, s->frame)) < 0)
+            return ret;
+
+        if (video_type == 0 || video_type == 1) {
+            GetBitContext gb;
+            init_get_bits(&gb, buf, 8 * video_size);
+
+            for (j = 0; j < avctx->height; j += 8)
+                for (i = 0; i < avctx->width; i += 8)
+                    decode8x8(&gb,
+                              s->frame->data[0] + j * s->frame->linesize[0] + i,
+                              s->frame->linesize[0], &s->bdsp);
+
+            buf += video_size;
+        } else if (video_type == 2) {
+            int v = *buf++;
+            for (j = 0; j < avctx->height; j++)
+                memset(s->frame->data[0] + j * s->frame->linesize[0],
+                       v, avctx->width);
+        } else {
+            av_log(avctx, AV_LOG_WARNING,
+                   "unsupported frame type %i\n", video_type);
+            return AVERROR_INVALIDDATA;
+        }
+    }
+
+    if (buf_end - buf >= AVPALETTE_COUNT * 3) {
+        for (i = 0; i < AVPALETTE_COUNT; i++) {
+            uint32_t pal = AV_RB24(buf);
+            s->palette[i] = 0xFFU << 24 | pal << 2 | ((pal >> 4) & 0x30303);
+            buf += 3;
+        }
+        s->palette_has_changed = 1;
+    }
+
+    if (video_size) {
+        s->frame->key_frame           = 1;
+        s->frame->pict_type           = AV_PICTURE_TYPE_I;
+        s->frame->palette_has_changed = s->palette_has_changed;
+        s->palette_has_changed        = 0;
+        memcpy(s->frame->data[1], s->palette, AVPALETTE_SIZE);
+
+        if ((ret = av_frame_ref(data, s->frame)) < 0)
+            return ret;
+        *got_frame = 1;
+    }
+
+    return avpkt->size;
+}
+

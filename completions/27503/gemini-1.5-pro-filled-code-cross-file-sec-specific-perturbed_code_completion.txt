@@ -1,0 +1,147 @@
+switch (tag)
+		{
+			case ID_SCE:
+			case ID_LFE:
+				// mono or LFE channel
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				// check for valid combinations of element instance tag and channel index
+				switch (p->mNumChannels)
+				{
+					case 1:
+						RequireAction (channelIndex == 0, status = kALAC_ParamError ; goto Exit ;) ;
+						break ;
+					case 2:
+						RequireAction ((channelIndex == 0) || (channelIndex == 1), status = kALAC_ParamError ; goto Exit ;) ;
+						break ;
+					case 3:
+						RequireAction (channelIndex == 2, status = kALAC_ParamError ; goto Exit ;) ;	// LFE must be in position 2
+						break ;
+					case 4:
+						RequireAction ((channelIndex == 2) || (channelIndex == 3), status = kALAC_ParamError ; goto Exit ;) ;
+						break ;
+					case 6:
+						RequireAction ((channelIndex >= 3) && (channelIndex <= 5), status = kALAC_ParamError ; goto Exit ;) ;
+						break ;
+					default:
+						status = kALAC_ParamError ;
+						goto Exit ;
+				}
+
+				if (p->mActiveElements++ >= p->mMaxElements)
+				{
+					status = kALAC_TooManyElements ;
+					goto Exit ;
+				}
+
+				status = DecodeOneChannel (p, bits, sampleBuffer + channelIndex, numSamples, &shiftBits, &extraBits, coefsU, &numU, &modeU, &denShiftU, &pbFactorU, &escapeFlag) ;
+				RequireNoErr (status, goto Exit ;) ;
+
+				// if we used the escape hatch, there may be some extra bits to read
+				if (extraBits > 0)
+					BitBufferAdvance (&shiftBits, extraBits) ;
+
+				// apply shifted values if any
+				if (shiftBits.cur != shiftBits.end)
+				{
+					bytesShifted = (uint8_t) ((shiftBits.end - shiftBits.cur) * 8) ;
+					shift = bytesShifted * 8 ;
+					out32 = (int32_t *) sampleBuffer + channelIndex ;
+
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						val = (int32_t) BitBufferRead (&shiftBits, shift) ;
+						out32 [i] += val ;
+						out32 += numChannels ;
+					}
+				}
+
+				channelIndex++ ;
+				break ;
+
+			case ID_CPE:
+				// stereo channel pair
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				RequireAction (channelIndex < (numChannels - 1), status = kALAC_ParamError ; goto Exit ;) ;
+
+				if (p->mActiveElements++ >= p->mMaxElements)
+				{
+					status = kALAC_TooManyElements ;
+					goto Exit ;
+				}
+
+				status = DecodeOneChannel (p, bits, sampleBuffer + channelIndex, numSamples, &shiftBits, &extraBits, coefsU, &numU, &modeU, &denShiftU, &pbFactorU, &escapeFlag) ;
+				RequireNoErr (status, goto Exit ;) ;
+
+				if (p->mActiveElements++ >= p->mMaxElements)
+				{
+					status = kALAC_TooManyElements ;
+					goto Exit ;
+				}
+
+				status = DecodeOneChannel (p, bits, sampleBuffer + channelIndex + 1, numSamples, &shiftBits, &extraBits, coefsV, &numV, &modeV, &denShiftV, &pbFactorV, &escapeFlag) ;
+				RequireNoErr (status, goto Exit ;) ;
+
+				// if we used the escape hatch, there may be some extra bits to read
+				if (extraBits > 0)
+					BitBufferAdvance (&shiftBits, extraBits) ;
+
+				// apply shifted values if any
+				if (shiftBits.cur != shiftBits.end)
+				{
+					bytesShifted = (uint8_t) ((shiftBits.end - shiftBits.cur) * 8) ;
+					shift = bytesShifted * 8 ;
+					out32 = (int32_t *) sampleBuffer + channelIndex ;
+
+					for (i = 0 ; i < numSamples ; i++)
+					{
+						val = (int32_t) BitBufferRead (&shiftBits, shift) ;
+						out32 [i] += val ;
+
+						val = (int32_t) BitBufferRead (&shiftBits, shift) ;
+						out32 [i+1] += val ;
+
+						out32 += numChannels ;
+					}
+				}
+
+				channelIndex += 2 ;
+				break ;
+
+			case ID_CCE:
+				// coupling channel
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				status = kALAC_UnsupportedElement ;
+				goto Exit ;
+
+			case ID_PCE:
+				// partial coupling channel
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				status = kALAC_UnsupportedElement ;
+				goto Exit ;
+
+			case ID_DSE:
+				// data stream element
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				status = kALAC_UnsupportedElement ;
+				goto Exit ;
+
+			case ID_FIL:
+				// fill element
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				unusedHeader = BitBufferReadSmall (bits, 8) ;
+				for (i = 0 ; i < unusedHeader ; i++)
+					chanBits = BitBufferReadSmall (bits, 8) ;
+				break ;
+
+			case ID_END:
+				// frame end, all done so byte align
+				goto NoMoreChannels ;
+
+			default:
+				// unknown element
+				status = kALAC_UnknownElement ;
+				goto Exit ;
+		}
+
+		// byte align the bitstream
+		BitBufferByteAlign (bits, false) ;

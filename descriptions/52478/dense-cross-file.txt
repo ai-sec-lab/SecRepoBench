@@ -1,0 +1,570 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// code/AssetLib/LWO/LWOAnimation.cpp
+void AnimResolver::ClearAnimRangeSetup() {
+    for (std::list<LWO::Envelope>::iterator it = envelopes.begin(); it != envelopes.end(); ++it) {
+
+        (*it).keys.erase((*it).keys.begin(), (*it).keys.begin() + (*it).old_first);
+        (*it).keys.erase((*it).keys.begin() + (*it).old_last + 1, (*it).keys.end());
+    }
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/LWO/LWOAnimation.cpp
+AnimResolver::AnimResolver(std::list<Envelope> &_envelopes, double tick) :
+        envelopes(_envelopes),
+        sample_rate(0.),
+        envl_x(),
+        envl_y(),
+        envl_z(),
+        end_x(),
+        end_y(),
+        end_z(),
+        flags(),
+        sample_delta() {
+    trans_x = trans_y = trans_z = nullptr;
+    rotat_x = rotat_y = rotat_z = nullptr;
+    scale_x = scale_y = scale_z = nullptr;
+
+    first = last = 150392.;
+
+    // find transformation envelopes
+    for (std::list<LWO::Envelope>::iterator it = envelopes.begin(); it != envelopes.end(); ++it) {
+
+        (*it).old_first = 0;
+        (*it).old_last = (*it).keys.size() - 1;
+
+        if ((*it).keys.empty()) {
+            continue;
+        }
+        if ((int)(*it).type < 1 || (int)(*it).type>EnvelopeType_Unknown) {
+            continue;
+        }
+        switch ((*it).type) {
+        // translation
+        case LWO::EnvelopeType_Position_X:
+            trans_x = &*it;
+            break;
+        case LWO::EnvelopeType_Position_Y:
+            trans_y = &*it;
+            break;
+        case LWO::EnvelopeType_Position_Z:
+            trans_z = &*it;
+            break;
+
+            // rotation
+        case LWO::EnvelopeType_Rotation_Heading:
+            rotat_x = &*it;
+            break;
+        case LWO::EnvelopeType_Rotation_Pitch:
+            rotat_y = &*it;
+            break;
+        case LWO::EnvelopeType_Rotation_Bank:
+            rotat_z = &*it;
+            break;
+
+            // scaling
+        case LWO::EnvelopeType_Scaling_X:
+            scale_x = &*it;
+            break;
+        case LWO::EnvelopeType_Scaling_Y:
+            scale_y = &*it;
+            break;
+        case LWO::EnvelopeType_Scaling_Z:
+            scale_z = &*it;
+            break;
+        default:
+            continue;
+        };
+
+        // convert from seconds to ticks
+        for (std::vector<LWO::Key>::iterator d = (*it).keys.begin(); d != (*it).keys.end(); ++d)
+            (*d).time *= tick;
+
+        // set default animation range (minimum and maximum time value for which we have a keyframe)
+        first = std::min(first, (*it).keys.front().time);
+        last = std::max(last, (*it).keys.back().time);
+    }
+
+    // deferred setup of animation range to increase performance.
+    // typically the application will want to specify its own.
+    need_to_setup = true;
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/LWO/LWOAnimation.cpp
+void AnimResolver::DoInterpolation(std::vector<LWO::Key>::const_iterator cur,
+        LWO::Envelope *envl, double time, float &fill) {
+    if (envl->keys.size() == 1) {
+        fill = envl->keys[0].value;
+        return;
+    }
+
+    // check whether we're at the beginning of the animation track
+    if (cur == envl->keys.begin()) {
+
+        // ok ... this depends on pre behaviour now
+        // we don't need to handle repeat&offset repeat&oszillate here, see UpdateAnimRangeSetup()
+        switch (envl->pre) {
+        case LWO::PrePostBehaviour_Linear:
+            DoInterpolation2(cur, cur + 1, time, fill);
+            return;
+
+        case LWO::PrePostBehaviour_Reset:
+            fill = 0.f;
+            return;
+
+        default: //case LWO::PrePostBehaviour_Constant:
+            fill = (*cur).value;
+            return;
+        }
+    }
+    // check whether we're at the end of the animation track
+    else if (cur == envl->keys.end() - 1 && time > envl->keys.rbegin()->time) {
+        // ok ... this depends on post behaviour now
+        switch (envl->post) {
+        case LWO::PrePostBehaviour_Linear:
+            DoInterpolation2(cur, cur - 1, time, fill);
+            return;
+
+        case LWO::PrePostBehaviour_Reset:
+            fill = 0.f;
+            return;
+
+        default: //case LWO::PrePostBehaviour_Constant:
+            fill = (*cur).value;
+            return;
+        }
+    }
+
+    // Otherwise do a simple interpolation
+    DoInterpolation2(cur - 1, cur, time, fill);
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/LWO/LWOAnimation.h
+namespace Assimp {
+namespace LWO {
+
+// ---------------------------------------------------------------------------
+/** \brief List of recognized LWO envelopes
+ */
+enum EnvelopeType
+{
+    EnvelopeType_Position_X = 0x1,
+    EnvelopeType_Position_Y = 0x2,
+    EnvelopeType_Position_Z = 0x3,
+
+    EnvelopeType_Rotation_Heading = 0x4,
+    EnvelopeType_Rotation_Pitch = 0x5,
+    EnvelopeType_Rotation_Bank = 0x6,
+
+    EnvelopeType_Scaling_X = 0x7,
+    EnvelopeType_Scaling_Y = 0x8,
+    EnvelopeType_Scaling_Z = 0x9,
+
+    // -- currently not yet handled
+    EnvelopeType_Color_R = 0xa,
+    EnvelopeType_Color_G = 0xb,
+    EnvelopeType_Color_B = 0xc,
+
+    EnvelopeType_Falloff_X = 0xd,
+    EnvelopeType_Falloff_Y = 0xe,
+    EnvelopeType_Falloff_Z = 0xf,
+
+    EnvelopeType_Unknown
+};
+
+// ---------------------------------------------------------------------------
+/** \brief List of recognized LWO interpolation modes
+ */
+enum InterpolationType
+{
+    IT_STEP, IT_LINE, IT_TCB, IT_HERM, IT_BEZI, IT_BEZ2
+};
+
+
+// ---------------------------------------------------------------------------
+/** \brief List of recognized LWO pre or post range behaviours
+ */
+enum PrePostBehaviour
+{
+    PrePostBehaviour_Reset        = 0x0,
+    PrePostBehaviour_Constant     = 0x1,
+    PrePostBehaviour_Repeat       = 0x2,
+    PrePostBehaviour_Oscillate    = 0x3,
+    PrePostBehaviour_OffsetRepeat = 0x4,
+    PrePostBehaviour_Linear       = 0x5
+};
+
+// ---------------------------------------------------------------------------
+/** \brief Data structure for a LWO animation keyframe
+ */
+struct Key {
+    Key() AI_NO_EXCEPT
+    : time()
+    , value()
+    , inter(IT_LINE)
+    , params() {
+        // empty
+    }
+
+    //! Current time
+    double time;
+
+    //! Current value
+    float value;
+
+    //! How to interpolate this key with previous key?
+    InterpolationType inter;
+
+    //! Interpolation parameters
+    float params[5];
+
+
+    // for std::find()
+    operator double () {
+        return time;
+    }
+};
+
+// ---------------------------------------------------------------------------
+/** \brief Data structure for a LWO animation envelope
+ */
+struct Envelope {
+    Envelope() AI_NO_EXCEPT
+    : index()
+    , type(EnvelopeType_Unknown)
+    , pre(PrePostBehaviour_Constant)
+    , post(PrePostBehaviour_Constant)
+    , old_first(0)
+    , old_last(0) {
+        // empty
+    }
+
+    //! Index of this envelope
+    unsigned int index;
+
+    //! Type of envelope
+    EnvelopeType type;
+
+    //! Pre- and post-behavior
+    PrePostBehaviour pre,post;
+
+    //! Keyframes for this envelope
+    std::vector<Key> keys;
+
+    // temporary data for AnimResolver
+    size_t old_first,old_last;
+};
+
+// ---------------------------------------------------------------------------
+//! @def AI_LWO_ANIM_FLAG_SAMPLE_ANIMS
+//! Flag for AnimResolver, subsamples the input data with the rate specified
+//! by AnimResolver::SetSampleRate().
+#define AI_LWO_ANIM_FLAG_SAMPLE_ANIMS 0x1
+
+
+// ---------------------------------------------------------------------------
+//! @def AI_LWO_ANIM_FLAG_START_AT_ZERO
+//! Flag for AnimResolver, ensures that the animations starts at zero.
+#define AI_LWO_ANIM_FLAG_START_AT_ZERO 0x2
+
+// ---------------------------------------------------------------------------
+/** @brief Utility class to build Assimp animations from LWO envelopes.
+ *
+ *  Used for both LWO and LWS (MOT also).
+ */
+class AnimResolver
+{
+public:
+
+    // ------------------------------------------------------------------
+    /** @brief Construct an AnimResolver from a given list of envelopes
+     *  @param envelopes Input envelopes. May be empty.
+     *  @param Output tick rate, per second
+     *  @note The input envelopes are possibly modified.
+     */
+    AnimResolver(std::list<Envelope>& envelopes, double tick);
+
+public:
+
+    // ------------------------------------------------------------------
+    /** @brief Extract the bind-pose transformation matrix.
+     *  @param out Receives bind-pose transformation matrix
+     */
+    void ExtractBindPose(aiMatrix4x4& out);
+
+    // ------------------------------------------------------------------
+    /** @brief Extract a node animation channel
+     *  @param out Receives a pointer to a newly allocated node anim.
+     *    If there's just one keyframe defined, *out is set to nullptr and
+     *    no animation channel is computed.
+     *  @param flags Any combination of the AI_LWO_ANIM_FLAG_XXX flags.
+     */
+    void ExtractAnimChannel(aiNodeAnim** out, unsigned int flags = 0);
+
+
+    // ------------------------------------------------------------------
+    /** @brief Set the sampling rate for ExtractAnimChannel().
+     *
+     *  Non-linear interpolations are subsampled with this rate (keys
+     *  per second). Closer sampling positions, if existent, are kept.
+     *  The sampling rate defaults to 0, if this value is not changed and
+     *  AI_LWO_ANIM_FLAG_SAMPLE_ANIMS is specified for ExtractAnimChannel(),
+     *  the class finds a suitable sample rate by itself.
+     */
+    void SetSampleRate(double sr) {
+        sample_rate = sr;
+    }
+
+    // ------------------------------------------------------------------
+    /** @brief Getter for SetSampleRate()
+     */
+    double GetSampleRate() const {
+        return sample_rate;
+    }
+
+    // ------------------------------------------------------------------
+    /** @brief Set the animation time range
+     *
+     *  @param first Time where the animation starts, in ticks
+     *  @param last  Time where the animation ends, in ticks
+     */
+    void SetAnimationRange(double _first, double _last) {
+        first = _first;
+        last  = _last;
+
+        ClearAnimRangeSetup();
+        UpdateAnimRangeSetup();
+    }
+
+protected:
+
+    // ------------------------------------------------------------------
+    /** @brief Build linearly subsampled keys from 3 single envelopes
+     *  @param out Receives output keys
+     *  @param envl_x X-component envelope
+     *  @param envl_y Y-component envelope
+     *  @param envl_z Z-component envelope
+     *  @param flags Any combination of the AI_LWO_ANIM_FLAG_XXX flags.
+     *  @note Up to two input envelopes may be nullptr
+     */
+    void GetKeys(std::vector<aiVectorKey>& out,
+        LWO::Envelope* envl_x,
+        LWO::Envelope* envl_y,
+        LWO::Envelope* envl_z,
+        unsigned int flags);
+
+    // ------------------------------------------------------------------
+    /** @brief Resolve a single animation key by applying the right
+     *  interpolation to it.
+     *  @param cur Current key
+     *  @param envl Envelope working on
+     *  @param time time to be interpolated
+     *  @param fill Receives the interpolated output value.
+     */
+    void DoInterpolation(std::vector<LWO::Key>::const_iterator cur,
+        LWO::Envelope* envl,double time, float& fill);
+
+    // ------------------------------------------------------------------
+    /** @brief Almost the same, except we won't handle pre/post
+     *  conditions here.
+     *  @see DoInterpolation
+     */
+    void DoInterpolation2(std::vector<LWO::Key>::const_iterator beg,
+        std::vector<LWO::Key>::const_iterator end,double time, float& fill);
+
+    // ------------------------------------------------------------------
+    /** @brief Interpolate 2 tracks if one is given
+     *
+     *  @param out Receives extra output keys
+     *  @param key_out Primary output key
+     *  @param time Time to interpolate for
+     */
+    void InterpolateTrack(std::vector<aiVectorKey>& out,
+        aiVectorKey& key_out,double time);
+
+    // ------------------------------------------------------------------
+    /** @brief Subsample an animation track by a given sampling rate
+     *
+     *  @param out Receives output keys. Last key at input defines the
+     *    time where subsampling starts.
+     *  @param time Time to end subsampling at
+     *  @param sample_delta Time delta between two samples
+     */
+    void SubsampleAnimTrack(std::vector<aiVectorKey>& out,
+        double time,double sample_delta);
+
+    // ------------------------------------------------------------------
+    /** @brief Delete all keys which we inserted to match anim setup
+     */
+    void ClearAnimRangeSetup();
+
+    // ------------------------------------------------------------------
+    /** @brief Insert extra keys to match LWO's pre and post behaviours
+     *  in a given time range [first...last]
+     */
+    void UpdateAnimRangeSetup();
+
+private:
+    std::list<Envelope>& envelopes;
+    double sample_rate;
+
+    LWO::Envelope* trans_x, *trans_y, *trans_z;
+    LWO::Envelope* rotat_x, *rotat_y, *rotat_z;
+    LWO::Envelope* scale_x, *scale_y, *scale_z;
+
+    double first, last;
+    bool need_to_setup;
+
+    // temporary storage
+    LWO::Envelope* envl_x, * envl_y, * envl_z;
+    std::vector<LWO::Key>::const_iterator cur_x,cur_y,cur_z;
+    bool end_x, end_y, end_z;
+
+    unsigned int flags;
+    double sample_delta;
+};
+
+} // end namespace LWO
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/LWO/LWOAnimation.cpp
+void AnimResolver::GetKeys(std::vector<aiVectorKey> &out,
+        LWO::Envelope *_envl_x,
+        LWO::Envelope *_envl_y,
+        LWO::Envelope *_envl_z,
+        unsigned int _flags) {
+    envl_x = _envl_x;
+    envl_y = _envl_y;
+    envl_z = _envl_z;
+    flags = _flags;
+
+    // generate default channels if none are given
+    LWO::Envelope def_x, def_y, def_z;
+    LWO::Key key_dummy;
+    key_dummy.time = 0.f;
+    if ((envl_x && envl_x->type == LWO::EnvelopeType_Scaling_X) ||
+            (envl_y && envl_y->type == LWO::EnvelopeType_Scaling_Y) ||
+            (envl_z && envl_z->type == LWO::EnvelopeType_Scaling_Z)) {
+        key_dummy.value = 1.f;
+    } else
+        key_dummy.value = 0.f;
+
+    if (!envl_x) {
+        envl_x = &def_x;
+        envl_x->keys.push_back(key_dummy);
+    }
+    if (!envl_y) {
+        envl_y = &def_y;
+        envl_y->keys.push_back(key_dummy);
+    }
+    if (!envl_z) {
+        envl_z = &def_z;
+        envl_z->keys.push_back(key_dummy);
+    }
+
+    // guess how many keys we'll get
+    size_t reserve;
+    double sr = 1.;
+    if (flags & AI_LWO_ANIM_FLAG_SAMPLE_ANIMS) {
+        if (!sample_rate)
+            sr = 100.f;
+        else
+            sr = sample_rate;
+        sample_delta = 1.f / sr;
+
+        reserve = (size_t)(
+                std::max(envl_x->keys.rbegin()->time,
+                        std::max(envl_y->keys.rbegin()->time, envl_z->keys.rbegin()->time)) *
+                sr);
+    } else
+        reserve = std::max(envl_x->keys.size(), std::max(envl_x->keys.size(), envl_z->keys.size()));
+    out.reserve(reserve + (reserve >> 1));
+
+    // Iterate through all three arrays at once - it's tricky, but
+    // rather interesting to implement.
+    cur_x = envl_x->keys.begin();
+    cur_y = envl_y->keys.begin();
+    cur_z = envl_z->keys.begin();
+
+    end_x = end_y = end_z = false;
+    while (true) {
+
+        aiVectorKey fill;
+
+        if ((*cur_x).time == (*cur_y).time && (*cur_x).time == (*cur_z).time) {
+
+            // we have a keyframe for all of them defined .. this means
+            // we don't need to interpolate here.
+            fill.mTime = (*cur_x).time;
+
+            fill.mValue.x = (*cur_x).value;
+            fill.mValue.y = (*cur_y).value;
+            fill.mValue.z = (*cur_z).value;
+
+            // subsample animation track
+            if (flags & AI_LWO_ANIM_FLAG_SAMPLE_ANIMS) {
+                //SubsampleAnimTrack(out,cur_x, cur_y, cur_z, d, sample_delta);
+            }
+        }
+
+        // Find key with lowest time value
+        else if ((*cur_x).time <= (*cur_y).time && !end_x) {
+
+            if ((*cur_z).time <= (*cur_x).time && !end_z) {
+                InterpolateTrack(out, fill, (*cur_z).time);
+            } else {
+                InterpolateTrack(out, fill, (*cur_x).time);
+            }
+        } else if ((*cur_z).time <= (*cur_y).time && !end_y) {
+            InterpolateTrack(out, fill, (*cur_y).time);
+        } else if (!end_y) {
+            // welcome on the server, y
+            InterpolateTrack(out, fill, (*cur_y).time);
+        } else {
+            // we have reached the end of at least 2 channels,
+            // only one is remaining. Extrapolate the 2.
+            if (end_y) {
+                InterpolateTrack(out, fill, (end_x ? (*cur_z) : (*cur_x)).time);
+            } else if (end_x) {
+                InterpolateTrack(out, fill, (end_z ? (*cur_y) : (*cur_z)).time);
+            } else { // if (end_z)
+                InterpolateTrack(out, fill, (end_y ? (*cur_x) : (*cur_y)).time);
+            }
+        }
+        double lasttime = fill.mTime;
+        out.push_back(fill);
+
+        if (lasttime >= (*cur_x).time) {
+            if (cur_x != envl_x->keys.end() - 1)
+                ++cur_x;
+            else
+                end_x = true;
+        }
+        if (lasttime >= (*cur_y).time) {
+            if (cur_y != envl_y->keys.end() - 1)
+                ++cur_y;
+            else
+                end_y = true;
+        }
+        if (lasttime >= (*cur_z).time) {
+            if (cur_z != envl_z->keys.end() - 1)
+                ++cur_z;
+            else
+                end_z = true;
+        }
+
+        if (end_x && end_y && end_z) /* finished? */
+            break;
+    }
+
+    if (flags & AI_LWO_ANIM_FLAG_START_AT_ZERO) {
+        for (std::vector<aiVectorKey>::iterator it = out.begin(); it != out.end(); ++it)
+            (*it).mTime -= first;
+    }
+}
+

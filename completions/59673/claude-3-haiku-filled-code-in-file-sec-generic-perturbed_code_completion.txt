@@ -1,0 +1,74 @@
+static inline void mpeg_motion_lowres(MpegEncContext *s,
+                                     uint8_t *dest_y, uint8_t *dest_cb,
+                                     uint8_t *dest_cr,
+                                     int field_based, int bottom_field,
+                                     int field_select,
+                                     uint8_t *const *ref_picture,
+                                     const h264_chroma_mc_func *pix_op,
+                                     int motion_x, int motion_y,
+                                     int h, int mb_y)
+{
+    const int lowres   = s->avctx->lowres;
+    const int op_index = FFMIN(lowres, 3);
+    const int s_mask   = (2 << lowres) - 1;
+    int emu = 0;
+    int sx, sy;
+
+    if (s->quarter_sample) {
+        motion_x /= 2;
+        motion_y /= 2;
+    }
+
+    sx = motion_x & s_mask;
+    sy = motion_y & s_mask;
+    src_x += motion_x >> lowres + 1;
+    src_y += motion_y >> lowres + 1;
+
+    src   += src_y * stride + src_x;
+
+    if ((unsigned)src_x > FFMAX( h_edge_pos - (!!sx) - w,                 0) ||
+        (unsigned)src_y > FFMAX((v_edge_pos >> field_based) - (!!sy) - h, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, src,
+                                 s->linesize, s->linesize,
+                                 w + 1, (h + 1) << field_based,
+                                 src_x, src_y * (1 << field_based),
+                                 h_edge_pos, v_edge_pos);
+        src = s->sc.edge_emu_buffer;
+        emu = 1;
+    }
+
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+    if (field_select)
+        src += s->linesize;
+    pix_op[op_index](dest_y, src, stride, h, sx, sy);
+    if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+        int uvsrc_x = src_x >> s->chroma_x_shift;
+        int uvsrc_y = src_y >> s->chroma_y_shift;
+        uint8_t *ptr_cb = ref_picture[1] + uvsrc_y * s->uvlinesize + uvsrc_x;
+        uint8_t *ptr_cr = ref_picture[2] + uvsrc_y * s->uvlinesize + uvsrc_x;
+
+        if (emu) {
+            s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cb,
+                                     s->uvlinesize, s->uvlinesize,
+                                     9, 9,
+                                     uvsrc_x, uvsrc_y,
+                                     h_edge_pos >> 1, v_edge_pos >> 1);
+            ptr_cb = s->sc.edge_emu_buffer;
+
+            s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cr,
+                                     s->uvlinesize, s->uvlinesize,
+                                     9, 9,
+                                     uvsrc_x, uvsrc_y,
+                                     h_edge_pos >> 1, v_edge_pos >> 1);
+            ptr_cr = s->sc.edge_emu_buffer;
+        }
+
+        sx = (sx << 2) >> lowres;
+        sy = (sy << 2) >> lowres;
+        if (field_select)
+            ptr_cb += s->uvlinesize, ptr_cr += s->uvlinesize;
+        pix_op[op_index](dest_cb, ptr_cb, s->uvlinesize, (h + 1) >> s->chroma_y_shift, sx, sy);
+        pix_op[op_index](dest_cr, ptr_cr, s->uvlinesize, (h + 1) >> s->chroma_y_shift, sx, sy);
+    }
+}

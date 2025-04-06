@@ -1,0 +1,204 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/isomedia/box_code_base.c
+GF_Err stss_box_read(GF_Box *s, GF_BitStream *bs)
+{
+	u32 i;
+	GF_SyncSampleBox *ptr = (GF_SyncSampleBox *)s;
+
+	ISOM_DECREASE_SIZE(ptr, 4);
+	ptr->nb_entries = gf_bs_read_u32(bs);
+	if (ptr->size / 4 <  ptr->nb_entries || (u64)ptr->nb_entries > (u64)SIZE_MAX/sizeof(u32)) {
+		GF_LOG(GF_LOG_ERROR, GF_LOG_CONTAINER, ("[iso file] Invalid number of entries %d in stss\n", ptr->nb_entries));
+		return GF_ISOM_INVALID_FILE;
+	}
+
+	ptr->alloc_size = ptr->nb_entries;
+	ptr->sampleNumbers = (u32 *) gf_malloc( ptr->alloc_size * sizeof(u32));
+	if (ptr->sampleNumbers == NULL) return GF_OUT_OF_MEM;
+
+	for (i = 0; i < ptr->nb_entries; i++) {
+		ptr->sampleNumbers[i] = gf_bs_read_u32(bs);
+	}
+	return GF_OK;
+}
+
+// the below code fragment can be found in:
+// src/isomedia/box_code_base.c
+GF_Err saiz_box_read(GF_Box *s, GF_BitStream *bs)
+{
+	GF_SampleAuxiliaryInfoSizeBox*ptr = (GF_SampleAuxiliaryInfoSizeBox*)s;
+
+	if (ptr->flags & 1) {
+		ISOM_DECREASE_SIZE(ptr, 8);
+		ptr->aux_info_type = gf_bs_read_u32(bs);
+		ptr->aux_info_type_parameter = gf_bs_read_u32(bs);
+	}
+	ISOM_DECREASE_SIZE(ptr, 5);
+	ptr->default_sample_info_size = gf_bs_read_u8(bs);
+	ptr->sample_count = gf_bs_read_u32(bs);
+
+	if (ptr->default_sample_info_size == 0) {
+		if (ptr->size < ptr->sample_count)
+		    return GF_ISOM_INVALID_FILE;
+
+		ptr->sample_info_size = gf_malloc(sizeof(u8)*ptr->sample_count);
+		ptr->sample_alloc = ptr->sample_count;
+		if (!ptr->sample_info_size)
+		    return GF_OUT_OF_MEM;
+
+		ISOM_DECREASE_SIZE(ptr, ptr->sample_count);
+		gf_bs_read_data(bs, (char *) ptr->sample_info_size, ptr->sample_count);
+	}
+	return GF_OK;
+}
+
+// the below code fragment can be found in:
+// src/isomedia/box_code_base.c
+GF_Err saio_box_read(GF_Box *s, GF_BitStream *bs)
+{
+	GF_SampleAuxiliaryInfoOffsetBox *ptr = (GF_SampleAuxiliaryInfoOffsetBox *)s;
+
+	if (ptr->flags & 1) {
+		ISOM_DECREASE_SIZE(ptr, 8);
+		ptr->aux_info_type = gf_bs_read_u32(bs);
+		ptr->aux_info_type_parameter = gf_bs_read_u32(bs);
+	}
+	ISOM_DECREASE_SIZE(ptr, 4);
+	ptr->entry_count = gf_bs_read_u32(bs);
+
+	if (ptr->entry_count) {
+		u32 i;
+		if (ptr->size / (ptr->version == 0 ? 4 : 8) < ptr->entry_count || (u64)ptr->entry_count > (u64)SIZE_MAX/sizeof(u64))
+			return GF_ISOM_INVALID_FILE;
+		ptr->offsets = gf_malloc(sizeof(u64)*ptr->entry_count);
+		if (!ptr->offsets)
+			return GF_OUT_OF_MEM;
+		ptr->entry_alloc = ptr->entry_count;
+		if (ptr->version==0) {
+			ISOM_DECREASE_SIZE(ptr, 4*ptr->entry_count);
+			for (i=0; i<ptr->entry_count; i++)
+				ptr->offsets[i] = gf_bs_read_u32(bs);
+		} else {
+			ISOM_DECREASE_SIZE(ptr, 8*ptr->entry_count);
+			for (i=0; i<ptr->entry_count; i++)
+				ptr->offsets[i] = gf_bs_read_u64(bs);
+		}
+	}
+	return GF_OK;
+}
+
+// the below code fragment can be found in:
+// src/isomedia/box_code_base.c
+GF_Err stsz_box_size(GF_Box *s)
+{
+	u32 i, fieldSize, size;
+	GF_SampleSizeBox *ptr = (GF_SampleSizeBox *)s;
+
+	ptr->size += 8;
+	if (!ptr->sampleCount) return GF_OK;
+
+	//regular table
+	if (ptr->type == GF_ISOM_BOX_TYPE_STSZ) {
+		if (ptr->sampleSize) return GF_OK;
+		ptr->size += (4 * ptr->sampleCount);
+		return GF_OK;
+	}
+
+	fieldSize = 4;
+	size = ptr->sizes[0];
+
+	for (i=0; i < ptr->sampleCount; i++) {
+		if (ptr->sizes[i] <= 0xF) continue;
+		//switch to 8-bit table
+		else if (ptr->sizes[i] <= 0xFF) {
+			fieldSize = 8;
+		}
+		//switch to 16-bit table
+		else if (ptr->sizes[i] <= 0xFFFF) {
+			fieldSize = 16;
+		}
+		//switch to 32-bit table
+		else {
+			fieldSize = 32;
+		}
+
+		//check the size
+		if (size != ptr->sizes[i]) size = 0;
+	}
+	//if all samples are of the same size, switch to regular (more compact)
+	if (size) {
+		ptr->type = GF_ISOM_BOX_TYPE_STSZ;
+		ptr->sampleSize = size;
+		gf_free(ptr->sizes);
+		ptr->sizes = NULL;
+	}
+
+	if (fieldSize == 32) {
+		//oops, doesn't fit in a compact table
+		ptr->type = GF_ISOM_BOX_TYPE_STSZ;
+		ptr->size += (4 * ptr->sampleCount);
+		return GF_OK;
+	}
+
+	//make sure we are a compact table (no need to change the mem representation)
+	ptr->type = GF_ISOM_BOX_TYPE_STZ2;
+	ptr->sampleSize = fieldSize;
+	if (fieldSize == 4) {
+		//do not forget the 0 padding field for odd count
+		ptr->size += (ptr->sampleCount + 1) / 2;
+	} else {
+		ptr->size += (ptr->sampleCount) * (fieldSize/8);
+	}
+	return GF_OK;
+}
+
+// the below code fragment can be found in:
+// src/isomedia/box_code_base.c
+GF_Err stsz_box_write(GF_Box *s, GF_BitStream *bs)
+{
+	GF_Err e;
+	u32 i;
+	GF_SampleSizeBox *ptr = (GF_SampleSizeBox *)s;
+
+	e = gf_isom_full_box_write(s, bs);
+	if (e) return e;
+	//in both versions this is still valid
+	if (ptr->type == GF_ISOM_BOX_TYPE_STSZ) {
+		gf_bs_write_u32(bs, ptr->sampleSize);
+	} else {
+		gf_bs_write_u24(bs, 0);
+		gf_bs_write_u8(bs, ptr->sampleSize);
+	}
+	gf_bs_write_u32(bs, ptr->sampleCount);
+
+	if (ptr->type == GF_ISOM_BOX_TYPE_STSZ) {
+		if (! ptr->sampleSize) {
+			for (i = 0; i < ptr->sampleCount; i++) {
+				gf_bs_write_u32(bs, ptr->sizes ? ptr->sizes[i] : 0);
+			}
+		}
+	} else {
+		for (i = 0; i < ptr->sampleCount; ) {
+			switch (ptr->sampleSize) {
+			case 4:
+				gf_bs_write_int(bs, ptr->sizes[i], 4);
+				if (i+1 < ptr->sampleCount) {
+					gf_bs_write_int(bs, ptr->sizes[i+1], 4);
+				} else {
+					//0 padding in odd sample count
+					gf_bs_write_int(bs, 0, 4);
+				}
+				i += 2;
+				break;
+			default:
+				gf_bs_write_int(bs, ptr->sizes[i], ptr->sampleSize);
+				i += 1;
+				break;
+			}
+		}
+	}
+	return GF_OK;
+}
+

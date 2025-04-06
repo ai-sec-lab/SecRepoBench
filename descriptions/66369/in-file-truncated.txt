@@ -1,0 +1,752 @@
+<｜begin▁of▁sentence｜>/*
+Copyright (c) 2012-2020, 2022-2024 Genome Research Ltd.
+Author: James Bonfield <jkb@sanger.ac.uk>
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+   1. Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+   3. Neither the names Genome Research Ltd and Wellcome Trust Sanger
+Institute nor the names of its contributors may be used to endorse or promote
+products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY GENOME RESEARCH LTD AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL GENOME RESEARCH LTD OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
+#include <config.h>
+
+#include <stdio.h>
+#include <errno.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <zlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <math.h>
+#include <inttypes.h>
+#include <ctype.h>
+
+#include "cram.h"
+#include "os.h"
+#include "../sam_internal.h" // for nibble2base
+#include "../htslib/hts.h"
+#include "../htslib/hts_endian.h"
+#include "../textutils_internal.h"
+
+KHASH_MAP_INIT_STR(m_s2u64, uint64_t)
+
+#define Z_CRAM_STRAT Z_FILTERED
+//#define Z_CRAM_STRAT Z_RLE
+//#define Z_CRAM_STRAT Z_HUFFMAN_ONLY
+//#define Z_CRAM_STRAT Z_DEFAULT_STRATEGY
+
+static int process_one_read(cram_fd *fd, cram_container *c,
+                            cram_slice *s, cram_record *cr,
+                            bam_seq_t *b, int rnum, kstring_t *MD,
+                            int embed_ref, int no_ref);
+
+/*
+ * Returns index of val into key.
+ * Basically strchr(key, val)-key;
+ */
+static int sub_idx(char *key, char val) {
+    int i;
+
+    for (i = 0; i < 4 && *key++ != val; i++);
+    return i;
+}
+
+/*
+ * Encodes a compression header block into a generic cram_block structure.
+ *
+ * Returns cram_block ptr on success
+ *         NULL on failure
+ */
+cram_block *cram_encode_compression_header(cram_fd *fd, cram_container *c,
+                                           cram_block_compression_hdr *h,
+                                           int embed_ref) {
+    cram_block *cb  = cram_new_block(COMPRESSION_HEADER, 0);
+    cram_block *map = cram_new_block(COMPRESSION_HEADER, 0);
+    int i, mc, r = 0;
+
+    int no_ref = c->no_ref;
+
+    if (!cb || !map)
+        return NULL;
+
+    /*
+     * This is a concatenation of several blocks of data:
+     * header + landmarks, preservation map, read encoding map, and the tag
+     * encoding map.
+     * All 4 are variable sized and we need to know how large these are
+     * before creating the compression header itself as this starts with
+     * the total size (stored as a variable length string).
+     */
+
+    // Duplicated from container itself, and removed in 1.1
+    if (CRAM_MAJOR_VERS(fd->version) == 1) {
+        r |= itf8_put_blk(cb, h->ref_seq_id);
+        r |= itf8_put_blk(cb, h->ref_seq_start);
+        r |= itf8_put_blk(cb, h->ref_seq_span);
+        r |= itf8_put_blk(cb, h->num_records);
+        r |= itf8_put_blk(cb, h->num_landmarks);
+        for (i = 0; i < h->num_landmarks; i++) {
+            r |= itf8_put_blk(cb, h->landmark[i]);
+        }
+    }
+
+    if (h->preservation_map) {
+        kh_destroy(map, h->preservation_map);
+        h->preservation_map = NULL;
+    }
+
+    /* Create in-memory preservation map */
+    /* FIXME: should create this when we create the container */
+    if (c->num_records > 0) {
+        khint_t k;
+        int r;
+
+        if (!(h->preservation_map = kh_init(map)))
+            return NULL;
+
+        k = kh_put(map, h->preservation_map, "RN", &r);
+        if (-1 == r) return NULL;
+        kh_val(h->preservation_map, k).i = !fd->lossy_read_names;
+
+        if (CRAM_MAJOR_VERS(fd->version) == 1) {
+            k = kh_put(map, h->preservation_map, "PI", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 0;
+
+            k = kh_put(map, h->preservation_map, "UI", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 1;
+
+            k = kh_put(map, h->preservation_map, "MI", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 1;
+
+        } else {
+            // Technically SM was in 1.0, but wasn't in Java impl.
+            k = kh_put(map, h->preservation_map, "SM", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 0;
+
+            k = kh_put(map, h->preservation_map, "TD", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 0;
+
+            k = kh_put(map, h->preservation_map, "AP", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = h->AP_delta;
+
+            if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+                k = kh_put(map, h->preservation_map, "QO", &r);
+                if (-1 == r) return NULL;
+                kh_val(h->preservation_map, k).i = h->qs_seq_orient;
+            }
+
+            if (no_ref || embed_ref>0) {
+                // Reference Required == No
+                k = kh_put(map, h->preservation_map, "RR", &r);
+                if (-1 == r) return NULL;
+                kh_val(h->preservation_map, k).i = 0;
+            }
+        }
+    }
+
+    /* Encode preservation map; could collapse this and above into one */
+    mc = 0;
+    BLOCK_SIZE(map) = 0;
+    if (h->preservation_map) {
+        khint_t k;
+
+        for (k = kh_begin(h->preservation_map);
+             k != kh_end(h->preservation_map);
+             k++) {
+            const char *key;
+            khash_t(map) *pmap = h->preservation_map;
+
+
+            if (!kh_exist(pmap, k))
+                continue;
+
+            key = kh_key(pmap, k);
+            BLOCK_APPEND(map, key, 2);
+
+            switch(CRAM_KEY(key[0], key[1])) {
+            case CRAM_KEY('M','I'):
+            case CRAM_KEY('U','I'):
+            case CRAM_KEY('P','I'):
+            case CRAM_KEY('A','P'):
+            case CRAM_KEY('R','N'):
+            case CRAM_KEY('R','R'):
+            case CRAM_KEY('Q','O'):
+                BLOCK_APPEND_CHAR(map, kh_val(pmap, k).i);
+                break;
+
+            case CRAM_KEY('S','M'): {
+                char smat[5], *mp = smat;
+                // Output format is for order ACGTN (minus ref base)
+                // to store the code value 0-3 for each symbol.
+                //
+                // Note this is different to storing the symbols in order
+                // that the codes occur from 0-3, which is what we used to
+                // do.  (It didn't matter as we always had a fixed table in
+                // the order.)
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[0], 'C') << 6) |
+                    (sub_idx(h->substitution_matrix[0], 'G') << 4) |
+                    (sub_idx(h->substitution_matrix[0], 'T') << 2) |
+                    (sub_idx(h->substitution_matrix[0], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[1], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[1], 'G') << 4) |
+                    (sub_idx(h->substitution_matrix[1], 'T') << 2) |
+                    (sub_idx(h->substitution_matrix[1], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[2], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[2], 'C') << 4) |
+                    (sub_idx(h->substitution_matrix[2], 'T') << 2) |
+                    (sub_idx(h->substitution_matrix[2], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[3], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[3], 'C') << 4) |
+                    (sub_idx(h->substitution_matrix[3], 'G') << 2) |
+                    (sub_idx(h->substitution_matrix[3], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[4], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[4], 'C') << 4) |
+                    (sub_idx(h->substitution_matrix[4], 'G') << 2) |
+                    (sub_idx(h->substitution_matrix[4], 'T') << 0);
+                BLOCK_APPEND(map, smat, 5);
+                break;
+            }
+
+            case CRAM_KEY('T','D'): {
+                r |= (fd->vv.varint_put32_blk(map, BLOCK_SIZE(h->TD_blk)) <= 0);
+                BLOCK_APPEND(map,
+                             BLOCK_DATA(h->TD_blk),
+                             BLOCK_SIZE(h->TD_blk));
+                break;
+            }
+
+            default:
+                hts_log_warning("Unknown preservation key '%.2s'", key);
+                break;
+            }
+
+            mc++;
+        }
+    }
+    r |= (fd->vv.varint_put32_blk(cb, BLOCK_SIZE(map) + fd->vv.varint_size(mc)) <= 0);
+    r |= (fd->vv.varint_put32_blk(cb, mc) <= 0);
+    BLOCK_APPEND(cb, BLOCK_DATA(map), BLOCK_SIZE(map));
+
+    /* rec encoding map */
+    mc = 0;
+    BLOCK_SIZE(map) = 0;
+    if (h->codecs[DS_BF]) {
+        if (-1 == h->codecs[DS_BF]->store(h->codecs[DS_BF], map, "BF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_CF]) {
+        if (-1 == h->codecs[DS_CF]->store(h->codecs[DS_CF], map, "CF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RL]) {
+        if (-1 == h->codecs[DS_RL]->store(h->codecs[DS_RL], map, "RL",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_AP]) {
+        if (-1 == h->codecs[DS_AP]->store(h->codecs[DS_AP], map, "AP",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RG]) {
+        if (-1 == h->codecs[DS_RG]->store(h->codecs[DS_RG], map, "RG",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_MF]) {
+        if (-1 == h->codecs[DS_MF]->store(h->codecs[DS_MF], map, "MF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_NS]) {
+        if (-1 == h->codecs[DS_NS]->store(h->codecs[DS_NS], map, "NS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_NP]) {
+        if (-1 == h->codecs[DS_NP]->store(h->codecs[DS_NP], map, "NP",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TS]) {
+        if (-1 == h->codecs[DS_TS]->store(h->codecs[DS_TS], map, "TS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_NF]) {
+        if (-1 == h->codecs[DS_NF]->store(h->codecs[DS_NF], map, "NF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TC]) {
+        if (-1 == h->codecs[DS_TC]->store(h->codecs[DS_TC], map, "TC",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TN]) {
+        if (-1 == h->codecs[DS_TN]->store(h->codecs[DS_TN], map, "TN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TL]) {
+        if (-1 == h->codecs[DS_TL]->store(h->codecs[DS_TL], map, "TL",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_FN]) {
+        if (-1 == h->codecs[DS_FN]->store(h->codecs[DS_FN], map, "FN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_FC]) {
+        if (-1 == h->codecs[DS_FC]->store(h->codecs[DS_FC], map, "FC",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_FP]) {
+        if (-1 == h->codecs[DS_FP]->store(h->codecs[DS_FP], map, "FP",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_BS]) {
+        if (-1 == h->codecs[DS_BS]->store(h->codecs[DS_BS], map, "BS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_IN]) {
+        if (-1 == h->codecs[DS_IN]->store(h->codecs[DS_IN], map, "IN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_DL]) {
+        if (-1 == h->codecs[DS_DL]->store(h->codecs[DS_DL], map, "DL",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_BA]) {
+        if (-1 == h->codecs[DS_BA]->store(h->codecs[DS_BA], map, "BA",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_BB]) {
+        if (-1 == h->codecs[DS_BB]->store(h->codecs[DS_BB], map, "BB",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_MQ]) {
+        if (-1 == h->codecs[DS_MQ]->store(h->codecs[DS_MQ], map, "MQ",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RN]) {
+        if (-1 == h->codecs[DS_RN]->store(h->codecs[DS_RN], map, "RN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_QS]) {
+        if (-1 == h->codecs[DS_QS]->store(h->codecs[DS_QS], map, "QS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_QQ]) {
+        if (-1 == h->codecs[DS_QQ]->store(h->codecs[DS_QQ], map, "QQ",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RI]) {
+        if (-1 == h->codecs[DS_RI]->store(h->codecs[DS_RI], map, "RI",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (CRAM_MAJOR_VERS(fd->version) != 1) {
+        if (h->codecs[DS_SC]) {
+            if (-1 == h->codecs[DS_SC]->store(h->codecs[DS_SC], map, "SC",
+                                              fd->version))
+                return NULL;
+            mc++;
+        }
+        if (h->codecs[DS_RS]) {
+            if (-1 == h->codecs[DS_RS]->store(h->codecs[DS_RS], map, "RS",
+                                              fd->version))
+                return NULL;
+            mc++;
+        }
+        if (h->codecs[DS_PD]) {
+            if (-1 == h->codecs[DS_PD]->store(h->codecs[DS_PD], map, "PD",
+                                              fd->version))
+                return NULL;
+            mc++;
+        }
+        if (h->codecs[DS_HC]) {
+            if (-1 == h->codecs[DS_HC]->store(h->codecs[DS_HC], map, "HC",
+                                              fd->version))
+                return NULL;
+            mc++;
+        }
+    }
+    if (h->codecs[DS_TM]) {
+        if (-1 == h->codecs[DS_TM]->store(h->codecs[DS_TM], map, "TM",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TV]) {
+        if (-1 == h->codecs[DS_TV]->store(h->codecs[DS_TV], map, "TV",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    r |= (fd->vv.varint_put32_blk(cb, BLOCK_SIZE(map) + fd->vv.varint_size(mc)) <= 0);
+    r |= (fd->vv.varint_put32_blk(cb, mc) <= 0);
+    BLOCK_APPEND(cb, BLOCK_DATA(map), BLOCK_SIZE(map));
+
+    /* tag encoding map */
+    mc = 0;
+    BLOCK_SIZE(map) = 0;
+    if (c->tags_used) {
+        khint_t k;
+
+        for (k = kh_begin(c->tags_used); k != kh_end(c->tags_used); k++) {
+            int key;
+            if (!kh_exist(c->tags_used, k))
+                continue;
+
+            key = kh_key(c->tags_used, k);
+            cram_codec *cd = kh_val(c->tags_used, k)->codec;
+
+            r |= (fd->vv.varint_put32_blk(map, key) <= 0);
+            if (-1 == cd->store(cd, map, NULL, fd->version))
+                return NULL;
+
+            mc++;
+        }
+    }
+
+    r |= (fd->vv.varint_put32_blk(cb, BLOCK_SIZE(map) + fd->vv.varint_size(mc)) <= 0);
+    r |= (fd->vv.varint_put32_blk(cb, mc) <= 0);
+    BLOCK_APPEND(cb, BLOCK_DATA(map), BLOCK_SIZE(map));
+
+    hts_log_info("Wrote compression block header in %d bytes", (int)BLOCK_SIZE(cb));
+
+    BLOCK_UPLEN(cb);
+
+    cram_free_block(map);
+
+    if (r >= 0)
+        return cb;
+
+ block_err:
+    return NULL;
+}
+
+
+/*
+ * Encodes a slice compression header.
+ *
+ * Returns cram_block on success
+ *         NULL on failure
+ */
+cram_block *cram_encode_slice_header(cram_fd *fd, cram_slice *s) {
+    char *buf;
+    char *cp;
+    cram_block *b = cram_new_block(MAPPED_SLICE, 0);
+    int j;
+
+    if (!b)
+        return NULL;
+
+    cp = buf = malloc(22+16+5*(8+s->hdr->num_blocks));
+    if (NULL == buf) {
+        cram_free_block(b);
+        return NULL;
+    }
+
+    cp += fd->vv.varint_put32s(cp, NULL, s->hdr->ref_seq_id);
+    if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+        cp += fd->vv.varint_put64(cp, NULL, s->hdr->ref_seq_start);
+        cp += fd->vv.varint_put64(cp, NULL, s->hdr->ref_seq_span);
+    } else {
+        if (s->hdr->ref_seq_start < 0 || s->hdr->ref_seq_start > INT_MAX) {
+            hts_log_error("Reference position too large for CRAM 3");
+            cram_free_block(b);
+            free(buf);
+            return NULL;
+        }
+        cp += fd->vv.varint_put32(cp, NULL, s->hdr->ref_seq_start);
+        cp += fd->vv.varint_put32(cp, NULL, s->hdr->ref_seq_span);
+    }
+    cp += fd->vv.varint_put32(cp, NULL, s->hdr->num_records);
+    if (CRAM_MAJOR_VERS(fd->version) == 2)
+        cp += fd->vv.varint_put32(cp, NULL, s->hdr->record_counter);
+    else if (CRAM_MAJOR_VERS(fd->version) >= 3)
+        cp += fd->vv.varint_put64(cp, NULL, s->hdr->record_counter);
+    cp += fd->vv.varint_put32(cp, NULL, s->hdr->num_blocks);
+    cp += fd->vv.varint_put32(cp, NULL, s->hdr->num_content_ids);
+    for (j = 0; j < s->hdr->num_content_ids; j++) {
+        cp += fd->vv.varint_put32(cp, NULL, s->hdr->block_content_ids[j]);
+    }
+    if (s->hdr->content_type == MAPPED_SLICE)
+        cp += fd->vv.varint_put32(cp, NULL, s->hdr->ref_base_id);
+
+    if (CRAM_MAJOR_VERS(fd->version) != 1) {
+        memcpy(cp, s->hdr->md5, 16); cp += 16;
+    }
+
+    assert(cp-buf <= 22+16+5*(8+s->hdr->num_blocks));
+
+    b->data = (unsigned char *)buf;
+    b->comp_size = b->uncomp_size = cp-buf;
+
+    return b;
+}
+
+
+/*
+ * Encodes a single read.
+ *
+ * Returns 0 on success
+ *        -1 on failure
+ */
+static int cram_encode_slice_read(cram_fd *fd,
+                                  cram_container *c,
+                                  cram_block_compression_hdr *h,
+                                  cram_slice *s,
+                                  cram_record *cr,
+                                  int64_t *last_pos) {
+    int r = 0;
+    int32_t i32;
+    int64_t i64;
+    unsigned char uc;
+
+    //fprintf(stderr, "Encode seq %d, %d/%d FN=%d, %s\n", rec, core->byte, core->bit, cr->nfeature, s->name_ds->str + cr->name);
+
+    //printf("BF=0x%x\n", cr->flags);
+    //      bf = cram_flag_swap[cr->flags];
+    i32 = fd->cram_flag_swap[cr->flags & 0xfff];
+    r |= h->codecs[DS_BF]->encode(s, h->codecs[DS_BF], (char *)&i32, 1);
+
+    i32 = cr->cram_flags & CRAM_FLAG_MASK;
+    r |= h->codecs[DS_CF]->encode(s, h->codecs[DS_CF], (char *)&i32, 1);
+
+    if (CRAM_MAJOR_VERS(fd->version) != 1 && s->hdr->ref_seq_id == -2)
+        r |= h->codecs[DS_RI]->encode(s, h->codecs[DS_RI], (char *)&cr->ref_id, 1);
+
+    r |= h->codecs[DS_RL]->encode(s, h->codecs[DS_RL], (char *)&cr->len, 1);
+
+    if (c->pos_sorted) {
+        if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+            i64 = cr->apos - *last_pos;
+            r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
+        } else {
+            i32 = cr->apos - *last_pos;
+            r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
+        }
+        *last_pos = cr->apos;
+    } else {
+        if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+            i64 = cr->apos;
+            r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i64, 1);
+        } else {
+            i32 = cr->apos;
+            r |= h->codecs[DS_AP]->encode(s, h->codecs[DS_AP], (char *)&i32, 1);
+        }
+    }
+
+    r |= h->codecs[DS_RG]->encode(s, h->codecs[DS_RG], (char *)&cr->rg, 1);
+
+    if (cr->cram_flags & CRAM_FLAG_DETACHED) {
+        i32 = cr->mate_flags;
+        r |= h->codecs[DS_MF]->encode(s, h->codecs[DS_MF], (char *)&i32, 1);
+
+        r |= h->codecs[DS_NS]->encode(s, h->codecs[DS_NS],
+                                      (char *)&cr->mate_ref_id, 1);
+
+        if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+            r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
+                                          (char *)&cr->mate_pos, 1);
+            r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
+                                          (char *)&cr->tlen, 1);
+        } else {
+            i32 = cr->mate_pos;
+            r |= h->codecs[DS_NP]->encode(s, h->codecs[DS_NP],
+                                          (char *)&i32, 1);
+            i32 = cr->tlen;
+            r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
+                                          (char *)&i32, 1);
+        }
+    } else {
+        if (cr->cram_flags & CRAM_FLAG_MATE_DOWNSTREAM) {
+            r |= h->codecs[DS_NF]->encode(s, h->codecs[DS_NF],
+                                          (char *)&cr->mate_line, 1);
+        }
+        if (cr->cram_flags & CRAM_FLAG_EXPLICIT_TLEN) {
+            if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+                r |= h->codecs[DS_TS]->encode(s, h->codecs[DS_TS],
+                                              (char *)&cr->tlen, 1);
+            }
+
+
+// --- CODE TRUNCATED HERE ---
+
+static sam_hrec_rg_t *cram_encode_aux(cram_fd *filedescriptor, bam_seq_t *b,
+                                      cram_container *c,
+                                      cram_slice *s, cram_record *cr,
+                                      int verbatim_NM, int verbatim_MD,
+                                      int NM, kstring_t *MD, int cf_tag,
+                                      int no_ref, int *err) {
+    char *aux, *orig;
+    sam_hrec_rg_t *brg = NULL;
+    int aux_size = bam_get_l_aux(b);
+    const char *aux_end = bam_data_end(b);
+    cram_block *td_b = c->comp_hdr->TD_blk;
+    int TD_blk_size = BLOCK_SIZE(td_b), new;
+    char *key;
+    khint_t k;
+
+    if (err) *err = 1;
+
+    orig = aux = (char *)bam_aux(b);
+
+
+    // cF:i  => Extra CRAM bit flags.
+    // 1:  Don't auto-decode MD (may be invalid)
+    // 2:  Don't auto-decode NM (may be invalid)
+    if (cf_tag && CRAM_MAJOR_VERS(filedescriptor->version) < 4) {
+        // Temporary copy of aux so we can ammend it.
+        aux = malloc(aux_size+4);
+        if (!aux)
+            return NULL;
+
+        memcpy(aux, orig, aux_size);
+        aux[aux_size++] = 'c';
+        aux[aux_size++] = 'F';
+        aux[aux_size++] = 'C';
+        aux[aux_size++] = cf_tag;
+        orig = aux;
+        aux_end = aux + aux_size;
+    }
+
+    // Copy aux keys to td_b and aux values to slice aux blocks
+    while (aux_end - aux >= 1 && aux[0] != 0) {
+        int r;
+
+        // Room for code + type + at least 1 byte of data
+        if (aux - orig >= aux_size - 3)
+            goto err;
+
+        // RG:Z
+        // This code block handles the processing of auxiliary tags during CRAM
+        // encoding. It checks the presence of specific tags like RG (Read Group),
+        // MD (Mismatch Description), and NM (Number of Mismatches) and applies
+        // specific logic to either store them directly, append special markers,
+        // or log warnings if expected header records are missing. The block also
+        // manages the encoding of auxiliary data, creating and using codecs based
+        // on the tag's type (e.g., string, integer, float). For container-level
+        // tracking, it adds integer keys to a tag map and uses these keys to
+        // initialize and configure the codecs, updating both slice-level and
+        // global CRAM metrics as appropriate. Each auxiliary tag's data is then
+        // appended to the corresponding blocks designated for external storage.
+        // <MASK>
+        tm->blk->m = tm->m;
+    }
+
+    // FIXME: sort BLOCK_DATA(td_b) by char[3] triples
+
+    // And and increment TD hash entry
+    BLOCK_APPEND_CHAR(td_b, 0);
+
+    // Duplicate key as BLOCK_DATA() can be realloced to a new pointer.
+    key = string_ndup(c->comp_hdr->TD_keys,
+                      (char *)BLOCK_DATA(td_b) + TD_blk_size,
+                      BLOCK_SIZE(td_b) - TD_blk_size);
+    if (!key)
+        goto block_err;
+    k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
+    if (new < 0) {
+        goto err;
+    } else if (new == 0) {
+        BLOCK_SIZE(td_b) = TD_blk_size;
+    } else {
+        kh_val(c->comp_hdr->TD_hash, k) = c->comp_hdr->nTL;
+        c->comp_hdr->nTL++;
+    }
+
+    cr->TL = kh_val(c->comp_hdr->TD_hash, k);
+    if (cram_stats_add(c->stats[DS_TL], cr->TL) < 0)
+        goto block_err;
+
+    if (orig != (char *)bam_aux(b))
+        free(orig);
+
+    if (err) *err = 0;
+
+    return brg;
+
+ err:
+ block_err:
+    if (orig != (char *)bam_aux(b))
+        free(orig);
+    return NULL;
+}

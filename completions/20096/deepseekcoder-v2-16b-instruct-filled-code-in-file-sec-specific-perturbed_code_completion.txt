@@ -1,0 +1,352 @@
+(status == MagickFalse)
+    return(DestroyImage(composite_mask));
+  status=SetImageMask(composite_mask,WritePixelMask,(Image *) NULL,exception);
+  status=QueryColorCompliance("#0000",AllCompliance,
+    &composite_mask->background_color,exception);
+  composite_mask->background_color.alpha=(MagickRealType) TransparentAlpha;
+  composite_mask->background_color.alpha_trait=BlendPixelTrait;
+  status=SetImageBackgroundColor(composite_mask,exception);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"\nbegin composite-mask %s",
+      id);
+  clone_info=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  (void) CloneString(&clone_info->primitive,mask_path);
+  status=QueryColorCompliance("#ffffff",AllCompliance,&clone_info->fill,
+    exception);
+  if (clone_info->clip_mask != (char *) NULL)
+    clone_info->clip_mask=DestroyString(clone_info->clip_mask);
+  status=QueryColorCompliance("#00000000",AllCompliance,&clone_info->stroke,
+    exception);
+  clone_info->stroke_width=0.0;
+  clone_info->alpha=OpaqueAlpha;
+  clone_info->clip_path=MagickFalse;
+  status=RenderMVGContent(composite_mask,clone_info,0,exception);
+  clone_info=DestroyDrawInfo(clone_info);
+  separate_mask=SeparateImage(composite_mask,AlphaChannel,exception);
+  if (separate_mask != (Image *) NULL)
+    {
+      composite_mask=DestroyImage(composite_mask);
+      composite_mask=separate_mask;
+      status=NegateImage(composite_mask,MagickFalse,exception);
+      if (status == MagickFalse)
+        composite_mask=DestroyImage(composite_mask);
+    }
+  if (status == MagickFalse)
+    composite_mask=DestroyImage(composite_mask);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"end composite-mask");
+  return(composite_mask);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o m p o s i t e I m a g e                                       %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawCompositeImage() composites the source over the destination image as
+%  dictated by the composite operator.
+%
+%  The format of the DrawCompositeImage method is:
+%
+%      MagickBooleanType DrawCompositeImage(Image *image,const Image *source,
+%        const CompositeOperator compose,const double x,const double y,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o source: the source image.
+%
+%    o compose: the composite operator.
+%
+%    o x: the column offset.
+%
+%    o y: the row offset.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawCompositeImage(Image *image,
+  const Image *source,const CompositeOperator compose,const double x,const double y,
+  ExceptionInfo *exception)
+{
+  CacheView
+    *image_view,
+    *source_view;
+
+  MagickBooleanType
+    status;
+
+  register ssize_t
+    i,
+    j;
+
+  ssize_t
+    start,
+    stop;
+
+  /*
+    Composite image.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(source != (const Image *) NULL);
+  assert(source->signature == MagickCoreSignature);
+  status=MagickTrue;
+  source_view=AcquireVirtualCacheView(source,exception);
+  image_view=AcquireAuthenticCacheView(image,exception);
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  #pragma omp parallel for schedule(static) shared(status) \
+    magick_number_threads(source,image,image->rows,image->columns)
+#endif
+  for (i=0; i < (ssize_t) image->rows; i++)
+  {
+    register Quantum
+      *magick_restrict q;
+
+    register ssize_t
+      k;
+
+    start=(ssize_t) floor(i-y+0.5);
+    stop=(ssize_t) floor(i-y-0.5);
+    if (start < 0)
+      start=0;
+    if (stop >= (ssize_t) source->rows)
+      stop=source->rows-1;
+    q=GetCacheViewAuthenticPixels(image_view,0,i,image->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      continue;
+    for (j=0; j < (ssize_t) image->columns; j++)
+    {
+      register Quantum
+        *magick_restrict p;
+
+      register ssize_t
+        m;
+
+      start=(ssize_t) floor(j-x+0.5);
+      stop=(ssize_t) floor(j-x-0.5);
+      if (start < 0)
+        start=0;
+      if (stop >= (ssize_t) source->columns)
+        stop=source->columns-1;
+      p=GetCacheViewAuthenticPixels(source_view,start,stop,stop-start+1,1,
+        exception);
+      if (p == (Quantum *) NULL)
+        continue;
+      for (k=0; k < (ssize_t) GetPixelChannels(image); k++)
+      {
+        for (m=start; m <= stop; m++)
+        {
+          Quantum
+            s,
+            d;
+
+          s=*(p+m*GetPixelChannels(source));
+          d=*(q+j*GetPixelChannels(image)+k);
+          CompositePixelChannels(compose,s,d,&d);
+          *(q+j*GetPixelChannels(image)+k)=d;
+        }
+        p+=GetPixelChannels(source);
+      }
+      q+=GetPixelChannels(image);
+    }
+    if (SyncCacheViewAuthenticPixels(image_view,exception) == MagickFalse)
+      status=MagickFalse;
+  }
+  source_view=DestroyCacheView(source_view);
+  image_view=DestroyCacheView(image_view);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o l o r F i l l                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawColorFill() fills the image with the specified color.
+%
+%  The format of the DrawColorFill method is:
+%
+%      MagickBooleanType DrawColorFill(Image *image,const DrawInfo *draw_info,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawColorFill(Image *image,
+  const DrawInfo *draw_info,ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    fill;
+
+  /*
+    Fill image with color.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  status=QueryColorCompliance(draw_info->fill,&draw_info->fill_rule,
+    &fill,exception);
+  if (status == MagickFalse)
+    return(MagickFalse);
+  fill.alpha=OpaqueAlpha;
+  status=SetImageBackgroundColor(image,&fill);
+  if (status == MagickFalse)
+    return(MagickFalse);
+  status=PaintImage(image,FillToBorderPixelMethod,0.0,0.0,fill,exception);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o l o r S t r o k e                                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawColorStroke() strokes the image with the specified color.
+%
+%  The format of the DrawColorStroke method is:
+%
+%      MagickBooleanType DrawColorStroke(Image *image,const DrawInfo *draw_info,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawColorStroke(Image *image,
+  const DrawInfo *draw_info,ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    stroke;
+
+  /*
+    Stroke image with color.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  status=QueryColorCompliance(draw_info->stroke,&draw_info->fill_rule,
+    &stroke,exception);
+  if (status == MagickFalse)
+    return(MagickFalse);
+  stroke.alpha=OpaqueAlpha;
+  status=DrawImage(image,draw_info,exception);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w D i s k I m a g e                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawDiskImage() draws a disk on the image at the specified position.
+%
+%  The format of the DrawDiskImage method is:
+%
+%      MagickBooleanType DrawDiskImage(Image *image,const DrawInfo *draw_info,
+%        const double x,const double y,ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o x: the x-coordinate of the disk.
+%
+%    o y: the y-coordinate of the disk.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawDiskImage(Image *image,
+  const DrawInfo *draw_info,const double x,const double y,ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  PrimitiveInfo
+    primitive_info;
+
+  PointInfo
+    point;
+
+  /*
+    Draw a disk.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  point.x=x;
+  point.y=y;
+  primitive_info.primitive=DiskPrimitive;
+  primitive_info.coordinates=0;
+  primitive_info.point=point;
+  primitive_info.method=CopyMethod;
+  status=DrawPrimitive(image,draw_info,&primitive_info,exception);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w E l l i p s e                                                   %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawEllipse()

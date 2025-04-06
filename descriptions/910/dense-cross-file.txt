@@ -1,0 +1,310 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsInt32Number CMSEXPORT cmsReadRawTag(cmsHPROFILE hProfile, cmsTagSignature sig, void* data, cmsUInt32Number BufferSize)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    void *Object;
+    int i;
+    cmsIOHANDLER* MemIO;
+    cmsTagTypeHandler* TypeHandler = NULL;
+    cmsTagTypeHandler LocalTypeHandler;
+    cmsTagDescriptor* TagDescriptor = NULL;
+    cmsUInt32Number rc;
+    cmsUInt32Number Offset, TagSize;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, TRUE);
+    if (i < 0) goto Error;                 // Not found, 
+
+    // It is already read?
+    if (Icc -> TagPtrs[i] == NULL) {
+
+        // No yet, get original position
+        Offset   = Icc ->TagOffsets[i];
+        TagSize  = Icc ->TagSizes[i];
+
+        // read the data directly, don't keep copy
+        if (data != NULL) {
+
+            if (BufferSize < TagSize)
+                TagSize = BufferSize;
+
+            if (!Icc ->IOhandler ->Seek(Icc ->IOhandler, Offset)) goto Error;
+            if (!Icc ->IOhandler ->Read(Icc ->IOhandler, data, 1, TagSize)) goto Error;
+
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return TagSize;
+        }
+
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return Icc ->TagSizes[i];
+    }
+
+    // The data has been already read, or written. But wait!, maybe the user choosed to save as
+    // raw data. In this case, return the raw data directly
+    if (Icc ->TagSaveAsRaw[i]) {
+
+        if (data != NULL)  {
+
+            TagSize  = Icc ->TagSizes[i];
+            if (BufferSize < TagSize)
+                TagSize = BufferSize;
+
+            memmove(data, Icc ->TagPtrs[i], TagSize);
+
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return TagSize;
+        }
+
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return Icc ->TagSizes[i];
+    }
+
+    // Already readed, or previously set by cmsWriteTag(). We need to serialize that
+    // data to raw in order to maintain consistency.
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    Object = cmsReadTag(hProfile, sig);
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    if (Object == NULL) goto Error;
+
+    // Now we need to serialize to a memory block: just use a memory iohandler
+
+    if (data == NULL) {
+        MemIO = cmsOpenIOhandlerFromNULL(cmsGetProfileContextID(hProfile));
+    } else{
+        MemIO = cmsOpenIOhandlerFromMem(cmsGetProfileContextID(hProfile), data, BufferSize, "w");
+    }
+    if (MemIO == NULL) goto Error;
+
+    // Obtain type handling for the tag
+    TypeHandler = Icc ->TagTypeHandlers[i];
+    TagDescriptor = _cmsGetTagDescriptor(Icc-> ContextID, sig);
+    if (TagDescriptor == NULL) {
+        cmsCloseIOhandler(MemIO);
+        goto Error;
+    }
+    
+    if (TypeHandler == NULL) goto Error;
+
+    // Serialize
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID  = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+
+    if (!_cmsWriteTypeBase(MemIO, TypeHandler ->Signature)) {
+        cmsCloseIOhandler(MemIO);
+        goto Error;
+    }
+
+    if (!LocalTypeHandler.WritePtr(&LocalTypeHandler, MemIO, Object, TagDescriptor ->ElemCount)) {
+        cmsCloseIOhandler(MemIO);
+        goto Error;
+    }
+
+    // Get Size and close
+    rc = MemIO ->Tell(MemIO);
+    cmsCloseIOhandler(MemIO);      // Ignore return code this time
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return rc;
+
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsBool CMSEXPORT cmsWriteTag(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    cmsTagTypeHandler* TypeHandler = NULL;
+    cmsTagTypeHandler LocalTypeHandler;
+    cmsTagDescriptor* TagDescriptor = NULL;
+    cmsTagTypeSignature Type;
+    int i;
+    cmsFloat64Number Version;
+    char TypeString[5], SigString[5];
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    // To delete tags.
+    if (data == NULL) {
+
+         // Delete the tag
+         i = _cmsSearchTag(Icc, sig, FALSE);
+         if (i >= 0) {
+                
+             // Use zero as a mark of deleted 
+             _cmsDeleteTagByPos(Icc, i);
+             Icc ->TagNames[i] = (cmsTagSignature) 0;
+             _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+             return TRUE;
+         }
+         // Didn't find the tag
+        goto Error;
+    }
+
+    if (!_cmsNewTag(Icc, sig, &i)) goto Error;
+
+    // This is not raw
+    Icc ->TagSaveAsRaw[i] = FALSE;
+
+    // This is not a link
+    Icc ->TagLinked[i] = (cmsTagSignature) 0;
+
+    // Get information about the TAG.
+    TagDescriptor = _cmsGetTagDescriptor(Icc-> ContextID, sig);
+    if (TagDescriptor == NULL){
+         cmsSignalError(Icc ->ContextID, cmsERROR_UNKNOWN_EXTENSION, "Unsupported tag '%x'", sig);
+        goto Error;
+    }
+
+
+    // Now we need to know which type to use. It depends on the version.
+    Version = cmsGetProfileVersion(hProfile);
+
+    if (TagDescriptor ->DecideType != NULL) {
+
+        // Let the tag descriptor to decide the type base on depending on
+        // the data. This is useful for example on parametric curves, where
+        // curves specified by a table cannot be saved as parametric and needs
+        // to be casted to single v2-curves, even on v4 profiles.
+
+        Type = TagDescriptor ->DecideType(Version, data);
+    }
+    else {
+
+        Type = TagDescriptor ->SupportedTypes[0];
+    }
+
+    // Does the tag support this type?
+    if (!IsTypeSupported(TagDescriptor, Type)) {
+
+        _cmsTagSignature2String(TypeString, (cmsTagSignature) Type);
+        _cmsTagSignature2String(SigString,  sig);
+
+        cmsSignalError(Icc ->ContextID, cmsERROR_UNKNOWN_EXTENSION, "Unsupported type '%s' for tag '%s'", TypeString, SigString);
+        goto Error;
+    }
+
+    // Does we have a handler for this type?
+    TypeHandler =  _cmsGetTagTypeHandler(Icc->ContextID, Type);
+    if (TypeHandler == NULL) {
+
+        _cmsTagSignature2String(TypeString, (cmsTagSignature) Type);
+        _cmsTagSignature2String(SigString,  sig);
+
+        cmsSignalError(Icc ->ContextID, cmsERROR_UNKNOWN_EXTENSION, "Unsupported type '%s' for tag '%s'", TypeString, SigString);
+        goto Error;           // Should never happen
+    }
+
+
+    // Fill fields on icc structure
+    Icc ->TagTypeHandlers[i]  = TypeHandler;
+    Icc ->TagNames[i]         = sig;
+    Icc ->TagSizes[i]         = 0;
+    Icc ->TagOffsets[i]       = 0;
+
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID  = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+    Icc ->TagPtrs[i]            = LocalTypeHandler.DupPtr(&LocalTypeHandler, data, TagDescriptor ->ElemCount);
+
+    if (Icc ->TagPtrs[i] == NULL)  {
+
+        _cmsTagSignature2String(TypeString, (cmsTagSignature) Type);
+        _cmsTagSignature2String(SigString,  sig);
+        cmsSignalError(Icc ->ContextID, cmsERROR_CORRUPTION_DETECTED, "Malformed struct in type '%s' for tag '%s'", TypeString, SigString);
+
+        goto Error;
+    }
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return FALSE;
+
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsBool CMSEXPORT cmsWriteRawTag(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number Size)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    if (!_cmsNewTag(Icc, sig, &i)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+         return FALSE;
+    }
+
+    // Mark the tag as being written as RAW
+    Icc ->TagSaveAsRaw[i] = TRUE;
+    Icc ->TagNames[i]     = sig;
+    Icc ->TagLinked[i]    = (cmsTagSignature) 0;
+
+    // Keep a copy of the block
+    Icc ->TagPtrs[i]  = _cmsDupMem(Icc ->ContextID, data, Size);
+    Icc ->TagSizes[i] = Size;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+
+    if (Icc->TagPtrs[i] == NULL) {           
+           Icc->TagNames[i] = (cmsTagSignature) 0;
+           return FALSE;
+    }
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsBool CMSEXPORT cmsLinkTag(cmsHPROFILE hProfile, cmsTagSignature sig, cmsTagSignature dest)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+     if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    if (!_cmsNewTag(Icc, sig, &i)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Keep necessary information
+    Icc ->TagSaveAsRaw[i] = FALSE;
+    Icc ->TagNames[i]     = sig;
+    Icc ->TagLinked[i]    = dest;
+
+    Icc ->TagPtrs[i]    = NULL;
+    Icc ->TagSizes[i]   = 0;
+    Icc ->TagOffsets[i] = 0;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmsplugin.c
+cmsTagTypeSignature CMSEXPORT _cmsReadTypeBase(cmsIOHANDLER* io)
+{
+    _cmsTagBase Base;
+
+    _cmsAssert(io != NULL);
+
+    if (io -> Read(io, &Base, sizeof(_cmsTagBase), 1) != 1)
+        return (cmsTagTypeSignature) 0;
+
+    return (cmsTagTypeSignature) _cmsAdjustEndianess32(Base.sig);
+}
+

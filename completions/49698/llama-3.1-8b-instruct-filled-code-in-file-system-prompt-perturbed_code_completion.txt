@@ -1,0 +1,87 @@
+exr_result_t
+internal_huf_decompress (
+    exr_decode_pipeline_t* decode,
+    const uint8_t*         compressed,
+    uint64_t               nCompressed,
+    uint16_t*              raw,
+    uint64_t               nRawSize,
+    void*                  spare,
+    uint64_t               sparebytes)
+{
+    uint32_t                            im, iM, nBits;
+    uint64_t                            nBytes;
+    const uint8_t*                      ptr;
+    exr_result_t                        rv;
+    const struct _internal_exr_context* pctxt = NULL;
+
+    if (nCompressed < 20)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    pctxt = decode->pctxt;
+    if (pctxt)
+    {
+        pctxt->print_error (pctxt, EXR_ERR_INVALID_ARGUMENT, "Invalid compressed data size");
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    im = readUInt (compressed);
+    iM = readUInt (compressed + 4);
+    if (im > iM)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    nBits = readUInt (compressed + 12);
+    nBytes = (nBits + 7) / 8;
+    if (nCompressed < 20 + nBytes)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    uint64_t* hcode = (uint64_t*) spare;
+    uint64_t* hdecod = (uint64_t*) (spare + HUF_ENCSIZE * sizeof (uint64_t));
+    uint8_t* table = (uint8_t*) (spare + HUF_ENCSIZE * sizeof (uint64_t) + HUF_DECSIZE * sizeof (HufDec));
+    uint8_t* data = table + readUInt (compressed + 8);
+    uint8_t* tableEnd = data + readUInt (compressed + 8);
+    uint8_t* dataStart = tableEnd;
+
+    if (fasthuf_decode_enabled ())
+    {
+        FastHufDecoder fhd;
+        rv = fasthuf_initialize (pctxt, &fhd, &dataStart, nBytes, im, iM, 65536);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+
+        rv = fasthuf_decode (pctxt, &fhd, compressed + 20, nCompressed - 20, raw, nRawSize);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+    }
+    else
+    {
+        rv = hufUnpackEncTable (&dataStart, &nBytes, im, iM, hcode);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+
+        rv = hufBuildDecTable (hcode, im, iM, hdecod);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+
+        rv = hufDecode (hcode, hdecod, compressed + 20, nCompressed - 20, iM, nRawSize, raw);
+        if (rv!= EXR_ERR_SUCCESS)
+        {
+            return rv;
+        }
+    }
+
+    return EXR_ERR_SUCCESS;
+}

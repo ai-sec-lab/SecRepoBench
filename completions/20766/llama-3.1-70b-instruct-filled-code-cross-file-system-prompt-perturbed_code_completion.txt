@@ -1,0 +1,43 @@
+// Parse the UDP header from the packet using the current IP offset.
+struct ndpi_udphdr *udph = (struct ndpi_udphdr *) &packet[ip_offset];
+u_int16_t src_port = ntohs(udph->source);
+u_int16_t dst_port = ntohs(udph->dest);
+
+// Extract source and destination ports to identify potential tunnel protocols.
+if (src_port == 2152 && dst_port == 2152) {
+  // Check for GTP-U protocol by comparing ports, then verify GTP version and message type.
+  struct ndpi_gtpu_header *gtpu = (struct ndpi_gtpu_header *) &packet[ip_offset + sizeof(struct ndpi_udphdr)];
+  if (gtpu->version == 1 && (gtpu->type == 0xff || gtpu->type == 0xfe)) {
+    // If GTP-U is detected, update IP offset to point to the encapsulated IP header.
+    ip_offset += sizeof(struct ndpi_udphdr) + sizeof(struct ndpi_gtpu_header);
+    // Set the tunnel type to ndpi_gtp_tunnel for GTP-U packets.
+    tunnel_type = ndpi_gtp_tunnel;
+  }
+} else if (src_port == 3804 && dst_port == 3804) {
+  // Check for TZSP protocol using ports, then verify TZSP version and encapsulated protocol.
+  struct ndpi_tzsp_header *tzsp = (struct ndpi_tzsp_header *) &packet[ip_offset + sizeof(struct ndpi_udphdr)];
+  if (tzsp->version == 1 && tzsp->encapsulated_protocol == 0x0800) {
+    // If TZSP is detected, navigate through its tags until reaching the encapsulated Ethernet frame.
+    u_int16_t tzsp_offset = sizeof(struct ndpi_udphdr) + sizeof(struct ndpi_tzsp_header);
+    while (tzsp_offset < header->caplen) {
+      struct ndpi_tzsp_tag *tag = (struct ndpi_tzsp_tag *) &packet[tzsp_offset];
+      tzsp_offset += sizeof(struct ndpi_tzsp_tag) + ntohs(tag->length);
+      if (tag->type == 0x0001) {
+        // Set the tunnel type to ndpi_tzsp_tunnel for TZSP packets.
+        tunnel_type = ndpi_tzsp_tunnel;
+        // Update IP offset to point to the encapsulated Ethernet frame.
+        ip_offset = tzsp_offset;
+        break;
+      }
+    }
+  }
+} else if (src_port == 5246) {
+  // Check for CAPWAP protocol using source port, then verify CAPWAP message type.
+  struct ndpi_capwap_header *capwap = (struct ndpi_capwap_header *) &packet[ip_offset + sizeof(struct ndpi_udphdr)];
+  if (capwap->message_type == 0x0001) {
+    // If CAPWAP is detected, update IP offset to point to the encapsulated IP header.
+    ip_offset += sizeof(struct ndpi_udphdr) + sizeof(struct ndpi_capwap_header);
+    // Set the tunnel type to ndpi_capwap_tunnel for CAPWAP packets.
+    tunnel_type = ndpi_capwap_tunnel;
+  }
+}

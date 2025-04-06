@@ -1,0 +1,63 @@
+linesize   = s->current_picture.f->linesize[0] << field_based;
+uvlinesize = s->current_picture.f->linesize[1] << field_based;
+
+mx = motion_x >> (lowres + 1);
+my = motion_y >> (lowres + 1);
+sx = motion_x & s_mask;
+sy = motion_y & s_mask;
+
+src_y = (mb_y * 2 + (motion_y >> (lowres + 1))) << (3 - lowres);
+if (!field_based)
+    src_y += (mb_y & 1) << (3 - lowres);
+else if (field_select)
+    src_y >>= 1;
+
+uvsrc_x = mb_x << (3 - lowres);
+uvsrc_y = src_y >> (1 + s->chroma_y_shift);
+
+src_y += (mb_y & 1) << (3 - lowres);
+ptr_y  = ref_picture[0] + src_y * linesize + (mb_x << (3 - lowres));
+ptr_cb = ref_picture[1] + uvsrc_y * uvlinesize + uvsrc_x;
+ptr_cr = ref_picture[2] + uvsrc_y * uvlinesize + uvsrc_x;
+
+if ((unsigned)src_y > v_edge_pos - (!!sy) - (2 << lowres)) {
+    if (!s->codec_id == AV_CODEC_ID_H261) {
+        ptr_y  = s->edge_emu_buffer + (2 << lowres) * linesize;
+        ptr_cb = s->edge_emu_buffer + (2 << lowres) * uvlinesize;
+        ptr_cr = s->edge_emu_buffer + (2 << lowres) * uvlinesize;
+        src_y -= (2 << lowres);
+        s->vdsp.emulated_edge_mc(s->edge_emu_buffer, ptr_y - (2 << lowres) * linesize, linesize,
+                                 17 << lowres, 17, src_y,
+                                 (motion_x >> lowres) + (17 << lowres),
+                                 v_edge_pos);
+    }
+    s->vdsp.emulated_edge_mc(ptr_cb, ptr_cb, uvlinesize,
+                             9 << lowres, 9, uvsrc_y,
+                             (motion_x >> (lowres + 1)) + (9 << lowres),
+                             v_edge_pos >> 1);
+    s->vdsp.emulated_edge_mc(ptr_cr, ptr_cr, uvlinesize,
+                             9 << lowres, 9, uvsrc_y,
+                             (motion_x >> (lowres + 1)) + (9 << lowres),
+                             v_edge_pos >> 1);
+}
+
+if (bottom_field) {
+    dest_y  += s->current_picture.f->linesize[0];
+    dest_cb += s->current_picture.f->linesize[1];
+    dest_cr += s->current_picture.f->linesize[2];
+}
+
+if (field_select) {
+    ptr_y  += linesize;
+    ptr_cb += uvlinesize;
+    ptr_cr += uvlinesize;
+}
+
+sx = (sx << 2) >> lowres;
+sy = (sy << 2) >> lowres;
+pix_op[lowres - 1](dest_y, ptr_y, linesize, h, sx, sy);
+
+if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+    pix_op[op_index](dest_cb, ptr_cb, uvlinesize, h >> s->chroma_y_shift, sx, sy);
+    pix_op[op_index](dest_cr, ptr_cr, uvlinesize, h >> s->chroma_y_shift, sx, sy);
+}

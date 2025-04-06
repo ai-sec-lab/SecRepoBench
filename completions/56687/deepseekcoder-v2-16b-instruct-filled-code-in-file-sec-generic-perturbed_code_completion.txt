@@ -1,0 +1,308 @@
+#else
+  char c;
+#endif
+
+  buf = io_read_buf(mrb, self);
+  if (RSTRING_LEN(buf) == 0) {
+    mrb_raise(mrb, E_EOF_ERROR, "readchar failed");
+  }
+  c = RSTRING_PTR(buf)[0];
+  if (RSTRING_LEN(buf) > len) {
+    buf = io_bufread(mrb, buf, len);
+  }
+  else {
+    buf = mrb_str_new(mrb, "", 0);
+  }
+  return mrb_str_new_cstr(mrb, &c);
+}
+
+static mrb_value
+io_readlines(mrb_state *mrb, mrb_value self)
+{
+  mrb_value ary = mrb_ary_new(mrb);
+  mrb_value line;
+  mrb_value buf;
+  mrb_int len;
+
+  while (1) {
+    buf = io_read_buf(mrb, self);
+    len = RSTRING_LEN(buf);
+    if (len == 0) break;
+    line = mrb_str_substr(mrb, buf, 0, len);
+    mrb_ary_push(mrb, ary, line);
+    if (RSTRING_PTR(buf)[len-1] == '\n') break;
+  }
+  return ary;
+}
+
+static mrb_value
+io_readline(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf;
+  mrb_int len;
+
+  buf = io_read_buf(mrb, self);
+  len = RSTRING_LEN(buf);
+  if (len == 0) {
+    return mrb_nil_value();
+  }
+  if (RSTRING_PTR(buf)[len-1] == '\n') {
+    return buf;
+  }
+  return mrb_str_substr(mrb, buf, 0, len);
+}
+
+static mrb_value
+io_getc(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf;
+  mrb_int len;
+#ifdef MRB_UTF8_STRING
+  unsigned char c;
+#else
+  char c;
+#endif
+
+  buf = io_read_buf(mrb, self);
+  len = RSTRING_LEN(buf);
+  if (len == 0) {
+    return mrb_nil_value();
+  }
+  c = RSTRING_PTR(buf)[0];
+  if (len > 1) {
+    buf = io_bufread(mrb, buf, 1);
+  }
+  else {
+    buf = mrb_str_new(mrb, "", 0);
+  }
+  return mrb_str_new_cstr(mrb, &c);
+}
+
+static mrb_value
+io_ungetc(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf;
+  mrb_int len;
+#ifdef MRB_UTF8_STRING
+  unsigned char c;
+#else
+  char c;
+#endif
+
+  mrb_get_args(mrb, "c", &c);
+  buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  len = RSTRING_LEN(buf);
+  if (len == 0) {
+    buf = mrb_str_new_cstr(mrb, &c);
+    mrb_iv_set(mrb, self, MRB_IVSYM(buf), buf);
+    return mrb_str_new_cstr(mrb, &c);
+  }
+  buf = mrb_str_resize(mrb, buf, len + 1);
+  memmove(RSTRING_PTR(buf) + 1, RSTRING_PTR(buf), len);
+  RSTRING_PTR(buf)[0] = c;
+  return mrb_str_new_cstr(mrb, &c);
+}
+
+static mrb_value
+io_each_byte(mrb_state *mrb, mrb_value self)
+{
+  mrb_value line;
+  while ((line = io_getc(mrb, self)) != mrb_nil_value()) {
+    mrb_yield(mrb, self, line);
+  }
+  return self;
+}
+
+static mrb_value
+io_each_char(mrb_state *mrb, mrb_value self)
+{
+  mrb_value line;
+  while ((line = io_readchar(mrb, self)) != mrb_nil_value()) {
+    mrb_yield(mrb, self, line);
+  }
+  return self;
+}
+
+static mrb_value
+io_each_line(mrb_state *mrb, mrb_value self)
+{
+  mrb_value line;
+  while ((line = io_readline(mrb, self)) != mrb_nil_value()) {
+    mrb_yield(mrb, self, line);
+  }
+  return self;
+}
+
+static mrb_value
+io_eof(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  return mrb_bool_value(RSTRING_LEN(buf) == 0);
+}
+
+static mrb_value
+io_eof_mark(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  return mrb_bool_value(RSTRING_LEN(buf) == 0);
+}
+
+static mrb_value
+io_ungetc_buffer(mrb_state *mrb, mrb_value self)
+{
+  mrb_value buf = mrb_iv_get(mrb, self, MRB_IVSYM(buf));
+  mrb_int len = RSTRING_LEN(buf);
+  if (len == 0) {
+    return mrb_nil_value();
+  }
+  buf = mrb_str_resize(mrb, buf, len - 1);
+  memmove(RSTRING_PTR(buf) + 1, RSTRING_PTR(buf), len - 1);
+  RSTRING_PTR(buf)[0] = RSTRING_PTR(buf)[1];
+  return mrb_str_new_cstr(mrb, &RSTRING_PTR(buf)[0]);
+}
+
+static mrb_value
+io_flush(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fsync(fptr->fd) == -1) {
+      mrb_sys_fail(mrb, "fsync");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_flush(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fsync(fptr->fd) == -1) {
+      mrb_sys_fail(mrb, "fsync");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_buffer(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fflush(NULL) == -1) {
+      mrb_sys_fail(mrb, "fflush");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_all(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fsync(fptr->fd) == -1) {
+      mrb_sys_fail(mrb, "fsync");
+    }
+    if (fflush(NULL) == -1) {
+      mrb_sys_fail(mrb, "fflush");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_buffer_all(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fflush(NULL) == -1) {
+      mrb_sys_fail(mrb, "fflush");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_if_modified(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fptr->fd2 >= 0) {
+      if (fsync(fptr->fd2) == -1) {
+        mrb_sys_fail(mrb, "fsync");
+      }
+    }
+    if (fsync(fptr->fd) == -1) {
+      mrb_sys_fail(mrb, "fsync");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_buffer_if_modified(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fptr->fd2 >= 0) {
+      if (fsync(fptr->fd2) == -1) {
+        mrb_sys_fail(mrb, "fsync");
+      }
+    }
+    if (fflush(NULL) == -1) {
+      mrb_sys_fail(mrb, "fflush");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_all_if_modified(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fptr->fd2 >= 0) {
+      if (fsync(fptr->fd2) == -1) {
+        mrb_sys_fail(mrb, "fsync");
+      }
+    }
+    if (fsync(fptr->fd) == -1) {
+      mrb_sys_fail(mrb, "fsync");
+    }
+    if (fflush(NULL) == -1) {
+      mrb_sys_fail(mrb, "fflush");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_buffer_all_if_modified(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fptr->fd2 >= 0) {
+      if (fsync(fptr->fd2) == -1) {
+        mrb_sys_fail(mrb, "fsync");
+      }
+    }
+    if (fflush(NULL) == -1) {
+      mrb_sys_fail(mrb, "fflush");
+    }
+  }
+  return mrb_nil_value();
+}
+
+static mrb_value
+io_sync_buffer_if_shared(mrb_state *mrb, mrb_value self)
+{
+  struct mrb_io *fptr = io_get_open_fptr(mrb, self);
+  if (fptr->sync) {
+    if (fptr->fd2 >= 0) {
+      if (fsync(fptr->fd2) == -1) {
+        mrb_sys_fail(mrb, "fsync");
+      }
+    }
+    if

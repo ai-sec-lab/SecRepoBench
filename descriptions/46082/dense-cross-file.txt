@@ -1,0 +1,181 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/stream_processor/flb_sp_key.c
+static int msgpack_object_to_sp_value(msgpack_object o,
+                                      struct flb_sp_value *result)
+{
+    result->o = o;
+
+    /* Compose result with found value */
+    if (o.type == MSGPACK_OBJECT_BOOLEAN) {
+        result->type = FLB_EXP_BOOL;
+        result->val.boolean = o.via.boolean;
+        return 0;
+    }
+    else if (o.type == MSGPACK_OBJECT_POSITIVE_INTEGER ||
+             o.type == MSGPACK_OBJECT_NEGATIVE_INTEGER) {
+        result->type = FLB_EXP_INT;
+        result->val.i64 = o.via.i64;
+        return 0;
+    }
+    else if (o.type == MSGPACK_OBJECT_FLOAT32 ||
+             o.type == MSGPACK_OBJECT_FLOAT) {
+        result->type = FLB_EXP_FLOAT;
+        result->val.f64 = o.via.f64;
+        return 0;
+    }
+    else if (o.type == MSGPACK_OBJECT_STR) {
+        result->type = FLB_EXP_STRING;
+        result->val.string = flb_sds_create_len((char *) o.via.str.ptr,
+                                                o.via.str.size);
+        return 0;
+    }
+    else if (o.type == MSGPACK_OBJECT_MAP) {
+        /* return boolean 'true', just denoting the existence of the key */
+        result->type = FLB_EXP_BOOL;
+        result->val.boolean = true;
+        return 0;
+    }
+    else if (o.type == MSGPACK_OBJECT_NIL) {
+        result->type = FLB_EXP_NULL;
+        return 0;
+    }
+
+    return -1;
+}
+
+// the below code fragment can be found in:
+// src/flb_record_accessor.c
+struct flb_ra_value *flb_ra_get_value_object(struct flb_record_accessor *ra,
+                                             msgpack_object map)
+{
+    struct flb_ra_parser *rp;
+
+    rp = get_ra_parser(ra);
+    if (rp == NULL) {
+        return NULL;
+    }
+
+    return flb_ra_key_to_value(rp->key->name, map, rp->key->subkeys);
+}
+
+// the below code fragment can be found in:
+// src/flb_ra_key.c
+struct flb_ra_value *flb_ra_key_to_value(flb_sds_t ckey,
+                                         msgpack_object map,
+                                         struct mk_list *subkeys)
+{
+    int i;
+    int ret;
+    msgpack_object val;
+    msgpack_object *out_key;
+    msgpack_object *out_val;
+    struct flb_ra_value *result;
+
+    /* Get the key position in the map */
+    i = ra_key_val_id(ckey, map);
+    if (i == -1) {
+        return NULL;
+    }
+
+    /* Reference entries */
+    val = map.via.map.ptr[i].val;
+
+    /* Create the result context */
+    result = flb_calloc(1, sizeof(struct flb_ra_value));
+    if (!result) {
+        flb_errno();
+        return NULL;
+    }
+    result->o = val;
+
+    if ((val.type == MSGPACK_OBJECT_MAP || val.type == MSGPACK_OBJECT_ARRAY)
+        && subkeys != NULL && mk_list_size(subkeys) > 0) {
+
+        ret = subkey_to_object(&val, subkeys, &out_key, &out_val);
+        if (ret == 0) {
+            ret = msgpack_object_to_ra_value(*out_val, result);
+            if (ret == -1) {
+                flb_free(result);
+                return NULL;
+            }
+            return result;
+        }
+        else {
+            flb_free(result);
+            return NULL;
+        }
+    }
+    else {
+        ret = msgpack_object_to_ra_value(val, result);
+        if (ret == -1) {
+            flb_error("[ra key] cannot process key value");
+            flb_free(result);
+            return NULL;
+        }
+    }
+
+    return result;
+}
+
+// the below code fragment can be found in:
+// src/stream_processor/flb_sp.c
+static int object_to_number(msgpack_object obj, int64_t *i, double *d)
+{
+    int ret;
+    int64_t i_out;
+    double d_out;
+    char str_num[20];
+
+    if (obj.type == MSGPACK_OBJECT_POSITIVE_INTEGER ||
+        obj.type == MSGPACK_OBJECT_NEGATIVE_INTEGER) {
+        *i = obj.via.i64;
+        return FLB_STR_INT;
+    }
+    else if (obj.type == MSGPACK_OBJECT_FLOAT32 ||
+             obj.type == MSGPACK_OBJECT_FLOAT) {
+        *d = obj.via.f64;
+        return FLB_STR_FLOAT;
+    }
+    else if (obj.type == MSGPACK_OBJECT_STR) {
+        /* A numeric representation of a string should not exceed 19 chars */
+        if (obj.via.str.size > 19) {
+            return -1;
+        }
+
+        memcpy(str_num, obj.via.str.ptr, obj.via.str.size);
+        str_num[obj.via.str.size] = '\0';
+
+        ret = string_to_number(str_num, obj.via.str.size,
+                               &i_out, &d_out);
+        if (ret == FLB_STR_FLOAT) {
+            *d = d_out;
+            return FLB_STR_FLOAT;
+        }
+        else if (ret == FLB_STR_INT) {
+            *i = i_out;
+            return FLB_STR_INT;
+        }
+    }
+
+    return -1;
+}
+
+// the below code fragment can be found in:
+// src/flb_record_accessor.c
+int flb_ra_get_kv_pair(struct flb_record_accessor *ra, msgpack_object map,
+                       msgpack_object **start_key,
+                       msgpack_object **out_key, msgpack_object **out_val)
+{
+    struct flb_ra_parser *rp;
+
+    rp = get_ra_parser(ra);
+    if (rp == NULL) {
+        return FLB_FALSE;
+    }
+
+    return flb_ra_key_value_get(rp->key->name, map, rp->key->subkeys,
+                                start_key, out_key, out_val);
+}
+

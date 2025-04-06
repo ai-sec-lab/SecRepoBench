@@ -1,0 +1,59 @@
+if(packet->content_disposition_line.len > 0) {
+  u_int8_t attachment_len = sizeof("attachment; filename");
+
+  if(packet->content_disposition_line.len > attachment_len &&
+     strncmp((char *)packet->content_disposition_line.ptr, "attachment; filename", 20) == 0) {
+    u_int8_t attachment_filename_len = packet->content_disposition_line.len - attachment_len;
+    int i;
+
+    if(packet->content_disposition_line.ptr[attachment_len] == '\"') {
+      /* Check if the filename in the content disposition line is enclosed in quotes.
+         If the last character is not a quote, assume the format is 'filename="file_name'.
+         If the last character is a quote and the filename length is sufficient, assume the format is 'filename="file_name"'.
+         Allocate memory and copy the filename from the packet to the flow structure, excluding the starting quote.
+         If the last character is a quote and the filename length is sufficient, allocate memory and copy the filename from the packet to the flow structure, excluding both starting and ending quotes. */
+      if (attachment_filename_len > 0) {
+        flow->http.filename = ndpi_malloc(attachment_filename_len + 1);
+        if (flow->http.filename!= NULL) {
+          if (packet->content_disposition_line.ptr[attachment_len + 1] == '\"') {
+            /* filename="file_name" */
+            strncpy(flow->http.filename, (char*)packet->content_disposition_line.ptr + attachment_len + 2, attachment_filename_len - 2);
+            flow->http.filename[attachment_filename_len - 2] = '\0';
+          } else {
+            /* filename=file_name */
+            strncpy(flow->http.filename, (char*)packet->content_disposition_line.ptr + attachment_len + 1, attachment_filename_len - 1);
+            flow->http.filename[attachment_filename_len - 1] = '\0';
+          }
+        }
+      }
+    } else {
+      /*case: filename=file_name*/
+      flow->http.filename = ndpi_malloc(attachment_filename_len + 1);
+
+      if(flow->http.filename!= NULL) {
+        strncpy(flow->http.filename, (char*)packet->content_disposition_line.ptr+attachment_len, attachment_filename_len);
+        flow->http.filename[attachment_filename_len] = '\0';
+      }
+    }
+
+    if(attachment_filename_len > ATTACHMENT_LEN) {
+      attachment_len += attachment_filename_len-ATTACHMENT_LEN-1;
+
+      if((attachment_len+ATTACHMENT_LEN) <= packet->content_disposition_line.len) {
+        for(i = 0; binary_file_ext[i]!= NULL; i++) {
+          /* Use memcmp in case content-disposition contains binary data */
+          if(memcmp(&packet->content_disposition_line.ptr[attachment_len],
+                    binary_file_ext[i], ATTACHMENT_LEN) == 0) {
+            char str[64];
+
+            snprintf(str, sizeof(str), "Found file extn %s", binary_file_ext[i]);
+            flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT;
+            ndpi_set_binary_application_transfer(ndpi_struct, flow, str);
+            NDPI_LOG_INFO(ndpi_struct, "found executable HTTP transfer");
+            return(flow->category);
+          }
+        }
+      }
+    }
+  }
+}

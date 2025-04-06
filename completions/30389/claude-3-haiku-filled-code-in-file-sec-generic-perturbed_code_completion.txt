@@ -1,0 +1,38 @@
+offset = counter + 1;
+sni_len = clear_payload[offset];
+if(sni_len + offset + 1 <= crypto_data_len) {
+  memcpy(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name,
+         &clear_payload[offset + 1], sni_len);
+  flow->protos.tls_quic_stun.tls_quic.client_requested_server_name[sni_len] = '\0';
+  NDPI_LOG_DBG(detectionmodule, "SNI: [%s]\n", flow->protos.tls_quic_stun.tls_quic.client_requested_server_name);
+  sni_found = 1;
+  ndpi_match_host_subprotocol(detectionmodule, flow,
+                              flow->protos.tls_quic_stun.tls_quic.client_requested_server_name,
+                              strlen(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name),
+                              &ret_match);
+  if(ret_match.protocol_id != NDPI_PROTOCOL_UNKNOWN) {
+    NDPI_LOG_DBG(detectionmodule, "Matched SNI to subprotocol %s\n",
+                 ndpi_get_proto_name(detectionmodule, ret_match.protocol_id));
+    ndpi_int_change_protocol(detectionmodule, flow, ret_match.protocol_id, NDPI_PROTOCOL_QUIC);
+  } else if(ndpi_check_dga(detectionmodule, flow,
+                           flow->protos.tls_quic_stun.tls_quic.client_requested_server_name,
+                           strlen(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name), 0)) {
+    NDPI_LOG_DBG(detectionmodule, "SNI looks like DGA\n");
+    ndpi_set_risk(detectionmodule, flow, NDPI_DGA_DOMAIN);
+  }
+  flow->protos.tls_quic_stun.tls_quic.hello_processed = 1;
+}
+
+offset = counter + 1 + sni_len;
+if(offset + 2 <= crypto_data_len && memcmp(&clear_payload[offset], "UAID", 4) == 0) {
+  offset += 4;
+  len = gquic_get_u16(&clear_payload[offset], version);
+  offset += 2;
+  if(offset + len <= crypto_data_len) {
+    http_process_user_agent(detectionmodule, flow, &clear_payload[offset], len);
+    ua_found = 1;
+  }
+}
+
+if(sni_found && ua_found)
+  return;

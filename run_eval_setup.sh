@@ -23,6 +23,7 @@ fi
 
 # Run the eval command with all IDs in one go
 python eval.py setup "${ID_LIST[@]}" --path /home/cdilgren/project_benchmark/oss-fuzz-bench \
-    --model_names claude-3-haiku claude-3.5-sonnet gemini-1.5-flash gemini-1.5-pro gpt-4o-mini gpt-4o \
+    --model_names llama-3.1-70b-instruct \
     --context_types cross-file \
-    --prompt_types sec-generic sec-specific system-prompt
+    --prompt_types system-prompt sec-generic sec-specific \
+    --modes perturbed

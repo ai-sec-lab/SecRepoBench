@@ -1,0 +1,51 @@
+// Analyze the packet payload to determine if it might be an OpenVPN packet.
+if (packet->payload_packet_len >= 4) {
+  if (packet->tcp!= NULL) {
+    ovpn_payload += 4;
+  }
+
+  // Extract the operation code from the payload
+  operationcode = ovpn_payload[0];
+
+  // If it's over UDP, perform additional checks
+  if (packet->udp!= NULL) {
+    // If the first packet in the flow matches specific length and operation code criteria, identify it as OpenVPN
+    if (packet->payload_packet_len == 4 && operationcode == 0x01) {
+      NDPI_LOG_DBG(ndpi_struct, "found openvpn over udp\n");
+      ndpi_int_add_protocol_to_bitmask(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+      return;
+    }
+
+    // Otherwise, check if the flow's OpenVPN counter is below a threshold and the operation code indicates a client reset
+    if (flow->openvpn_counter < 3 && operationcode == 0x05) {
+      // Attempt to extract and store the session ID from the payload
+      alen = ovpn_payload[1];
+      if (packet->payload_packet_len >= 5 + alen) {
+        session_remote = ovpn_payload + 2;
+        memcpy(flow->openvpn_session_remote, session_remote, alen);
+      }
+    }
+
+    // If the counter is within a range and the operation code indicates a server reset, verify the session ID matches
+    if (flow->openvpn_counter >= 3 && flow->openvpn_counter < 6 && operationcode == 0x06) {
+      // Verify the session ID matches
+      hmac_size = ovpn_payload[packet->payload_packet_len - 1];
+      if (packet->payload_packet_len >= 5 + hmac_size && memcmp(flow->openvpn_session_remote, ovpn_payload + 2, alen) == 0) {
+        NDPI_LOG_DBG(ndpi_struct, "found openvpn over udp\n");
+        ndpi_int_add_protocol_to_bitmask(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+        return;
+      } else {
+        failed = 1;
+      }
+    }
+  }
+}
+
+// Increment the flow's OpenVPN counter after processing
+flow->openvpn_counter++;
+
+// If the detection attempt fails, exclude the protocol from the flow's possible protocols
+if (failed) {
+  NDPI_LOG_DBG(ndpi_struct, "excluding openvpn\n");
+  ndpi_int_remove_protocol_from_bitmask(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+}

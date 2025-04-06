@@ -1,0 +1,48 @@
+// Retrieve the context from the decode structure if available.
+    pctxt = decode->context;
+
+    // Check if the compressed data size is at least 20 bytes for a valid header.
+    if (nCompressed < 20)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    // Validate that 'im' and 'iM' are within acceptable limits.
+    if (pctxt->im < 0 || pctxt->im >= HUF_ENCSIZE || pctxt->iM < 0 || pctxt->iM >= HUF_ENCSIZE)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    // Ensure there is enough data in the buffer to perform decompression.
+    if (nCompressed - 20 < (static_cast<uint64_t>(readUInt(compressed + 16)) + 7) / 8)
+    {
+        return EXR_ERR_INVALID_ARGUMENT;
+    }
+
+    // Check if fast Huffman decoding is enabled and applicable based on the data size.
+    nBits = readUInt(compressed + 12);
+    if (FastHufDecoder::enabled() && nBits > 128)
+    {
+        // If so, initialize and perform fast Huffman decoding.
+        FastHufDecoder fhd(compressed + 20, nCompressed - 20, pctxt->im, pctxt->iM, pctxt->iM);
+        fhd.decode((unsigned char*)compressed + 20 + (static_cast<uint64_t>(nBits) + 7) / 8, nBits, raw, nRawSize);
+    }
+    else
+    {
+        // If not, use a slower, standard Huffman decoding method.
+        AutoArray<uint64_t, HUF_ENCSIZE> freq;
+        AutoArray<HufDec, HUF_DECSIZE>   hdec;
+
+        hufClearDecTable(hdec);
+
+        // Clear and unpack the Huffman encoding table for use in decoding.
+        hufUnpackEncTable(&ptr, nCompressed - 20, pctxt->im, pctxt->iM, freq);
+
+        // Build the Huffman decoding table based on frequency data.
+        hufBuildDecTable(freq, pctxt->im, pctxt->iM, hdec);
+
+        // Execute the appropriate decoding function (fast or standard) and return the result.
+        hufDecode(freq, hdec, ptr, nBits, pctxt->iM, nRawSize, raw);
+    }
+
+    return EXR_ERR_SUCCESS;

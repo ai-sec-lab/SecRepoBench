@@ -1,0 +1,376 @@
+PrimitiveInfo
+    *primitive_info;
+
+  MVGInfo
+    mvg_info;
+
+  StopInfo
+    *stops;
+
+  DrawInfo
+    **graphic_context;
+
+  MagickBooleanType
+    status;
+
+  size_t
+    extent,
+    number_stops;
+
+  ssize_t
+    n;
+
+  /*
+    Initialize graphics context.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  assert(draw_info->signature == MagickCoreSignature);
+  if (draw_info->primitive == (char *) NULL)
+    return(MagickFalse);
+  extent=2048;
+  primitive_info=(PrimitiveInfo *) AcquireQuantumMemory(extent,
+    sizeof(*primitive_info));
+  if (primitive_info == (PrimitiveInfo *) NULL)
+    ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+      draw_info->primitive);
+  graphic_context=(DrawInfo **) AcquireMagickMemory(sizeof(*graphic_context));
+  if (graphic_context == (DrawInfo **) NULL)
+    {
+      primitive_info=(PrimitiveInfo *) RelinquishMagickMemory(primitive_info);
+      ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+        draw_info->primitive);
+    }
+  graphic_context[0]=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  n=0;
+  stops=(StopInfo *) NULL;
+  status=MagickTrue;
+  token=AcquireString(draw_info->primitive);
+  primitive=AcquireString(draw_info->primitive);
+  mvg_info.primitive_info=&primitive_info;
+  mvg_info.extent=&extent;
+  mvg_info.offset=0;
+  mvg_info.exception=exception;
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"begin draw-image");
+  /*
+    Parse the render primitive and draw on the image.
+  */
+  for (q=draw_info->primitive; *q != '\0'; )
+  {
+    /*
+      Interpret graphic primitive.
+    */
+    GetNextToken(q,&q,MagickPathExtent,token);
+    if (*token == '\0')
+      break;
+    if (*token == '#')
+      {
+        /* Comment */
+        while ((*q != '\n') && (*q != '\0'))
+          q++;
+        continue;
+      }
+    if (LocaleCompare("push",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        if (LocaleCompare("graphic-context",token) == 0)
+          {
+            /*
+              Push current drawing context.
+            */
+            n++;
+            graphic_context=(DrawInfo **) ResizeQuantumMemory(graphic_context,
+              (size_t) (n+1),sizeof(*graphic_context));
+            if (graphic_context == (DrawInfo **) NULL)
+              {
+                primitive_info=(PrimitiveInfo *) RelinquishMagickMemory(
+                  primitive_info);
+                ThrowBinaryException(ResourceLimitError,
+                  "MemoryAllocationFailed",draw_info->primitive);
+              }
+            graphic_context[n]=CloneDrawInfo((ImageInfo *) NULL,
+              graphic_context[n-1]);
+            continue;
+          }
+        ThrowPointExpectedException(token,exception);
+        break;
+      }
+    if (LocaleCompare("pop",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        if (LocaleCompare("graphic-context",token) == 0)
+          {
+            /*
+              Pop current drawing context.
+            */
+            if (n == 0)
+              {
+                ThrowPointExpectedException(token,exception);
+                break;
+              }
+            graphic_context[n]=DestroyDrawInfo(graphic_context[n]);
+            n--;
+            continue;
+          }
+        ThrowPointExpectedException(token,exception);
+        break;
+      }
+    if (LocaleCompare("path",token) == 0)
+      {
+        char
+          *path;
+
+        GetNextToken(q,&q,MagickPathExtent,token);
+        path=GetNodeByURL(draw_info->primitive,token);
+        if (path == (char *) NULL)
+          {
+            ThrowPointExpectedException(token,exception);
+            break;
+          }
+        (void) TracePath(&mvg_info,path,exception);
+        path=DestroyString(path);
+        continue;
+      }
+    if (LocaleCompare("pattern",token) == 0)
+      {
+        char
+          *path;
+
+        GetNextToken(q,&q,MagickPathExtent,token);
+        path=GetNodeByURL(draw_info->primitive,token);
+        if (path == (char *) NULL)
+          {
+            ThrowPointExpectedException(token,exception);
+            break;
+          }
+        (void) DrawPatternPath(image,graphic_context[n],token,&image->pattern,
+          exception);
+        path=DestroyString(path);
+        continue;
+      }
+    if (LocaleCompare("clip-path",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        (void) DrawClipPath(image,graphic_context[n],token,exception);
+        continue;
+      }
+    if (LocaleCompare("fill",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        (void) QueryColorCompliance(token,AllCompliance,
+          &graphic_context[n]->fill,exception);
+        continue;
+      }
+    if (LocaleCompare("fill-opacity",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->fill.alpha=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("fill-rule",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->fill_rule=(FillRule) ParseCommandOption(
+          MagickFillRuleOptions,MagickFalse,token);
+        continue;
+      }
+    if (LocaleCompare("stroke",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        (void) QueryColorCompliance(token,AllCompliance,
+          &graphic_context[n]->stroke,exception);
+        continue;
+      }
+    if (LocaleCompare("stroke-opacity",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->stroke.alpha=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("stroke-width",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->stroke_width=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("stroke-linecap",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->linecap=(LineCap) ParseCommandOption(
+          MagickLineCapOptions,MagickFalse,token);
+        continue;
+      }
+    if (LocaleCompare("stroke-linejoin",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->linejoin=(LineJoin) ParseCommandOption(
+          MagickLineJoinOptions,MagickFalse,token);
+        continue;
+      }
+    if (LocaleCompare("stroke-miterlimit",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->miterlimit=(size_t) StringToUnsignedLong(token);
+        continue;
+      }
+    if (LocaleCompare("stroke-dasharray",token) == 0)
+      {
+        if (graphic_context[n]->dash_pattern != (double *) NULL)
+          graphic_context[n]->dash_pattern=(double *) RelinquishMagickMemory(
+            graphic_context[n]->dash_pattern);
+        if (IsPoint(q) == MagickFalse)
+          continue;
+        p=q;
+        for (x=0; IsPoint(q) != MagickFalse; x++)
+        {
+          GetNextToken(q,&q,MagickPathExtent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,MagickPathExtent,token);
+        }
+        graphic_context[n]->dash_pattern=(double *) AcquireQuantumMemory((size_t)
+          x+1UL,sizeof(*graphic_context[n]->dash_pattern));
+        if (graphic_context[n]->dash_pattern == (double *) NULL)
+          {
+            primitive_info=(PrimitiveInfo *) RelinquishMagickMemory(
+              primitive_info);
+            ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+              draw_info->primitive);
+          }
+        for (j=0; j < (ssize_t) x; j++)
+        {
+          GetNextToken(p,&p,MagickPathExtent,token);
+          if (*token == ',')
+            GetNextToken(p,&p,MagickPathExtent,token);
+          graphic_context[n]->dash_pattern[j]=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+        }
+        graphic_context[n]->dash_pattern[j]=0.0;
+        continue;
+      }
+    if (LocaleCompare("stroke-dashoffset",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->dash_offset=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("text",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        (void) CloneString(&graphic_context[n]->text,token);
+        continue;
+      }
+    if (LocaleCompare("text-antialias",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->text_antialias=IsStringTrue(token);
+        continue;
+      }
+    if (LocaleCompare("text-decoration",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->decorate=(DecorationType) ParseCommandOption(
+          MagickDecorateOptions,MagickFalse,token);
+        continue;
+      }
+    if (LocaleCompare("text-encoding",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        (void) CloneString(&graphic_context[n]->encoding,token);
+        continue;
+      }
+    if (LocaleCompare("text-undercolor",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        (void) QueryColorCompliance(token,AllCompliance,
+          &graphic_context[n]->undercolor,exception);
+        continue;
+      }
+    if (LocaleCompare("translate",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->affine.tx=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->affine.ty=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("rotate",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->affine.sx=cos(DegreesToRadians(
+          StringToDouble(token,&next_token)));
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        graphic_context[n]->affine.rx=sin(DegreesToRadians(
+          StringToDouble(token,&next_token)));
+        graphic_context[n]->affine.ry=(-graphic_context[n]->affine.rx);
+        graphic_context[n]->affine.sy=graphic_context[n]->affine.sx;
+        continue;
+      }
+    if (LocaleCompare("scale",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->affine.sx=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->affine.sy=StringToDouble(token,&next_token);
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("skewX",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->affine.ry=tan(DegreesToRadians(
+          StringToDouble(token,&next_token)));
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("skewY",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->affine.rx=tan(DegreesToRadians(
+          StringToDouble(token,&next_token)));
+        if (token == next_token)
+          ThrowPointExpectedException(token,exception);
+        continue;
+      }
+    if (LocaleCompare("composite",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        graphic_context[n]->compose=(CompositeOperator) ParseCommandOption(
+          MagickComposeOptions,MagickFalse,token);
+        continue;
+      }
+    if (LocaleCompare("primitive",token) == 0)
+      {
+        GetNextToken(q,&q,MagickPathExtent,token);
+        primitive_type=(PrimitiveType) ParseCommandOption(
+          MagickPrimitiveOptions,MagickFalse,token);
+        if (primitive_type == UndefinedPrimitive)
+          {
+            ThrowPointExpectedException(token,exception);
+            break;
+          }
+        primitive_info->primitive=primitive_type;
+        primitive_info->coordinates=0;
+        continue;
+      }

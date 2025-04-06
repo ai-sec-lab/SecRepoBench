@@ -1,0 +1,759 @@
+<｜begin▁of▁sentence｜>/*-
+ * Copyright (c) 2003-2007 Tim Kientzle
+ * Copyright (c) 2009 Andreas Henriksson <andreas@fatal.se>
+ * Copyright (c) 2009-2012 Michihiro NAKAJIMA
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "archive_platform.h"
+__FBSDID("$FreeBSD: head/lib/libarchive/archive_read_support_format_iso9660.c 201246 2009-12-30 05:30:35Z kientzle $");
+
+#ifdef HAVE_ERRNO_H
+#include <errno.h>
+#endif
+/* #include <stdint.h> */ /* See archive_platform.h */
+#include <stdio.h>
+#ifdef HAVE_STDLIB_H
+#include <stdlib.h>
+#endif
+#ifdef HAVE_STRING_H
+#include <string.h>
+#endif
+#include <time.h>
+#ifdef HAVE_ZLIB_H
+#include <zlib.h>
+#endif
+
+#include "archive.h"
+#include "archive_endian.h"
+#include "archive_entry.h"
+#include "archive_entry_locale.h"
+#include "archive_private.h"
+#include "archive_read_private.h"
+#include "archive_string.h"
+
+/*
+ * An overview of ISO 9660 format:
+ *
+ * Each disk is laid out as follows:
+ *   * 32k reserved for private use
+ *   * Volume descriptor table.  Each volume descriptor
+ *     is 2k and specifies basic format information.
+ *     The "Primary Volume Descriptor" (PVD) is defined by the
+ *     standard and should always be present; other volume
+ *     descriptors include various vendor-specific extensions.
+ *   * Files and directories.  Each file/dir is specified by
+ *     an "extent" (starting sector and length in bytes).
+ *     Dirs are just files with directory records packed one
+ *     after another.  The PVD contains a single dir entry
+ *     specifying the location of the root directory.  Everything
+ *     else follows from there.
+ *
+ * This module works by first reading the volume descriptors, then
+ * building a list of directory entries, sorted by starting
+ * sector.  At each step, I look for the earliest dir entry that
+ * hasn't yet been read, seek forward to that location and read
+ * that entry.  If it's a dir, I slurp in the new dir entries and
+ * add them to the heap; if it's a regular file, I return the
+ * corresponding archive_entry and wait for the client to request
+ * the file body.  This strategy allows us to read most compliant
+ * CDs with a single pass through the data, as required by libarchive.
+ */
+#define	LOGICAL_BLOCK_SIZE	2048
+#define	SYSTEM_AREA_BLOCK	16
+
+/* Structure of on-disk primary volume descriptor. */
+#define PVD_type_offset 0
+#define PVD_type_size 1
+#define PVD_id_offset (PVD_type_offset + PVD_type_size)
+#define PVD_id_size 5
+#define PVD_version_offset (PVD_id_offset + PVD_id_size)
+#define PVD_version_size 1
+#define PVD_reserved1_offset (PVD_version_offset + PVD_version_size)
+#define PVD_reserved1_size 1
+#define PVD_system_id_offset (PVD_reserved1_offset + PVD_reserved1_size)
+#define PVD_system_id_size 32
+#define PVD_volume_id_offset (PVD_system_id_offset + PVD_system_id_size)
+#define PVD_volume_id_size 32
+#define PVD_reserved2_offset (PVD_volume_id_offset + PVD_volume_id_size)
+#define PVD_reserved2_size 8
+#define PVD_volume_space_size_offset (PVD_reserved2_offset + PVD_reserved2_size)
+#define PVD_volume_space_size_size 8
+#define PVD_reserved3_offset (PVD_volume_space_size_offset + PVD_volume_space_size_size)
+#define PVD_reserved3_size 32
+#define PVD_volume_set_size_offset (PVD_reserved3_offset + PVD_reserved3_size)
+#define PVD_volume_set_size_size 4
+#define PVD_volume_sequence_number_offset (PVD_volume_set_size_offset + PVD_volume_set_size_size)
+#define PVD_volume_sequence_number_size 4
+#define PVD_logical_block_size_offset (PVD_volume_sequence_number_offset + PVD_volume_sequence_number_size)
+#define PVD_logical_block_size_size 4
+#define PVD_path_table_size_offset (PVD_logical_block_size_offset + PVD_logical_block_size_size)
+#define PVD_path_table_size_size 8
+#define PVD_type_1_path_table_offset (PVD_path_table_size_offset + PVD_path_table_size_size)
+#define PVD_type_1_path_table_size 4
+#define PVD_opt_type_1_path_table_offset (PVD_type_1_path_table_offset + PVD_type_1_path_table_size)
+#define PVD_opt_type_1_path_table_size 4
+#define PVD_type_m_path_table_offset (PVD_opt_type_1_path_table_offset + PVD_opt_type_1_path_table_size)
+#define PVD_type_m_path_table_size 4
+#define PVD_opt_type_m_path_table_offset (PVD_type_m_path_table_offset + PVD_type_m_path_table_size)
+#define PVD_opt_type_m_path_table_size 4
+#define PVD_root_directory_record_offset (PVD_opt_type_m_path_table_offset + PVD_opt_type_m_path_table_size)
+#define PVD_root_directory_record_size 34
+#define PVD_volume_set_id_offset (PVD_root_directory_record_offset + PVD_root_directory_record_size)
+#define PVD_volume_set_id_size 128
+#define PVD_publisher_id_offset (PVD_volume_set_id_offset + PVD_volume_set_id_size)
+#define PVD_publisher_id_size 128
+#define PVD_preparer_id_offset (PVD_publisher_id_offset + PVD_publisher_id_size)
+#define PVD_preparer_id_size 128
+#define PVD_application_id_offset (PVD_preparer_id_offset + PVD_preparer_id_size)
+#define PVD_application_id_size 128
+#define PVD_copyright_file_id_offset (PVD_application_id_offset + PVD_application_id_size)
+#define PVD_copyright_file_id_size 37
+#define PVD_abstract_file_id_offset (PVD_copyright_file_id_offset + PVD_copyright_file_id_size)
+#define PVD_abstract_file_id_size 37
+#define PVD_bibliographic_file_id_offset (PVD_abstract_file_id_offset + PVD_abstract_file_id_size)
+#define PVD_bibliographic_file_id_size 37
+#define PVD_creation_date_offset (PVD_bibliographic_file_id_offset + PVD_bibliographic_file_id_size)
+#define PVD_creation_date_size 17
+#define PVD_modification_date_offset (PVD_creation_date_offset + PVD_creation_date_size)
+#define PVD_modification_date_size 17
+#define PVD_expiration_date_offset (PVD_modification_date_offset + PVD_modification_date_size)
+#define PVD_expiration_date_size 17
+#define PVD_effective_date_offset (PVD_expiration_date_offset + PVD_expiration_date_size)
+#define PVD_effective_date_size 17
+#define PVD_file_structure_version_offset (PVD_effective_date_offset + PVD_effective_date_size)
+#define PVD_file_structure_version_size 1
+#define PVD_reserved4_offset (PVD_file_structure_version_offset + PVD_file_structure_version_size)
+#define PVD_reserved4_size 1
+#define PVD_application_data_offset (PVD_reserved4_offset + PVD_reserved4_size)
+#define PVD_application_data_size 512
+#define PVD_reserved5_offset (PVD_application_data_offset + PVD_application_data_size)
+#define PVD_reserved5_size (2048 - PVD_reserved5_offset)
+
+/* TODO: It would make future maintenance easier to just hardcode the
+ * above values.  In particular, ECMA119 states the offsets as part of
+ * the standard.  That would eliminate the need for the following check.*/
+#if PVD_reserved5_offset != 1395
+#error PVD offset and size definitions are wrong.
+#endif
+
+
+/* Structure of optional on-disk supplementary volume descriptor. */
+#define SVD_type_offset 0
+#define SVD_type_size 1
+#define SVD_id_offset (SVD_type_offset + SVD_type_size)
+#define SVD_id_size 5
+#define SVD_version_offset (SVD_id_offset + SVD_id_size)
+#define SVD_version_size 1
+/* ... */
+#define SVD_reserved1_offset	72
+#define SVD_reserved1_size	8
+#define SVD_volume_space_size_offset 80
+#define SVD_volume_space_size_size 8
+#define SVD_escape_sequences_offset (SVD_volume_space_size_offset + SVD_volume_space_size_size)
+#define SVD_escape_sequences_size 32
+/* ... */
+#define SVD_logical_block_size_offset 128
+#define SVD_logical_block_size_size 4
+#define SVD_type_L_path_table_offset 140
+#define SVD_type_M_path_table_offset 148
+/* ... */
+#define SVD_root_directory_record_offset 156
+#define SVD_root_directory_record_size 34
+#define SVD_file_structure_version_offset 881
+#define SVD_reserved2_offset	882
+#define SVD_reserved2_size	1
+#define SVD_reserved3_offset	1395
+#define SVD_reserved3_size	653
+/* ... */
+/* FIXME: validate correctness of last SVD entry offset. */
+
+/* Structure of an on-disk directory record. */
+/* Note:  ISO9660 stores each multi-byte integer twice, once in
+ * each byte order.  The sizes here are the size of just one
+ * of the two integers.  (This is why the offset of a field isn't
+ * the same as the offset+size of the previous field.) */
+#define DR_length_offset 0
+#define DR_length_size 1
+#define DR_ext_attr_length_offset 1
+#define DR_ext_attr_length_size 1
+#define DR_extent_offset 2
+#define DR_extent_size 4
+#define DR_size_offset 10
+#define DR_size_size 4
+#define DR_date_offset 18
+#define DR_date_size 7
+#define DR_flags_offset 25
+#define DR_flags_size 1
+#define DR_file_unit_size_offset 26
+#define DR_file_unit_size_size 1
+#define DR_interleave_offset 27
+#define DR_interleave_size 1
+#define DR_volume_sequence_number_offset 28
+#define DR_volume_sequence_number_size 2
+#define DR_name_len_offset 32
+#define DR_name_len_size 1
+#define DR_name_offset 33
+
+#ifdef HAVE_ZLIB_H
+static const unsigned char zisofs_magic[8] = {
+	0x37, 0xE4, 0x53, 0x96, 0xC9, 0xDB, 0xD6, 0x07
+};
+
+struct zisofs {
+	/* Set 1 if this file compressed by paged zlib */
+	int		 pz;
+	int		 pz_log2_bs; /* Log2 of block size */
+	uint64_t	 pz_uncompressed_size;
+
+	int		 initialized;
+	unsigned char	*uncompressed_buffer;
+	size_t		 uncompressed_buffer_size;
+
+	uint32_t	 pz_offset;
+	unsigned char	 header[16];
+	size_t		 header_avail;
+	int		 header_passed;
+	unsigned char	*block_pointers;
+	size_t		 block_pointers_alloc;
+	size_t		 block_pointers_size;
+	size_t		 block_pointers_avail;
+	size_t		 block_off;
+	uint32_t	 block_avail;
+
+	z_stream	 stream;
+	int		 stream_valid;
+};
+#else
+struct zisofs {
+	/* Set 1 if this file compressed by paged zlib */
+	int		 pz;
+};
+#endif
+
+struct content {
+	uint64_t	 offset;/* Offset on disk.		*/
+	uint64_t	 size;	/* File size in bytes.		*/
+	struct content	*next;
+};
+
+/* In-memory storage for a directory record. */
+struct file_info {
+	struct file_info	*use_next;
+	struct file_info	*parent;
+	struct file_info	*next;
+	struct file_info	*re_next;
+	int		 subdirs;
+	uint64_t	 key;		/* Heap Key.			*/
+	uint64_t	 offset;	/* Offset on disk.		*/
+	uint64_t	 size;		/* File size in bytes.		*/
+	uint32_t	 ce_offset;	/* Offset of CE.		*/
+	uint32_t	 ce_size;	/* Size of CE.			*/
+	char		 rr_moved;	/* Flag to rr_moved.		*/
+	char		 rr_moved_has_re_only;
+	char		 re;		/* Having RRIP "RE" extension.	*/
+	char		 re_descendant;
+	uint64_t	 cl_offset;	/* Having RRIP "CL" extension.	*/
+	int		 birthtime_is_set;
+	time_t		 birthtime;	/* File created time.		*/
+	time_t		 mtime;		/* File last modified time.	*/
+	time_t		 atime;		/* File last accessed time.	*/
+	time_t		 ctime;		/* File attribute change time.	*/
+	uint64_t	 rdev;		/* Device number.		*/
+	mode_t		 mode;
+	uid_t		 uid;
+	gid_t		 gid;
+	int64_t		 number;
+	int		 nlinks;
+	struct archive_string name; /* Pathname */
+	unsigned char	*utf16be_name;
+	size_t		 utf16be_bytes;
+	char		 name_continues; /* Non-zero if name continues */
+	struct archive_string symlink;
+	char		 symlink_continues; /* Non-zero if link continues */
+	/* Set 1 if this file compressed by paged zlib(zisofs) */
+	int		 pz;
+	int		 pz_log2_bs; /* Log2 of block size */
+	uint64_t	 pz_uncompressed_size;
+	/* Set 1 if this file is multi extent. */
+	int		 multi_extent;
+	struct {
+		struct content	*first;
+		struct content	**last;
+	} contents;
+	struct {
+		struct file_info	*first;
+		struct file_info	**last;
+	} rede_files;
+};
+
+struct heap_queue {
+	struct file_info **files;
+	int		 allocated;
+	int		 used;
+};
+
+struct iso9660 {
+	int	magic;
+#define ISO9660_MAGIC   0x96609660
+
+	int opt_support_joliet;
+	int opt_support_rockridge;
+
+	struct archive_string pathname;
+	char	seenRockridge;	/* Set true if RR extensions are used. */
+	char	seenSUSP;	/* Set true if SUSP is being used. */
+	char	seenJoliet;
+
+	unsigned char	suspOffset;
+	struct file_info *rr_moved;
+	struct read_ce_queue {
+		struct read_ce_req {
+			uint64_t	 offset;/* Offset of CE on disk. */
+			struct file_info *file;
+		}		*reqs;
+		int		 cnt;
+		int		 allocated;
+	}	read_ce_req;
+
+	int64_t		previous_number;
+	struct archive_string previous_pathname;
+
+	struct file_info		*use_files;
+	struct heap_queue		 pending_files;
+	struct {
+		struct file_info	*first;
+		struct file_info	**last;
+	}	cache_files;
+	struct {
+		struct file_info	*first;
+		struct file_info	**last;
+	}	re_files;
+
+	uint64_t current_position;
+	ssize_t	logical_block_size;
+	uint64_t volume_size; /* Total size of volume in bytes. */
+	int32_t  volume_block;/* Total size of volume in logical blocks. */
+
+	struct vd {
+		int		location;	/* Location of Extent.	*/
+		uint32_t	size;
+	} primary, joliet;
+
+	int64_t	entry_sparse_offset;
+	int64_t	entry_bytes_remaining;
+	size_t  entry_bytes_unconsumed;
+	struct zisofs	 entry_zisofs;
+	struct content	*entry_content;
+	struct archive_string_conv *sconv_utf16be;
+	/*
+	 * Buffers for a full pathname in UTF-16BE in Joliet extensions.
+	 */
+#define UTF16_NAME_MAX	1024
+	unsigned char *utf16be_path;
+	size_t		 utf16be_path_len;
+	unsigned char *utf16be_previous_path;
+	size_t		 utf16be_previous_path_len;
+	/* Null buffer used in bidder to improve its performance. */
+	unsigned char	 null[2048];
+};
+
+static int	archive_read_format_iso9660_bid(struct archive_read *, int);
+static int	archive_read_format_iso9660_options(struct archive_read *,
+		    const char *, const char *);
+static int	archive_read_format_iso9660_cleanup(struct archive_read *);
+static int	archive_read_format_iso9660_read_data(struct archive_read *,
+		    const void **, size_t *, int64_t *);
+static int	archive_read_format_iso9660_read_data_skip(struct archive_read *);
+static int	archive_read_format_iso9660_read_header(struct archive_read *,
+		    struct archive_entry *);
+static const char *build_pathname(struct archive_string *, struct file_info *, int);
+static int	build_pathname_utf16be(unsigned char *, size_t, size_t *,
+		    struct file_info *);
+#if DEBUG
+static void	dump_isodirrec(FILE *, const unsigned char *isodirrec);
+#endif
+static time_t	time_from_tm(struct tm *);
+static time_t	isodate17(const unsigned char *);
+static time_t	isodate7(const unsigned char *);
+static int	isBootRecord(struct iso9660 *, const unsigned char *);
+static int	isVolumePartition(struct iso9660 *, const unsigned char *);
+static int	isVDSetTerminator(struct iso9660 *, const unsigned char *);
+static int	isJolietSVD(struct iso9660 *, const unsigned char *);
+static int	isSVD(struct iso9660 *, const unsigned char *);
+static int	isEVD(struct iso9660 *, const unsigned char *);
+static int	isPVD(struct iso9660 *, const unsigned char *);
+static int	next_cache_entry(struct archive_read *, struct iso9660 *,
+		    struct file_info **);
+static int	next_entry_seek(struct archive_read *, struct iso9660 *,
+		    struct file_info **);
+static struct file_info *
+		parse_file_info(struct archive_read *a,
+		    struct file_info *parent, const unsigned char *isodirrec,
+		    size_t reclen);
+static int	parse_rockridge(struct archive_read *a,
+		    struct file_info *file, const unsigned char *start,
+		    const unsigned char *end);
+static int	register_CE(struct archive_read *a, int32_t location,
+		    struct file_info *file);
+static int	read_CE(struct archive_read *a, struct iso9660 *iso9660);
+static void	parse_rockridge_NM1(struct file_info *,
+		    const unsigned char *, int);
+static void	parse_rockridge_SL1(struct file_info *,
+		    const unsigned char *, int);
+static void	parse_rockridge_TF1(struct file_info *,
+		    const unsigned char *, int);
+static void	parse_rockridge_ZF1(struct file_info *,
+		    const unsigned char *, int);
+static void	register_file(struct iso9660 *, struct file_info *);
+static void	release_files(struct iso9660 *);
+static unsigned	toi(const void *p, int n);
+static inline void re_add_entry(struct iso9660 *, struct file_info *);
+static inline struct file_info * re_get_entry(struct iso9660 *);
+static inline int rede_add_entry(struct file_info *);
+static inline struct file_info * rede_get_entry(struct file_info *);
+static inline void cache_add_entry(struct iso9660 *iso9660,
+		    struct file_info *file);
+static inline struct file_info *cache_get_entry(struct iso9660 *iso9660);
+static int	heap_add_entry(struct archive_read *a, struct heap_queue *heap,
+		    struct file_info *file, uint64_t key);
+static struct file_info *heap_get_entry(struct heap_queue *heap);
+
+#define add_entry(arch, iso9660, file)	\
+	heap_add_entry(arch, &((iso9660)->pending_files), file, file->offset)
+#define next_entry(iso9660)		\
+	heap_get_entry(&((iso9660)->pending_files))
+
+int
+archive_read_support_format_iso9660(struct archive *_a)
+{
+	struct archive_read *a = (struct archive_read *)_a;
+	struct iso9660 *iso9660;
+	int r;
+
+	archive_check_magic(_a, ARCHIVE_READ_MAGIC,
+	    ARCHIVE_STATE_NEW, "archive_read_support_format_iso9660");
+
+	iso9660 = (struct iso9660 *)calloc(1, sizeof(*iso9660));
+	if (iso9660 == NULL) {
+		archive_set_error(&a->archive, ENOMEM,
+		    "Can't allocate iso9660 data");
+		return (ARCHIVE_FATAL);
+	}
+	iso9660->magic = ISO9660_MAGIC;
+	iso9660->cache_files.first = NULL;
+	iso9660->cache_files.last = &(iso9660->cache_files.first);
+	iso9660->re_files.first = NULL;
+	iso9660->re_files.last = &(iso9660->re_files.first);
+	/* Enable to support Joliet extensions by default.	*/
+	iso9660->opt_support_joliet = 1;
+	/* Enable to support Rock Ridge extensions by default.	*/
+	iso9660->opt_support_rockridge = 1;
+
+	r = __archive_read_register_format(a,
+	    iso9660,
+	    "iso9660",
+	    archive_read_format_iso9660_bid,
+	    archive_read_format_iso9660_options,
+	    archive_read_format_iso9660_read_header,
+	    archive_read_format_iso9660_read_data,
+	    archive_read_format_iso9660_read_data_skip,
+	    NULL,
+	    archive_read_format_iso9660_cleanup,
+	    NULL,
+	    NULL);
+
+	if (r != ARCHIVE_OK) {
+		free(iso9660);
+		return (r);
+	}
+	return (ARCHIVE_OK);
+}
+
+
+static int
+archive_read_format_iso9660_bid(struct archive_read *a, int best_bid)
+{
+	struct iso9660 *iso9660;
+	ssize_t bytes_read;
+	const unsigned char *p;
+	int seenTerminator;
+
+	/* If there's already a better bid than we can ever
+	   make, don't bother testing. */
+	if (best_bid > 48)
+		return (-1);
+
+	iso9660 = (struct iso9660 *)(a->format->data);
+
+	/*
+	 * Skip the first 32k (reserved area) and get the first
+	 * 8 sectors of the volume descriptor table.  Of course,
+	 * if the I/O layer gives us more, we'll take it.
+	 */
+#define RESERVED_AREA	(SYSTEM_AREA_BLOCK * LOGICAL_BLOCK_SIZE)
+	p = __archive_read_ahead(a,
+	    RESERVED_AREA + 8 * LOGICAL_BLOCK_SIZE,
+	    &bytes_read);
+	if (p == NULL)
+	    return (-1);
+
+	/* Skip the reserved area. */
+	bytes_read -= RESERVED_AREA;
+	p += RESERVED_AREA;
+
+	/* Check each volume descriptor. */
+	seenTerminator = 0;
+	for (; bytes_read > LOGICAL_BLOCK_SIZE;
+	    bytes_read -= LOGICAL_BLOCK_SIZE, p += LOGICAL_BLOCK_SIZE) {
+		/* Do not handle undefined Volume Descriptor Type. */
+		if (p[0] >= 4 && p[0] <= 254)
+			return (0);
+		/* Standard Identifier must be "CD001" */
+		if (memcmp(p + 1, "CD001", 5) != 0)
+			return (0);
+		if (isPVD(iso9660, p))
+			continue;
+		if (!iso9660->joliet.location) {
+			if (isJolietSVD(iso9660, p))
+				continue;
+		}
+		if (isBootRecord(iso9660, p))
+			continue;
+		if (isEVD(iso9660, p))
+			continue;
+		if (isSVD(iso9660, p))
+			continue;
+		if (isVolumePartition(iso9660, p))
+			continue;
+		if (isVDSetTerminator(iso9660, p)) {
+			seenTerminator = 1;
+			break;
+		}
+		return (0);
+	}
+	/*
+	 * ISO 9660 format must have Primary Volume Descriptor and
+	 * Volume Descriptor Set Terminator.
+	 */
+	if (seenTerminator && iso9660->primary.location > 16)
+		return (48);
+
+	/* We didn't find a valid PVD; return a bid of zero. */
+	return (0);
+}
+
+static int
+archive_read_format_iso9660_options(struct archive_read *a,
+		const char *key, const char *val)
+{
+	struct iso9660 *iso9660;
+
+	iso9660 = (struct iso9660 *)(a->format->data);
+
+	if (strcmp(key, "joliet") == 0) {
+		if (val == NULL || strcmp(val, "off") == 0 ||
+				strcmp(val, "ignore") == 0 ||
+				strcmp(val, "disable") == 0 ||
+				strcmp(val, "0") == 0)
+			iso9660->opt_support_joliet = 0;
+		else
+			iso9660->opt_support_joliet = 1;
+		return (ARCHIVE_OK);
+	}
+	if (strcmp(key, "rockridge") == 0 ||
+	    strcmp(key, "Rockridge") == 0) {
+		iso9660->opt_support_rockridge = val != NULL;
+		return (ARCHIVE_OK);
+	}
+
+	/* Note: The "warn" return is just to inform the options
+	 * supervisor that we didn't handle it.  It will generate
+	 * a suitable error if no one used this option. */
+	return (ARCHIVE_WARN);
+}
+
+static int
+isNull(struct iso9660 *iso9660, const unsigned char *h, unsigned offset,
+unsigned bytes)
+{
+
+	while (bytes >= sizeof(iso9660->null)) {
+		if (!memcmp(iso9660->null, h + offset, sizeof(iso9660->null)))
+			return (0);
+		offset += sizeof(iso9660->null);
+		bytes -= sizeof(iso9660->null);
+	}
+	if (bytes)
+		return memcmp(iso9660->null, h + offset, bytes) == 0;
+	else
+		return (1);
+}
+
+static int
+isBootRecord(struct iso9660 *iso9660, const unsigned char *h)
+{
+	(void)iso9660; /* UNUSED */
+
+	/* Type of the Volume Descriptor Boot Record must be 0. */
+	if (h[0] != 0)
+		return (0);
+
+	/* Volume Descriptor Version must be 1. */
+	if (h[6] != 1)
+		return (0);
+
+	return (1);
+}
+
+static int
+isVolumePartition(struct iso9660 *iso9660, const unsigned char *h)
+{
+	int32_t location;
+
+	/* Type of the Volume Partition Descriptor must be 3. */
+	if (h[0] != 3)
+		return (0);
+
+	/* Volume Descriptor Version must be 1. */
+	if (h[6] != 1)
+		return (0);
+	/* Unused Field */
+	if (h[7] != 0)
+		return (0);
+
+	location = archive_le32dec(h + 72);
+	if (location <= SYSTEM_AREA_BLOCK ||
+	    location >= iso9660->volume_block)
+		return (0);
+	if ((uint32_t)location != archive_be32dec(h + 76))
+		return (0);
+
+	return (1);
+}
+
+static int
+isVDSetTerminator(struct iso9660 *iso9660, const unsigned char *h)
+{
+	(void)iso9660; /* UNUSED */
+
+	/* Type of the Volume Descriptor Set Terminator must be 255. */
+	if (h[0] != 255)
+		return (0);
+
+	/* Volume Descriptor Version must be 1. */
+	if (h[6] != 1)
+		return (0);
+
+	/* Reserved field must be 0. */
+	if (!isNull(iso9660, h, 7, 2048-7))
+		return (0);
+
+	return (1);
+}
+
+static int
+isJolietSVD(struct iso9660 *iso9660, const unsigned char *h)
+{
+	const unsigned char *p;
+	ssize_t logical_block_size;
+	int32_t volume_block;
+
+	/* Check if current sector is a kind of Supplementary Volume
+	 * Descriptor. */
+	if (!isSVD(iso9660, h))
+		return (0);
+
+	/* FIXME: do more validations according to joliet spec.
+
+// --- CODE TRUNCATED HERE ---
+
+static int
+read_children(struct archive_read *archivereader, struct file_info *parent)
+{
+	struct iso9660 *iso9660;
+	const unsigned char *b, *p;
+	struct file_info *multi;
+	size_t step, skip_size;
+
+	iso9660 = (struct iso9660 *)(archivereader->format->data);
+	/* flush any remaining bytes from the last round to ensure
+	 * we're positioned */
+	if (iso9660->entry_bytes_unconsumed) {
+		__archive_read_consume(archivereader, iso9660->entry_bytes_unconsumed);
+		iso9660->entry_bytes_unconsumed = 0;
+	}
+	if (iso9660->current_position > parent->offset) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Ignoring out-of-order directory (%s) %jd > %jd",
+		    parent->name.s,
+		    (intmax_t)iso9660->current_position,
+		    (intmax_t)parent->offset);
+		return (ARCHIVE_WARN);
+	}
+	if (parent->offset + parent->size > iso9660->volume_size) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Directory is beyond end-of-media: %s",
+		    parent->name.s);
+		return (ARCHIVE_WARN);
+	}
+	if (iso9660->current_position < parent->offset) {
+		int64_t skipsize;
+
+		skipsize = parent->offset - iso9660->current_position;
+		skipsize = __archive_read_consume(archivereader, skipsize);
+		if (skipsize < 0)
+			return ((int)skipsize);
+		iso9660->current_position = parent->offset;
+	}
+
+	step = (size_t)(((parent->size + iso9660->logical_block_size -1) /
+	    iso9660->logical_block_size) * iso9660->logical_block_size);
+	b = __archive_read_ahead(archivereader, step, NULL);
+	if (b == NULL) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Failed to read full block when scanning "
+		    "ISO9660 directory list");
+		return (ARCHIVE_FATAL);
+	}
+	iso9660->current_position += step;
+	multi = NULL;
+	skip_size = step;
+	while (step) {
+		// Iterate over directory entries in the buffer while there is data to process.
+		// For each directory entry, parse its file information, and handle special cases:
+		// - Skip entries for '.' and '..' directories.
+		// - Manage multi-extent files by collecting their contents into a list.
+		// - For each valid directory entry, add it to the archive structure.
+		// - Handle memory allocation and error management for multi-extent file handling.
+		// <MASK>
+	}
+
+	__archive_read_consume(archivereader, skip_size);
+
+	/* Read data which recorded by RRIP "CE" extension. */
+	if (read_CE(archivereader, iso9660) != ARCHIVE_OK)
+		return (ARCHIVE_FATAL);
+
+	return (ARCHIVE_OK);
+}

@@ -1,0 +1,314 @@
+to delete
+             _cmsDeleteTagByPos(Icc, i);
+             Icc -> TagNames[i] = (cmsTagSignature) 0;
+         }
+
+         _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+         return TRUE;
+    }
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i >= 0) {
+
+        // Already exists, delete it
+        _cmsDeleteTagByPos(Icc, i);
+    }
+
+    // Check if we have space for a new tag
+    if (Icc -> TagCount >= MAX_TABLE_TAG) {
+        cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get the tag position
+    if (!_cmsNewTag(Icc, sig, &i)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get the version
+    Version = cmsGetProfileVersion(hProfile);
+
+    // Search for support on this tag
+    TagDescriptor = _cmsGetTagDescriptor(Icc->ContextID, sig);
+    if (TagDescriptor == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Decide the type
+    if (TagDescriptor ->DecideType != NULL) {
+        Type = TagDescriptor ->DecideType(Version, data);
+    }
+    else {
+        Type = TagDescriptor ->SupportedTypes[0];
+    }
+
+    // Get type handler
+    TypeHandler = _cmsGetTagTypeHandler(Icc->ContextID, Type);
+    if (TypeHandler == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Save the type
+    Icc -> TagTypeHandlers[i] = TypeHandler;
+
+    // Save the tag
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+    Icc -> TagPtrs[i] = LocalTypeHandler.WritePtr(&LocalTypeHandler, Icc ->IOhandler, (void*) data, TagDescriptor ->ElemCount);
+
+    // The tag type is supported, but something wrong happened and we cannot write the tag.
+    // let know the user about this (although it is just a warning)
+    if (Icc -> TagPtrs[i] == NULL) {
+        _cmsTagSignature2String(SigString, sig);
+        _cmsTagSignature2String(TypeString, Type);
+        cmsSignalError(Icc ->ContextID, cmsERROR_CORRUPTION_DETECTED, "Couldn't write tag '%s' of type '%s'", SigString, TypeString);
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Save the tag size
+    Icc -> TagSizes[i] = (cmsUInt32Number) TypeHandler ->SizeOf(TypeHandler, data);
+
+    // Save the tag offset
+    Icc -> TagOffsets[i] = Icc ->IOhandler->UsedSpace;
+
+    // Write the type base
+    if (!_cmsWriteTypeBase(Icc ->IOhandler, Type)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Write the tag
+    if (!TypeHandler ->WritePtr(&LocalTypeHandler, Icc ->IOhandler, Icc -> TagPtrs[i], TagDescriptor ->ElemCount)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Align to 32 bit boundary.
+    if (!_cmsWriteAlignment(Icc ->IOhandler)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Save the tag signature
+    Icc -> TagNames[i] = sig;
+
+    // Save the tag linked signature
+    Icc -> TagLinked[i] = (cmsTagSignature) 0;
+
+    // Save the tag save as raw flag
+    Icc -> TagSaveAsRaw[i] = FALSE;
+
+    // Increment the tag count
+    Icc -> TagCount++;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Link two tags. This is used to point to a tag that is not in the profile, but is linked to the current one.
+cmsBool CMSEXPORT cmsLinkTag(cmsHPROFILE hProfile, cmsTagSignature sig, cmsTagSignature linkedSig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Link the tag
+    Icc -> TagLinked[i] = linkedSig;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Save as raw flag
+cmsBool CMSEXPORT cmsSaveAsRawTag(cmsHPROFILE hProfile, cmsTagSignature sig, cmsBool SaveAsRaw)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i < 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Save as raw flag
+    Icc -> TagSaveAsRaw[i] = SaveAsRaw;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+// Add a new tag type handler
+cmsBool CMSEXPORT cmsAddTagTypeHandler(cmsTagTypeHandler* Handler)
+{
+    return _cmsAddTagTypeHandler(Handler);
+}
+
+// Add a new tag descriptor
+cmsBool CMSEXPORT cmsAddTagDescriptor(cmsTagDescriptor* Descriptor)
+{
+    return _cmsAddTagDescriptor(Descriptor);
+}
+
+// Add a new tag signature to the profile
+cmsBool CMSEXPORT cmsAddTagToProfile(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i >= 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return TRUE;
+    }
+
+    // Check if we have space for a new tag
+    if (Icc -> TagCount >= MAX_TABLE_TAG) {
+        cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Add the tag
+    Icc -> TagNames[Icc -> TagCount] = sig;
+    Icc -> TagOffsets[Icc -> TagCount] = 0;
+    Icc -> TagSizes[Icc -> TagCount] = 0;
+    Icc -> TagLinked[Icc -> TagCount] = (cmsTagSignature) 0;
+    Icc -> TagSaveAsRaw[Icc -> TagCount] = FALSE;
+    Icc -> TagTypeHandlers[Icc -> TagCount] = NULL;
+    Icc -> TagCount++;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+// Add a new tag type handler
+cmsBool CMSEXPORT cmsAddTagTypeHandler(cmsTagTypeHandler* Handler)
+{
+    return _cmsAddTagTypeHandler(Handler);
+}
+
+// Add a new tag descriptor
+cmsBool CMSEXPORT cmsAddTagDescriptor(cmsTagDescriptor* Descriptor)
+{
+    return _cmsAddTagDescriptor(Descriptor);
+}
+
+// Add a new tag signature to the profile
+cmsBool CMSEXPORT cmsAddTagToProfile(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i >= 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return TRUE;
+    }
+
+    // Check if we have space for a new tag
+    if (Icc -> TagCount >= MAX_TABLE_TAG) {
+        cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Add the tag
+    Icc -> TagNames[Icc -> TagCount] = sig;
+    Icc -> TagOffsets[Icc -> TagCount] = 0;
+    Icc -> TagSizes[Icc -> TagCount] = 0;
+    Icc -> TagLinked[Icc -> TagCount] = (cmsTagSignature) 0;
+    Icc -> TagSaveAsRaw[Icc -> TagCount] = FALSE;
+    Icc -> TagTypeHandlers[Icc -> TagCount] = NULL;
+    Icc -> TagCount++;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+// Add a new tag type handler
+cmsBool CMSEXPORT cmsAddTagTypeHandler(cmsTagTypeHandler* Handler)
+{
+    return _cmsAddTagTypeHandler(Handler);
+}
+
+// Add a new tag descriptor
+cmsBool CMSEXPORT cmsAddTagDescriptor(cmsTagDescriptor* Descriptor)
+{
+    return _cmsAddTagDescriptor(Descriptor);
+}
+
+// Add a new tag signature to the profile
+cmsBool CMSEXPORT cmsAddTagToProfile(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i >= 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return TRUE;
+    }
+
+    // Check if we have space for a new tag
+    if (Icc -> TagCount >= MAX_TABLE_TAG) {
+        cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Add the tag
+    Icc -> TagNames[Icc -> TagCount] = sig;
+    Icc -> TagOffsets[Icc -> TagCount] = 0;
+    Icc -> TagSizes[Icc -> TagCount] = 0;
+    Icc -> TagLinked[Icc -> TagCount] = (cmsTagSignature) 0;
+    Icc -> TagSaveAsRaw[Icc -> TagCount] = FALSE;
+    Icc -> TagTypeHandlers[Icc -> TagCount] = NULL;
+    Icc -> TagCount++;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+// Add a new tag type handler

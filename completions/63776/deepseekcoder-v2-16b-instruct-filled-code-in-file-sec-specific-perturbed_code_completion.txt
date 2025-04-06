@@ -1,0 +1,241 @@
+0);
+      uint32_t crc = 0;
+      crc = bit_calc_CRC (0x8005, data, chunksize);
+      sum1 = (sum1 + (crc & 0xffff)) % 0x10001;
+      sum2 = (sum2 + ((crc >> 0x10) & 0xffff) + (sum1 < (crc & 0xffff)))
+             % 0x10001;
+      data += chunksize;
+      size -= chunksize;
+    }
+  return (sum2 << 0x10) | sum1;
+}
+
+// index is the Section Number in the section map
+static int
+read_section (Dwg_Data *restrict dat, Dwg_Data *restrict dwg, BITCODE_RLd idx)
+{
+  Dwg_Section *section = find_section (dwg, idx);
+  if (!section)
+    {
+      LOG_ERROR ("Section %" PRIu64 " not found", (uint64_t)idx);
+      return DWG_ERR_SECTIONNOTFOUND;
+    }
+  if (section->address + section->size > dat->size)
+    {
+      LOG_ERROR ("Section %" PRIu64 " size overflow", (uint64_t)idx);
+      return DWG_ERR_SECTIONNOTFOUND;
+    }
+  dat->byte = section->address;
+  dat->bit = 0;
+  if (section->size > 0)
+    {
+      if (decompress_R2004_section (dat, &dwg->section[idx], section->size,
+                                    section->size))
+        {
+          LOG_ERROR ("Failed to decompress section %" PRIu64, (uint64_t)idx);
+          return DWG_ERR_INTERNALERROR;
+        }
+    }
+  return 0;
+}
+
+static int
+decode_R2004 (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
+{
+  int error = 0;
+  BITCODE_RLd idx;
+
+  if (dat->byte != 0x15)
+    {
+      LOG_ERROR ("Wrong HEADER Section Locator Records at %" PRIuSIZE,
+                 dat->byte)
+      return DWG_ERR_INVALIDDWG;
+    }
+  assert (dat->byte == 0x15);
+  dwg->header.sections = bit_read_RL (dat);
+  LOG_TRACE ("\nnum_sections: " FORMAT_RL " [RL]\n", dwg->header.sections)
+  if ((error = dwg_sections_init (dwg)))
+    return error;
+  /* section 0: header vars
+   *         1: class section
+   *         2: object map
+   *         3: (R13c3 and later): 2nd header (special table, no sentinels)
+   *         4: optional: MEASUREMENT
+   *         5: optional: AuxHeader (no sentinels, since R13c3)
+   */
+  for (j = 0; j < dwg->header.num_sections; j++)
+    {
+      dwg->header.section[j].number = (BITCODE_RLd)bit_read_RC (dat);
+      dwg->header.section[j].address = (BITCODE_RLL)bit_read_RL (dat);
+      dwg->header.section[j].size = bit_read_RL (dat);
+      if (j < 6)
+        strcpy (dwg->header.section[j].name, section_names[j]);
+      LOG_TRACE ("section[%u].number:  %4d [RC] %s\n", j,
+                 (int)dwg->header.section[j].number,
+                 dwg->header.section[j].name)
+      LOG_TRACE ("section[%u].address: %4u [RL]\n", j,
+                 (unsigned)dwg->header.section[j].address)
+      LOG_TRACE ("section[%u].size:    %4u [RL]\n", j,
+                 (unsigned)dwg->header.section[j].size);
+      if (dwg->header.section[j].address + dwg->header.section[j].size
+          > dat->size)
+        {
+          LOG_ERROR ("section[%u] address or size overflow: %" PRIu64
+                     " + " FORMAT_RL " > %" PRIuSIZE,
+                     j, dwg->header.section[j].address,
+                     dwg->header.section[j].size, dat->size);
+          return DWG_ERR_INVALIDDWG;
+        }
+    }
+
+  // Check CRC up to now (note: ODA has a bug here)
+  crc2 = bit_calc_CRC (0xC0C1, &dat->chain[0], dat->byte); // from 0 to now
+  crc = bit_read_RS (dat);
+  LOG_TRACE ("crc: %04X [RSx] from 0-%" PRIuSIZE "\n", (unsigned)crc,
+             dat->byte - 2);
+  if (crc != crc2)
+    {
+      LOG_ERROR ("Header CRC mismatch %04X <=> %04X", (unsigned)crc,
+                 (unsigned)crc2);
+      error |= DWG_ERR_WRONGCRC;
+    }
+
+  if (bit_search_sentinel (dat, dwg_sentinel (DWG_SENTINEL_HEADER_END)))
+    LOG_TRACE ("         HEADER (end):    %4u\n", (unsigned)dat->byte)
+
+  /*-------------------------------------------------------------------------
+   * Section 5 AuxHeader
+   * R13c3+, mostly redundant file header information. no sentinels
+   */
+  if (dwg->header.sections == 6 && dwg->header.version >= R_13c3)
+    {
+      int i;
+      Dwg_AuxHeader *_obj = &dwg->auxheader;
+      Bit_Chain *hdl_dat = dat;
+      size_t end_address = dwg->header.section[SECTION_AUXHEADER_R2000].address
+                           + dwg->header.section[SECTION_AUXHEADER_R2000].size;
+
+      obj = NULL;
+      dat->byte = dwg->header.section[SECTION_AUXHEADER_R2000].address;
+      LOG_TRACE ("\n"
+                 "=======> AuxHeader:       %4zu\n",
+                 dat->byte)
+      LOG_TRACE ("         AuxHeader (end): %4zu\n", end_address)
+      if (dat->size < end_address)
+        {
+          LOG_ERROR ("Invalid AuxHeader size: buffer overflow")
+          error |= DWG_ERR_SECTIONNOTFOUND;
+        }
+      else
+        {
+          size_t old_size = dat->size;
+          BITCODE_BL vcount;
+          dat->size = end_address;
+          // clang-format off
+          #include "auxheader.spec"
+          // clang-format on
+          dat->size = old_size;
+        }
+    }
+
+  /*-------------------------------------------------------------------------
+   * Thumbnail Image (pre-r13c3 before, since r13c3 at the end)
+   */
+  if (bit_search_sentinel (dat, dwg_sentinel (DWG_SENTINEL_THUMBNAIL_BEGIN)))
+    {
+      size_t start_address;
+
+      dat->bit = 0;
+      start_address = dat->byte;
+      LOG_TRACE ("\n=======> Thumbnail:       %4zu\n", start_address - 16);
+      if (dwg->header.thumbnail_address
+          && dwg->header.thumbnail_address != (BITCODE_RL)(dat->byte - 16))
+        LOG_WARN ("Illegal header.thumbnail_address: %i != %" PRIuSIZE,
+                  dwg->header.thumbnail_address, dat->byte - 16)
+      dwg->header.thumbnail_address = (dat->byte - 16) & 0xFFFFFFFF;
+      if (bit_search_sentinel (dat, dwg_sentinel (DWG_SENTINEL_THUMBNAIL_END)))
+        {
+          BITCODE_RL bmpsize;
+          LOG_TRACE ("         Thumbnail (end): %4zu\n", dat->byte)
+          if ((dat->byte - 16) < start_address)
+            {
+              LOG_ERROR ("Illegal header.thumbnail_size: %" PRIuSIZE
+                         " < %" PRIuSIZE,
+                         dat->byte - 16, start_address);
+            }
+          else if ((dat->byte - 16) - start_address < 10)
+            {
+              LOG_TRACE ("No header.thumbnail: %" PRIuSIZE " < 10",
+                         dat->byte - 16 - start_address);
+            }
+          else
+            {
+              BITCODE_RC type;
+              assert ((dat->byte - 16) >= start_address);
+              dwg->thumbnail.size = (dat->byte - 16) - start_address;
+              dwg->thumbnail.chain
+                  = (unsigned char *)calloc (dwg->thumbnail.size, 1);
+              dwg->thumbnail.byte = 0;
+              if (!dwg->thumbnail.chain)
+                {
+                  LOG_ERROR ("Out of memory");
+                  return DWG_ERR_OUTOFMEM;
+                }
+              memcpy (dwg->thumbnail.chain, &dat->chain[start_address],
+                      dwg->thumbnail.size);
+              dat->byte += dwg->thumbnail.size;
+              dwg_bmp (dwg, &bmpsize, &type);
+              if (bmpsize > dwg->thumbnail.size)
+                LOG_ERROR ("thumbnail size overflow: %i > %" PRIuSIZE "\n",
+                           bmpsize, dwg->thumbnail.size)
+            }
+        }
+    }
+
+  /*-------------------------------------------------------------------------
+   * Header Variables, section 0
+   */
+
+  LOG_INFO ("\n"
+            "=======> Header Variables:         %4u\n",
+            (unsigned int)dwg->header.section[SECTION_HEADER_R2000].address)
+  LOG_INFO ("         Header Variables   (end): %4u\n",
+            (unsigned int)(dwg->header.section[SECTION_HEADER_R2000].address
+                           + dwg->header.section[SECTION_HEADER_R2000].size))
+  if (dwg->header.section[SECTION_HEADER_R2000].address < 58
+      || dwg->header.section[SECTION_HEADER_R2000].address
+                 + dwg->header.section[SECTION_HEADER_R2000].size
+             > dat->size)
+    {
+      LOG_ERROR ("Invalid Header section, skipped")
+      error |= DWG_ERR_SECTIONNOTFOUND;
+      goto classes_section;
+    }
+  // after sentinel
+  dat->byte = pvz = dwg->header.section[SECTION_HEADER_R2000].address + 16;
+  // LOG_HANDLE ("@ 0x" FORMAT_RLLx ".%" PRIuSIZE "\n", bit_position (dat)/8,
+  // bit_position (dat)%8);
+#define MAX_HEADER_SIZE 2048
+  dwg->header_vars.size = bit_read_RL (dat);
+  LOG_TRACE ("         Length: " FORMAT_RL " [RL]\n", dwg->header_vars.size)
+  if (dwg->header_vars.size > MAX_HEADER_SIZE)
+    {
+      LOG_WARN ("Fixup illegal Header Length");
+      dwg->header_vars.size = dwg->header.section[SECTION_HEADER_R2000].size;
+      if (dwg->header_vars.size > 20)
+        dwg->header_vars.size -= 16 + 4;
+    }
+  dat->bit = 0;
+
+  error |= dwg_decode_header_variables (dat, dat, dat, dwg);
+
+  // LOG_HANDLE ("@ 0x" FORMAT_RLLx ".%" PRIuSIZE "\n", bit_position (dat)/8,
+  // bit_position (dat)%8); check slack Check CRC, hardcoded to 2 before end
+  // sentinel
+  if (dwg->header_vars.size < MAX_HEADER_SIZE)
+    {
+      size_t crcpos = pvz + dwg->header_vars.size + 4;
+      if (dat->bit || dat->byte != crcpos)
+        {
+          unsigned char r = 8 - dat->bit;
+          LOG_HANDLE (" padding: %zd byte, %d bits\n", crcpos - dat->byte, r);

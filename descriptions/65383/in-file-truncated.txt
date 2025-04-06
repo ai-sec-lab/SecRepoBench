@@ -1,0 +1,809 @@
+<｜begin▁of▁sentence｜>/*
+Copyright (c) 2012-2020, 2022-2023 Genome Research Ltd.
+Author: James Bonfield <jkb@sanger.ac.uk>
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+   1. Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+   3. Neither the names Genome Research Ltd and Wellcome Trust Sanger
+Institute nor the names of its contributors may be used to endorse or promote
+products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY GENOME RESEARCH LTD AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL GENOME RESEARCH LTD OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
+#include <config.h>
+
+#include <stdio.h>
+#include <errno.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <zlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <math.h>
+#include <inttypes.h>
+#include <ctype.h>
+
+#include "cram.h"
+#include "os.h"
+#include "../sam_internal.h" // for nibble2base
+#include "../htslib/hts.h"
+#include "../htslib/hts_endian.h"
+#include "../textutils_internal.h"
+
+KHASH_MAP_INIT_STR(m_s2u64, uint64_t)
+
+#define Z_CRAM_STRAT Z_FILTERED
+//#define Z_CRAM_STRAT Z_RLE
+//#define Z_CRAM_STRAT Z_HUFFMAN_ONLY
+//#define Z_CRAM_STRAT Z_DEFAULT_STRATEGY
+
+static int process_one_read(cram_fd *fd, cram_container *c,
+                            cram_slice *s, cram_record *cr,
+                            bam_seq_t *b, int rnum, kstring_t *MD,
+                            int embed_ref, int no_ref);
+
+/*
+ * Returns index of val into key.
+ * Basically strchr(key, val)-key;
+ */
+static int sub_idx(char *key, char val) {
+    int i;
+
+    for (i = 0; i < 4 && *key++ != val; i++);
+    return i;
+}
+
+/*
+ * Encodes a compression header block into a generic cram_block structure.
+ *
+ * Returns cram_block ptr on success
+ *         NULL on failure
+ */
+cram_block *cram_encode_compression_header(cram_fd *fd, cram_container *c,
+                                           cram_block_compression_hdr *h,
+                                           int embed_ref) {
+    cram_block *cb  = cram_new_block(COMPRESSION_HEADER, 0);
+    cram_block *map = cram_new_block(COMPRESSION_HEADER, 0);
+    int i, mc, r = 0;
+
+    int no_ref = c->no_ref;
+
+    if (!cb || !map)
+        return NULL;
+
+    /*
+     * This is a concatenation of several blocks of data:
+     * header + landmarks, preservation map, read encoding map, and the tag
+     * encoding map.
+     * All 4 are variable sized and we need to know how large these are
+     * before creating the compression header itself as this starts with
+     * the total size (stored as a variable length string).
+     */
+
+    // Duplicated from container itself, and removed in 1.1
+    if (CRAM_MAJOR_VERS(fd->version) == 1) {
+        r |= itf8_put_blk(cb, h->ref_seq_id);
+        r |= itf8_put_blk(cb, h->ref_seq_start);
+        r |= itf8_put_blk(cb, h->ref_seq_span);
+        r |= itf8_put_blk(cb, h->num_records);
+        r |= itf8_put_blk(cb, h->num_landmarks);
+        for (i = 0; i < h->num_landmarks; i++) {
+            r |= itf8_put_blk(cb, h->landmark[i]);
+        }
+    }
+
+    if (h->preservation_map) {
+        kh_destroy(map, h->preservation_map);
+        h->preservation_map = NULL;
+    }
+
+    /* Create in-memory preservation map */
+    /* FIXME: should create this when we create the container */
+    if (c->num_records > 0) {
+        khint_t k;
+        int r;
+
+        if (!(h->preservation_map = kh_init(map)))
+            return NULL;
+
+        k = kh_put(map, h->preservation_map, "RN", &r);
+        if (-1 == r) return NULL;
+        kh_val(h->preservation_map, k).i = !fd->lossy_read_names;
+
+        if (CRAM_MAJOR_VERS(fd->version) == 1) {
+            k = kh_put(map, h->preservation_map, "PI", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 0;
+
+            k = kh_put(map, h->preservation_map, "UI", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 1;
+
+            k = kh_put(map, h->preservation_map, "MI", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 1;
+
+        } else {
+            // Technically SM was in 1.0, but wasn't in Java impl.
+            k = kh_put(map, h->preservation_map, "SM", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 0;
+
+            k = kh_put(map, h->preservation_map, "TD", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = 0;
+
+            k = kh_put(map, h->preservation_map, "AP", &r);
+            if (-1 == r) return NULL;
+            kh_val(h->preservation_map, k).i = h->AP_delta;
+
+            if (CRAM_MAJOR_VERS(fd->version) >= 4) {
+                k = kh_put(map, h->preservation_map, "QO", &r);
+                if (-1 == r) return NULL;
+                kh_val(h->preservation_map, k).i = h->qs_seq_orient;
+            }
+
+            if (no_ref || embed_ref>0) {
+                // Reference Required == No
+                k = kh_put(map, h->preservation_map, "RR", &r);
+                if (-1 == r) return NULL;
+                kh_val(h->preservation_map, k).i = 0;
+            }
+        }
+    }
+
+    /* Encode preservation map; could collapse this and above into one */
+    mc = 0;
+    BLOCK_SIZE(map) = 0;
+    if (h->preservation_map) {
+        khint_t k;
+
+        for (k = kh_begin(h->preservation_map);
+             k != kh_end(h->preservation_map);
+             k++) {
+            const char *key;
+            khash_t(map) *pmap = h->preservation_map;
+
+
+            if (!kh_exist(pmap, k))
+                continue;
+
+            key = kh_key(pmap, k);
+            BLOCK_APPEND(map, key, 2);
+
+            switch(CRAM_KEY(key[0], key[1])) {
+            case CRAM_KEY('M','I'):
+            case CRAM_KEY('U','I'):
+            case CRAM_KEY('P','I'):
+            case CRAM_KEY('A','P'):
+            case CRAM_KEY('R','N'):
+            case CRAM_KEY('R','R'):
+            case CRAM_KEY('Q','O'):
+                BLOCK_APPEND_CHAR(map, kh_val(pmap, k).i);
+                break;
+
+            case CRAM_KEY('S','M'): {
+                char smat[5], *mp = smat;
+                // Output format is for order ACGTN (minus ref base)
+                // to store the code value 0-3 for each symbol.
+                //
+                // Note this is different to storing the symbols in order
+                // that the codes occur from 0-3, which is what we used to
+                // do.  (It didn't matter as we always had a fixed table in
+                // the order.)
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[0], 'C') << 6) |
+                    (sub_idx(h->substitution_matrix[0], 'G') << 4) |
+                    (sub_idx(h->substitution_matrix[0], 'T') << 2) |
+                    (sub_idx(h->substitution_matrix[0], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[1], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[1], 'G') << 4) |
+                    (sub_idx(h->substitution_matrix[1], 'T') << 2) |
+                    (sub_idx(h->substitution_matrix[1], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[2], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[2], 'C') << 4) |
+                    (sub_idx(h->substitution_matrix[2], 'T') << 2) |
+                    (sub_idx(h->substitution_matrix[2], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[3], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[3], 'C') << 4) |
+                    (sub_idx(h->substitution_matrix[3], 'G') << 2) |
+                    (sub_idx(h->substitution_matrix[3], 'N') << 0);
+                *mp++ =
+                    (sub_idx(h->substitution_matrix[4], 'A') << 6) |
+                    (sub_idx(h->substitution_matrix[4], 'C') << 4) |
+                    (sub_idx(h->substitution_matrix[4], 'G') << 2) |
+                    (sub_idx(h->substitution_matrix[4], 'T') << 0);
+                BLOCK_APPEND(map, smat, 5);
+                break;
+            }
+
+            case CRAM_KEY('T','D'): {
+                r |= (fd->vv.varint_put32_blk(map, BLOCK_SIZE(h->TD_blk)) <= 0);
+                BLOCK_APPEND(map,
+                             BLOCK_DATA(h->TD_blk),
+                             BLOCK_SIZE(h->TD_blk));
+                break;
+            }
+
+            default:
+                hts_log_warning("Unknown preservation key '%.2s'", key);
+                break;
+            }
+
+            mc++;
+        }
+    }
+    r |= (fd->vv.varint_put32_blk(cb, BLOCK_SIZE(map) + fd->vv.varint_size(mc)) <= 0);
+    r |= (fd->vv.varint_put32_blk(cb, mc) <= 0);
+    BLOCK_APPEND(cb, BLOCK_DATA(map), BLOCK_SIZE(map));
+
+    /* rec encoding map */
+    mc = 0;
+    BLOCK_SIZE(map) = 0;
+    if (h->codecs[DS_BF]) {
+        if (-1 == h->codecs[DS_BF]->store(h->codecs[DS_BF], map, "BF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_CF]) {
+        if (-1 == h->codecs[DS_CF]->store(h->codecs[DS_CF], map, "CF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RL]) {
+        if (-1 == h->codecs[DS_RL]->store(h->codecs[DS_RL], map, "RL",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_AP]) {
+        if (-1 == h->codecs[DS_AP]->store(h->codecs[DS_AP], map, "AP",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RG]) {
+        if (-1 == h->codecs[DS_RG]->store(h->codecs[DS_RG], map, "RG",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_MF]) {
+        if (-1 == h->codecs[DS_MF]->store(h->codecs[DS_MF], map, "MF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_NS]) {
+        if (-1 == h->codecs[DS_NS]->store(h->codecs[DS_NS], map, "NS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_NP]) {
+        if (-1 == h->codecs[DS_NP]->store(h->codecs[DS_NP], map, "NP",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TS]) {
+        if (-1 == h->codecs[DS_TS]->store(h->codecs[DS_TS], map, "TS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_NF]) {
+        if (-1 == h->codecs[DS_NF]->store(h->codecs[DS_NF], map, "NF",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TC]) {
+        if (-1 == h->codecs[DS_TC]->store(h->codecs[DS_TC], map, "TC",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TN]) {
+        if (-1 == h->codecs[DS_TN]->store(h->codecs[DS_TN], map, "TN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_TL]) {
+        if (-1 == h->codecs[DS_TL]->store(h->codecs[DS_TL], map, "TL",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_FN]) {
+        if (-1 == h->codecs[DS_FN]->store(h->codecs[DS_FN], map, "FN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_FC]) {
+        if (-1 == h->codecs[DS_FC]->store(h->codecs[DS_FC], map, "FC",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_FP]) {
+        if (-1 == h->codecs[DS_FP]->store(h->codecs[DS_FP], map, "FP",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_BS]) {
+        if (-1 == h->codecs[DS_BS]->store(h->codecs[DS_BS], map, "BS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_IN]) {
+        if (-1 == h->codecs[DS_IN]->store(h->codecs[DS_IN], map, "IN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_DL]) {
+        if (-1 == h->codecs[DS_DL]->store(h->codecs[DS_DL], map, "DL",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_BA]) {
+        if (-1 == h->codecs[DS_BA]->store(h->codecs[DS_BA], map, "BA",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_BB]) {
+        if (-1 == h->codecs[DS_BB]->store(h->codecs[DS_BB], map, "BB",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_MQ]) {
+        if (-1 == h->codecs[DS_MQ]->store(h->codecs[DS_MQ], map, "MQ",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RN]) {
+        if (-1 == h->codecs[DS_RN]->store(h->codecs[DS_RN], map, "RN",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_QS]) {
+        if (-1 == h->codecs[DS_QS]->store(h->codecs[DS_QS], map, "QS",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_QQ]) {
+        if (-1 == h->codecs[DS_QQ]->store(h->codecs[DS_QQ], map, "QQ",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (h->codecs[DS_RI]) {
+        if (-1 == h->codecs[DS_RI]->store(h->codecs[DS_RI], map, "RI",
+                                          fd->version))
+            return NULL;
+        mc++;
+    }
+    if (CRAM_MAJOR_VERS(fd
+
+// --- CODE TRUNCATED HERE ---
+
+static sam_hrec_rg_t *cram_encode_aux(cram_fd *fd, bam_seq_t *b,
+                                      cram_container *c,
+                                      cram_slice *s, cram_record *cr,
+                                      int verbatim_NM, int verbatim_MD,
+                                      int NM, kstring_t *MD, int cf_tag,
+                                      int no_ref, int *err) {
+    char *aux, *orig;
+    sam_hrec_rg_t *brg = NULL;
+    int aux_size = bam_get_l_aux(b);
+    const char *aux_limit = bam_data_end(b);
+    cram_block *td_b = c->comp_hdr->TD_blk;
+    int TD_blk_size = BLOCK_SIZE(td_b), new;
+    char *key;
+    khint_t k;
+
+    if (err) *err = 1;
+
+    orig = aux = (char *)bam_aux(b);
+
+
+    // cF:i  => Extra CRAM bit flags.
+    // 1:  Don't auto-decode MD (may be invalid)
+    // 2:  Don't auto-decode NM (may be invalid)
+    if (cf_tag && CRAM_MAJOR_VERS(fd->version) < 4) {
+        // Temporary copy of aux so we can ammend it.
+        aux = malloc(aux_size+4);
+        if (!aux)
+            return NULL;
+
+        memcpy(aux, orig, aux_size);
+        aux[aux_size++] = 'c';
+        aux[aux_size++] = 'F';
+        aux[aux_size++] = 'C';
+        aux[aux_size++] = cf_tag;
+        orig = aux;
+        aux_limit = aux + aux_size;
+    }
+
+    // Copy aux keys to td_b and aux values to slice aux blocks
+    while (aux_limit - aux >= 1 && aux[0] != 0) {
+        int r;
+
+        // Room for code + type + at least 1 byte of data
+        if (aux - orig >= aux_size - 3)
+            goto err;
+
+        // RG:Z
+        if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+            char *rg = &aux[3];
+            brg = sam_hrecs_find_rg(fd->header->hrecs, rg);
+            if (brg) {
+                while (aux < aux_limit && *aux++);
+                if (CRAM_MAJOR_VERS(fd->version) >= 4)
+                    BLOCK_APPEND(td_b, "RG*", 3);
+                continue;
+            } else {
+                // RG:Z tag will be stored verbatim
+                hts_log_warning("Missing @RG header for RG \"%s\"", rg);
+            }
+        }
+
+        // MD:Z
+        if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
+            if (cr->len && !no_ref && !(cr->flags & BAM_FUNMAP) && !verbatim_MD) {
+                if (MD && MD->s && strncasecmp(MD->s, aux+3, orig + aux_size - (aux+3)) == 0) {
+                    while (aux < aux_limit && *aux++);
+                    if (CRAM_MAJOR_VERS(fd->version) >= 4)
+                        BLOCK_APPEND(td_b, "MD*", 3);
+                    continue;
+                }
+            }
+        }
+
+        // NM:i
+        if (aux[0] == 'N' && aux[1] == 'M') {
+            if (cr->len && !no_ref && !(cr->flags & BAM_FUNMAP) && !verbatim_NM) {
+                int NM_ = bam_aux2i_end((uint8_t *)aux+2, (uint8_t *)aux_limit);
+                if (NM_ == NM) {
+                    switch(aux[2]) {
+                    case 'A': case 'C': case 'c': aux+=4; break;
+                    case 'S': case 's':           aux+=5; break;
+                    case 'I': case 'i': case 'f': aux+=7; break;
+                    default:
+                        hts_log_error("Unhandled type code for NM tag");
+                        goto err;
+                    }
+                    if (CRAM_MAJOR_VERS(fd->version) >= 4)
+                        BLOCK_APPEND(td_b, "NM*", 3);
+                    continue;
+                }
+            }
+        }
+
+        BLOCK_APPEND(td_b, aux, 3);
+
+        // Container level tags_used, for TD series
+        // Maps integer key ('X0i') to cram_tag_map struct.
+        int key = (((unsigned char *) aux)[0]<<16 |
+                   ((unsigned char *) aux)[1]<<8  |
+                   ((unsigned char *) aux)[2]);
+        k = kh_put(m_tagmap, c->tags_used, key, &r);
+        if (-1 == r)
+            goto err;
+        else if (r != 0)
+            kh_val(c->tags_used, k) = NULL;
+
+        if (r == 1) {
+            khint_t k_global;
+
+            // Global tags_used for cram_metrics support
+            pthread_mutex_lock(&fd->metrics_lock);
+            k_global = kh_put(m_metrics, fd->tags_used, key, &r);
+            if (-1 == r) {
+                pthread_mutex_unlock(&fd->metrics_lock);
+                goto err;
+            }
+            if (r >= 1) {
+                kh_val(fd->tags_used, k_global) = cram_new_metrics();
+                if (!kh_val(fd->tags_used, k_global)) {
+                    kh_del(m_metrics, fd->tags_used, k_global);
+                    pthread_mutex_unlock(&fd->metrics_lock);
+                    goto err;
+                }
+            }
+
+            pthread_mutex_unlock(&fd->metrics_lock);
+
+            int i2[2] = {'\t',key};
+            size_t sk = key;
+            cram_tag_map *m = calloc(1, sizeof(*m));
+            if (!m)
+                goto_err;
+            kh_val(c->tags_used, k) = m;
+
+            cram_codec *c;
+
+            // Use a block content id based on the tag id.
+            // Codec type depends on tag data type.
+            switch(aux[2]) {
+            case 'Z': case 'H':
+                // string as byte_array_stop
+                c = cram_encoder_init(E_BYTE_ARRAY_STOP, NULL,
+                                      E_BYTE_ARRAY, (void *)i2,
+                                      fd->version, &fd->vv);
+                break;
+
+            case 'A': case 'c': case 'C': {
+                // byte array len, 1 byte
+                cram_byte_array_len_encoder e;
+                cram_stats st;
+
+                if (CRAM_MAJOR_VERS(fd->version) <= 3) {
+                    e.len_encoding = E_HUFFMAN;
+                    e.len_dat = NULL; // will get codes from st
+                } else {
+                    e.len_encoding = E_CONST_INT;
+                    e.len_dat = NULL; // will get codes from st
+                }
+                memset(&st, 0, sizeof(st));
+                if (cram_stats_add(&st, 1) < 0) goto block_err;
+                cram_stats_encoding(fd, &st);
+
+                e.val_encoding = E_EXTERNAL;
+                e.val_dat = (void *)sk;
+
+                c = cram_encoder_init(E_BYTE_ARRAY_LEN, &st,
+                                      E_BYTE_ARRAY, (void *)&e,
+                                      fd->version, &fd->vv);
+                break;
+            }
+
+            case 's': case 'S': {
+                // byte array len, 2 byte
+                cram_byte_array_len_encoder e;
+                cram_stats st;
+
+                if (CRAM_MAJOR_VERS(fd->version) <= 3) {
+                    e.len_encoding = E_HUFFMAN;
+                    e.len_dat = NULL; // will get codes from st
+                } else {
+                    e.len_encoding = E_CONST_INT;
+                    e.len_dat = NULL; // will get codes from st
+                }
+                memset(&st, 0, sizeof(st));
+                if (cram_stats_add(&st, 2) < 0) goto block_err;
+                cram_stats_encoding(fd, &st);
+
+                e.val_encoding = E_EXTERNAL;
+                e.val_dat = (void *)sk;
+
+                c = cram_encoder_init(E_BYTE_ARRAY_LEN, &st,
+                                      E_BYTE_ARRAY, (void *)&e,
+                                      fd->version, &fd->vv);
+                break;
+            }
+            case 'i': case 'I': case 'f': {
+                // byte array len, 4 byte
+                cram_byte_array_len_encoder e;
+                cram_stats st;
+
+                if (CRAM_MAJOR_VERS(fd->version) <= 3) {
+                    e.len_encoding = E_HUFFMAN;
+                    e.len_dat = NULL; // will get codes from st
+                } else {
+                    e.len_encoding = E_CONST_INT;
+                    e.len_dat = NULL; // will get codes from st
+                }
+                memset(&st, 0, sizeof(st));
+                if (cram_stats_add(&st, 4) < 0) goto block_err;
+                cram_stats_encoding(fd, &st);
+
+                e.val_encoding = E_EXTERNAL;
+                e.val_dat = (void *)sk;
+
+                c = cram_encoder_init(E_BYTE_ARRAY_LEN, &st,
+                                      E_BYTE_ARRAY, (void *)&e,
+                                      fd->version, &fd->vv);
+                break;
+            }
+
+            case 'B': {
+                // Byte array of variable size, but we generate our tag
+                // byte stream at the wrong stage (during reading and not
+                // after slice header construction). So we use
+                // BYTE_ARRAY_LEN with the length codec being external
+                // too.
+                cram_byte_array_len_encoder e;
+
+                e.len_encoding = CRAM_MAJOR_VERS(fd->version) >= 4
+                    ? E_VARINT_UNSIGNED
+                    : E_EXTERNAL;
+                e.len_dat = (void *)sk; // or key+128 for len?
+
+                e.val_encoding = E_EXTERNAL;
+                e.val_dat = (void *)sk;
+
+                c = cram_encoder_init(E_BYTE_ARRAY_LEN, NULL,
+                                      E_BYTE_ARRAY, (void *)&e,
+                                      fd->version, &fd->vv);
+                break;
+            }
+
+            default:
+                hts_log_error("Unsupported SAM aux type '%c'", aux[2]);
+                c = NULL;
+            }
+
+            if (!c)
+                goto_err;
+
+            m->codec = c;
+
+            // Link to fd-global tag metrics
+            pthread_mutex_lock(&fd->metrics_lock);
+            m->m = k_global ? (cram_metrics *)kh_val(fd->tags_used, k_global) : NULL;
+            pthread_mutex_unlock(&fd->metrics_lock);
+        }
+
+        cram_tag_map *tm = (cram_tag_map *)kh_val(c->tags_used, k);
+        if (!tm) goto_err;
+        cram_codec *codec = tm->codec;
+        if (!tm->codec) goto_err;
+
+        switch(aux[2]) {
+        case 'A': case 'C': case 'c':
+            if (aux_limit - aux < 3+1)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3;
+            //codec->encode(s, codec, aux, 1);
+            // Functionally equivalent, but less code.
+            BLOCK_APPEND_CHAR(tm->blk, *aux);
+            aux++;
+            break;
+
+        case 'S': case 's':
+            if (aux_limit - aux < 3+2)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3;
+            //codec->encode(s, codec, aux, 2);
+            BLOCK_APPEND(tm->blk, aux, 2);
+            aux+=2;
+            break;
+
+        case 'I': case 'i': case 'f':
+            if (aux_limit - aux < 3+4)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3;
+            //codec->encode(s, codec, aux, 4);
+            BLOCK_APPEND(tm->blk, aux, 4);
+            aux+=4;
+            break;
+
+        case 'd':
+            if (aux_limit - aux < 3+8)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            aux+=3; //*tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
+            //codec->encode(s, codec, aux, 8);
+            BLOCK_APPEND(tm->blk, aux, 8);
+            aux+=8;
+            break;
+
+        case 'Z': 
+        // Case handlers for auxiliary fields of types 'H' and 'B' in BAM records.
+        // Handles 'H' type (hexadecimal string) by creating a new block if necessary,
+        // and encoding the data from the auxiliary fields.
+        // For 'B' type (byte array), computes the length based on the sub-type and count,
+        // allocates blocks as needed, and encodes the data.
+        // Checks for sufficient data remaining in the auxiliary field buffer before processing.
+        // Updates the auxiliary field pointer appropriately after encoding.
+        // <MASK>
+        default:
+            hts_log_error("Unknown aux type '%c'", aux_limit - aux < 2 ? '?' : aux[2]);
+            goto err;
+        }
+        tm->blk->m = tm->m;
+    }
+
+    // FIXME: sort BLOCK_DATA(td_b) by char[3] triples
+
+    // And and increment TD hash entry
+    BLOCK_APPEND_CHAR(td_b, 0);
+
+    // Duplicate key as BLOCK_DATA() can be realloced to a new pointer.
+    key = string_ndup(c->comp_hdr->TD_keys,
+                      (char *)BLOCK_DATA(td_b) + TD_blk_size,
+                      BLOCK_SIZE(td_b) - TD_blk_size);
+    if (!key)
+        goto block_err;
+    k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
+    if (new < 0) {
+        goto err;
+    } else if (new == 0) {
+        BLOCK_SIZE(td_b) = TD_blk_size;
+    } else {
+        kh_val(c->comp_hdr->TD_hash, k) = c->comp_hdr->nTL;
+        c->comp_hdr->nTL++;
+    }
+
+    cr->TL = kh_val(c->comp_hdr->TD_hash, k);
+    if (cram_stats_add(c->stats[DS_TL], cr->TL) < 0)
+        goto block_err;
+
+    if (orig != (char *)bam_aux(b))
+        free(orig);
+
+    if (err) *err = 0;
+
+    return brg;
+
+ err:
+ block_err:
+    if (orig != (char *)bam_aux(b))
+        free(orig);
+    return NULL;
+}

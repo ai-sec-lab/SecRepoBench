@@ -1,0 +1,92 @@
+int flb_parser_regex_do(struct flb_parser *parser,
+                        const char *buf, size_t length,
+                        void **out_buf, size_t *out_size,
+                        struct flb_time *out_time)
+{
+    int ret;
+    int i;
+    int num_matches;
+    int time_ret;
+    int time_len;
+    char *p;
+    char *end;
+    char *time_str;
+    double time_frac_secs = 0;
+    struct flb_regex_search result;
+    msgpack_sbuffer mp_sbuf;
+    msgpack_packer mp_pck;
+
+    /* Initialize output */
+    *out_buf = NULL;
+    *out_size = 0;
+
+    /* Initialize msgpack buffer */
+    msgpack_sbuffer_init(&mp_sbuf);
+    msgpack_packer_init(&mp_pck, &mp_sbuf, msgpack_sbuffer_write);
+
+    /* Perform regex matching */
+    ret = flb_regex_do(parser->regex, buf, length, &result);
+    if (ret == -1) {
+        if (parser->skip_empty == FLB_TRUE) {
+            msgpack_sbuffer_destroy(&mp_sbuf);
+            return 0;
+        }
+        else {
+            msgpack_sbuffer_destroy(&mp_sbuf);
+            return -1;
+        }
+    }
+
+    num_matches = flb_regex_result_num_matches(&result);
+
+    /* Iterate results and pack them */
+    for (i = 0; i < num_matches; i++) {
+        /* Get time */
+        time_str = flb_regex_get_capture_value(&result, i, "time", &time_len);
+        if (time_str) {
+            time_ret = flb_parser_time_lookup(time_str, time_len,
+                                              0, parser,
+                                              &out_time->tm, &time_frac_secs);
+            if (time_ret == 0) {
+                out_time->tm_sec += (int) time_frac_secs;
+                out_time->nsec = (time_frac_secs - (int) time_frac_secs) * 1000000000;
+            }
+            else {
+                msgpack_sbuffer_destroy(&mp_sbuf);
+                return -1;
+            }
+        }
+        else {
+            /* No time key found, use current time */
+            flb_time_get(out_time);
+        }
+
+        /* Pack map start */
+        msgpack_pack_map(&mp_pck, parser->types_len);
+
+        /* Iterate regex matches and pack them */
+        p = (char *) buf;
+        end = p + length;
+        for (i = 0; i < parser->types_len; i++) {
+            char *val;
+            int val_len;
+
+            val = flb_regex_get_capture_value(&result, i, parser->types[i].key, &val_len);
+            if (val) {
+                flb_parser_typecast(parser->types[i].key, strlen(parser->types[i].key),
+                                   val, val_len, &mp_pck,
+                                   parser->types, parser->types_len);
+            }
+            else {
+                msgpack_pack_str(&mp_pck, strlen(parser->types[i].key));
+                msgpack_pack_str_body(&mp_pck, parser->types[i].key, strlen(parser->types[i].key));
+                msgpack_pack_nil(&mp_pck);
+            }
+        }
+    }
+
+    *out_buf = mp_sbuf.data;
+    *out_size = mp_sbuf.size;
+
+    return 0;
+}

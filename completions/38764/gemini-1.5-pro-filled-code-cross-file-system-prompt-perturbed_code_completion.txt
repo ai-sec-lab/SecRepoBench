@@ -1,0 +1,75 @@
+int len, reclen, err = ARCHIVE_OK;
+		struct file_info *file, *filep;
+
+		p = b;
+		while (step > 0 && (reclen = *p) != 0) {
+			if (step < ISO9660_DR_LEN) {
+				err = ARCHIVE_EOF;
+				goto break_out;
+			}
+			len = ISO9660_DR_LEN;
+			if (reclen == 1) {
+				if (step < ISO9660_DR_LEN_2) {
+					err = ARCHIVE_EOF;
+					goto break_out;
+				}
+				len = ISO9660_DR_LEN_2;
+				if ((p[1] & 0x80) == 0) {
+					/* Directory continuation */
+					if (multi == NULL) {
+						archive_set_error(
+						    &archivereader->archive,
+						    ARCHIVE_ERRNO_MISC,
+						    "Invalid directory continuation area");
+						err = ARCHIVE_FATAL;
+						goto break_out;
+					}
+					parse_file_info_2(iso9660, p, len, multi);
+					goto skip_entry;
+				}
+			}
+			file = parse_file_info(iso9660, p, len);
+			if (file == NULL) {
+				err = ARCHIVE_FATAL;
+				goto break_out;
+			}
+			if (multi != NULL &&
+			    (file->flags & ISO9660_FLAG_MULTI) == 0) {
+				filep = sort_multi_extent(multi);
+				if (filep == NULL) {
+					err = ARCHIVE_FATAL;
+					goto break_out;
+				}
+				cache_add_entry(iso9660, filep);
+				multi = NULL;
+			}
+			if (file->flags & ISO9660_FLAG_MULTI) {
+				if (multi != NULL) {
+					archive_set_error(
+					    &archivereader->archive,
+					    ARCHIVE_ERRNO_MISC,
+					    "Invalid multi-extent directory");
+					err = ARCHIVE_FATAL;
+					goto break_out;
+				}
+				multi = file;
+			} else if (strcmp(file->name.s, ".") != 0 &&
+			    strcmp(file->name.s, "..") != 0) {
+				cache_add_entry(iso9660, file);
+			}
+		skip_entry:
+			step -= reclen;
+			p += reclen;
+		}
+break_out:
+		if (multi != NULL) {
+			filep = sort_multi_extent(multi);
+			if (filep == NULL)
+				return (ARCHIVE_FATAL);
+			cache_add_entry(iso9660, filep);
+		}
+		if (err != ARCHIVE_OK)
+			return (err);
+		if (step > 0 && reclen == 0)
+			skip_size -= step;
+		step = 0;

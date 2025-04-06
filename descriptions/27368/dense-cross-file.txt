@@ -1,0 +1,446 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/flb_gzip.c
+int flb_gzip_uncompress(void *in_data, size_t in_len,
+                        void **out_data, size_t *out_len)
+{
+    int status;
+    uint8_t *p;
+    void *out_buf;
+    size_t out_size = 0;
+    void *zip_data;
+    size_t zip_len;
+    unsigned char flg;
+    unsigned int xlen, hcrc;
+    unsigned int dlen, crc;
+    mz_ulong crc_out;
+    mz_stream stream;
+    const unsigned char *start;
+
+    /* Minimal length: header + crc32 */
+    if (in_len < 18) {
+        flb_error("[gzip] unexpected content length");
+        return -1;
+    }
+
+    /* Magic bytes */
+    p = in_data;
+    if (p[0] != 0x1F || p[1] != 0x8B) {
+        flb_error("[gzip] invalid magic bytes");
+        return -1;
+    }
+
+    if (p[2] != 8) {
+        flb_error("[gzip] invalid method");
+        return -1;
+    }
+
+    /* Flag byte */
+    flg = p[3];
+
+    /* Reserved bits */
+    if (flg & 0xE0) {
+        flb_error("[gzip] invalid flag");
+        return -1;
+    }
+
+    /* Skip base header of 10 bytes */
+    start = p + FLB_GZIP_HEADER_OFFSET;
+
+    /* Skip extra data if present */
+    if (flg & FEXTRA) {
+        xlen = read_le16(start);
+        if (xlen > in_len - 12) {
+            flb_error("[gzip] invalid gzip data");
+            return -1;
+        }
+        start += xlen + 2;
+    }
+
+    /* Skip file name if present */
+    if (flg & FNAME) {
+        do {
+            if (start - p >= in_len) {
+                flb_error("[gzip] invalid gzip data (FNAME)");
+                return -1;
+            }
+        } while (*start++);
+    }
+
+    /* Skip file comment if present */
+    if (flg & FCOMMENT) {
+        do {
+            if (start - p >= in_len) {
+                flb_error("[gzip] invalid gzip data (FCOMMENT)");
+                return -1;
+            }
+        } while (*start++);
+    }
+
+    /* Check header crc if present */
+    if (flg & FHCRC) {
+        if (start - p > in_len - 2) {
+            flb_error("[gzip] invalid gzip data (FHRC)");
+            return -1;
+        }
+
+        hcrc = read_le16(start);
+        crc = mz_crc32(MZ_CRC32_INIT, p, start - p) & 0x0000FFFF;
+        if (hcrc != crc) {
+            flb_error("[gzip] invalid gzip header CRC");
+            return -1;
+        }
+        start += 2;
+    }
+
+    /* Get decompressed length */
+    dlen = read_le32(&p[in_len - 4]);
+
+    /* Get CRC32 checksum of original data */
+    crc = read_le32(&p[in_len - 8]);
+
+    /* Decompress data */
+    if ((p + in_len) - p < 8) {
+        flb_error("[gzip] invalid gzip CRC32 checksum");
+        return -1;
+    }
+
+    /* Allocate outgoing buffer */
+    out_buf = flb_malloc(dlen);
+    if (!out_buf) {
+        flb_errno();
+        return -1;
+    }
+    out_size = dlen;
+
+    /* Map zip content */
+    zip_data = (uint8_t *) start;
+    zip_len = (p + in_len) - start - 8;
+
+    memset(&stream, 0, sizeof(stream));
+    stream.next_in = zip_data;
+    stream.avail_in = zip_len;
+    stream.next_out = out_buf;
+    stream.avail_out = out_size;
+
+    status = mz_inflateInit2(&stream, -Z_DEFAULT_WINDOW_BITS);
+    if (status != MZ_OK) {
+        flb_free(out_buf);
+        return -1;
+    }
+
+    status = mz_inflate(&stream, MZ_FINISH);
+    if (status != MZ_STREAM_END) {
+        mz_inflateEnd(&stream);
+        flb_free(out_buf);
+        return -1;
+    }
+
+    if (stream.total_out != dlen) {
+        mz_inflateEnd(&stream);
+        flb_free(out_buf);
+        flb_error("[gzip] invalid gzip data size");
+        return -1;
+    }
+
+    /* terminate the stream, it's not longer required */
+    mz_inflateEnd(&stream);
+
+    /* Validate message CRC vs inflated data CRC */
+    crc_out = mz_crc32(MZ_CRC32_INIT, out_buf, dlen);
+    if (crc_out != crc) {
+        flb_free(out_buf);
+        flb_error("[gzip] invalid GZip checksum (CRC32)");
+        return -1;
+    }
+
+    /* set the uncompressed data */
+    *out_len = dlen;
+    *out_data = out_buf;
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// lib/miniz/miniz.c
+size_t tdefl_compress_mem_to_mem(void *pOut_buf, size_t out_buf_len, const void *pSrc_buf, size_t src_buf_len, int flags)
+{
+    tdefl_output_buffer out_buf;
+    MZ_CLEAR_OBJ(out_buf);
+    if (!pOut_buf)
+        return 0;
+    out_buf.m_pBuf = (mz_uint8 *)pOut_buf;
+    out_buf.m_capacity = out_buf_len;
+    if (!tdefl_compress_mem_to_output(pSrc_buf, src_buf_len, tdefl_output_buffer_putter, &out_buf, flags))
+        return 0;
+    return out_buf.m_size;
+}
+
+// the below code fragment can be found in:
+// lib/miniz/miniz.c
+mz_bool mz_zip_reader_extract_to_mem_no_alloc(mz_zip_archive *pZip, mz_uint file_index, void *pBuf, size_t buf_size, mz_uint flags, void *pUser_read_buf, size_t user_read_buf_size)
+{
+    int status = TINFL_STATUS_DONE;
+    mz_uint64 needed_size, cur_file_ofs, comp_remaining, out_buf_ofs = 0, read_buf_size, read_buf_ofs = 0, read_buf_avail;
+    mz_zip_archive_file_stat file_stat;
+    void *pRead_buf;
+    mz_uint32 local_header_u32[(MZ_ZIP_LOCAL_DIR_HEADER_SIZE + sizeof(mz_uint32) - 1) / sizeof(mz_uint32)];
+    mz_uint8 *pLocal_header = (mz_uint8 *)local_header_u32;
+    tinfl_decompressor inflator;
+
+    if ((!pZip) || (!pZip->m_pState) || ((buf_size) && (!pBuf)) || ((user_read_buf_size) && (!pUser_read_buf)) || (!pZip->m_pRead))
+        return mz_zip_set_error(pZip, MZ_ZIP_INVALID_PARAMETER);
+
+    if (!mz_zip_reader_file_stat(pZip, file_index, &file_stat))
+        return MZ_FALSE;
+
+    /* A directory or zero length file */
+    if ((file_stat.m_is_directory) || (!file_stat.m_comp_size))
+        return MZ_TRUE;
+
+    /* Encryption and patch files are not supported. */
+    if (file_stat.m_bit_flag & (MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_IS_ENCRYPTED | MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_USES_STRONG_ENCRYPTION | MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_COMPRESSED_PATCH_FLAG))
+        return mz_zip_set_error(pZip, MZ_ZIP_UNSUPPORTED_ENCRYPTION);
+
+    /* This function only supports decompressing stored and deflate. */
+    if ((!(flags & MZ_ZIP_FLAG_COMPRESSED_DATA)) && (file_stat.m_method != 0) && (file_stat.m_method != MZ_DEFLATED))
+        return mz_zip_set_error(pZip, MZ_ZIP_UNSUPPORTED_METHOD);
+
+    /* Ensure supplied output buffer is large enough. */
+    needed_size = (flags & MZ_ZIP_FLAG_COMPRESSED_DATA) ? file_stat.m_comp_size : file_stat.m_uncomp_size;
+    if (buf_size < needed_size)
+        return mz_zip_set_error(pZip, MZ_ZIP_BUF_TOO_SMALL);
+
+    /* Read and parse the local directory entry. */
+    cur_file_ofs = file_stat.m_local_header_ofs;
+    if (pZip->m_pRead(pZip->m_pIO_opaque, cur_file_ofs, pLocal_header, MZ_ZIP_LOCAL_DIR_HEADER_SIZE) != MZ_ZIP_LOCAL_DIR_HEADER_SIZE)
+        return mz_zip_set_error(pZip, MZ_ZIP_FILE_READ_FAILED);
+
+    if (MZ_READ_LE32(pLocal_header) != MZ_ZIP_LOCAL_DIR_HEADER_SIG)
+        return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
+
+    cur_file_ofs += MZ_ZIP_LOCAL_DIR_HEADER_SIZE + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_FILENAME_LEN_OFS) + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_EXTRA_LEN_OFS);
+    if ((cur_file_ofs + file_stat.m_comp_size) > pZip->m_archive_size)
+        return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
+
+    if ((flags & MZ_ZIP_FLAG_COMPRESSED_DATA) || (!file_stat.m_method))
+    {
+        /* The file is stored or the caller has requested the compressed data. */
+        if (pZip->m_pRead(pZip->m_pIO_opaque, cur_file_ofs, pBuf, (size_t)needed_size) != needed_size)
+            return mz_zip_set_error(pZip, MZ_ZIP_FILE_READ_FAILED);
+
+#ifndef MINIZ_DISABLE_ZIP_READER_CRC32_CHECKS
+        if ((flags & MZ_ZIP_FLAG_COMPRESSED_DATA) == 0)
+        {
+            if (mz_crc32(MZ_CRC32_INIT, (const mz_uint8 *)pBuf, (size_t)file_stat.m_uncomp_size) != file_stat.m_crc32)
+                return mz_zip_set_error(pZip, MZ_ZIP_CRC_CHECK_FAILED);
+        }
+#endif
+
+        return MZ_TRUE;
+    }
+
+    /* Decompress the file either directly from memory or from a file input buffer. */
+    tinfl_init(&inflator);
+
+    if (pZip->m_pState->m_pMem)
+    {
+        /* Read directly from the archive in memory. */
+        pRead_buf = (mz_uint8 *)pZip->m_pState->m_pMem + cur_file_ofs;
+        read_buf_size = read_buf_avail = file_stat.m_comp_size;
+        comp_remaining = 0;
+    }
+    else if (pUser_read_buf)
+    {
+        /* Use a user provided read buffer. */
+        if (!user_read_buf_size)
+            return MZ_FALSE;
+        pRead_buf = (mz_uint8 *)pUser_read_buf;
+        read_buf_size = user_read_buf_size;
+        read_buf_avail = 0;
+        comp_remaining = file_stat.m_comp_size;
+    }
+    else
+    {
+        /* Temporarily allocate a read buffer. */
+        read_buf_size = MZ_MIN(file_stat.m_comp_size, (mz_uint64)MZ_ZIP_MAX_IO_BUF_SIZE);
+        if (((sizeof(size_t) == sizeof(mz_uint32))) && (read_buf_size > 0x7FFFFFFF))
+            return mz_zip_set_error(pZip, MZ_ZIP_INTERNAL_ERROR);
+
+        if (NULL == (pRead_buf = pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, (size_t)read_buf_size)))
+            return mz_zip_set_error(pZip, MZ_ZIP_ALLOC_FAILED);
+
+        read_buf_avail = 0;
+        comp_remaining = file_stat.m_comp_size;
+    }
+
+    do
+    {
+        /* The size_t cast here should be OK because we've verified that the output buffer is >= file_stat.m_uncomp_size above */
+        size_t in_buf_size, out_buf_size = (size_t)(file_stat.m_uncomp_size - out_buf_ofs);
+        if ((!read_buf_avail) && (!pZip->m_pState->m_pMem))
+        {
+            read_buf_avail = MZ_MIN(read_buf_size, comp_remaining);
+            if (pZip->m_pRead(pZip->m_pIO_opaque, cur_file_ofs, pRead_buf, (size_t)read_buf_avail) != read_buf_avail)
+            {
+                status = TINFL_STATUS_FAILED;
+                mz_zip_set_error(pZip, MZ_ZIP_DECOMPRESSION_FAILED);
+                break;
+            }
+            cur_file_ofs += read_buf_avail;
+            comp_remaining -= read_buf_avail;
+            read_buf_ofs = 0;
+        }
+        in_buf_size = (size_t)read_buf_avail;
+        status = tinfl_decompress(&inflator, (mz_uint8 *)pRead_buf + read_buf_ofs, &in_buf_size, (mz_uint8 *)pBuf, (mz_uint8 *)pBuf + out_buf_ofs, &out_buf_size, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | (comp_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0));
+        read_buf_avail -= in_buf_size;
+        read_buf_ofs += in_buf_size;
+        out_buf_ofs += out_buf_size;
+    } while (status == TINFL_STATUS_NEEDS_MORE_INPUT);
+
+    if (status == TINFL_STATUS_DONE)
+    {
+        /* Make sure the entire file was decompressed, and check its CRC. */
+        if (out_buf_ofs != file_stat.m_uncomp_size)
+        {
+            mz_zip_set_error(pZip, MZ_ZIP_UNEXPECTED_DECOMPRESSED_SIZE);
+            status = TINFL_STATUS_FAILED;
+        }
+#ifndef MINIZ_DISABLE_ZIP_READER_CRC32_CHECKS
+        else if (mz_crc32(MZ_CRC32_INIT, (const mz_uint8 *)pBuf, (size_t)file_stat.m_uncomp_size) != file_stat.m_crc32)
+        {
+            mz_zip_set_error(pZip, MZ_ZIP_CRC_CHECK_FAILED);
+            status = TINFL_STATUS_FAILED;
+        }
+#endif
+    }
+
+    if ((!pZip->m_pState->m_pMem) && (!pUser_read_buf))
+        pZip->m_pFree(pZip->m_pAlloc_opaque, pRead_buf);
+
+    return status == TINFL_STATUS_DONE;
+}
+
+// the below code fragment can be found in:
+// lib/miniz/miniz.c
+tdefl_status tdefl_compress_buffer(tdefl_compressor *d, const void *pIn_buf, size_t in_buf_size, tdefl_flush flush)
+{
+    MZ_ASSERT(d->m_pPut_buf_func);
+    return tdefl_compress(d, pIn_buf, &in_buf_size, NULL, NULL, flush);
+}
+
+// the below code fragment can be found in:
+// lib/miniz/miniz.c
+int mz_inflate(mz_streamp pStream, int flush)
+{
+    inflate_state *pState;
+    mz_uint n, first_call, decomp_flags = TINFL_FLAG_COMPUTE_ADLER32;
+    size_t in_bytes, out_bytes, orig_avail_in;
+    tinfl_status status;
+
+    if ((!pStream) || (!pStream->state))
+        return MZ_STREAM_ERROR;
+    if (flush == MZ_PARTIAL_FLUSH)
+        flush = MZ_SYNC_FLUSH;
+    if ((flush) && (flush != MZ_SYNC_FLUSH) && (flush != MZ_FINISH))
+        return MZ_STREAM_ERROR;
+
+    pState = (inflate_state *)pStream->state;
+    if (pState->m_window_bits > 0)
+        decomp_flags |= TINFL_FLAG_PARSE_ZLIB_HEADER;
+    orig_avail_in = pStream->avail_in;
+
+    first_call = pState->m_first_call;
+    pState->m_first_call = 0;
+    if (pState->m_last_status < 0)
+        return MZ_DATA_ERROR;
+
+    if (pState->m_has_flushed && (flush != MZ_FINISH))
+        return MZ_STREAM_ERROR;
+    pState->m_has_flushed |= (flush == MZ_FINISH);
+
+    if ((flush == MZ_FINISH) && (first_call))
+    {
+        /* MZ_FINISH on the first call implies that the input and output buffers are large enough to hold the entire compressed/decompressed file. */
+        decomp_flags |= TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
+        in_bytes = pStream->avail_in;
+        out_bytes = pStream->avail_out;
+        status = tinfl_decompress(&pState->m_decomp, pStream->next_in, &in_bytes, pStream->next_out, pStream->next_out, &out_bytes, decomp_flags);
+        pState->m_last_status = status;
+        pStream->next_in += (mz_uint)in_bytes;
+        pStream->avail_in -= (mz_uint)in_bytes;
+        pStream->total_in += (mz_uint)in_bytes;
+        pStream->adler = tinfl_get_adler32(&pState->m_decomp);
+        pStream->next_out += (mz_uint)out_bytes;
+        pStream->avail_out -= (mz_uint)out_bytes;
+        pStream->total_out += (mz_uint)out_bytes;
+
+        if (status < 0)
+            return MZ_DATA_ERROR;
+        else if (status != TINFL_STATUS_DONE)
+        {
+            pState->m_last_status = TINFL_STATUS_FAILED;
+            return MZ_BUF_ERROR;
+        }
+        return MZ_STREAM_END;
+    }
+    /* flush != MZ_FINISH then we must assume there's more input. */
+    if (flush != MZ_FINISH)
+        decomp_flags |= TINFL_FLAG_HAS_MORE_INPUT;
+
+    if (pState->m_dict_avail)
+    {
+        n = MZ_MIN(pState->m_dict_avail, pStream->avail_out);
+        memcpy(pStream->next_out, pState->m_dict + pState->m_dict_ofs, n);
+        pStream->next_out += n;
+        pStream->avail_out -= n;
+        pStream->total_out += n;
+        pState->m_dict_avail -= n;
+        pState->m_dict_ofs = (pState->m_dict_ofs + n) & (TINFL_LZ_DICT_SIZE - 1);
+        return ((pState->m_last_status == TINFL_STATUS_DONE) && (!pState->m_dict_avail)) ? MZ_STREAM_END : MZ_OK;
+    }
+
+    for (;;)
+    {
+        in_bytes = pStream->avail_in;
+        out_bytes = TINFL_LZ_DICT_SIZE - pState->m_dict_ofs;
+
+        status = tinfl_decompress(&pState->m_decomp, pStream->next_in, &in_bytes, pState->m_dict, pState->m_dict + pState->m_dict_ofs, &out_bytes, decomp_flags);
+        pState->m_last_status = status;
+
+        pStream->next_in += (mz_uint)in_bytes;
+        pStream->avail_in -= (mz_uint)in_bytes;
+        pStream->total_in += (mz_uint)in_bytes;
+        pStream->adler = tinfl_get_adler32(&pState->m_decomp);
+
+        pState->m_dict_avail = (mz_uint)out_bytes;
+
+        n = MZ_MIN(pState->m_dict_avail, pStream->avail_out);
+        memcpy(pStream->next_out, pState->m_dict + pState->m_dict_ofs, n);
+        pStream->next_out += n;
+        pStream->avail_out -= n;
+        pStream->total_out += n;
+        pState->m_dict_avail -= n;
+        pState->m_dict_ofs = (pState->m_dict_ofs + n) & (TINFL_LZ_DICT_SIZE - 1);
+
+        if (status < 0)
+            return MZ_DATA_ERROR; /* Stream is corrupted (there could be some uncompressed data left in the output dictionary - oh well). */
+        else if ((status == TINFL_STATUS_NEEDS_MORE_INPUT) && (!orig_avail_in))
+            return MZ_BUF_ERROR; /* Signal caller that we can't make forward progress without supplying more input or by setting flush to MZ_FINISH. */
+        else if (flush == MZ_FINISH)
+        {
+            /* The output buffer MUST be large to hold the remaining uncompressed data when flush==MZ_FINISH. */
+            if (status == TINFL_STATUS_DONE)
+                return pState->m_dict_avail ? MZ_BUF_ERROR : MZ_STREAM_END;
+            /* status here must be TINFL_STATUS_HAS_MORE_OUTPUT, which means there's at least 1 more byte on the way. If there's no more room left in the output buffer then something is wrong. */
+            else if (!pStream->avail_out)
+                return MZ_BUF_ERROR;
+        }
+        else if ((status == TINFL_STATUS_DONE) || (!pStream->avail_in) || (!pStream->avail_out) || (pState->m_dict_avail))
+            break;
+    }
+
+    return ((status == TINFL_STATUS_DONE) && (!pState->m_dict_avail)) ? MZ_STREAM_END : MZ_OK;
+}
+

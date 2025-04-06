@@ -1,0 +1,361 @@
+char
+    *mvg_primitive;
+
+  DrawInfo
+    **graphic_context;
+
+  double
+    angle,
+    coordinates,
+    cursor,
+    factor,
+    primitive_extent;
+
+  MagickBooleanType
+    proceed,
+    status;
+
+  MVGInfo
+    mvg_info;
+
+  PointInfo
+    point;
+
+  PrimitiveInfo
+    *primitive_info;
+
+  PrimitiveType
+    primitive_type;
+
+  register ssize_t
+    i,
+    n;
+
+  size_t
+    extent,
+    number_stops;
+
+  ssize_t
+    j,
+    offset;
+
+  StopInfo
+    *stops;
+
+  /*
+    Ensure the primitive is not NULL.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (DrawInfo *) NULL);
+  assert(draw_info->signature == MagickCoreSignature);
+  if (draw_info->primitive == (char *) NULL)
+    return(MagickFalse);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"begin draw-image");
+  /*
+    Allocate primitive info memory.
+  */
+  primitive_extent=(strlen(draw_info->primitive)+1)*sizeof(*primitive_info);
+  primitive_info=(PrimitiveInfo *) AcquireQuantumMemory((size_t)
+    primitive_extent,sizeof(*primitive_info));
+  if (primitive_info == (PrimitiveInfo *) NULL)
+    return(MagickFalse);
+  (void) memset(primitive_info,0,(size_t) primitive_extent);
+  primitive_info->coordinates=0;
+  primitive_info->method=FloodfillMethod;
+  /*
+    Parse the primitive string, and initialize the affine matrix.
+  */
+  token=AcquireString(draw_info->primitive);
+  extent=strlen(token)+MagickPathExtent;
+  primitive=AcquireString(token);
+  (void) memset(&point,0,sizeof(point));
+  cursor=0.0;
+  n=0;
+  number_stops=0;
+  stops=(StopInfo *) NULL;
+  status=MagickTrue;
+  offset=0;
+  graphic_context=(DrawInfo **) AcquireQuantumMemory(16,
+    sizeof(*graphic_context));
+  if (graphic_context == (DrawInfo **) NULL)
+    {
+      primitive_info=(PrimitiveInfo *) RelinquishMagickMemory(primitive_info);
+      token=DestroyString(token);
+      primitive=DestroyString(primitive);
+      ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+        draw_info->primitive);
+    }
+  graphic_context[n]=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  mvg_info.primitive_info=&primitive_info;
+  mvg_info.extent=&primitive_extent;
+  mvg_info.offset=0;
+  mvg_info.exception=exception;
+  /*
+    Check for clip path.
+  */
+  if (draw_info->clip_path != MagickFalse)
+    {
+      const char
+        *clip_path;
+
+      clip_path=GetImageArtifact(image,draw_info->clip_mask);
+      if (clip_path != (const char *) NULL)
+        {
+          if (image->clip_mask == (Image *) NULL)
+            image->clip_mask=DrawClippingMask(image,draw_info,
+              draw_info->clip_mask,clip_path,exception);
+          (void) SetImageMask(image,WritePixelMask,image->clip_mask,exception);
+        }
+    }
+  for (q=draw_info->primitive; *q != '\0'; )
+  {
+    /*
+      Interpret graphic primitive.
+    */
+    GetNextToken(q,&q,extent,token);
+    if (*token == '\0')
+      break;
+    if (image->debug != MagickFalse)
+      (void) LogMagickEvent(DrawEvent,GetMagickModule(),"  %s",token);
+    if (*token == '@')
+      {
+        /*
+          Node reference: number or URL.
+        */
+        GetNextToken(q,&q,extent,token);
+        mvg_primitive=GetNodeByURL(primitive,token);
+        if (mvg_primitive != (char *) NULL)
+          {
+            size_t
+              length;
+
+            length=TracePath(&mvg_info,mvg_primitive,exception);
+            if (length != 0)
+              {
+                mvg_info.offset+=length;
+                primitive_info+=length;
+              }
+            mvg_primitive=DestroyString(mvg_primitive);
+            continue;
+          }
+        (void) ThrowMagickException(exception,GetMagickModule(),DrawError,
+          "UndefinedPath","`%s'",token);
+        status=MagickFalse;
+        break;
+      }
+    /*
+      Parse the primitive attributes.
+    */
+    primitive_type=UndefinedPrimitive;
+    coordinates=0;
+    switch (*token)
+    {
+      case 'a':
+      case 'A':
+      {
+        double
+          angle;
+
+        MagickBooleanType
+          large_arc,
+          sweep_flag;
+
+        PointInfo
+          radii;
+
+        /*
+          Elliptical Arc.
+        */
+        primitive_type=primitive_info->primitive;
+        do
+        {
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          radii.x=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          radii.y=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          angle=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          large_arc=StringToLong(token) != 0 ? MagickTrue : MagickFalse;
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          sweep_flag=StringToLong(token) != 0 ? MagickTrue : MagickFalse;
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          point.x=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          point.y=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          if (*token == ',')
+            p++;
+          point.x+=cursor;
+          point.y+=cursor;
+          TraceArcPath(&mvg_info,point,point,radii,angle,large_arc,
+            sweep_flag);
+          cursor=point.x;
+          while (isspace((int) ((unsigned char) *q)) != 0)
+            q++;
+          if (*q == ',')
+            q++;
+        } while (IsPoint(q) != MagickFalse);
+        break;
+      }
+      case 'b':
+      case 'B':
+      {
+        /*
+          Cubic Bezier curve.
+        */
+        primitive_type=primitive_info->primitive;
+        do
+        {
+          for (i=0; i < 4; i++)
+          {
+            GetNextToken(q,&q,extent,token);
+            if (*token == ',')
+              GetNextToken(q,&q,extent,token);
+            point.x=StringToDouble(token,&next_token);
+            if (token == next_token)
+              ThrowPointExpectedException(token,exception);
+            GetNextToken(q,&q,extent,token);
+            if (*token == ',')
+              GetNextToken(q,&q,extent,token);
+            point.y=StringToDouble(token,&next_token);
+            if (token == next_token)
+              ThrowPointExpectedException(token,exception);
+            if (*token == ',')
+              p++;
+            point.x+=cursor;
+            point.y+=cursor;
+            if (i == 0)
+              {
+                primitive_info->point=point;
+                continue;
+              }
+            TracePoint(primitive_info+1,point);
+            primitive_info++;
+            mvg_info.offset++;
+          }
+          TraceBezier(&mvg_info,4);
+          cursor=point.x;
+          primitive_info=(*mvg_info.primitive_info)+mvg_info.offset;
+          while (isspace((int) ((unsigned char) *q)) != 0)
+            q++;
+          if (*q == ',')
+            q++;
+        } while (IsPoint(q) != MagickFalse);
+        break;
+      }
+      case 'c':
+      case 'C':
+      {
+        /*
+          Circle.
+        */
+        primitive_type=primitive_info->primitive;
+        do
+        {
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          point.x=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          point.y=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          point.x+=cursor;
+          point.y+=cursor;
+          TraceCircle(&mvg_info,primitive_info->point,point);
+          cursor=primitive_info->point.x;
+          primitive_info=(*mvg_info.primitive_info)+mvg_info.offset;
+          while (isspace((int) ((unsigned char) *q)) != 0)
+            q++;
+          if (*q == ',')
+            q++;
+        } while (IsPoint(q) != MagickFalse);
+        break;
+      }
+      case 'e':
+      case 'E':
+      {
+        /*
+          Ellipse.
+        */
+        primitive_type=primitive_info->primitive;
+        do
+        {
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          point.x=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          point.y=StringToDouble(token,&next_token);
+          if (token == next_token)
+            ThrowPointExpectedException(token,exception);
+          GetNextToken(q,&q,extent,token);
+          if (*token == ',')
+            GetNextToken(q,&q,extent,token);
+          point.x+=cursor;
+          point.y+=cursor;
+          TraceEllipse(&mvg_info,point,point,point);
+          cursor=point.x;
+          primitive_info=(*mvg_info.primitive_info)+mvg_info.offset;
+          while (isspace((int) ((unsigned char) *q)) != 0)
+            q++;
+          if (*q == ',')
+            q++;
+        } while (IsPoint(q) != MagickFalse);
+        break;
+      }
+      case 'g':
+      case 'G':
+      {
+        ssize_t
+          type;
+
+        /*
+          Gradient fill.
+        */
+        GetNextToken(q,&q,extent,token);
+        type=ParseCommandOption(MagickGradientOptions,MagickFalse,token);
+        if (type == -1)
+          {
+            status=MagickFalse;
+            break;
+          }
+        if (graphic_context[n]->gradient.stops != (StopInfo *) NULL)
+          graphic_context[n]->gradient.stops=(StopInfo *)
+            RelinquishMagickMemory(graphic_context[n]->gradient.stops);

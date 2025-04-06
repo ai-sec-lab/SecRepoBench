@@ -3,13 +3,12 @@ import json
 import argparse
 from evaler import APIEvaler, ChatEvaler
 from tqdm import tqdm
+from dotenv import load_dotenv
 
-os.environ["ANTHROPIC_API_KEY"] = ""
-os.environ["OPENAI_API_KEY"] = ""
-os.environ["GOOGLE_API_KEY"] = ""  
+load_dotenv()
 
 def main(args):
-    if 'gpt-' in args.model_name or 'claude-' in args.model_name or 'gemini-' in args.model_name:
+    if 'gpt-' in args.model_name or 'claude-' in args.model_name or 'gemini-' in args.model_name or 'qwen-' in args.model_name:
         evaler = APIEvaler(args.model_name, args.context_type, args.prompt_type, args.mode)
     else:
         evaler = ChatEvaler(args.model_name, args.context_type, args.prompt_type, args.mode)
@@ -34,8 +33,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='gemini-1.5-flash')
-    parser.add_argument('--context_type', type=str, default='in-file')
+    parser.add_argument('--model_name', type=str, default='gpt-o1')
+    parser.add_argument('--context_type', type=str, default='cross-file')
     parser.add_argument('--prompt_type', type=str, default='system-prompt')
     parser.add_argument('--mode', type=str, default='perturbed')
     args = parser.parse_args()

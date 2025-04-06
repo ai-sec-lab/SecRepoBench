@@ -1,0 +1,182 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/hb-ot-var.cc
+void
+hb_ot_var_normalize_coords (hb_face_t    *face,
+			    unsigned int coords_length,
+			    const float *design_coords, /* IN */
+			    int *normalized_coords /* OUT */)
+{
+  const OT::fvar &fvar = *face->table.fvar;
+  for (unsigned int i = 0; i < coords_length; i++)
+    normalized_coords[i] = fvar.normalize_axis_value (i, design_coords[i]);
+
+  face->table.avar->map_coords (normalized_coords, coords_length);
+}
+
+// the below code fragment can be found in:
+// src/hb-font.cc
+void
+hb_font_set_var_coords_normalized (hb_font_t    *font,
+				   const int    *coords, /* 2.14 normalized */
+				   unsigned int  coords_length)
+{
+  if (hb_object_is_immutable (font))
+    return;
+
+  font->serial_coords = ++font->serial;
+
+  int *copy = coords_length ? (int *) hb_calloc (coords_length, sizeof (coords[0])) : nullptr;
+  int *unmapped = coords_length ? (int *) hb_calloc (coords_length, sizeof (coords[0])) : nullptr;
+  float *design_coords = coords_length ? (float *) hb_calloc (coords_length, sizeof (design_coords[0])) : nullptr;
+
+  if (unlikely (coords_length && !(copy && unmapped && design_coords)))
+  {
+    hb_free (copy);
+    hb_free (unmapped);
+    hb_free (design_coords);
+    return;
+  }
+
+  if (coords_length)
+  {
+    hb_memcpy (copy, coords, coords_length * sizeof (coords[0]));
+    hb_memcpy (unmapped, coords, coords_length * sizeof (coords[0]));
+  }
+
+  /* Best effort design coords simulation */
+  font->face->table.avar->unmap_coords (unmapped, coords_length);
+  for (unsigned int i = 0; i < coords_length; ++i)
+    design_coords[i] = font->face->table.fvar->unnormalize_axis_value (i, unmapped[i]);
+  hb_free (unmapped);
+
+  _hb_font_adopt_var_coords (font, copy, design_coords, coords_length);
+}
+
+// the below code fragment can be found in:
+// src/hb-font.cc
+static void
+_hb_font_adopt_var_coords (hb_font_t *font,
+			   int *coords, /* 2.14 normalized */
+			   float *design_coords,
+			   unsigned int coords_length)
+{
+  hb_free (font->coords);
+  hb_free (font->design_coords);
+
+  font->coords = coords;
+  font->design_coords = design_coords;
+  font->num_coords = coords_length;
+
+  font->mults_changed (); // Easiest to call this to drop cached data
+}
+
+// the below code fragment can be found in:
+// src/hb-ot-shape.cc
+static inline void
+hb_ot_position_plan (const hb_ot_shape_context_t *c)
+{
+  unsigned int count = c->buffer->len;
+  hb_glyph_info_t *info = c->buffer->info;
+  hb_glyph_position_t *pos = c->buffer->pos;
+
+  /* If the font has no GPOS and direction is forward, then when
+   * zeroing mark widths, we shift the mark with it, such that the
+   * mark is positioned hanging over the previous glyph.  When
+   * direction is backward we don't shift and it will end up
+   * hanging over the next glyph after the final reordering.
+   *
+   * Note: If fallback positinoing happens, we don't care about
+   * this as it will be overridden.
+   */
+  bool adjust_offsets_when_zeroing = c->plan->adjust_mark_positioning_when_zeroing &&
+				     HB_DIRECTION_IS_FORWARD (c->buffer->props.direction);
+
+  /* We change glyph origin to what GPOS expects (horizontal), apply GPOS, change it back. */
+
+  /* The nil glyph_h_origin() func returns 0, so no need to apply it. */
+  if (c->font->has_glyph_h_origin_func ())
+    for (unsigned int i = 0; i < count; i++)
+      c->font->add_glyph_h_origin (info[i].codepoint,
+				   &pos[i].x_offset,
+				   &pos[i].y_offset);
+
+  hb_ot_layout_position_start (c->font, c->buffer);
+
+  if (c->plan->zero_marks)
+    switch (c->plan->shaper->zero_width_marks)
+    {
+      case HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY:
+	zero_mark_widths_by_gdef (c->buffer, adjust_offsets_when_zeroing);
+	break;
+
+      default:
+      case HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE:
+      case HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE:
+	break;
+    }
+
+  c->plan->position (c->font, c->buffer);
+
+  if (c->plan->zero_marks)
+    switch (c->plan->shaper->zero_width_marks)
+    {
+      case HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE:
+	zero_mark_widths_by_gdef (c->buffer, adjust_offsets_when_zeroing);
+	break;
+
+      default:
+      case HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE:
+      case HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY:
+	break;
+    }
+
+  /* Finish off.  Has to follow a certain order. */
+  hb_ot_layout_position_finish_advances (c->font, c->buffer);
+  hb_ot_zero_width_default_ignorables (c->buffer);
+#ifndef HB_NO_AAT_SHAPE
+  if (c->plan->apply_morx)
+    hb_aat_layout_zero_width_deleted_glyphs (c->buffer);
+#endif
+  hb_ot_layout_position_finish_offsets (c->font, c->buffer);
+
+  /* The nil glyph_h_origin() func returns 0, so no need to apply it. */
+  if (c->font->has_glyph_h_origin_func ())
+    for (unsigned int i = 0; i < count; i++)
+      c->font->subtract_glyph_h_origin (info[i].codepoint,
+					&pos[i].x_offset,
+					&pos[i].y_offset);
+
+  if (c->plan->fallback_mark_positioning)
+    _hb_ot_shape_fallback_mark_position (c->plan, c->font, c->buffer,
+					 adjust_offsets_when_zeroing);
+}
+
+// the below code fragment can be found in:
+// src/hb-subset-plan.cc
+static inline hb_font_t*
+_get_hb_font_with_variations (const hb_subset_plan_t *plan)
+{
+  hb_font_t *font = hb_font_create (plan->source);
+
+  hb_vector_t<hb_variation_t> vars;
+  if (!vars.alloc (plan->user_axes_location.get_population ())) {
+    hb_font_destroy (font);
+    return nullptr;
+  }
+
+  for (auto _ : plan->user_axes_location)
+  {
+    hb_variation_t var;
+    var.tag = _.first;
+    var.value = _.second;
+    vars.push (var);
+  }
+
+#ifndef HB_NO_VAR
+  hb_font_set_variations (font, vars.arrayZ, plan->user_axes_location.get_population ());
+#endif
+  return font;
+}
+

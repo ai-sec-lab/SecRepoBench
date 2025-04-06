@@ -1,0 +1,56 @@
+if(packet->payload_packet_len < 20) {
+    return;
+  }
+
+  if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_UNKNOWN) {
+    return;
+  }
+
+  if(packet->detected_protocol != NDPI_PROTOCOL_UNKNOWN) {
+    return;
+  }
+
+  if(packet->tcp != NULL) {
+    ovpn_payload += packet->tcp->offset;
+  }
+
+  operationcode = ovpn_payload[0] & P_OPCODE_MASK;
+
+  if(packet->udp != NULL) {
+    if(packet->payload_packet_len == 66 && operationcode == P_CONTROL_HARD_RESET_CLIENT_V1) {
+      NDPI_LOG_INFO(ndpi_struct, "OpenVPN: Detected first client packet\n");
+      flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+      return;
+    }
+
+    if(flow->openvpn_stage < P_HARD_RESET_CLIENT_MAX_COUNT && 
+       (operationcode == P_CONTROL_HARD_RESET_CLIENT_V1 || operationcode == P_CONTROL_HARD_RESET_CLIENT_V2)) {
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if(hmac_size != -1) {
+        session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size);
+        memcpy(flow->openvpn_session_id, session_remote, 8);
+        flow->openvpn_stage++;
+        return;
+      }
+    }
+
+    if(flow->openvpn_stage > 0 && flow->openvpn_stage < P_HARD_RESET_CLIENT_MAX_COUNT &&
+       (operationcode == P_CONTROL_HARD_RESET_SERVER_V1 || operationcode == P_CONTROL_HARD_RESET_SERVER_V2)) {
+      hmac_size = check_pkid_and_detect_hmac_size(ovpn_payload);
+      if(hmac_size != -1) {
+        session_remote = ovpn_payload + P_PACKET_ID_ARRAY_LEN_OFFSET(hmac_size);
+        if(memcmp(flow->openvpn_session_id, session_remote, 8) == 0) {
+          NDPI_LOG_INFO(ndpi_struct, "OpenVPN: Detected server packet with matching session ID\n");
+          flow->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+          return;
+        } else {
+          failed = 1;
+        }
+      }
+    }
+  }
+
+  if(failed) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  }
+  flow->openvpn_stage++;

@@ -1,0 +1,2774 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libyara/modules/dotnet/dotnet.c
+void dotnet_parse_tilde(
+    PE* pe,
+    int64_t metadata_root,
+    PCLI_HEADER cli_header,
+    PSTREAMS streams)
+{
+  PTILDE_HEADER tilde_header;
+  int64_t resource_base;
+  uint32_t* row_offset = NULL;
+
+  int bit_check;
+
+  // This is used as an offset into the rows and tables. For every bit set in
+  // Valid this will be incremented. This is because the bit position doesn't
+  // matter, just the number of bits that are set, when determining how many
+  // rows and what the table structure is.
+  int matched_bits = 0;
+
+  // We need to know the number of rows for some tables, because they are
+  // indexed into. The index will be either 2 or 4 bytes, depending upon the
+  // number of rows being indexed into.
+  ROWS rows;
+  INDEX_SIZES index_sizes;
+  uint32_t heap_sizes;
+
+  // Default all rows to 0. They will be set to actual values later on, if
+  // they exist in the file.
+  memset(&rows, '\0', sizeof(ROWS));
+
+  // Default index sizes are 2. Will be bumped to 4 if necessary.
+  memset(&index_sizes, 2, sizeof(index_sizes));
+
+  tilde_header =
+      (PTILDE_HEADER) (pe->data + metadata_root + yr_le32toh(streams->tilde->Offset));
+
+  if (!struct_fits_in_pe(pe, tilde_header, TILDE_HEADER))
+    return;
+
+  heap_sizes = yr_le32toh(tilde_header->HeapSizes);
+
+  // Set index sizes for various heaps.
+  if (heap_sizes & 0x01)
+    index_sizes.string = 4;
+
+  if (heap_sizes & 0x02)
+    index_sizes.guid = 4;
+
+  if (heap_sizes & 0x04)
+    index_sizes.blob = 4;
+
+  // Immediately after the tilde header is an array of 32bit values which
+  // indicate how many rows are in each table. The tables are immediately
+  // after the rows array.
+  //
+  // Save the row offset.
+  row_offset = (uint32_t*) (tilde_header + 1);
+
+  // Walk all the bits first because we need to know the number of rows for
+  // some tables in order to parse others. In particular this applies to
+  // coded indexes, which are documented in ECMA-335 II.24.2.6.
+  for (bit_check = 0; bit_check < 64; bit_check++)
+  {
+    if (!((yr_le64toh(tilde_header->Valid) >> bit_check) & 0x01))
+      continue;
+
+#define ROW_CHECK(name)                                                  \
+  if (fits_in_pe(pe, row_offset, (matched_bits + 1) * sizeof(uint32_t))) \
+    rows.name = *(row_offset + matched_bits);
+
+#define ROW_CHECK_WITH_INDEX(name)    \
+  ROW_CHECK(name);                    \
+  if (yr_le32toh(rows.name) > 0xFFFF) \
+    index_sizes.name = 4;
+
+    switch (bit_check)
+    {
+    case BIT_MODULE:
+      ROW_CHECK(module);
+      break;
+    case BIT_MODULEREF:
+      ROW_CHECK_WITH_INDEX(moduleref);
+      break;
+    case BIT_ASSEMBLYREF:
+      ROW_CHECK_WITH_INDEX(assemblyref);
+      break;
+    case BIT_ASSEMBLYREFPROCESSOR:
+      ROW_CHECK_WITH_INDEX(assemblyrefprocessor);
+      break;
+    case BIT_TYPEREF:
+      ROW_CHECK(typeref);
+      break;
+    case BIT_METHODDEF:
+      ROW_CHECK_WITH_INDEX(methoddef);
+      break;
+    case BIT_MEMBERREF:
+      ROW_CHECK_WITH_INDEX(memberref);
+      break;
+    case BIT_TYPEDEF:
+      ROW_CHECK_WITH_INDEX(typedef_);
+      break;
+    case BIT_TYPESPEC:
+      ROW_CHECK(typespec);
+      break;
+    case BIT_FIELD:
+      ROW_CHECK_WITH_INDEX(field);
+      break;
+    case BIT_PARAM:
+      ROW_CHECK_WITH_INDEX(param);
+      break;
+    case BIT_PROPERTY:
+      ROW_CHECK_WITH_INDEX(property);
+      break;
+    case BIT_INTERFACEIMPL:
+      ROW_CHECK(interfaceimpl);
+      break;
+    case BIT_EVENT:
+      ROW_CHECK_WITH_INDEX(event);
+      break;
+    case BIT_STANDALONESIG:
+      ROW_CHECK(standalonesig);
+      break;
+    case BIT_ASSEMBLY:
+      ROW_CHECK(assembly);
+      break;
+    case BIT_FILE:
+      ROW_CHECK(file);
+      break;
+    case BIT_EXPORTEDTYPE:
+      ROW_CHECK(exportedtype);
+      break;
+    case BIT_MANIFESTRESOURCE:
+      ROW_CHECK(manifestresource);
+      break;
+    case BIT_GENERICPARAM:
+      ROW_CHECK_WITH_INDEX(genericparam);
+      break;
+    case BIT_GENERICPARAMCONSTRAINT:
+      ROW_CHECK(genericparamconstraint);
+      break;
+    case BIT_METHODSPEC:
+      ROW_CHECK(methodspec);
+      break;
+    default:
+      break;
+    }
+
+    matched_bits++;
+  }
+
+  // This is used when parsing the MANIFEST RESOURCE table.
+  resource_base = pe_rva_to_offset(
+      pe, yr_le32toh(cli_header->Resources.VirtualAddress));
+
+  dotnet_parse_tilde_2(
+      pe,
+      tilde_header,
+      resource_base,
+      metadata_root,
+      rows,
+      index_sizes,
+      streams);
+}
+
+// the below code fragment can be found in:
+// libyara/modules/pe/pe.c
+static void pe_parse_header(PE* pe, uint64_t base_address, int flags)
+{
+  PIMAGE_SECTION_HEADER section;
+  PIMAGE_DATA_DIRECTORY data_dir;
+
+  char section_name[IMAGE_SIZEOF_SHORT_NAME + 1];
+  int sect_name_length, scount, ddcount;
+
+  uint64_t highest_sec_siz = 0;
+  uint64_t highest_sec_ofs = 0;
+  uint64_t section_end;
+  uint64_t last_section_end;
+
+  set_integer(1, pe->object, "is_pe");
+
+  set_integer(
+      yr_le16toh(pe->header->FileHeader.Machine), pe->object, "machine");
+
+  set_integer(
+      yr_le16toh(pe->header->FileHeader.NumberOfSections),
+      pe->object,
+      "number_of_sections");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.TimeDateStamp),
+      pe->object,
+      "timestamp");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.PointerToSymbolTable),
+      pe->object,
+      "pointer_to_symbol_table");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.NumberOfSymbols),
+      pe->object,
+      "number_of_symbols");
+
+  set_integer(
+      yr_le32toh(pe->header->FileHeader.SizeOfOptionalHeader),
+      pe->object,
+      "size_of_optional_header");
+
+  set_integer(
+      yr_le16toh(pe->header->FileHeader.Characteristics),
+      pe->object,
+      "characteristics");
+
+  set_integer(
+      flags & SCAN_FLAGS_PROCESS_MEMORY
+          ? base_address + yr_le32toh(OptionalHeader(pe, AddressOfEntryPoint))
+          : pe_rva_to_offset(
+                pe, yr_le32toh(OptionalHeader(pe, AddressOfEntryPoint))),
+      pe->object,
+      "entry_point");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, AddressOfEntryPoint)),
+      pe->object,
+      "entry_point_raw");
+
+  set_integer(
+      IS_64BITS_PE(pe) ? yr_le64toh(OptionalHeader(pe, ImageBase))
+                       : yr_le32toh(OptionalHeader(pe, ImageBase)),
+      pe->object,
+      "image_base");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, NumberOfRvaAndSizes)),
+      pe->object,
+      "number_of_rva_and_sizes");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, Magic)), pe->object, "opthdr_magic");
+
+  set_integer(
+      OptionalHeader(pe, MajorLinkerVersion),
+      pe->object,
+      "linker_version.major");
+
+  set_integer(
+      OptionalHeader(pe, MinorLinkerVersion),
+      pe->object,
+      "linker_version.minor");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfCode)), pe->object, "size_of_code");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfInitializedData)),
+      pe->object,
+      "size_of_initialized_data");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfUninitializedData)),
+      pe->object,
+      "size_of_uninitialized_data");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, BaseOfCode)), pe->object, "base_of_code");
+
+  if (!IS_64BITS_PE(pe))
+  {
+    set_integer(
+        yr_le32toh(pe->header->OptionalHeader.BaseOfData),
+        pe->object,
+        "base_of_data");
+  }
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SectionAlignment)),
+      pe->object,
+      "section_alignment");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, FileAlignment)),
+      pe->object,
+      "file_alignment");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MajorOperatingSystemVersion)),
+      pe->object,
+      "os_version.major");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MinorOperatingSystemVersion)),
+      pe->object,
+      "os_version.minor");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MajorImageVersion)),
+      pe->object,
+      "image_version.major");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MinorImageVersion)),
+      pe->object,
+      "image_version.minor");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MajorSubsystemVersion)),
+      pe->object,
+      "subsystem_version.major");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, MinorSubsystemVersion)),
+      pe->object,
+      "subsystem_version.minor");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, Win32VersionValue)),
+      pe->object,
+      "win32_version_value");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfImage)), pe->object, "size_of_image");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, SizeOfHeaders)),
+      pe->object,
+      "size_of_headers");
+
+  set_integer(yr_le32toh(OptionalHeader(pe, CheckSum)), pe->object, "checksum");
+
+  set_integer(
+      yr_le16toh(OptionalHeader(pe, Subsystem)), pe->object, "subsystem");
+
+  set_integer(
+      OptionalHeader(pe, DllCharacteristics),
+      pe->object,
+      "dll_characteristics");
+
+  set_integer(
+      IS_64BITS_PE(pe) ? yr_le64toh(OptionalHeader(pe, SizeOfStackReserve))
+                       : yr_le32toh(OptionalHeader(pe, SizeOfStackReserve)),
+      pe->object,
+      "size_of_stack_reserve");
+
+  set_integer(
+      IS_64BITS_PE(pe) ? yr_le64toh(OptionalHeader(pe, SizeOfStackCommit))
+                       : yr_le32toh(OptionalHeader(pe, SizeOfStackCommit)),
+      pe->object,
+      "size_of_stack_commit");
+
+  set_integer(
+      IS_64BITS_PE(pe) ? yr_le64toh(OptionalHeader(pe, SizeOfHeapReserve))
+                       : yr_le32toh(OptionalHeader(pe, SizeOfHeapReserve)),
+      pe->object,
+      "size_of_heap_reserve");
+
+  set_integer(
+      IS_64BITS_PE(pe) ? yr_le64toh(OptionalHeader(pe, SizeOfHeapCommit))
+                       : yr_le32toh(OptionalHeader(pe, SizeOfHeapCommit)),
+      pe->object,
+      "size_of_heap_commit");
+
+  set_integer(
+      yr_le32toh(OptionalHeader(pe, LoaderFlags)), pe->object, "loader_flags");
+
+  data_dir = IS_64BITS_PE(pe) ? pe->header64->OptionalHeader.DataDirectory
+                              : pe->header->OptionalHeader.DataDirectory;
+
+  ddcount = yr_le16toh(OptionalHeader(pe, NumberOfRvaAndSizes));
+  ddcount = yr_min(ddcount, IMAGE_NUMBEROF_DIRECTORY_ENTRIES);
+
+  for (int i = 0; i < ddcount; i++)
+  {
+    if (!struct_fits_in_pe(pe, data_dir, IMAGE_DATA_DIRECTORY))
+      break;
+
+    set_integer(
+        yr_le32toh(data_dir->VirtualAddress),
+        pe->object,
+        "data_directories[%i].virtual_address",
+        i);
+
+    set_integer(
+        yr_le32toh(data_dir->Size), pe->object, "data_directories[%i].size", i);
+
+    data_dir++;
+  }
+
+  pe_iterate_resources(
+      pe, (RESOURCE_CALLBACK_FUNC) pe_collect_resources, (void*) pe);
+
+  set_integer(pe->resources, pe->object, "number_of_resources");
+  set_integer(pe->version_infos, pe->object, "number_of_version_infos");
+
+  section = IMAGE_FIRST_SECTION(pe->header);
+
+  scount = yr_min(
+      yr_le16toh(pe->header->FileHeader.NumberOfSections), MAX_PE_SECTIONS);
+
+  for (int i = 0; i < scount; i++)
+  {
+    if (!struct_fits_in_pe(pe, section, IMAGE_SECTION_HEADER))
+      break;
+
+    memcpy(section_name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
+    section_name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
+
+    // Basically do rstrip('\0'), find the rightmost non-null character.
+    // Samples like
+    // 0043812838495a45449a0ac61a81b9c16eddca1ad249fb4f7fdb1c4505e9bb34 contain
+    // sections with additional characters after the first null.
+    for (sect_name_length = IMAGE_SIZEOF_SHORT_NAME - 1; sect_name_length >= 0;
+         --sect_name_length)
+    {
+      if (section_name[sect_name_length] != '\0')
+        break;
+    }
+
+    uint64_t sect_full_name_length = 0;
+    const char* full_section_name = pe_get_section_full_name(
+        pe, section_name, sect_name_length + 1, &sect_full_name_length);
+
+    set_sized_string(
+        (char*) section_name,
+        sect_name_length + 1,
+        pe->object,
+        "sections[%i].name",
+        i);
+
+    set_sized_string(
+        full_section_name,
+        sect_full_name_length,
+        pe->object,
+        "sections[%i].full_name",
+        i);
+
+    set_integer(
+        yr_le32toh(section->Characteristics),
+        pe->object,
+        "sections[%i].characteristics",
+        i);
+
+    set_integer(
+        yr_le32toh(section->SizeOfRawData),
+        pe->object,
+        "sections[%i].raw_data_size",
+        i);
+
+    set_integer(
+        yr_le32toh(section->PointerToRawData),
+        pe->object,
+        "sections[%i].raw_data_offset",
+        i);
+
+    set_integer(
+        yr_le32toh(section->VirtualAddress),
+        pe->object,
+        "sections[%i].virtual_address",
+        i);
+
+    set_integer(
+        yr_le32toh(section->Misc.VirtualSize),
+        pe->object,
+        "sections[%i].virtual_size",
+        i);
+
+    set_integer(
+        yr_le32toh(section->PointerToRelocations),
+        pe->object,
+        "sections[%i].pointer_to_relocations",
+        i);
+
+    set_integer(
+        yr_le32toh(section->PointerToLinenumbers),
+        pe->object,
+        "sections[%i].pointer_to_line_numbers",
+        i);
+
+    set_integer(
+        yr_le32toh(section->NumberOfRelocations),
+        pe->object,
+        "sections[%i].number_of_relocations",
+        i);
+
+    set_integer(
+        yr_le32toh(section->NumberOfLinenumbers),
+        pe->object,
+        "sections[%i].number_of_line_numbers",
+        i);
+
+    // This will catch the section with the highest raw offset to help checking
+    // if overlay data is present. If two sections have the same raw pointer
+    // but different raw sizes the largest one is used. An example of this case
+    // is file: cf62bf1815a93e68e6c5189f689286b66c4088b9507cf3ecf835e4ac3f9ededa
+
+    section_end = yr_le32toh(section->PointerToRawData) +
+                  yr_le32toh(section->SizeOfRawData);
+
+    if (section_end > highest_sec_ofs + highest_sec_siz)
+    {
+      highest_sec_ofs = yr_le32toh(section->PointerToRawData);
+      highest_sec_siz = yr_le32toh(section->SizeOfRawData);
+    }
+
+    section++;
+  }
+
+  // An overlay is data appended to a PE file. Its location is at
+  // RawData + RawOffset of the last section on the physical file
+  last_section_end = highest_sec_siz + highest_sec_ofs;
+
+  // For PE files that have overlaid data overlay.offset contains the offset
+  // within the file where the overlay starts and overlay.size contains the
+  // size. If the PE file doesn't have an overlay both fields are 0, if the
+  // file is not a PE file (or is a malformed PE) both fields are YR_UNDEFINED.
+  if (last_section_end && (pe->data_size > last_section_end))
+  {
+    set_integer(last_section_end, pe->object, "overlay.offset");
+    set_integer(pe->data_size - last_section_end, pe->object, "overlay.size");
+  }
+  else
+  {
+    set_integer(0, pe->object, "overlay.offset");
+    set_integer(0, pe->object, "overlay.size");
+  }
+}
+
+// the below code fragment can be found in:
+// tests/test-pe.c
+int main(int argc, char** argv)
+{
+  int result = 0;
+
+  YR_DEBUG_INITIALIZE();
+  YR_DEBUG_FPRINTF(1, stderr, "+ %s() { // in %s\n", __FUNCTION__, argv[0]);
+
+  init_top_srcdir();
+
+  yr_initialize();
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.is_pe \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          not pe.is_pe \
+      }",
+      "tests/data/tiny-macho");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(\"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(\"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny-idata-51ff");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(\"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(/.*/, /.*CriticalSection/) == 4 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(/kernel32\\.dll/i, /.*/) == 21 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(/.*/, /.*/) \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(/.*/, /.*CriticalSection/) \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  ///////////////////////////////
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_STANDARD, \"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_STANDARD, \"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny-idata-51ff");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_STANDARD, \"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_STANDARD, /.*/, /.*CriticalSection/) == 4 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_STANDARD, /kernel32\\.dll/i, /.*/) == 21 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_STANDARD, /.*/, /.*/) \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_STANDARD, /.*/, /.*CriticalSection/) \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.number_of_imports == 2 and\
+          pe.number_of_imported_functions == 48\
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_DELAYED, \"USER32.dll\", \"MessageBoxA\") \
+      }",
+      "tests/data/pe_imports");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+            pe.imports(pe.IMPORT_DELAYED, \"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/pe_imports");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_DELAYED, /.*/, /Message.*/) == 2 \
+      }",
+      "tests/data/pe_imports");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_DELAYED, /USER32\\.dll/i, /.*BoxA/) == 1 \
+      }",
+      "tests/data/pe_imports");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_DELAYED, /.*/, /.*CriticalSection/) \
+      }",
+      "tests/data/pe_imports");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.number_of_delayed_imports == 1 and\
+          pe.number_of_delayed_imported_functions == 2\
+      }",
+      "tests/data/pe_imports");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_ANY, \"KERNEL32.dll\", \"DeleteCriticalSection\") and \
+          pe.imports(pe.IMPORT_ANY, \"USER32.dll\", \"MessageBoxA\") \
+      }",
+      "tests/data/pe_imports");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_ANY, \"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny-idata-51ff");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_ANY, \"KERNEL32.dll\", \"DeleteCriticalSection\") \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_ANY, /.*/, /.*CriticalSection/) == 4 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_ANY, /kernel32\\.dll/i, /.*/) == 21 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_ANY, /.*/, /.*/) \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imports(pe.IMPORT_ANY, /.*/, /.*CriticalSection/) \
+      }",
+      "tests/data/tiny-idata-5200");
+
+  assert_true_rule(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          ( \
+            pe.IMPORT_ANY & (pe.IMPORT_STANDARD | pe.IMPORT_DELAYED) \
+          ) == (pe.IMPORT_STANDARD | pe.IMPORT_DELAYED)\
+      }",
+      "")
+
+      assert_true_rule_file(
+          "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.number_of_sections == 7 \
+      }",
+          "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.entry_point == 0x14E0 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.entry_point_raw == 0x1380 \
+      }",
+      "tests/data/mtxex.dll");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.linker_version.major == 2 and \
+          pe.linker_version.minor == 26 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.sections[0].name == \".text\" and \
+          pe.sections[1].name == \".data\" and \
+          pe.sections[2].name == \".rdata\" and \
+          pe.sections[3].name == \".bss\" and \
+          pe.sections[4].name == \".idata\" and \
+          pe.sections[5].name == \".CRT\" and \
+          pe.sections[6].name == \".tls\" \
+      }",
+      "tests/data/tiny");
+
+#if defined(HAVE_LIBCRYPTO) || defined(HAVE_WINCRYPT_H) || \
+    defined(HAVE_COMMONCRYPTO_COMMONCRYPTO_H)
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.imphash() == \"1720bf764274b7a4052bbef0a71adc0d\" \
+      }",
+      "tests/data/tiny");
+
+#endif
+
+#if defined(HAVE_LIBCRYPTO)
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.number_of_signatures == 1 and \
+          pe.signatures[0].thumbprint == \"c1bf1b8f751bf97626ed77f755f0a393106f2454\" and \
+          pe.signatures[0].subject == \"/C=US/ST=California/L=Menlo Park/O=Quicken, Inc./OU=Operations/CN=Quicken, Inc.\" \
+      }",
+      "tests/data/"
+      "079a472d22290a94ebb212aa8015cdc8dd28a968c6b4d3b88acdd58ce2d3b885");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.number_of_signatures == 2 \
+      }",
+      "tests/data/"
+      "3b8b90159fa9b6048cc5410c5d53f116943564e4d05b04a843f9b3d0540d0c1c");
+
+#endif
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.section_index(\".text\") == 0 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.section_index(pe.entry_point) == 0 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.is_32bit() and not pe.is_64bit() \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.checksum == 0xA8DC \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.checksum == pe.calculate_checksum() \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.overlay.offset == 0x8000 and pe.overlay.size == 7 \
+      }",
+      "tests/data/tiny-overlay");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.overlay.offset == 0 and pe.overlay.size == 0 \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.pdb_path == \"D:\\\\workspace\\\\2018_R9_RelBld\\\\target\\\\checkout\\\\custprof\\\\Release\\\\custprof.pdb\" \
+      }",
+      "tests/data/"
+      "079a472d22290a94ebb212aa8015cdc8dd28a968c6b4d3b88acdd58ce2d3b885");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.pdb_path == \"/Users/runner/work/OpenCorePkg/OpenCorePkg/UDK/Build/OpenCorePkg/DEBUG_XCODE5/X64/OpenCorePkg/Application/ChipTune/ChipTune/DEBUG/ChipTune.dll\" \
+      }",
+      "tests/data/ChipTune.efi");
+
+  assert_false_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.checksum == pe.calculate_checksum() \
+      }",
+      "tests/data/tiny-idata-51ff");
+
+  /*
+   * mtxex.dll is
+   * 23e72ce7e9cdbc80c0095484ebeb02f56b21e48fd67044e69e7a2ae76db631e5, which was
+   * taken from a Windows 10 install. The details of which are: export_timestamp
+   * = 1827812126 dll_name = "mtxex.dll" number_of_exports = 4 export_details
+   *            [0]
+   *                    offset = 1072
+   *                    name = "DllGetClassObject"
+   *                    forward_name = YR_UNDEFINED
+   *                    ordinal = 1
+   *            [1]
+   *                    offset = YR_UNDEFINED
+   *                    name = "GetObjectContext"
+   *                    forward_name = "COMSVCS.GetObjectContext"
+   *                    ordinal = 2
+   *            [2]
+   *                    offset = YR_UNDEFINED
+   *                    name = "MTSCreateActivity"
+   *                    forward_name = "COMSVCS.MTSCreateActivity"
+   *                    ordinal = 3
+   *            [3]
+   *                    offset = YR_UNDEFINED
+   *                    name = "SafeRef"
+   *                    forward_name = "COMSVCS.SafeRef"
+   *                    ordinal = 4
+   */
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.number_of_exports == 4 and \
+          pe.dll_name == \"mtxex.dll\" and \
+          pe.export_timestamp == 1827812126 and \
+          pe.export_details[0].offset == 1072 and \
+          pe.export_details[0].name == \"DllGetClassObject\" and \
+          pe.export_details[0].ordinal == 1 and \
+          pe.export_details[1].forward_name == \"COMSVCS.GetObjectContext\" \
+      }",
+      "tests/data/mtxex.dll");
+  /*
+   * mtxex_modified_rsrc_rva.dll is a modified copy of mtxex.dll from a Windows
+   * 10 install. The modification was to change the RVA of the only resource to
+   * be invalid (it was changed to be 0x41585300), to ensure we are still
+   * parsing resources even if the RVA does not have a corresponding file
+   * offset.
+   */
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.number_of_resources == 1 and \
+          pe.resources[0].rva == 5462081 and \
+          pe.resources[0].length == 888 \
+      }",
+      "tests/data/mtxex_modified_rsrc_rva.dll");
+
+  // Make sure exports function is case insensitive (historically this has been
+  // the case) and supports ordinals...
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.exports(\"saferef\") and \
+          pe.exports(4) and \
+          pe.exports(/mtscreateactivity/i) \
+      }",
+      "tests/data/mtxex.dll");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.exports_index(\"MTSCreateActivity\") == 2 and \
+          pe.exports_index(3) == 2 and \
+          pe.exports_index(/mtscreateactivity/i) == 2 \
+      }",
+      "tests/data/mtxex.dll");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.export_details[0].name == \"CP_PutItem\" \
+      }",
+      "tests/data/"
+      "079a472d22290a94ebb212aa8015cdc8dd28a968c6b4d3b88acdd58ce2d3b885.upx");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.rich_signature.toolid(157, 40219) == 1 and \
+          pe.rich_signature.toolid(1, 0) > 40 and pe.rich_signature.toolid(1, 0) < 45 and \
+          pe.rich_signature.version(30319) and \
+          pe.rich_signature.version(40219, 170) == 11 \
+      }",
+      "tests/data/"
+      "079a472d22290a94ebb212aa8015cdc8dd28a968c6b4d3b88acdd58ce2d3b885");
+
+  // This is the first 840 bytes (just enough to make sure the rich header is
+  // parsed) of
+  // 3593d3d08761d8ddc269dde945c0cb07e5cef5dd46ad9eefc22d17901f542093.
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.rich_signature.offset == 0x200 and \
+          pe.rich_signature.length == 64 and \
+          pe.rich_signature.key == 0x9f1d8511 and \
+          pe.rich_signature.clear_data == \"DanS\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x11\\x00\\x00\\x00\\xc3\\x0f]\\x00\\x03\\x00\\x00\\x00\\x09x\\x95\\x00\\x01\\x00\\x00\\x00\\x09x\\x83\\x00\\x05\\x00\\x00\\x00\\x09x\\x94\\x00\\x01\\x00\\x00\\x00\\x09x\\x91\\x00\\x01\\x00\\x00\\x00\" \
+      }",
+      "tests/data/weird_rich");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule test { \
+        condition: \
+          pe.language(0x09) and pe.locale(0x0409) \
+      }",
+      "tests/data/mtxex.dll");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule version_info_catch \
+      {\
+          condition:\
+            pe.number_of_version_infos  > 2 and\
+            for any version in pe.version_info_list : ( \
+              version.key == \"FileVersion\" and \
+              version.value == \"27.1.9.33\" \
+          ) \
+      }",
+      "tests/data/"
+      "079a472d22290a94ebb212aa8015cdc8dd28a968c6b4d3b88acdd58ce2d3b885");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule iequals_comparison { \
+        condition: \
+          pe.sections[0].name != \".TEXT\" and \
+          pe.sections[0].name iequals \".TEXT\" \
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      \
+      rule import_details_catch \
+      {\
+          condition:\
+            for any import_detail in pe.import_details: (\
+                import_detail.library_name == \"MSVCR100.dll\" and\
+                for any function in import_detail.functions : (\
+                    function.name == \"_initterm\"\
+                )\
+            )\
+      }",
+      "tests/data/"
+      "079a472d22290a94ebb212aa8015cdc8dd28a968c6b4d3b88acdd58ce2d3b885");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      \
+      rule zero_length_version_info_value \
+      {\
+          condition:\
+            pe.number_of_version_infos == 12 and \
+            pe.version_info[\"Comments\"] == \"\" and \
+            pe.version_info[\"CompanyName\"] == \"\" and \
+            pe.version_info[\"LegalTrademarks\"] == \"\" and \
+            pe.version_info[\"PrivateBuild\"] == \"\" and \
+            pe.version_info[\"SpecialBuild\"] == \"\" \
+      }",
+      "tests/data/"
+      "ca21e1c32065352d352be6cde97f89c141d7737ea92434831f998080783d5386");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule section_name_comparison { \
+        condition: \
+          for all section in pe.sections : ( \
+              section.name == section.full_name \
+          )\
+      }",
+      "tests/data/tiny");
+
+  assert_true_rule_file(
+      "import \"pe\" \
+      rule section_name_comparison { \
+        condition: \
+          for any section in pe.sections : ( \
+              section.name == \"/4\" and\
+              section.full_name == \".debug_aranges\" \
+          )\
+      }",
+      "tests/data/pe_mingw");
+
+  yr_finalize();
+
+  YR_DEBUG_FPRINTF(
+      1, stderr, "} = %d // %s() in %s\n", result, __FUNCTION__, argv[0]);
+
+  return result;
+}
+
+// the below code fragment can be found in:
+// libyara/modules/dex/dex.c
+void dex_parse(DEX* dex, uint64_t base_address)
+{
+  dex_header_t* dex_header;
+
+  int i, j;
+
+  uint32_t uleb128_size = 0;
+  uint32_t new_size = 0;
+  uint32_t index_class_data_item = 0;
+  uint32_t index_encoded_method = 0;
+  uint32_t index_encoded_field = 0;
+
+  if (!struct_fits_in_dex(dex, dex->data, dex_header_t))
+    return;
+
+  dex_parse_header(dex->header, dex->object);
+
+  dex_header = dex->header;
+
+  if (!fits_in_dex(
+          dex,
+          dex->data + yr_le32toh(dex_header->string_ids_offset),
+          yr_le32toh(dex_header->string_ids_size) * sizeof(string_id_item_t)))
+    return;
+
+#ifdef DEBUG_DEX_MODULE
+  printf("[DEX] Parse STRING ID section\n");
+#endif
+
+  // Get information about the String ID section
+  for (i = 0; i < yr_le32toh(dex_header->string_ids_size); i++)
+  {
+    string_id_item_t* string_id_item =
+        (string_id_item_t*) (dex->data + yr_le32toh(dex_header->string_ids_offset) + i * sizeof(string_id_item_t));
+
+#ifdef DEBUG_DEX_MODULE
+    printf(
+        "[DEX] STRING ID item data_offset:0x%x\n",
+        yr_le32toh(string_id_item->string_data_offset));
+#endif
+
+    if (!fits_in_dex(
+            dex,
+            dex->data + yr_le32toh(string_id_item->string_data_offset),
+            sizeof(uint32_t)))
+      continue;
+
+    uint32_t value = (uint32_t) read_uleb128(
+        (dex->data + yr_le32toh(string_id_item->string_data_offset)),
+        &uleb128_size);
+
+#ifdef DEBUG_DEX_MODULE
+    printf("[DEX] STRING ID item size:0x%x\n", value);
+#endif
+
+    if (!fits_in_dex(
+            dex,
+            dex->data + yr_le32toh(string_id_item->string_data_offset),
+            value))
+      continue;
+
+    set_integer(
+        yr_le32toh(string_id_item->string_data_offset),
+        dex->object,
+        "string_ids[%i].offset",
+        i);
+
+    set_integer(value, dex->object, "string_ids[%i].size", i);
+
+    set_sized_string(
+        (const char*) ((
+            dex->data + yr_le32toh(string_id_item->string_data_offset) + 1)),
+        value,
+        dex->object,
+        "string_ids[%i].value",
+        i);
+  }
+
+  if (!fits_in_dex(
+          dex,
+          dex->data + yr_le32toh(dex_header->type_ids_offset),
+          yr_le32toh(dex_header->type_ids_size) * sizeof(type_id_item_t)))
+    return;
+
+#ifdef DEBUG_DEX_MODULE
+  printf("[DEX] Parse TYPE ID section\n");
+#endif
+
+  // Get information about the Type ID section
+  for (i = 0; i < yr_le32toh(dex_header->type_ids_size); i++)
+  {
+    type_id_item_t* type_id_item =
+        (type_id_item_t*) (dex->data + yr_le32toh(dex_header->type_ids_offset) + i * sizeof(type_id_item_t));
+
+    set_integer(
+        yr_le32toh(type_id_item->descriptor_idx),
+        dex->object,
+        "type_ids[%i].descriptor_idx",
+        i);
+  }
+
+  if (!fits_in_dex(
+          dex,
+          dex->data + yr_le32toh(dex_header->proto_ids_offset),
+          yr_le32toh(dex_header->proto_ids_size) * sizeof(proto_id_item_t)))
+    return;
+
+#ifdef DEBUG_DEX_MODULE
+  printf("[DEX] Parse PROTO ID section\n");
+#endif
+
+  // Get information about the Proto ID section
+  for (i = 0; i < yr_le32toh(dex_header->proto_ids_size); i++)
+  {
+    proto_id_item_t* proto_id_item =
+        (proto_id_item_t*) (dex->data + yr_le32toh(dex_header->proto_ids_offset) + i * sizeof(proto_id_item_t));
+
+    set_integer(
+        yr_le32toh(proto_id_item->shorty_idx),
+        dex->object,
+        "proto_ids[%i].shorty_idx",
+        i);
+    set_integer(
+        yr_le32toh(proto_id_item->return_type_idx),
+        dex->object,
+        "proto_ids[%i].return_type_idx",
+        i);
+    set_integer(
+        yr_le32toh(proto_id_item->parameters_offset),
+        dex->object,
+        "proto_ids[%i].parameters_offset",
+        i);
+  }
+
+  if (!fits_in_dex(
+          dex,
+          dex->data + yr_le32toh(dex_header->field_ids_offset),
+          yr_le32toh(dex_header->field_ids_size) * sizeof(field_id_item_t)))
+    return;
+
+#ifdef DEBUG_DEX_MODULE
+  printf("[DEX] Parse FIELD ID section\n");
+#endif
+
+  // Get information about the Field ID section
+  for (i = 0; i < yr_le32toh(dex_header->field_ids_size); i++)
+  {
+    field_id_item_t* field_id_item =
+        (field_id_item_t*) (dex->data + yr_le32toh(dex_header->field_ids_offset) + i * sizeof(field_id_item_t));
+
+    set_integer(
+        yr_le16toh(field_id_item->class_idx),
+        dex->object,
+        "field_ids[%i].class_idx",
+        i);
+    set_integer(
+        yr_le16toh(field_id_item->type_idx),
+        dex->object,
+        "field_ids[%i].type_idx",
+        i);
+    set_integer(
+        yr_le32toh(field_id_item->name_idx),
+        dex->object,
+        "field_ids[%i].name_idx",
+        i);
+  }
+
+  if (!fits_in_dex(
+          dex,
+          dex->data + yr_le32toh(dex_header->method_ids_offset),
+          yr_le32toh(dex_header->method_ids_size) * sizeof(method_id_item_t)))
+    return;
+
+#ifdef DEBUG_DEX_MODULE
+  printf("[DEX] Parse METHOD ID section\n");
+#endif
+
+  // Get information about the Method ID section
+  for (i = 0; i < yr_le32toh(dex_header->method_ids_size); i++)
+  {
+    method_id_item_t* method_id_item =
+        (method_id_item_t*) (dex->data + yr_le32toh(dex_header->method_ids_offset) + i * sizeof(method_id_item_t));
+
+    set_integer(
+        yr_le16toh(method_id_item->class_idx),
+        dex->object,
+        "method_ids[%i].class_idx",
+        i);
+    set_integer(
+        yr_le16toh(method_id_item->proto_idx),
+        dex->object,
+        "method_ids[%i].proto_idx",
+        i);
+    set_integer(
+        yr_le32toh(method_id_item->name_idx),
+        dex->object,
+        "method_ids[%i].name_idx",
+        i);
+  }
+
+#ifdef DEBUG_DEX_MODULE
+  printf("[DEX] Parse MAP List ID section\n");
+#endif
+
+  // Get information about the Map List ID section
+  if (yr_le32toh(dex_header->map_offset) != 0 &&
+      fits_in_dex(
+          dex,
+          dex->data + yr_le32toh(dex_header->map_offset),
+          sizeof(uint32_t)))
+  {
+    uint32_t* map_list_size =
+        (uint32_t*) (dex->data + yr_le32toh(dex_header->map_offset));
+
+    set_integer(yr_le32toh(*map_list_size), dex->object, "map_list.size");
+
+    if (!fits_in_dex(
+            dex,
+            dex->data + yr_le32toh(dex_header->map_offset),
+            sizeof(uint32_t) + yr_le32toh(*map_list_size) * sizeof(map_item_t)))
+      return;
+
+    for (i = 0; i < yr_le32toh(*map_list_size); i++)
+    {
+      map_item_t* map_item =
+          (map_item_t*) (dex->data + yr_le32toh(dex_header->map_offset) + sizeof(uint32_t) + i * sizeof(map_item_t));
+
+      set_integer(
+          yr_le16toh(map_item->type),
+          dex->object,
+          "map_list.map_item[%i].type",
+          i);
+      set_integer(
+          yr_le16toh(map_item->unused),
+          dex->object,
+          "map_list.map_item[%i].unused",
+          i);
+      set_integer(
+          yr_le32toh(map_item->size),
+          dex->object,
+          "map_list.map_item[%i].size",
+          i);
+      set_integer(
+          yr_le32toh(map_item->offset),
+          dex->object,
+          "map_list.map_item[%i].offset",
+          i);
+    }
+  }
+
+  if (!fits_in_dex(
+          dex,
+          dex->data + yr_le32toh(dex_header->class_defs_offset),
+          yr_le32toh(dex_header->class_defs_size) * sizeof(class_id_item_t)))
+    return;
+
+#ifdef DEBUG_DEX_MODULE
+  printf("[DEX] Parse CLASS ID section\n");
+#endif
+
+  // Get information about the Class ID section
+  for (i = 0; i < yr_le32toh(dex_header->class_defs_size); i++)
+  {
+    class_id_item_t* class_id_item =
+        (class_id_item_t*) (dex->data + yr_le32toh(dex_header->class_defs_offset) + i * sizeof(class_id_item_t));
+
+#ifdef DEBUG_DEX_MODULE
+    printf(
+        "[DEX] CLASS ID item class_idx:0x%x access_flags:0x%x "
+        "super_class_idx:0x%x interfaces_offset:0x%x source_file_idx:0x%x "
+        "annotations_offset:0x%x class_data_offset:0x%x "
+        "static_values_offset:0x%x\n",
+        yr_le32toh(class_id_item->class_idx),
+        yr_le32toh(class_id_item->access_flags),
+        yr_le32toh(class_id_item->super_class_idx),
+        yr_le32toh(class_id_item->interfaces_offset),
+        yr_le32toh(class_id_item->source_file_idx),
+        yr_le32toh(class_id_item->annotations_offset),
+        yr_le32toh(class_id_item->class_data_offset),
+        yr_le32toh(class_id_item->static_values_offset));
+#endif
+
+    set_integer(
+        yr_le32toh(class_id_item->class_idx),
+        dex->object,
+        "class_defs[%i].class_idx",
+        i);
+    set_integer(
+        yr_le32toh(class_id_item->access_flags),
+        dex->object,
+        "class_defs[%i].access_flags",
+        i);
+    set_integer(
+        yr_le32toh(class_id_item->super_class_idx),
+        dex->object,
+        "class_defs[%i].super_class_idx",
+        i);
+    set_integer(
+        yr_le32toh(class_id_item->interfaces_offset),
+        dex->object,
+        "class_defs[%i].interfaces_offset",
+        i);
+    set_integer(
+        yr_le32toh(class_id_item->source_file_idx),
+        dex->object,
+        "class_defs[%i].source_file_idx",
+        i);
+    set_integer(
+        yr_le32toh(class_id_item->annotations_offset),
+        dex->object,
+        "class_defs[%i].annotations_offset",
+        i);
+    set_integer(
+        yr_le32toh(class_id_item->class_data_offset),
+        dex->object,
+        "class_defs[%i].class_data_offset",
+        i);
+    set_integer(
+        yr_le32toh(class_id_item->static_values_offset),
+        dex->object,
+        "class_defs[%i].static_values_offset",
+        i);
+
+    if (yr_le32toh(class_id_item->class_data_offset) != 0)
+    {
+      class_data_item_t class_data_item;
+
+      if (!fits_in_dex(
+              dex,
+              dex->data + yr_le32toh(class_id_item->class_data_offset),
+              4 * sizeof(uint32_t)))
+        return;
+
+      uleb128_size = 0;
+
+      class_data_item.static_fields_size = (uint32_t) read_uleb128(
+          (dex->data + yr_le32toh(class_id_item->class_data_offset)),
+          &uleb128_size);
+
+      class_data_item.instance_fields_size = (uint32_t) read_uleb128(
+          (dex->data + yr_le32toh(class_id_item->class_data_offset) +
+           uleb128_size),
+          &uleb128_size);
+
+      class_data_item.direct_methods_size = (uint32_t) read_uleb128(
+          (dex->data + yr_le32toh(class_id_item->class_data_offset) +
+           uleb128_size),
+          &uleb128_size);
+
+      class_data_item.virtual_methods_size = (uint32_t) read_uleb128(
+          (dex->data + yr_le32toh(class_id_item->class_data_offset) +
+           uleb128_size),
+          &uleb128_size);
+
+      set_integer(
+          class_data_item.static_fields_size,
+          dex->object,
+          "class_data_item[%i].static_fields_size",
+          index_class_data_item);
+
+      set_integer(
+          class_data_item.instance_fields_size,
+          dex->object,
+          "class_data_item[%i].instance_fields_size",
+          index_class_data_item);
+
+      set_integer(
+          class_data_item.direct_methods_size,
+          dex->object,
+          "class_data_item[%i].direct_methods_size",
+          index_class_data_item);
+
+      set_integer(
+          class_data_item.virtual_methods_size,
+          dex->object,
+          "class_data_item[%i].virtual_methods_size",
+          index_class_data_item);
+
+#ifdef DEBUG_DEX_MODULE
+      printf("[DEX] CLASS DATA item static fields\n");
+#endif
+
+      uint32_t previous_field_idx = 0;
+      for (j = 0; j < class_data_item.static_fields_size; j++)
+      {
+        new_size = load_encoded_field(
+            dex,
+            yr_le32toh(class_id_item->class_data_offset) + uleb128_size,
+            &previous_field_idx,
+            index_encoded_field,
+            1,
+            0);
+
+        // If the current field isn't parsed the other fields aren't likely to
+        // parse.
+        if (new_size == 0)
+          break;
+
+        uleb128_size += new_size;
+        index_encoded_field += 1;
+      }
+
+#ifdef DEBUG_DEX_MODULE
+      printf("[DEX] CLASS DATA item instance fields\n");
+#endif
+
+      previous_field_idx = 0;
+
+      for (j = 0; j < class_data_item.instance_fields_size; j++)
+      {
+        new_size = load_encoded_field(
+            dex,
+            yr_le32toh(class_id_item->class_data_offset) + uleb128_size,
+            &previous_field_idx,
+            index_encoded_field,
+            0,
+            1);
+
+        // If the current field isn't parsed the other fields aren't likely to
+        // parse.
+        if (new_size == 0)
+          break;
+
+        uleb128_size += new_size;
+        index_encoded_field += 1;
+      }
+
+#ifdef DEBUG_DEX_MODULE
+      printf("[DEX] CLASS DATA item direct methods\n");
+#endif
+
+      uint32_t previous_method_idx = 0;
+
+      for (j = 0; j < class_data_item.direct_methods_size; j++)
+      {
+        new_size = load_encoded_method(
+            dex,
+            yr_le32toh(class_id_item->class_data_offset) + uleb128_size,
+            &previous_method_idx,
+            index_encoded_method,
+            1,
+            0);
+
+        // If the current field isn't parsed the other fields aren't likely to
+        // parse.
+        if (new_size == 0)
+          break;
+
+        uleb128_size += new_size;
+        index_encoded_method += 1;
+      }
+
+#ifdef DEBUG_DEX_MODULE
+      printf("[DEX] CLASS DATA item virtual methods\n");
+#endif
+
+      previous_method_idx = 0;
+
+      for (j = 0; j < class_data_item.virtual_methods_size; j++)
+      {
+        new_size = load_encoded_method(
+            dex,
+            yr_le32toh(class_id_item->class_data_offset) + uleb128_size,
+            &previous_method_idx,
+            index_encoded_method,
+            0,
+            1);
+
+        // If the current field isn't parsed the other fields aren't likely to
+        // parse.
+        if (new_size == 0)
+          break;
+
+        uleb128_size += new_size;
+        index_encoded_method += 1;
+      }
+
+      index_class_data_item++;
+    }
+  }
+
+  set_integer(index_encoded_method, dex->object, "number_of_methods");
+  set_integer(index_encoded_field, dex->object, "number_of_fields");
+}
+
+// the below code fragment can be found in:
+// libyara/grammar.c
+int
+yyparse (void *yyscanner, YR_COMPILER* compiler)
+{
+/* Lookahead token kind.  */
+int yychar;
+
+
+/* The semantic value of the lookahead symbol.  */
+/* Default value used for initialization, for pacifying older GCCs
+   or non-GCC compilers.  */
+YY_INITIAL_VALUE (static YYSTYPE yyval_default;)
+YYSTYPE yylval YY_INITIAL_VALUE (= yyval_default);
+
+    /* Number of syntax errors so far.  */
+    int yynerrs = 0;
+
+    yy_state_fast_t yystate = 0;
+    /* Number of tokens to shift before error messages enabled.  */
+    int yyerrstatus = 0;
+
+    /* Refer to the stacks through separate pointers, to allow yyoverflow
+       to reallocate them elsewhere.  */
+
+    /* Their size.  */
+    YYPTRDIFF_T yystacksize = YYINITDEPTH;
+
+    /* The state stack: array, bottom, top.  */
+    yy_state_t yyssa[YYINITDEPTH];
+    yy_state_t *yyss = yyssa;
+    yy_state_t *yyssp = yyss;
+
+    /* The semantic value stack: array, bottom, top.  */
+    YYSTYPE yyvsa[YYINITDEPTH];
+    YYSTYPE *yyvs = yyvsa;
+    YYSTYPE *yyvsp = yyvs;
+
+  int yyn;
+  /* The return value of yyparse.  */
+  int yyresult;
+  /* Lookahead symbol kind.  */
+  yysymbol_kind_t yytoken = YYSYMBOL_YYEMPTY;
+  /* The variables used to return semantic value and location from the
+     action routines.  */
+  YYSTYPE yyval;
+
+
+
+#define YYPOPSTACK(N)   (yyvsp -= (N), yyssp -= (N))
+
+  /* The number of symbols on the RHS of the reduced rule.
+     Keep to zero when no symbol should be popped.  */
+  int yylen = 0;
+
+  YYDPRINTF ((stderr, "Starting parse\n"));
+
+  yychar = YYEMPTY; /* Cause a token to be read.  */
+
+  goto yysetstate;
+
+
+/*------------------------------------------------------------.
+| yynewstate -- push a new state, which is found in yystate.  |
+`------------------------------------------------------------*/
+yynewstate:
+  /* In all cases, when you get here, the value and location stacks
+     have just been pushed.  So pushing a state here evens the stacks.  */
+  yyssp++;
+
+
+/*--------------------------------------------------------------------.
+| yysetstate -- set current state (the top of the stack) to yystate.  |
+`--------------------------------------------------------------------*/
+yysetstate:
+  YYDPRINTF ((stderr, "Entering state %d\n", yystate));
+  YY_ASSERT (0 <= yystate && yystate < YYNSTATES);
+  YY_IGNORE_USELESS_CAST_BEGIN
+  *yyssp = YY_CAST (yy_state_t, yystate);
+  YY_IGNORE_USELESS_CAST_END
+  YY_STACK_PRINT (yyss, yyssp);
+
+  if (yyss + yystacksize - 1 <= yyssp)
+#if !defined yyoverflow && !defined YYSTACK_RELOCATE
+    YYNOMEM;
+#else
+    {
+      /* Get the current used size of the three stacks, in elements.  */
+      YYPTRDIFF_T yysize = yyssp - yyss + 1;
+
+# if defined yyoverflow
+      {
+        /* Give user a chance to reallocate the stack.  Use copies of
+           these so that the &'s don't force the real ones into
+           memory.  */
+        yy_state_t *yyss1 = yyss;
+        YYSTYPE *yyvs1 = yyvs;
+
+        /* Each stack pointer address is followed by the size of the
+           data in use in that stack, in bytes.  This used to be a
+           conditional around just the two extra args, but that might
+           be undefined if yyoverflow is a macro.  */
+        yyoverflow (YY_("memory exhausted"),
+                    &yyss1, yysize * YYSIZEOF (*yyssp),
+                    &yyvs1, yysize * YYSIZEOF (*yyvsp),
+                    &yystacksize);
+        yyss = yyss1;
+        yyvs = yyvs1;
+      }
+# else /* defined YYSTACK_RELOCATE */
+      /* Extend the stack our own way.  */
+      if (YYMAXDEPTH <= yystacksize)
+        YYNOMEM;
+      yystacksize *= 2;
+      if (YYMAXDEPTH < yystacksize)
+        yystacksize = YYMAXDEPTH;
+
+      {
+        yy_state_t *yyss1 = yyss;
+        union yyalloc *yyptr =
+          YY_CAST (union yyalloc *,
+                   YYSTACK_ALLOC (YY_CAST (YYSIZE_T, YYSTACK_BYTES (yystacksize))));
+        if (! yyptr)
+          YYNOMEM;
+        YYSTACK_RELOCATE (yyss_alloc, yyss);
+        YYSTACK_RELOCATE (yyvs_alloc, yyvs);
+#  undef YYSTACK_RELOCATE
+        if (yyss1 != yyssa)
+          YYSTACK_FREE (yyss1);
+      }
+# endif
+
+      yyssp = yyss + yysize - 1;
+      yyvsp = yyvs + yysize - 1;
+
+      YY_IGNORE_USELESS_CAST_BEGIN
+      YYDPRINTF ((stderr, "Stack size increased to %ld\n",
+                  YY_CAST (long, yystacksize)));
+      YY_IGNORE_USELESS_CAST_END
+
+      if (yyss + yystacksize - 1 <= yyssp)
+        YYABORT;
+    }
+#endif /* !defined yyoverflow && !defined YYSTACK_RELOCATE */
+
+
+  if (yystate == YYFINAL)
+    YYACCEPT;
+
+  goto yybackup;
+
+
+/*-----------.
+| yybackup.  |
+`-----------*/
+yybackup:
+  /* Do appropriate processing given the current state.  Read a
+     lookahead token if we need one and don't already have one.  */
+
+  /* First try to decide what to do without reference to lookahead token.  */
+  yyn = yypact[yystate];
+  if (yypact_value_is_default (yyn))
+    goto yydefault;
+
+  /* Not known => get a lookahead token if don't already have one.  */
+
+  /* YYCHAR is either empty, or end-of-input, or a valid lookahead.  */
+  if (yychar == YYEMPTY)
+    {
+      YYDPRINTF ((stderr, "Reading a token\n"));
+      yychar = yylex (&yylval, yyscanner, compiler);
+    }
+
+  if (yychar <= _END_OF_FILE_)
+    {
+      yychar = _END_OF_FILE_;
+      yytoken = YYSYMBOL_YYEOF;
+      YYDPRINTF ((stderr, "Now at end of input.\n"));
+    }
+  else if (yychar == YYerror)
+    {
+      /* The scanner already issued an error message, process directly
+         to error recovery.  But do not keep the error token as
+         lookahead, it is too special and may lead us to an endless
+         loop in error recovery. */
+      yychar = YYUNDEF;
+      yytoken = YYSYMBOL_YYerror;
+      goto yyerrlab1;
+    }
+  else
+    {
+      yytoken = YYTRANSLATE (yychar);
+      YY_SYMBOL_PRINT ("Next token is", yytoken, &yylval, &yylloc);
+    }
+
+  /* If the proper action on seeing token YYTOKEN is to reduce or to
+     detect an error, take that action.  */
+  yyn += yytoken;
+  if (yyn < 0 || YYLAST < yyn || yycheck[yyn] != yytoken)
+    goto yydefault;
+  yyn = yytable[yyn];
+  if (yyn <= 0)
+    {
+      if (yytable_value_is_error (yyn))
+        goto yyerrlab;
+      yyn = -yyn;
+      goto yyreduce;
+    }
+
+  /* Count tokens shifted since error; after three, turn off error
+     status.  */
+  if (yyerrstatus)
+    yyerrstatus--;
+
+  /* Shift the lookahead token.  */
+  YY_SYMBOL_PRINT ("Shifting", yytoken, &yylval, &yylloc);
+  yystate = yyn;
+  YY_IGNORE_MAYBE_UNINITIALIZED_BEGIN
+  *++yyvsp = yylval;
+  YY_IGNORE_MAYBE_UNINITIALIZED_END
+
+  /* Discard the shifted token.  */
+  yychar = YYEMPTY;
+  goto yynewstate;
+
+
+/*-----------------------------------------------------------.
+| yydefault -- do the default action for the current state.  |
+`-----------------------------------------------------------*/
+yydefault:
+  yyn = yydefact[yystate];
+  if (yyn == 0)
+    goto yyerrlab;
+  goto yyreduce;
+
+
+/*-----------------------------.
+| yyreduce -- do a reduction.  |
+`-----------------------------*/
+yyreduce:
+  /* yyn is the number of a rule to reduce with.  */
+  yylen = yyr2[yyn];
+
+  /* If YYLEN is nonzero, implement the default value of the action:
+     '$$ = $1'.
+
+     Otherwise, the following line sets YYVAL to garbage.
+     This behavior is undocumented and Bison
+     users should not rely upon it.  Assigning to YYVAL
+     unconditionally makes the parser a bit smaller, and it avoids a
+     GCC warning that YYVAL may be used uninitialized.  */
+  yyval = yyvsp[1-yylen];
+
+
+  YY_REDUCE_PRINT (yyn);
+  switch (yyn)
+    {
+  case 8: /* rules: rules "end of included file"  */
+#line 333 "grammar.y"
+      {
+        _yr_compiler_pop_file_name(compiler);
+      }
+#line 1846 "grammar.c"
+    break;
+
+  case 9: /* import: "<import>" "text string"  */
+#line 341 "grammar.y"
+      {
+        int result = yr_parser_reduce_import(yyscanner, (yyvsp[0].sized_string));
+
+        yr_free((yyvsp[0].sized_string));
+
+        fail_if_error(result);
+      }
+#line 1858 "grammar.c"
+    break;
+
+  case 10: /* @1: %empty  */
+#line 353 "grammar.y"
+      {
+        fail_if_error(yr_parser_reduce_rule_declaration_phase_1(
+            yyscanner, (int32_t) (yyvsp[-2].integer), (yyvsp[0].c_string), &(yyval.rule)));
+      }
+#line 1867 "grammar.c"
+    break;
+
+  case 11: /* $@2: %empty  */
+#line 358 "grammar.y"
+      {
+        YR_RULE* rule = (YR_RULE*) yr_arena_ref_to_ptr(
+            compiler->arena, &(yyvsp[-4].rule));
+
+        rule->tags = (char*) yr_arena_ref_to_ptr(
+            compiler->arena, &(yyvsp[-3].tag));
+
+        rule->metas = (YR_META*) yr_arena_ref_to_ptr(
+            compiler->arena, &(yyvsp[-1].meta));
+
+        rule->strings = (YR_STRING*) yr_arena_ref_to_ptr(
+            compiler->arena, &(yyvsp[0].string));
+      }
+#line 1885 "grammar.c"
+    break;
+
+  case 12: /* rule: rule_modifiers "<rule>" "identifier" @1 tags '{' meta strings $@2 condition '}'  */
+#line 372 "grammar.y"
+      {
+        int result = yr_parser_reduce_rule_declaration_phase_2(
+            yyscanner, &(yyvsp[-7].rule)); // rule created in phase 1
+
+        yr_free((yyvsp[-8].c_string));
+
+        fail_if_error(result);
+      }
+#line 1898 "grammar.c"
+    break;
+
+  case 13: /* meta: %empty  */
+#line 385 "grammar.y"
+      {
+        (yyval.meta) = YR_ARENA_NULL_REF;
+      }
+#line 1906 "grammar.c"
+    break;
+
+  case 14: /* meta: "<meta>" ':' meta_declarations  */
+#line 389 "grammar.y"
+      {
+        YR_META* meta = yr_arena_get_ptr(
+            compiler->arena,
+            YR_METAS_TABLE,
+            (compiler->current_meta_idx - 1) * sizeof(YR_META));
+
+        meta->flags |= META_FLAGS_LAST_IN_RULE;
+
+        (yyval.meta) = (yyvsp[0].meta);
+      }
+#line 1921 "grammar.c"
+    break;
+
+  case 15: /* strings: %empty  */
+#line 404 "grammar.y"
+      {
+        (yyval.string) = YR_ARENA_NULL_REF;
+      }
+#line 1929 "grammar.c"
+    break;
+
+  case 16: /* strings: "<strings>" ':' string_declarations  */
+#line 408 "grammar.y"
+      {
+        YR_STRING* string = (YR_STRING*) yr_arena_get_ptr(
+            compiler->arena,
+            YR_STRINGS_TABLE,
+            (compiler->current_string_idx - 1) * sizeof(YR_STRING));
+
+        string->flags |= STRING_FLAGS_LAST_IN_RULE;
+
+        (yyval.string) = (yyvsp[0].string);
+      }
+#line 1944 "grammar.c"
+    break;
+
+  case 18: /* rule_modifiers: %empty  */
+#line 427 "grammar.y"
+                                       { (yyval.integer) = 0;  }
+#line 1950 "grammar.c"
+    break;
+
+  case 19: /* rule_modifiers: rule_modifiers rule_modifier  */
+#line 428 "grammar.y"
+                                       { (yyval.integer) = (yyvsp[-1].integer) | (yyvsp[0].integer); }
+#line 1956 "grammar.c"
+    break;
+
+  case 20: /* rule_modifier: "<private>"  */
+#line 433 "grammar.y"
+                     { (yyval.integer) = RULE_FLAGS_PRIVATE; }
+#line 1962 "grammar.c"
+    break;
+
+  case 21: /* rule_modifier: "<global>"  */
+#line 434 "grammar.y"
+                     { (yyval.integer) = RULE_FLAGS_GLOBAL; }
+#line 1968 "grammar.c"
+    break;
+
+  case 22: /* tags: %empty  */
+#line 440 "grammar.y"
+      {
+        (yyval.tag) = YR_ARENA_NULL_REF;
+      }
+#line 1976 "grammar.c"
+    break;
+
+  case 23: /* tags: ':' tag_list  */
+#line 444 "grammar.y"
+      {
+        // Tags list is represented in the arena as a sequence
+        // of null-terminated strings, the sequence ends with an
+        // additional null character. Here we write the ending null
+        //character. Example: tag1\0tag2\0tag3\0\0
+
+        fail_if_error(yr_arena_write_string(
+            yyget_extra(yyscanner)->arena, YR_SZ_POOL, "", NULL));
+
+        (yyval.tag) = (yyvsp[0].tag);
+      }
+#line 1992 "grammar.c"
+    break;
+
+  case 24: /* tag_list: "identifier"  */
+#line 460 "grammar.y"
+      {
+        int result = yr_arena_write_string(
+            yyget_extra(yyscanner)->arena, YR_SZ_POOL, (yyvsp[0].c_string), &(yyval.tag));
+
+        yr_free((yyvsp[0].c_string));
+
+        fail_if_error(result);
+      }
+#line 2005 "grammar.c"
+    break;
+
+  case 25: /* tag_list: tag_list "identifier"  */
+#line 469 "grammar.y"
+      {
+        YR_ARENA_REF ref;
+
+        // Write the new tag identifier.
+        int result = yr_arena_write_string(
+            yyget_extra(yyscanner)->arena, YR_SZ_POOL, (yyvsp[0].c_string), &ref);
+
+        yr_free((yyvsp[0].c_string));
+
+        fail_if_error(result);
+
+        // Get the address for the tag identifier just written.
+        char* new_tag = (char*) yr_arena_ref_to_ptr(
+            compiler->arena, &ref);
+
+        // Take the address of first tag's identifier in the list.
+        char* tag = (char*) yr_arena_ref_to_ptr(
+            compiler->arena, &(yyval.tag));
+
+        // Search for duplicated tags. Tags are written one after
+        // the other, with zeroes in between (i.e: tag1/0tag2/0tag3)
+        // that's why can use tag < new_tag as the condition for the
+        // loop.
+        while (tag < new_tag)
+        {
+          if (strcmp(tag, new_tag) == 0)
+          {
+            yr_compiler_set_error_extra_info(compiler, tag);
+            fail_with_error(ERROR_DUPLICATED_TAG_IDENTIFIER);
+          }
+
+          tag += strlen(tag) + 1;
+        }
+
+        (yyval.tag) = (yyvsp[-1].tag);
+      }
+#line 2046 "grammar.c"
+    break;
+
+  case 26: /* meta_declarations: meta_declaration  */
+#line 510 "grammar.y"
+                                          {  (yyval.meta) = (yyvsp[0].meta); }
+#line 2052 "grammar.c"
+    break;
+
+  case 27: /* meta_declarations: meta_declarations meta_declaration  */
+#line 511 "grammar.y"
+                                          {  (yyval.meta) = (yyvsp[-1].meta); }
+#line 2058 "grammar.c"
+    break;
+
+  case 28: /* meta_declaration: "identifier" '=' "text string"  */
+#line 517 "grammar.y"
+      {
+        SIZED_STRING* sized_string = (yyvsp[0].sized_string);
+
+        int result = yr_parser_reduce_meta_declaration(
+            yyscanner,
+            META_TYPE_STRING,
+            (yyvsp[-2].c_string),
+            sized_string->c_string,
+            0,
+            &(yyval.meta));
+
+        yr_free((yyvsp[-2].c_string));
+        yr_free((yyvsp[0].sized_string));
+
+        fail_if_error(result);
+      }
+#line 2079 "grammar.c"
+    break;
+
+  case 29: /* meta_declaration: "identifier" '=' "integer number"  */
+#line 534 "grammar.y"
+      {
+        int result = yr_parser_reduce_meta_declaration(
+            yyscanner,
+            META_TYPE_INTEGER,
+            (yyvsp[-2].c_string),
+            NULL,
+            (yyvsp[0].integer),
+            &(yyval.meta));
+
+        yr_free((yyvsp[-2].c_string));
+
+        fail_if_error(result);
+      }
+#line 2097 "grammar.c"
+    break;
+
+  case 30: /* meta_declaration: "identifier" '=' '-' "integer number"  */
+#line 548 "grammar.y"
+      {
+        int result = yr_parser_reduce_meta_declaration(
+            yyscanner,
+            META_TYPE_INTEGER,
+            (yyvsp[-3].c_string),
+            NULL,
+            -(yyvsp[0].integer),
+            &(yyval.meta));
+
+        yr_free((yyvsp[-3].c_string));
+
+        fail_if_error(result);
+      }
+#line 2115 "grammar.c"
+    break;
+
+  case 31: /* meta_declaration: "identifier" '=' "<true>"  */
+#line 562 "grammar.y"
+      {
+        int result = yr_parser_reduce_meta_declaration(
+            yyscanner,
+            META_TYPE_BOOLEAN,
+            (yyvsp[-2].c_string),
+            NULL,
+            true,
+            &(yyval.meta));
+
+        yr_free((yyvsp[-2].c_string));
+
+        fail_if_error(result);
+      }
+#line 2133 "grammar.c"
+    break;
+
+  case 32: /* meta_declaration: "identifier" '=' "<false>"  */
+#line 576 "grammar.y"
+      {
+        int result = yr_parser_reduce_meta_declaration(
+            yyscanner,
+            META_TYPE_BOOLEAN,
+            (yyvsp[-2].c_string),
+            NULL,
+            false,
+            &(yyval.meta));
+
+        yr_free((yyvsp[-2].c_string));
+
+        fail_if_error(result);
+      }
+#line 2151 "grammar.c"
+    break;
+
+  case 33: /* string_declarations: string_declaration  */
+#line 593 "grammar.y"
+                                              { (yyval.string) = (yyvsp[0].string); }
+#line 2157 "grammar.c"
+    break;
+
+  case 34: /* string_declarations: string_declarations string_declaration  */
+#line 594 "grammar.y"
+                                              { (yyval.string) = (yyvsp[-1].string); }
+#line 2163 "grammar.c"
+    break;
+
+  case 35: /* $@3: %empty  */
+#line 600 "grammar.y"
+      {
+        compiler->current_line = yyget_lineno(yyscanner);
+      }
+#line 2171 "grammar.c"
+    break;
+
+  case 36: /* string_declaration: "string identifier" '=' $@3 "text string" string_modifiers  */
+#line 604 "grammar.y"
+      {
+        int result = yr_parser_reduce_string_declaration(
+            yyscanner, (yyvsp[0].modifier), (yyvsp[-4].c_string), (yyvsp[-1].sized_string), &(yyval.string));
+
+        yr_free((yyvsp[-4].c_string));
+        yr_free((yyvsp[-1].sized_string));
+        yr_free((yyvsp[0].modifier).alphabet);
+
+        fail_if_error(result);
+        compiler->current_line = 0;
+      }
+#line 2187 "grammar.c"
+    break;
+
+  case 37: /* $@4: %empty  */
+#line 616 "grammar.y"
+      {
+        compiler->current_line = yyget_lineno(yyscanner);
+      }
+#line 2195 "grammar.c"
+    break;
+
+  case 38: /* string_declaration: "string identifier" '=' $@4 "regular expression" regexp_modifiers  */
+#line 620 "grammar.y"
+      {
+        int result;
+
+        (yyvsp[0].modifier).flags |= STRING_FLAGS_REGEXP;
+
+        result = yr_parser_reduce_string_declaration(
+            yyscanner, (yyvsp[0].modifier), (yyvsp[-4].c_string), (yyvsp[-1].sized_string), &(yyval.string));
+
+        yr_free((yyvsp[-4].c_string));
+        yr_free((yyvsp[-1].sized_string));
+
+        fail_if_error(result);
+
+        compiler->current_line = 0;
+      }
+#line 2215 "grammar.c"
+    break;
+
+  case 39: /* $@5: %empty  */
+#line 636 "grammar.y"
+      {
+        compiler->current_line = yyget_lineno(yyscanner);
+      }
+#line 2223 "grammar.c"
+    break;
+
+  case 40: /* string_declaration: "string identifier" '=' $@5 "hex string" hex_modifiers  */
+#line 640 "grammar.y"
+      {
+        int result;
+
+        (yyvsp[0].modifier).flags |= STRING_FLAGS_HEXADECIMAL;
+
+        result = yr_parser_reduce_string_declaration(
+            yyscanner, (yyvsp[0].modifier), (yyvsp[-4].c_string), (yyvsp[-1].sized_string), &(yyval.string));
+
+        yr_free((yyvsp[-4].c_string));
+        yr_free((yyvsp[-1].sized_string));
+
+        fail_if_error(result);
+
+        compiler->current_line = 0;
+      }
+#line 2243 "grammar.c"
+    break;
+
+  case 41: /* string_modifiers: %empty  */
+#line 660 "grammar.y"
+      {
+        (yyval.modifier).flags = 0;
+        (yyval.modifier).xor_min = 0;
+        (yyval.modifier).xor_max = 0;
+        (yyval.modifier).alphabet = NULL;
+      }
+#line 2254 "grammar.c"
+    break;
+
+  case 42: /* string_modifiers: string_modifiers string_modifier  */
+#line 667 "grammar.y"
+      {
+        (yyval.modifier) = (yyvsp[-1].modifier);
+
+        // Only set the xor minimum and maximum if we are dealing with the
+        // xor modifier. If we don't check for this then we can end up with
+        // "xor wide" resulting in whatever is on the stack for "wide"
+        // overwriting the values for xor.
+        if ((yyvsp[0].modifier).flags & STRING_FLAGS_XOR)
+        {
+          (yyval.modifier).xor_min = (yyvsp[0].modifier).xor_min;
+          (yyval.modifier).xor_max = (yyvsp[0].modifier).xor_max;
+        }
+
+        // Only set the base64 alphabet if we are dealing with the base64
+        // modifier. If we don't check for this then we can end up with
+        // "base64 ascii" resulting in whatever is on the stack for "ascii"
+        // overwriting the values for base64.
+        if (((yyvsp[0].modifier).flags & STRING_FLAGS_BASE64) ||
+            ((yyvsp[0].modifier).flags & STRING_FLAGS_BASE64_WIDE))
+        {
+          if ((yyval.modifier).alphabet != NULL)
+          {
+            if (ss_compare((yyval.modifier).alphabet, (yyvsp[0].modifier).alphabet) != 0)
+            {
+              yr_compiler_set_error_extra_info(
+                  compiler, "can not specify multiple alphabets");
+
+              yr_free((yyvsp[0].modifier).alphabet);
+              yr_free((yyval.modifier).alphabet);
+
+              fail_with_error(ERROR_INVALID_MODIFIER);
+            }
+            else
+            {
+              yr_free((yyvsp[0].modifier).alphabet);
+            }
+          }
+          else
+          {
+            (yyval.modifier).alphabet = (yyvsp[0].modifier).alphabet;
+          }
+        }
+
+        if ((yyval.modifier).flags & (yyvsp[0].modifier).flags)
+        {
+          if ((yyval.modifier).alphabet != NULL)
+            yr_free((yyval.modifier).alphabet);
+
+          fail_with_error(ERROR_DUPLICATED_MODIFIER);
+        }
+        else
+        {
+          (yyval.modifier).flags = (yyval.modifier).flags | (yyvsp[0].modifier).flags;
+        }
+      }
+#line 2314 "grammar.c"
+    break;
+
+  case 43: /* string_modifier: "<wide>"  */
+#line 726 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_WIDE; }
+#line 2320 "grammar.c"
+    break;
+
+  case 44: /* string_modifier: "<ascii>"  */
+#line 727 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_ASCII; }
+#line 2326 "grammar.c"
+    break;
+
+  case 45: /* string_modifier: "<nocase>"  */
+#line 728 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_NO_CASE; }
+#line 2332 "grammar.c"
+    break;
+
+  case 46: /* string_modifier: "<fullword>"  */
+#line 729 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_FULL_WORD; }
+#line 2338 "grammar.c"
+    break;
+
+  case 47: /* string_modifier: "<private>"  */
+#line 730 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_PRIVATE; }
+#line 2344 "grammar.c"
+    break;
+
+  case 48: /* string_modifier: "<xor>"  */
+#line 732 "grammar.y"
+      {
+        (yyval.modifier).flags = STRING_FLAGS_XOR;
+        (yyval.modifier).xor_min = 0;
+        (yyval.modifier).xor_max = 255;
+      }
+#line 2354 "grammar.c"
+    break;
+
+  case 49: /* string_modifier: "<xor>" '(' "integer number" ')'  */
+#line 738 "grammar.y"
+      {
+        int result = ERROR_SUCCESS;
+
+        if ((yyvsp[-1].integer) < 0 || (yyvsp[-1].integer) > 255)
+        {
+          yr_compiler_set_error_extra_info(compiler, "invalid xor range");
+          result = ERROR_INVALID_MODIFIER;
+        }
+
+        fail_if_error(result);
+
+        (yyval.modifier).flags = STRING_FLAGS_XOR;
+        (yyval.modifier).xor_min = (uint8_t) (yyvsp[-1].integer);
+        (yyval.modifier).xor_max = (uint8_t) (yyvsp[-1].integer);
+      }
+#line 2374 "grammar.c"
+    break;
+
+  case 50: /* string_modifier: "<xor>" '(' "integer number" '-' "integer number" ')'  */
+#line 759 "grammar.y"
+      {
+        int result = ERROR_SUCCESS;
+
+        if ((yyvsp[-3].integer) < 0)
+        {
+          yr_compiler_set_error_extra_info(
+              compiler, "lower bound for xor range exceeded (min: 0)");
+          result = ERROR_INVALID_MODIFIER;
+        }
+
+        if ((yyvsp[-1].integer) > 255)
+        {
+          yr_compiler_set_error_extra_info(
+              compiler, "upper bound for xor range exceeded (max: 255)");
+          result = ERROR_INVALID_MODIFIER;
+        }
+
+        if ((yyvsp[-3].integer) > (yyvsp[-1].integer))
+        {
+          yr_compiler_set_error_extra_info(
+              compiler, "xor lower bound exceeds upper bound");
+          result = ERROR_INVALID_MODIFIER;
+        }
+
+        fail_if_error(result);
+
+        (yyval.modifier).flags = STRING_FLAGS_XOR;
+        (yyval.modifier).xor_min = (uint8_t) (yyvsp[-3].integer);
+        (yyval.modifier).xor_max = (uint8_t) (yyvsp[-1].integer);
+      }
+#line 2409 "grammar.c"
+    break;
+
+  case 51: /* string_modifier: "<base64>"  */
+#line 790 "grammar.y"
+      {
+        (yyval.modifier).flags = STRING_FLAGS_BASE64;
+        (yyval.modifier).alphabet = ss_new(DEFAULT_BASE64_ALPHABET);
+      }
+#line 2418 "grammar.c"
+    break;
+
+  case 52: /* string_modifier: "<base64>" '(' "text string" ')'  */
+#line 795 "grammar.y"
+      {
+        int result = ERROR_SUCCESS;
+
+        if ((yyvsp[-1].sized_string)->length != 64)
+        {
+          yr_free((yyvsp[-1].sized_string));
+          yr_compiler_set_error_extra_info(
+              compiler, "length of base64 alphabet must be 64");
+          result = ERROR_INVALID_MODIFIER;
+        }
+
+        fail_if_error(result);
+
+        (yyval.modifier).flags = STRING_FLAGS_BASE64;
+        (yyval.modifier).alphabet = (yyvsp[-1].sized_string);
+      }
+#line 2439 "grammar.c"
+    break;
+
+  case 53: /* string_modifier: "<base64wide>"  */
+#line 812 "grammar.y"
+      {
+        (yyval.modifier).flags = STRING_FLAGS_BASE64_WIDE;
+        (yyval.modifier).alphabet = ss_new(DEFAULT_BASE64_ALPHABET);
+      }
+#line 2448 "grammar.c"
+    break;
+
+  case 54: /* string_modifier: "<base64wide>" '(' "text string" ')'  */
+#line 817 "grammar.y"
+      {
+        int result = ERROR_SUCCESS;
+
+        if ((yyvsp[-1].sized_string)->length != 64)
+        {
+          yr_free((yyvsp[-1].sized_string));
+          yr_compiler_set_error_extra_info(
+              compiler, "length of base64 alphabet must be 64");
+          result = ERROR_INVALID_MODIFIER;
+        }
+
+        fail_if_error(result);
+
+        (yyval.modifier).flags = STRING_FLAGS_BASE64_WIDE;
+        (yyval.modifier).alphabet = (yyvsp[-1].sized_string);
+      }
+#line 2469 "grammar.c"
+    break;
+
+  case 55: /* regexp_modifiers: %empty  */
+#line 836 "grammar.y"
+                                          { (yyval.modifier).flags = 0; }
+#line 2475 "grammar.c"
+    break;
+
+  case 56: /* regexp_modifiers: regexp_modifiers regexp_modifier  */
+#line 838 "grammar.y"
+      {
+        if ((yyvsp[-1].modifier).flags & (yyvsp[0].modifier).flags)
+        {
+          fail_with_error(ERROR_DUPLICATED_MODIFIER);
+        }
+        else
+        {
+          (yyval.modifier).flags = (yyvsp[-1].modifier).flags | (yyvsp[0].modifier).flags;
+        }
+      }
+#line 2490 "grammar.c"
+    break;
+
+  case 57: /* regexp_modifier: "<wide>"  */
+#line 851 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_WIDE; }
+#line 2496 "grammar.c"
+    break;
+
+  case 58: /* regexp_modifier: "<ascii>"  */
+#line 852 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_ASCII; }
+#line 2502 "grammar.c"
+    break;
+
+  case 59: /* regexp_modifier: "<nocase>"  */
+#line 853 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_NO_CASE; }
+#line 2508 "grammar.c"
+    break;
+
+  case 60: /* regexp_modifier: "<fullword>"  */
+#line 854 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_FULL_WORD; }
+#line 2514 "grammar.c"
+    break;
+
+  case 61: /* regexp_modifier: "<private>"  */
+#line 855 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_PRIVATE; }
+#line 2520 "grammar.c"
+    break;
+
+  case 62: /* hex_modifiers: %empty  */
+#line 859 "grammar.y"
+                                          { (yyval.modifier).flags = 0; }
+#line 2526 "grammar.c"
+    break;
+
+  case 63: /* hex_modifiers: hex_modifiers hex_modifier  */
+#line 861 "grammar.y"
+      {
+        if ((yyvsp[-1].modifier).flags & (yyvsp[0].modifier).flags)
+        {
+          fail_with_error(ERROR_DUPLICATED_MODIFIER);
+        }
+        else
+        {
+          (yyval.modifier).flags = (yyvsp[-1].modifier).flags | (yyvsp[0].modifier).flags;
+        }
+      }
+#line 2541 "grammar.c"
+    break;
+
+  case 64: /* hex_modifier: "<private>"  */
+#line 874 "grammar.y"
+                    { (yyval.modifier).flags = STRING_FLAGS_PRIVATE; }
+#line 2547 "grammar.c"
+    break;
+
+  case 65: /* identifier: "identifier"  */
+#line 879 "grammar.y"
+      {
+        YR_EXPRESSION expr;
+
+        int result = ERROR_SUCCESS;
+        int var_index = yr_parser_lookup_loop_variable(yyscanner, (yyvsp[0].c_string), &expr);
+
+        if (var_index >= 0)
+        {
+          // The identifier corresponds to a loop variable.
+          result = yr_parser_emit_with_arg(
+              yyscanner,
+              OP_PUSH_M,
+              var_index,
+              NULL,
+              NULL);
+
+          // The expression associated to this identifier is the same one
+          // associated to the loop variable.
+          (yyval.expression) = expr;
+        }
+        else
+        {
+          // Search for identifier within the global namespace, where the
+          // externals variables reside.
+
+          YR_OBJECT* object = (YR_OBJECT*) yr_hash_table_lookup(
+              compiler->objects_table, (yyvsp[0].c_string), NULL);
+
+          YR_NAMESPACE* ns = (YR_NAMESPACE*) yr_arena_get_ptr(
+              compiler->arena,
+              YR_NAMESPACES_TABLE,
+              compiler->current_namespace_idx * sizeof(struct YR_NAMESPACE));
+
+          if (object == NULL)
+          {
+            // If not found, search within the current namespace.
+            object = (YR_OBJECT*) yr_hash_table_lookup(
+                compiler->objects_table, (yyvsp[0].c_string), ns->name);
+          }
+
+          if (object != NULL)
+          {
+            YR_ARENA_REF ref;
+
+            result = _yr_compiler_store_string(
+                compiler, (yyvsp[0].c_string), &ref);
+
+            if (result == ERROR_SUCCESS)
+              result = yr_parser_emit_with_arg_reloc(
+                  yyscanner,
+                  OP_OBJ_LOAD,
+                  yr_arena_ref_to_ptr(compiler->arena, &ref),
+                  NULL,
+                  NULL);
+
+            (yyval.expression).type = EXPRESSION_TYPE_OBJECT;
+            (yyval.expression).value.object = object;
+            (yyval.expression).identifier.ptr = NULL;
+            (yyval.expression).identifier.ref = ref;
+          }
+          else
+          {
+            uint32_t rule_idx = yr_hash_table_lookup_uint32(
+                compiler->rules_table, (yyvsp[0].c_string), ns->name);
+
+            if (rule_idx != UINT32_MAX)
+            {
+              result = yr_parser_emit_with_arg(
+                  yyscanner,
+                  OP_PUSH_RULE,
+                  rule_idx,
+                  NULL,
+                  NULL);
+
+              YR_RULE* rule = _yr_compiler_get_rule_by_idx(compiler, rule_idx);
+
+              yr_arena_ptr_to_ref(compiler->arena, rule->identifier, &(yyval.expression).identifier.ref);
+
+              (yyval.expression).type = EXPRESSION_TYPE_BOOLEAN;
+              (yyval.expression).value.integer = YR_UNDEFINED;
+              (yyval.expression).identifier.ptr = NULL;
+            }
+            else
+            {
+              yr_compiler_set_error_extra_info(compiler, (yyvsp[0].c_string));
+              result = ERROR_UNDEFINED_IDENTIFIER;
+            }
+          }
+        }
+
+        yr_free((yyvsp[0].c_string));
+
+        fail_if_error(result);
+      }
+#line 2646 "grammar.c"
+    break;
+
+  case 66: /* identifier: identifier '.' "identifier"  */
+#line 974 "grammar.y"
+      {
+        int result = ERROR_SUCCESS;
+        YR_OBJECT* field = NULL;
+
+        if ((yyvsp[-2].expression).type == EXPRESSION_TYPE_OBJECT &&
+            (yyvsp[-2].expression).value.object->type == OBJECT_TYPE_STRUCTURE)
+        {
+          field = yr_object_lookup_field((yyvsp[-2].expression).value.object, (yyvsp[0].c_string));
+
+          if (field != NULL)
+          {
+            YR_ARENA_REF ref;
+
+            result = _yr_compiler_store_string(
+                compiler, (yyvsp[0].c_string), &ref);
+
+            if (result == ERROR_SUCCESS)
+              result = yr_parser_emit_with_arg_reloc(
+                  yyscanner,
+                  OP_OBJ_FIELD,
+                  yr_arena_ref_to_ptr(compiler->arena, &ref),
+                  NULL,
+                  NULL);
+
+            (yyval.expression).type = EXPRESSION_TYPE_OBJECT;
+            (yyval.expression).value.object = field;
+            (yyval.expression).identifier.ref = ref;
+            (yyval.expression).identifier.ptr = NULL;
+          }
+          else
+          {
+            yr_compiler_set_error_extra_info(compiler, (yyvsp[0].c_string));
+            result = ERROR_INVALID_FIELD_NAME;
+          }
+        }
+        else
+        {
+          yr_compiler_set_error_extra_info(
+             compiler, expression_identifier((yyvsp[-2].expression)));
+
+          result = ERROR_NOT_A_STRUCTURE;
+        }
+
+        yr_free((yyvsp[0].c_string));
+
+        fail_if_error(result);
+      }
+#line 2698 "grammar.c"
+   
+
+// --- CODE TRUNCATED HERE ---
+

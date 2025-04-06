@@ -1,0 +1,871 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/error.c
+MRB_API mrb_value
+mrb_vformat(mrb_state *mrb, const char *format, va_list ap)
+{
+  const char *chars, *p = format, *b = format, *e;
+  char ch;
+  size_t len;
+  mrb_int i;
+  struct RClass *cls;
+  mrb_bool inspect = FALSE;
+  mrb_value result = mrb_str_new_capa(mrb, 128), obj, str;
+  int ai = mrb_gc_arena_save(mrb);
+
+  while (*p) {
+    const char c = *p++;
+    e = p;
+    if (c == '%') {
+      if (*p == '!') {
+        inspect = TRUE;
+        ++p;
+      }
+      if (!*p) break;
+      switch (*p) {
+        case 'c':
+          ch = (char)va_arg(ap, int);
+          chars = &ch;
+          len = 1;
+          goto L_cat;
+        case 'd': case 'i':
+#if MRB_INT_MAX < INT_MAX
+          i = (mrb_int)va_arg(ap, int);
+#else
+          i = *p == 'd' ? (mrb_int)va_arg(ap, int) : va_arg(ap, mrb_int);
+#endif
+          obj = mrb_fixnum_value(i);
+          goto L_cat_obj;
+#ifndef MRB_WITHOUT_FLOAT
+        case 'f':
+          obj = mrb_float_value(mrb, (mrb_float)va_arg(ap, double));
+          goto L_cat_obj;
+#endif
+        case 'l':
+          chars = va_arg(ap, char*);
+          len = va_arg(ap, size_t);
+        L_cat:
+          if (inspect) {
+            obj = mrb_str_new(mrb, chars, len);
+            goto L_cat_obj;
+          }
+          mrb_str_cat(mrb, result, b,  e - b - 1);
+          mrb_str_cat(mrb, result, chars, len);
+          b = ++p;
+          mrb_gc_arena_restore(mrb, ai);
+          break;
+        case 'n':
+#if UINT32_MAX < INT_MAX
+          obj = mrb_symbol_value((mrb_sym)va_arg(ap, int));
+#else
+          obj = mrb_symbol_value(va_arg(ap, mrb_sym));
+#endif
+          goto L_cat_obj;
+        case 's':
+          chars = va_arg(ap, char*);
+          len = strlen(chars);
+          goto L_cat;
+        case 't':
+          cls = mrb_class(mrb, va_arg(ap, mrb_value));
+          goto L_cat_class;
+        case 'v': case 'S':
+          obj = va_arg(ap, mrb_value);
+        L_cat_obj:
+          str = (inspect ? mrb_inspect : mrb_obj_as_string)(mrb, obj);
+          chars = RSTRING_PTR(str);
+          len = RSTRING_LEN(str);
+          inspect = FALSE;
+          goto L_cat;
+        case 'C':
+          cls = va_arg(ap, struct RClass*);
+        L_cat_class:
+          obj = mrb_obj_value(cls);
+          goto L_cat_obj;
+        case 'T':
+          obj = va_arg(ap, mrb_value);
+        L_cat_real_class_of:
+          cls = mrb_obj_class(mrb, obj);
+          goto L_cat_class;
+        case 'Y':
+          obj = va_arg(ap, mrb_value);
+          if (!mrb_test(obj) || mrb_true_p(obj)) {
+            inspect = TRUE;
+            goto L_cat_obj;
+          }
+          else {
+            goto L_cat_real_class_of;
+          }
+        case '%':
+        L_cat_current:
+          chars = p;
+          len = 1;
+          goto L_cat;
+        default:
+          mrb_raisef(mrb, E_ARGUMENT_ERROR, "malformed format string - %%%c", *p);
+      }
+    }
+    else if (c == '\\') {
+      if (!*p) break;
+      goto L_cat_current;
+
+    }
+  }
+
+  mrb_str_cat(mrb, result, b, p - b);
+  return result;
+}
+
+// the below code fragment can be found in:
+// src/class.c
+MRB_API mrb_int
+mrb_get_args(mrb_state *mrb, const char *format, ...)
+{
+  const char *fmt = format;
+  char c;
+  mrb_int i = 0;
+  va_list ap;
+  mrb_int argc = mrb->c->ci->argc;
+  mrb_value *array_argv = mrb->c->stack+1;
+  mrb_bool argv_on_stack = argc >= 0;
+  mrb_bool opt = FALSE;
+  mrb_bool opt_skip = TRUE;
+  mrb_bool given = TRUE;
+  mrb_value kdict;
+  mrb_bool reqkarg = FALSE;
+  mrb_int needargc = 0;
+
+  if (!argv_on_stack) {
+    struct RArray *a = mrb_ary_ptr(*array_argv);
+    array_argv = ARY_PTR(a);
+    argc = ARY_LEN(a);
+  }
+  va_start(ap, format);
+
+#define ARGV array_argv
+
+  while ((c = *fmt++)) {
+    switch (c) {
+    case '|':
+      opt = TRUE;
+      break;
+    case '*':
+      opt_skip = FALSE;
+      if (!reqkarg) reqkarg = strchr(fmt, ':') ? TRUE : FALSE;
+      goto check_exit;
+    case '!':
+      break;
+    case ':':
+      reqkarg = TRUE;
+      /* fall through */
+    case '&': case '?':
+      if (opt) opt_skip = FALSE;
+      break;
+    default:
+      if (!opt) needargc ++;
+      break;
+    }
+  }
+
+ check_exit:
+  if (reqkarg && argc > needargc && mrb_hash_p(kdict = ARGV[argc - 1])) {
+    mrb_hash_check_kdict(mrb, kdict);
+    argc --;
+  }
+  else {
+    kdict = mrb_nil_value();
+  }
+
+  opt = FALSE;
+  i = 0;
+  while ((c = *format++)) {
+    mrb_value *argv = ARGV;
+    mrb_bool altmode;
+
+    switch (c) {
+    case '|': case '*': case '&': case '?': case ':':
+      break;
+    default:
+      if (argc <= i) {
+        if (opt) {
+          given = FALSE;
+        }
+        else {
+          mrb_raise(mrb, E_ARGUMENT_ERROR, "wrong number of arguments");
+        }
+      }
+      break;
+    }
+
+    if (*format == '!') {
+      format ++;
+      altmode = TRUE;
+    }
+    else {
+      altmode = FALSE;
+    }
+
+    switch (c) {
+    case 'o':
+      {
+        mrb_value *p;
+
+        p = va_arg(ap, mrb_value*);
+        if (i < argc) {
+          *p = argv[i++];
+        }
+      }
+      break;
+    case 'C':
+      {
+        mrb_value *p;
+
+        p = va_arg(ap, mrb_value*);
+        if (i < argc) {
+          mrb_value ss;
+
+          ss = argv[i++];
+          if (!class_ptr_p(ss)) {
+            mrb_raisef(mrb, E_TYPE_ERROR, "%v is not class/module", ss);
+          }
+          *p = ss;
+        }
+      }
+      break;
+    case 'S':
+      {
+        mrb_value *p;
+
+        p = va_arg(ap, mrb_value*);
+        if (i < argc) {
+          *p = argv[i++];
+          if (!(altmode && mrb_nil_p(*p))) {
+            mrb_to_str(mrb, *p);
+          }
+        }
+      }
+      break;
+    case 'A':
+      {
+        mrb_value *p;
+
+        p = va_arg(ap, mrb_value*);
+        if (i < argc) {
+          *p = argv[i++];
+          if (!(altmode && mrb_nil_p(*p))) {
+            *p = to_ary(mrb, *p);
+          }
+        }
+      }
+      break;
+    case 'H':
+      {
+        mrb_value *p;
+
+        p = va_arg(ap, mrb_value*);
+        if (i < argc) {
+          *p = argv[i++];
+          if (!(altmode && mrb_nil_p(*p))) {
+            *p = to_hash(mrb, *p);
+          }
+        }
+      }
+      break;
+    case 's':
+      {
+        mrb_value ss;
+        char **ps = 0;
+        mrb_int *pl = 0;
+
+        ps = va_arg(ap, char**);
+        pl = va_arg(ap, mrb_int*);
+        if (i < argc) {
+          ss = argv[i++];
+          if (altmode && mrb_nil_p(ss)) {
+            *ps = NULL;
+            *pl = 0;
+          }
+          else {
+            mrb_to_str(mrb, ss);
+            *ps = RSTRING_PTR(ss);
+            *pl = RSTRING_LEN(ss);
+          }
+        }
+      }
+      break;
+    case 'z':
+      {
+        mrb_value ss;
+        const char **ps;
+
+        ps = va_arg(ap, const char**);
+        if (i < argc) {
+          ss = argv[i++];
+          if (altmode && mrb_nil_p(ss)) {
+            *ps = NULL;
+          }
+          else {
+            mrb_to_str(mrb, ss);
+            *ps = RSTRING_CSTR(mrb, ss);
+          }
+        }
+      }
+      break;
+    case 'a':
+      {
+        mrb_value aa;
+        struct RArray *a;
+        mrb_value **pb;
+        mrb_int *pl;
+
+        pb = va_arg(ap, mrb_value**);
+        pl = va_arg(ap, mrb_int*);
+        if (i < argc) {
+          aa = argv[i++];
+          if (altmode && mrb_nil_p(aa)) {
+            *pb = 0;
+            *pl = 0;
+          }
+          else {
+            aa = to_ary(mrb, aa);
+            a = mrb_ary_ptr(aa);
+            *pb = ARY_PTR(a);
+            *pl = ARY_LEN(a);
+          }
+        }
+      }
+      break;
+    case 'I':
+      {
+        void* *p;
+        mrb_value ss;
+
+        p = va_arg(ap, void**);
+        if (i < argc) {
+          ss = argv[i++];
+          if (!mrb_istruct_p(ss))
+          {
+            mrb_raisef(mrb, E_TYPE_ERROR, "%v is not inline struct", ss);
+          }
+          *p = mrb_istruct_ptr(ss);
+        }
+      }
+      break;
+#ifndef MRB_WITHOUT_FLOAT
+    case 'f':
+      {
+        mrb_float *p;
+
+        p = va_arg(ap, mrb_float*);
+        if (i < argc) {
+          *p = mrb_to_flo(mrb, argv[i++]);
+        }
+      }
+      break;
+#endif
+    case 'i':
+      {
+        mrb_int *p;
+
+        p = va_arg(ap, mrb_int*);
+        if (i < argc) {
+          *p = mrb_fixnum(mrb_to_int(mrb, argv[i++]));
+        }
+      }
+      break;
+    case 'b':
+      {
+        mrb_bool *boolp = va_arg(ap, mrb_bool*);
+
+        if (i < argc) {
+          mrb_value b = argv[i++];
+          *boolp = mrb_test(b);
+        }
+      }
+      break;
+    case 'n':
+      {
+        mrb_sym *symp;
+
+        symp = va_arg(ap, mrb_sym*);
+        if (i < argc) {
+          mrb_value ss;
+
+          ss = argv[i++];
+          *symp = to_sym(mrb, ss);
+        }
+      }
+      break;
+    case 'd':
+      {
+        void** datap;
+        struct mrb_data_type const* type;
+
+        datap = va_arg(ap, void**);
+        type = va_arg(ap, struct mrb_data_type const*);
+        if (i < argc) {
+          mrb_value dd = argv[i++];
+          if (altmode && mrb_nil_p(dd)) {
+            *datap = 0;
+          }
+          else {
+            *datap = mrb_data_get_ptr(mrb, dd, type);
+          }
+        }
+      }
+      break;
+
+    case '&':
+      {
+        mrb_value *p, *bp;
+
+        p = va_arg(ap, mrb_value*);
+        if (mrb->c->ci->argc < 0) {
+          bp = mrb->c->stack + 2;
+        }
+        else {
+          bp = mrb->c->stack + mrb->c->ci->argc + 1;
+        }
+        if (altmode && mrb_nil_p(*bp)) {
+          mrb_raise(mrb, E_ARGUMENT_ERROR, "no block given");
+        }
+        *p = *bp;
+      }
+      break;
+    case '|':
+      if (opt_skip && i == argc) goto finish;
+      opt = TRUE;
+      break;
+    case '?':
+      {
+        mrb_bool *p;
+
+        p = va_arg(ap, mrb_bool*);
+        *p = given;
+      }
+      break;
+
+    case '*':
+      {
+        mrb_value **var;
+        mrb_int *pl;
+        mrb_bool nocopy = (altmode || !argv_on_stack) ? TRUE : FALSE;
+
+        var = va_arg(ap, mrb_value**);
+        pl = va_arg(ap, mrb_int*);
+        if (argc > i) {
+          *pl = argc-i;
+          if (*pl > 0) {
+            if (nocopy) {
+              *var = argv+i;
+            }
+            else {
+              mrb_value args = mrb_ary_new_from_values(mrb, *pl, argv+i);
+              RARRAY(args)->c = NULL;
+              *var = RARRAY_PTR(args);
+            }
+          }
+          i = argc;
+        }
+        else {
+          *pl = 0;
+          *var = NULL;
+        }
+      }
+      break;
+
+    case ':':
+      {
+        mrb_value ksrc = mrb_hash_p(kdict) ? mrb_hash_dup(mrb, kdict) : mrb_hash_new(mrb);
+        const mrb_kwargs *kwargs = va_arg(ap, const mrb_kwargs*);
+        mrb_value *rest;
+
+        if (kwargs == NULL) {
+          rest = NULL;
+        }
+        else {
+          uint32_t kwnum = kwargs->num;
+          uint32_t required = kwargs->required;
+          const char *const *kname = kwargs->table;
+          mrb_value *values = kwargs->values;
+          uint32_t j;
+          const uint32_t keyword_max = 40;
+
+          if (kwnum > keyword_max || required > kwnum) {
+            mrb_raise(mrb, E_ARGUMENT_ERROR, "keyword number is too large");
+          }
+
+          for (j = required; j > 0; j --, kname ++, values ++) {
+            mrb_value k = mrb_symbol_value(mrb_intern_cstr(mrb, *kname));
+            if (!mrb_hash_key_p(mrb, ksrc, k)) {
+              mrb_raisef(mrb, E_ARGUMENT_ERROR, "missing keyword: %s", *kname);
+            }
+            *values = mrb_hash_delete_key(mrb, ksrc, k);
+            mrb_gc_protect(mrb, *values);
+          }
+
+          for (j = kwnum - required; j > 0; j --, kname ++, values ++) {
+            mrb_value k = mrb_symbol_value(mrb_intern_cstr(mrb, *kname));
+            if (mrb_hash_key_p(mrb, ksrc, k)) {
+              *values = mrb_hash_delete_key(mrb, ksrc, k);
+              mrb_gc_protect(mrb, *values);
+            }
+            else {
+              *values = mrb_undef_value();
+            }
+          }
+
+          rest = kwargs->rest;
+        }
+
+        if (rest) {
+          *rest = ksrc;
+        }
+        else if (!mrb_hash_empty_p(mrb, ksrc)) {
+          ksrc = mrb_hash_keys(mrb, ksrc);
+          ksrc = RARRAY_PTR(ksrc)[0];
+          mrb_raisef(mrb, E_ARGUMENT_ERROR, "unknown keyword: %v", ksrc);
+        }
+      }
+      break;
+
+    default:
+      mrb_raisef(mrb, E_ARGUMENT_ERROR, "invalid argument specifier %c", c);
+      break;
+    }
+  }
+
+#undef ARGV
+
+  if (!c && argc > i) {
+    mrb_raise(mrb, E_ARGUMENT_ERROR, "wrong number of arguments");
+  }
+
+finish:
+  va_end(ap);
+  return i;
+}
+
+// the below code fragment can be found in:
+// src/string.c
+mrb_value
+mrb_str_len_to_inum(mrb_state *mrb, const char *str, mrb_int len, mrb_int base, int badcheck)
+{
+  const char *p = str;
+  const char *pend = str + len;
+  char sign = 1;
+  int c;
+  uint64_t n = 0;
+  mrb_int val;
+
+#define conv_digit(c) \
+    (ISDIGIT(c) ? ((c) - '0') : \
+     ISLOWER(c) ? ((c) - 'a' + 10) : \
+     ISUPPER(c) ? ((c) - 'A' + 10) : \
+     -1)
+
+  if (!p) {
+    if (badcheck) goto bad;
+    return mrb_fixnum_value(0);
+  }
+  while (p<pend && ISSPACE(*p))
+    p++;
+
+  if (p[0] == '+') {
+    p++;
+  }
+  else if (p[0] == '-') {
+    p++;
+    sign = 0;
+  }
+  if (base <= 0) {
+    if (p[0] == '0') {
+      switch (p[1]) {
+        case 'x': case 'X':
+          base = 16;
+          break;
+        case 'b': case 'B':
+          base = 2;
+          break;
+        case 'o': case 'O':
+          base = 8;
+          break;
+        case 'd': case 'D':
+          base = 10;
+          break;
+        default:
+          base = 8;
+          break;
+      }
+    }
+    else if (base < -1) {
+      base = -base;
+    }
+    else {
+      base = 10;
+    }
+  }
+  switch (base) {
+    case 2:
+      if (p[0] == '0' && (p[1] == 'b'||p[1] == 'B')) {
+        p += 2;
+      }
+      break;
+    case 3:
+      break;
+    case 8:
+      if (p[0] == '0' && (p[1] == 'o'||p[1] == 'O')) {
+        p += 2;
+      }
+    case 4: case 5: case 6: case 7:
+      break;
+    case 10:
+      if (p[0] == '0' && (p[1] == 'd'||p[1] == 'D')) {
+        p += 2;
+      }
+    case 9: case 11: case 12: case 13: case 14: case 15:
+      break;
+    case 16:
+      if (p[0] == '0' && (p[1] == 'x'||p[1] == 'X')) {
+        p += 2;
+      }
+      break;
+    default:
+      if (base < 2 || 36 < base) {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "illegal radix %i", base);
+      }
+      break;
+  } /* end of switch (base) { */
+  if (p>=pend) {
+    if (badcheck) goto bad;
+    return mrb_fixnum_value(0);
+  }
+  if (*p == '0') {    /* squeeze preceding 0s */
+    p++;
+    while (p<pend) {
+      c = *p++;
+      if (c == '_') {
+        if (p<pend && *p == '_') {
+          if (badcheck) goto bad;
+          break;
+        }
+        continue;
+      }
+      if (c != '0') {
+        p--;
+        break;
+      }
+    }
+    if (*(p - 1) == '0')
+      p--;
+  }
+  if (p == pend || *p == '_') {
+    if (badcheck) goto bad;
+    return mrb_fixnum_value(0);
+  }
+  for ( ;p<pend;p++) {
+    if (*p == '_') {
+      p++;
+      if (p==pend) {
+        if (badcheck) goto bad;
+        continue;
+      }
+      if (*p == '_') {
+        if (badcheck) goto bad;
+        break;
+      }
+    }
+    if (badcheck && *p == '\0') {
+      goto nullbyte;
+    }
+    c = conv_digit(*p);
+    if (c < 0 || c >= base) {
+      break;
+    }
+    n *= base;
+    n += c;
+    if (n > (uint64_t)MRB_INT_MAX + (sign ? 0 : 1)) {
+#ifndef MRB_WITHOUT_FLOAT
+      if (base == 10) {
+        return mrb_float_value(mrb, mrb_str_to_dbl(mrb, mrb_str_new(mrb, str, len), badcheck));
+      }
+      else
+#endif
+      {
+        mrb_raisef(mrb, E_RANGE_ERROR, "string (%l) too big for integer", str, pend-str);
+      }
+    }
+  }
+  val = (mrb_int)n;
+  if (badcheck) {
+    if (p == str) goto bad;             /* no number */
+    if (*(p - 1) == '_') goto bad;      /* trailing '_' */
+    while (p<pend && ISSPACE(*p)) p++;
+    if (p<pend) goto bad;               /* trailing garbage */
+  }
+
+  return mrb_fixnum_value(sign ? val : -val);
+ nullbyte:
+  mrb_raise(mrb, E_ARGUMENT_ERROR, "string contains null byte");
+  /* not reached */
+ bad:
+  mrb_raisef(mrb, E_ARGUMENT_ERROR, "invalid string for number(%!l)", str, pend-str);
+  /* not reached */
+  return mrb_fixnum_value(0);
+}
+
+// the below code fragment can be found in:
+// src/string.c
+void
+mrb_init_string(mrb_state *mrb)
+{
+  struct RClass *s;
+
+  mrb_static_assert(RSTRING_EMBED_LEN_MAX < (1 << MRB_STR_EMBED_LEN_BIT),
+                    "pointer size too big for embedded string");
+
+  mrb->string_class = s = mrb_define_class(mrb, "String", mrb->object_class);             /* 15.2.10 */
+  MRB_SET_INSTANCE_TT(s, MRB_TT_STRING);
+
+  mrb_define_method(mrb, s, "bytesize",        mrb_str_bytesize,        MRB_ARGS_NONE());
+
+  mrb_define_method(mrb, s, "<=>",             mrb_str_cmp_m,           MRB_ARGS_REQ(1)); /* 15.2.10.5.1  */
+  mrb_define_method(mrb, s, "==",              mrb_str_equal_m,         MRB_ARGS_REQ(1)); /* 15.2.10.5.2  */
+  mrb_define_method(mrb, s, "+",               mrb_str_plus_m,          MRB_ARGS_REQ(1)); /* 15.2.10.5.4  */
+  mrb_define_method(mrb, s, "*",               mrb_str_times,           MRB_ARGS_REQ(1)); /* 15.2.10.5.5  */
+  mrb_define_method(mrb, s, "[]",              mrb_str_aref_m,          MRB_ARGS_ANY());  /* 15.2.10.5.6  */
+  mrb_define_method(mrb, s, "[]=",             mrb_str_aset_m,          MRB_ARGS_ANY());
+  mrb_define_method(mrb, s, "capitalize",      mrb_str_capitalize,      MRB_ARGS_NONE()); /* 15.2.10.5.7  */
+  mrb_define_method(mrb, s, "capitalize!",     mrb_str_capitalize_bang, MRB_ARGS_NONE()); /* 15.2.10.5.8  */
+  mrb_define_method(mrb, s, "chomp",           mrb_str_chomp,           MRB_ARGS_ANY());  /* 15.2.10.5.9  */
+  mrb_define_method(mrb, s, "chomp!",          mrb_str_chomp_bang,      MRB_ARGS_ANY());  /* 15.2.10.5.10 */
+  mrb_define_method(mrb, s, "chop",            mrb_str_chop,            MRB_ARGS_NONE()); /* 15.2.10.5.11 */
+  mrb_define_method(mrb, s, "chop!",           mrb_str_chop_bang,       MRB_ARGS_NONE()); /* 15.2.10.5.12 */
+  mrb_define_method(mrb, s, "downcase",        mrb_str_downcase,        MRB_ARGS_NONE()); /* 15.2.10.5.13 */
+  mrb_define_method(mrb, s, "downcase!",       mrb_str_downcase_bang,   MRB_ARGS_NONE()); /* 15.2.10.5.14 */
+  mrb_define_method(mrb, s, "empty?",          mrb_str_empty_p,         MRB_ARGS_NONE()); /* 15.2.10.5.16 */
+  mrb_define_method(mrb, s, "eql?",            mrb_str_eql,             MRB_ARGS_REQ(1)); /* 15.2.10.5.17 */
+
+  mrb_define_method(mrb, s, "hash",            mrb_str_hash_m,          MRB_ARGS_NONE()); /* 15.2.10.5.20 */
+  mrb_define_method(mrb, s, "include?",        mrb_str_include,         MRB_ARGS_REQ(1)); /* 15.2.10.5.21 */
+  mrb_define_method(mrb, s, "index",           mrb_str_index_m,         MRB_ARGS_ARG(1,1));  /* 15.2.10.5.22 */
+  mrb_define_method(mrb, s, "initialize",      mrb_str_init,            MRB_ARGS_REQ(1)); /* 15.2.10.5.23 */
+  mrb_define_method(mrb, s, "initialize_copy", mrb_str_replace,         MRB_ARGS_REQ(1)); /* 15.2.10.5.24 */
+  mrb_define_method(mrb, s, "intern",          mrb_str_intern,          MRB_ARGS_NONE()); /* 15.2.10.5.25 */
+  mrb_define_method(mrb, s, "length",          mrb_str_size,            MRB_ARGS_NONE()); /* 15.2.10.5.26 */
+  mrb_define_method(mrb, s, "replace",         mrb_str_replace,         MRB_ARGS_REQ(1)); /* 15.2.10.5.28 */
+  mrb_define_method(mrb, s, "reverse",         mrb_str_reverse,         MRB_ARGS_NONE()); /* 15.2.10.5.29 */
+  mrb_define_method(mrb, s, "reverse!",        mrb_str_reverse_bang,    MRB_ARGS_NONE()); /* 15.2.10.5.30 */
+  mrb_define_method(mrb, s, "rindex",          mrb_str_rindex,          MRB_ARGS_ANY());  /* 15.2.10.5.31 */
+  mrb_define_method(mrb, s, "size",            mrb_str_size,            MRB_ARGS_NONE()); /* 15.2.10.5.33 */
+  mrb_define_method(mrb, s, "slice",           mrb_str_aref_m,          MRB_ARGS_ANY());  /* 15.2.10.5.34 */
+  mrb_define_method(mrb, s, "split",           mrb_str_split_m,         MRB_ARGS_ANY());  /* 15.2.10.5.35 */
+
+#ifndef MRB_WITHOUT_FLOAT
+  mrb_define_method(mrb, s, "to_f",            mrb_str_to_f,            MRB_ARGS_NONE()); /* 15.2.10.5.38 */
+#endif
+  mrb_define_method(mrb, s, "to_i",            mrb_str_to_i,            MRB_ARGS_ANY());  /* 15.2.10.5.39 */
+  mrb_define_method(mrb, s, "to_s",            mrb_str_to_s,            MRB_ARGS_NONE()); /* 15.2.10.5.40 */
+  mrb_define_method(mrb, s, "to_str",          mrb_str_to_s,            MRB_ARGS_NONE());
+  mrb_define_method(mrb, s, "to_sym",          mrb_str_intern,          MRB_ARGS_NONE()); /* 15.2.10.5.41 */
+  mrb_define_method(mrb, s, "upcase",          mrb_str_upcase,          MRB_ARGS_NONE()); /* 15.2.10.5.42 */
+  mrb_define_method(mrb, s, "upcase!",         mrb_str_upcase_bang,     MRB_ARGS_NONE()); /* 15.2.10.5.43 */
+  mrb_define_method(mrb, s, "inspect",         mrb_str_inspect,         MRB_ARGS_NONE()); /* 15.2.10.5.46(x) */
+  mrb_define_method(mrb, s, "bytes",           mrb_str_bytes,           MRB_ARGS_NONE());
+
+  mrb_define_method(mrb, s, "getbyte",         mrb_str_getbyte,         MRB_ARGS_REQ(1));
+  mrb_define_method(mrb, s, "setbyte",         mrb_str_setbyte,         MRB_ARGS_REQ(2));
+  mrb_define_method(mrb, s, "byteslice",       mrb_str_byteslice,       MRB_ARGS_ARG(1,1));
+}
+
+// the below code fragment can be found in:
+// src/string.c
+double
+mrb_str_len_to_dbl(mrb_state *mrb, const char *s, size_t len, mrb_bool badcheck)
+{
+  char buf[DBL_DIG * 4 + 20];
+  const char *p = s, *p2;
+  const char *pend = p + len;
+  char *end;
+  char *n;
+  char prev = 0;
+  double d;
+  mrb_bool dot = FALSE;
+
+  if (!p) return 0.0;
+  while (p<pend && ISSPACE(*p)) p++;
+  p2 = p;
+
+  if (pend - p > 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+    mrb_value x;
+
+    if (!badcheck) return 0.0;
+    x = mrb_str_len_to_inum(mrb, p, pend-p, 0, badcheck);
+    if (mrb_fixnum_p(x))
+      d = (double)mrb_fixnum(x);
+    else /* if (mrb_float_p(x)) */
+      d = mrb_float(x);
+    return d;
+  }
+  while (p < pend) {
+    if (!*p) {
+      if (badcheck) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "string for Float contains null byte");
+        /* not reached */
+      }
+      pend = p;
+      p = p2;
+      goto nocopy;
+    }
+    if (!badcheck && *p == ' ') {
+      pend = p;
+      p = p2;
+      goto nocopy;
+    }
+    if (*p == '_') break;
+    p++;
+  }
+  p = p2;
+  n = buf;
+  while (p < pend) {
+    char c = *p++;
+    if (c == '.') dot = TRUE;
+    if (c == '_') {
+      /* remove an underscore between digits */
+      if (n == buf || !ISDIGIT(prev) || p == pend) {
+        if (badcheck) goto bad;
+        break;
+      }
+    }
+    else if (badcheck && prev == '_' && !ISDIGIT(c)) goto bad;
+    else {
+      const char *bend = buf+sizeof(buf)-1;
+      if (n==bend) {            /* buffer overflow */
+        if (dot) break;         /* cut off remaining fractions */
+        return INFINITY;
+      }
+      *n++ = c;
+    }
+    prev = c;
+  }
+  *n = '\0';
+  p = buf;
+  pend = n;
+nocopy:
+  d = mrb_float_read(p, &end);
+  if (p == end) {
+    if (badcheck) {
+bad:
+      mrb_raisef(mrb, E_ARGUMENT_ERROR, "invalid string for float(%!s)", s);
+      /* not reached */
+    }
+    return d;
+  }
+  if (badcheck) {
+    if (!end || p == end) goto bad;
+    while (end<pend && ISSPACE(*end)) end++;
+    if (end<pend) goto bad;
+  }
+  return d;
+}
+

@@ -1,0 +1,74 @@
+zval *pmembers, *pflags;
+	zend_long flags;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &serialized_data_buffer, &buf_len) == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	PHP_VAR_UNSERIALIZE_INIT(var_hash);
+
+	/* storage */
+	s = p = (const unsigned char*)serialized_data_buffer;
+
+	if (*p!= 'x' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	pflags = var_tmp_var(&var_hash);
+
+	if (!php_var_unserialize(pflags, &p, s + buf_len, &var_hash) || Z_TYPE_P(pflags) != IS_LONG) {
+		goto outexcept;
+	}
+
+	flags = Z_LVAL_P(pflags);
+
+	zend_hash_init(&intern->storage, flags, NULL, spl_object_storage_dtor, 0);
+
+	while (flags--) {
+		zval *pinfo, *pobj, info, obj;
+		spl_SplObjectStorageElement *element, *pelement;
+		zend_hash_key key = {0};
+
+		pobj = var_tmp_var(&var_hash);
+		if (!php_var_unserialize(pobj, &p, s + buf_len, &var_hash) || Z_TYPE_P(pobj) != IS_OBJECT) {
+			goto outexcept;
+		}
+
+		if (spl_object_storage_get_hash(&key, intern, Z_OBJ_P(pobj)) == FAILURE) {
+			goto outexcept;
+		}
+
+		if (*p == ',') { /* new version has inf */
+			++p;
+			pinfo = var_tmp_var(&var_hash);
+			if (!php_var_unserialize(pinfo, &p, s + buf_len, &var_hash)) {
+				goto outexcept;
+			}
+		}
+
+		pelement = spl_object_storage_get(intern, &key);
+		if (pelement) {
+			var_push_dtor(&var_hash, &pelement->inf);
+		}
+
+		element = emalloc(sizeof(spl_SplObjectStorageElement));
+		element->obj = Z_OBJ_P(pobj);
+		GC_ADDREF(element->obj);
+		if (*p == ',') {
+			ZVAL_COPY_VALUE(&element->inf, pinfo);
+		} else {
+			ZVAL_NULL(&element->inf);
+		}
+
+		if (key.key) {
+			zend_hash_update_mem(&intern->storage, key.key, element, sizeof(spl_SplObjectStorageElement));
+		} else {
+			zend_hash_index_update_mem(&intern->storage, key.h, element, sizeof(spl_SplObjectStorageElement));
+		}
+		spl_object_storage_free_hash(intern, &key);
+
+		var_replace(&var_hash, &obj, pobj);
+		if (*p == ',') {
+			var_replace(&var_hash, &info, pinfo);
+		}

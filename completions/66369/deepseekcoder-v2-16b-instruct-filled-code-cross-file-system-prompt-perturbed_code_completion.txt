@@ -1,0 +1,74 @@
+// Copy aux keys to td_b and aux values to slice aux blocks
+while (aux_end - aux >= 1 && aux[0] != 0) {
+    int r;
+
+    // Room for code + type + at least 1 byte of data
+    if (aux - orig >= aux_size - 3)
+        goto err;
+
+    // RG:Z
+    key = string_ndup(c->comp_hdr->TD_keys,
+                      (char *)BLOCK_DATA(td_b) + TD_blk_size,
+                      BLOCK_SIZE(td_b) - TD_blk_size);
+    if (!key)
+        goto err;
+    k = kh_put(m_s2i, c->comp_hdr->TD_hash, key, &new);
+    if (new < 0) {
+        goto err;
+    } else if (new == 0) {
+        BLOCK_SIZE(td_b) = TD_blk_size;
+    } else {
+        kh_val(c->comp_hdr->TD_hash, k) = c->comp_hdr->nTL;
+        c->comp_hdr->nTL++;
+    }
+
+    cr->TL = kh_val(c->comp_hdr->TD_hash, k);
+    if (cram_stats_add(c->stats[DS_TL], cr->TL) < 0)
+        goto block_err;
+
+    // Check the tag type and process accordingly
+    if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+        const char *rg = sam_hdr_line_name(fd->header, "RG", cr->rg);
+        if (!rg)
+            continue;
+
+        size_t rg_len = strlen(rg);
+        BLOCK_APPEND(s->aux_blk, (char *)&aux[0], 3);
+        BLOCK_APPEND(s->aux_blk, rg, rg_len);
+        BLOCK_APPEND_CHAR(s->aux_blk, '\0');
+        cr->aux_size += 3 + rg_len + 1;
+        cr->rg = -1; // prevents auto-add later
+    } else {
+        // Handle other tags if necessary
+        cram_map *m = map_find(c->comp_hdr->tag_encoding_map, (unsigned char *)aux, id);
+        if (!m)
+            goto err;
+
+        BLOCK_APPEND(s->aux_blk, (char *)aux, 3);
+
+        if (!m->codec) goto err;
+        r |= m->codec->decode(s, m->codec, blk, (char *)s->aux_blk, &out_sz);
+        if (r) break;
+        cr->aux_size += out_sz + 3;
+
+        // cF CRAM flags.
+        if (aux[0] == 'c' && aux[1] == 'F' && aux[2] == 'C' && out_sz == 1) {
+            // Remove cF tag
+            uint8_t cF = BLOCK_END(s->aux_blk)[-1];
+            BLOCK_SIZE(s->aux_blk) -= out_sz + 3;
+            cr->aux_size -= out_sz + 3;
+
+            // bit 1 => don't auto-decode MD.
+            // Pretend MD is present verbatim, so we don't auto-generate
+            if ((cF & 1) && has_MD && *has_MD == 0)
+                *has_MD = 1;
+
+            // bit 1 => don't auto-decode NM
+            if ((cF & 2) && has_NM && *has_NM == 0)
+                *has_NM = 1;
+        }
+    }
+
+    // Move to the next tag
+    aux += 3;
+}

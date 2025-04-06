@@ -1,0 +1,267 @@
+int frame_get_vlmetalayers(blosc2_frame_s* frame, blosc2_schunk* schunk) {
+  int64_t trailer_offset = get_trailer_offset(frame, 0, true);
+  if (trailer_offset < BLOSC_EXTENDED_HEADER_LENGTH || trailer_offset + FRAME_TRAILER_MINLEN > frame->len) {
+    BLOSC_TRACE_ERROR("Cannot read the trailer out of the frame.");
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  uint8_t* trailer = frame->cframe + trailer_offset;
+  int32_t trailer_len = frame->trailer_len;
+
+  return get_vlmeta_from_trailer(frame, schunk, trailer, trailer_len);
+}
+
+
+int frame_get_data_chunk(blosc2_frame_s* frame, int32_t index, uint8_t** data_chunk) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (index < 0 || index >= nchunks) {
+    BLOSC_TRACE_ERROR("Invalid chunk index.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, NULL);
+  if (coffsets == NULL) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  int64_t chunk_offset = 0;
+  for (int i = 0; i < index; i++) {
+    chunk_offset += sw64_(coffsets + BLOSC2_CHUNK_CBYTES + i * sizeof(int64_t));
+  }
+  int64_t chunk_cbytes = sw64_(coffsets + BLOSC2_CHUNK_CBYTES + index * sizeof(int64_t)) - chunk_offset;
+
+  if (frame->cframe != NULL) {
+    *data_chunk = frame->cframe + header_len + chunk_offset;
+  }
+  else {
+    FILE* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb");
+    }
+    else {
+      fp = fopen(frame->urlpath, "rb");
+    }
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the frame file.");
+      return BLOSC2_ERROR_FILE_OPEN;
+    }
+    fseek(fp, header_len + chunk_offset, SEEK_SET);
+    *data_chunk = malloc((size_t)chunk_cbytes);
+    size_t rbytes = fread(*data_chunk, 1, (size_t)chunk_cbytes, fp);
+    fclose(fp);
+    if (rbytes != (size_t)chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot read the chunk data from the frame.");
+      free(*data_chunk);
+      *data_chunk = NULL;
+      return BLOSC2_ERROR_FILE_READ;
+    }
+  }
+  return 1;
+}
+
+
+int frame_get_chunk(blosc2_frame_s* frame, int32_t index, uint8_t** data_chunk, bool* needs_free) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (index < 0 || index >= nchunks) {
+    BLOSC_TRACE_ERROR("Invalid chunk index.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, NULL);
+  if (coffsets == NULL) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  int64_t chunk_offset = 0;
+  for (int i = 0; i < index; i++) {
+    chunk_offset += sw64_(coffsets + BLOSC2_CHUNK_CBYTES + i * sizeof(int64_t));
+  }
+  int64_t chunk_cbytes = sw64_(coffsets + BLOSC2_CHUNK_CBYTES + index * sizeof(int64_t)) - chunk_offset;
+
+  if (frame->cframe != NULL) {
+    *data_chunk = frame->cframe + header_len + chunk_offset;
+    *needs_free = false;
+  }
+  else {
+    FILE* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb");
+    }
+    else {
+      fp = fopen(frame->urlpath, "rb");
+    }
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the frame file.");
+      return BLOSC2_ERROR_FILE_OPEN;
+    }
+    fseek(fp, header_len + chunk_offset, SEEK_SET);
+    *data_chunk = malloc((size_t)chunk_cbytes);
+    size_t rbytes = fread(*data_chunk, 1, (size_t)chunk_cbytes, fp);
+    fclose(fp);
+    if (rbytes != (size_t)chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot read the chunk data from the frame.");
+      free(*data_chunk);
+      *data_chunk = NULL;
+      return BLOSC2_ERROR_FILE_READ;
+    }
+    *needs_free = true;
+  }
+  return 1;
+}
+
+
+int frame_get_data(blosc2_frame_s* frame, uint8_t** data, int64_t* nbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t cbytes;
+  int ret = get_header_info(frame, &header_len, &frame_len, nbytes, &cbytes, NULL, NULL,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (frame->cframe != NULL) {
+    *data = frame->cframe + header_len;
+  }
+  else {
+    FILE* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb");
+    }
+    else {
+      fp = fopen(frame->urlpath, "rb");
+    }
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the frame file.");
+      return BLOSC2_ERROR_FILE_OPEN;
+    }
+    fseek(fp, header_len, SEEK_SET);
+    *data = malloc((size_t)cbytes);
+    size_t rbytes = fread(*data, 1, (size_t)cbytes, fp);
+    fclose(fp);
+    if (rbytes != (size_t)cbytes) {
+      BLOSC_TRACE_ERROR("Cannot read the data from the frame.");
+      free(*data);
+      *data = NULL;
+      return BLOSC2_ERROR_FILE_READ;
+    }
+  }
+  return 1;
+}
+
+
+int frame_set_data(blosc2_frame_s* frame, uint8_t* data, int64_t nbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t cbytes;
+  int ret = get_header_info(frame, &header_len, &frame_len, NULL, &cbytes, NULL, NULL,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (frame->cframe != NULL) {
+    memcpy(frame->cframe + header_len, data, (size_t)nbytes);
+  }
+  else {
+    FILE* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb+");
+    }
+    else {
+      fp = fopen(frame->urlpath, "rb+");
+    }
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the frame file.");
+      return BLOSC2_ERROR_FILE_OPEN;
+    }
+    fseek(fp, header_len, SEEK_SET);
+    size_t wbytes = fwrite(data, 1, (size_t)nbytes, fp);
+    fclose(fp);
+    if (wbytes != (size_t)nbytes) {
+      BLOSC_TRACE_ERROR("Cannot write the data to the frame.");
+      return BLOSC2_ERROR_FILE_WRITE;
+    }
+  }
+  return 1;
+}
+
+
+int frame_append_data(blosc2_frame_s* frame, uint8_t* data, int64_t nbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t cbytes;
+  int ret = get_header_info(frame, &header_len, &frame_len, NULL, &cbytes, NULL, NULL,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (frame->cframe != NULL) {
+    frame->cframe = realloc(frame->cframe, (size_t)(frame_len + nbytes));
+    memcpy(frame->cframe + frame_len, data, (size_t)nbytes);
+  }
+  else {
+    FILE* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb+");
+    }
+    else {
+      fp = fopen(frame->urlpath, "rb+");
+    }
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the frame file.");
+      return BLOSC2_ERROR_FILE_OPEN;
+    }
+    fseek(fp, frame_len, SEEK_SET);
+    size_t wbytes = fwrite(data, 1, (size_t)nbytes, fp);
+    fclose(fp);
+    if (wbytes != (size_t)nbytes) {
+      BLOSC_TRACE_ERROR("Cannot write the data to the frame.");
+      return BLOSC2_ERROR_FILE_WRITE;
+    }
+  }
+  return 1;
+}
+
+
+int frame_append_chunk(blosc2_frame_s* frame, uint8_t* data, int64_t nbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t cbytes;
+  int ret = get_header_info(frame, &header_len, &frame_len, NULL, &cbytes, NULL, NULL,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (frame->cframe != NULL) {
+    frame->cframe = realloc(frame->

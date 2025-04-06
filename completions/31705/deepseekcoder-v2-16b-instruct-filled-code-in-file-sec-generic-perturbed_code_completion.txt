@@ -1,0 +1,276 @@
+_ERROR("Cannot access the trailer out of the frame.");
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  // Get the trailer
+  uint8_t* trailer = NULL;
+  if (frame->cframe != NULL) {
+    trailer = frame->cframe + trailer_offset;
+  } else {
+    size_t rbytes = 0;
+    trailer = malloc(trailer_len);
+    FILE* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb");
+    }
+    else {
+      fp = fopen(frame->urlpath, "rb");
+    }
+    if (fp != NULL) {
+      fseek(fp, trailer_offset, SEEK_SET);
+      rbytes = fread(trailer, 1, trailer_len, fp);
+      fclose(fp);
+    }
+    if (rbytes != (size_t) trailer_len) {
+      BLOSC_TRACE_ERROR("Cannot access the trailer out of the frame.");
+      free(trailer);
+      return BLOSC2_ERROR_FILE_READ;
+    }
+  }
+
+  ret = get_vlmeta_from_trailer(frame, schunk, trailer, trailer_len);
+
+  if (frame->cframe == NULL) {
+    free(trailer);
+  }
+
+  return ret;
+}
+
+
+int frame_get_data(blosc2_frame_s* frame, blosc2_schunk* schunk, int32_t start_chunk, int32_t nchunks,
+                    uint8_t** data, int32_t* chunk_cbytes, int32_t* chunk_nbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t blocksize;
+  int32_t chunksize;
+  int32_t nchunks_frame;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes,
+                            &blocksize, &chunksize, &nchunks_frame,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (start_chunk < 0 || start_chunk >= nchunks_frame) {
+    BLOSC_TRACE_ERROR("Invalid start chunk index.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  if (nchunks <= 0 || start_chunk + nchunks > nchunks_frame) {
+    BLOSC_TRACE_ERROR("Invalid number of chunks.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, NULL);
+  if (coffsets == NULL) {
+    BLOSC_TRACE_ERROR("Cannot get the coffsets from frame.");
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  int32_t chunk_offset = start_chunk * sizeof(int64_t);
+  int64_t chunk_pos = coffsets[start_chunk + chunk_offset];
+  if (chunk_pos < 0 || chunk_pos + chunksize > cbytes) {
+    BLOSC_TRACE_ERROR("Invalid chunk position.");
+    free(coffsets);
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  if (data != NULL) {
+    *data = schunk->data[start_chunk];
+  }
+  if (chunk_cbytes != NULL) {
+    *chunk_cbytes = chunksize;
+  }
+  if (chunk_nbytes != NULL) {
+    *chunk_nbytes = schunk->data[start_chunk + chunk_offset + 1];
+  }
+
+  free(coffsets);
+  return 1;
+}
+
+
+int frame_append_data(blosc2_frame_s* frame, blosc2_schunk* schunk, uint8_t* data, int32_t nbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes_frame;
+  int64_t cbytes_frame;
+  int32_t blocksize;
+  int32_t chunksize;
+  int32_t nchunks_frame;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes_frame, &cbytes_frame,
+                            &blocksize, &chunksize, &nchunks_frame,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (nbytes <= 0 || data == NULL) {
+    BLOSC_TRACE_ERROR("Invalid data to append.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nchunks_frame == INT32_MAX) {
+    BLOSC_TRACE_ERROR("Cannot append data to a frame with too many chunks.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nbytes > INT32_MAX) {
+    BLOSC_TRACE_ERROR("Data size exceeds maximum allowed.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nbytes_frame + nbytes > INT64_MAX) {
+    BLOSC_TRACE_ERROR("Frame size exceeds maximum allowed.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (cbytes_frame + nbytes > INT64_MAX) {
+    BLOSC_TRACE_ERROR("Frame compressed size exceeds maximum allowed.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nchunks_frame == INT32_MAX) {
+    BLOSC_TRACE_ERROR("Frame has too many chunks.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nchunks_frame == 0) {
+    BLOSC_TRACE_ERROR("Frame has no chunks.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nbytes % chunksize != 0) {
+    BLOSC_TRACE_ERROR("Data size is not a multiple of the chunk size.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  int32_t nchunks = (int32_t)(nbytes / chunksize);
+  if (nchunks_frame + nchunks > INT32_MAX) {
+    BLOSC_TRACE_ERROR("Frame would have too many chunks.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  uint8_t* coffsets = get_coffsets(frame, header_len, cbytes_frame, NULL);
+  if (coffsets == NULL) {
+    BLOSC_TRACE_ERROR("Cannot get the coffsets from frame.");
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  int64_t chunk_pos = coffsets[nchunks_frame - 1] + chunksize;
+  if (chunk_pos + nbytes > cbytes_frame + cbytes_frame) {
+    BLOSC_TRACE_ERROR("Cannot append data to frame.");
+    free(coffsets);
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  uint8_t* new_data = malloc(nbytes);
+  memcpy(new_data, data, nbytes);
+  schunk->data[nchunks_frame] = new_data;
+
+  free(coffsets);
+  return 1;
+}
+
+
+int frame_remove_data(blosc2_frame_s* frame, blosc2_schunk* schunk, int32_t start_chunk, int32_t nchunks) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t blocksize;
+  int32_t chunksize;
+  int32_t nchunks_frame;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes,
+                            &blocksize, &chunksize, &nchunks_frame,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (start_chunk < 0 || start_chunk >= nchunks_frame) {
+    BLOSC_TRACE_ERROR("Invalid start chunk index.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  if (nchunks <= 0 || start_chunk + nchunks > nchunks_frame) {
+    BLOSC_TRACE_ERROR("Invalid number of chunks.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, NULL);
+  if (coffsets == NULL) {
+    BLOSC_TRACE_ERROR("Cannot get the coffsets from frame.");
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  int32_t chunk_offset = start_chunk * sizeof(int64_t);
+  int64_t chunk_pos = coffsets[start_chunk + chunk_offset];
+  if (chunk_pos < 0 || chunk_pos + chunksize > cbytes) {
+    BLOSC_TRACE_ERROR("Invalid chunk position.");
+    free(coffsets);
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  for (int32_t i = 0; i < nchunks; i++) {
+    int32_t idx = start_chunk + i;
+    free(schunk->data[idx]);
+    for (int32_t j = idx; j < nchunks_frame - 1; j++) {
+      schunk->data[j] = schunk->data[j + 1];
+    }
+  }
+  nchunks_frame -= nchunks;
+
+  // Update the coffsets
+  int64_t new_coffset = chunk_pos;
+  for (int32_t i = start_chunk; i < nchunks_frame; i++) {
+    new_coffset += chunksize;
+    coffsets[i] = new_coffset;
+  }
+
+  free(coffsets);
+  return 1;
+}
+
+
+int frame_update_data(blosc2_frame_s* frame, blosc2_schunk* schunk, int32_t start_chunk, int32_t nchunks,
+                      uint8_t* data, int32_t nbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes_frame;
+  int64_t cbytes_frame;
+  int32_t blocksize;
+  int32_t chunksize;
+  int32_t nchunks_frame;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes_frame, &cbytes_frame,
+                            &blocksize, &chunksize, &nchunks_frame,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the header info from frame.");
+    return ret;
+  }
+
+  if (start_chunk < 0 || start_chunk >= nchunks_frame) {
+    BLOSC_TRACE_ERROR("Invalid start chunk index.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  if (nchunks <= 0 || start_chunk + nchunks > nchunks_frame) {
+    BLOSC_TRACE_ERROR("Invalid number of chunks.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nbytes <= 0 || data == NULL) {
+    BLOSC_TRACE_ERROR("Invalid data to update.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if (nbytes > INT32_MAX) {
+    BLOSC_TRACE_ERROR("Data size exceeds maximum allowed.");
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  if

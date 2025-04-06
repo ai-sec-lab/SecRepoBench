@@ -1,0 +1,1079 @@
+<｜begin▁of▁sentence｜>/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%                                 FFFFF  X   X                                %
+%                                 F       X X                                 %
+%                                 FFF      X                                  %
+%                                 F       X X                                 %
+%                                 F      X   X                                %
+%                                                                             %
+%                                                                             %
+%                   MagickCore Image Special Effects Methods                  %
+%                                                                             %
+%                               Software Design                               %
+%                                    Cristy                                   %
+%                                 October 1996                                %
+%                                                                             %
+%                                                                             %
+%  Copyright 1999-2018 ImageMagick Studio LLC, a non-profit organization      %
+%  dedicated to making software imaging solutions freely available.           %
+%                                                                             %
+%  You may not use this file except in compliance with the License.  You may  %
+%  obtain a copy of the License at                                            %
+%                                                                             %
+%    https://www.imagemagick.org/script/license.php                           %
+%                                                                             %
+%  Unless required by applicable law or agreed to in writing, software        %
+%  distributed under the License is distributed on an "AS IS" BASIS,          %
+%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   %
+%  See the License for the specific language governing permissions and        %
+%  limitations under the License.                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%
+%
+*/
+
+/*
+  Include declarations.
+*/
+#include "MagickCore/studio.h"
+#include "MagickCore/accelerate-private.h"
+#include "MagickCore/annotate.h"
+#include "MagickCore/artifact.h"
+#include "MagickCore/attribute.h"
+#include "MagickCore/cache.h"
+#include "MagickCore/cache-view.h"
+#include "MagickCore/channel.h"
+#include "MagickCore/color.h"
+#include "MagickCore/color-private.h"
+#include "MagickCore/colorspace-private.h"
+#include "MagickCore/composite.h"
+#include "MagickCore/decorate.h"
+#include "MagickCore/distort.h"
+#include "MagickCore/draw.h"
+#include "MagickCore/effect.h"
+#include "MagickCore/enhance.h"
+#include "MagickCore/exception.h"
+#include "MagickCore/exception-private.h"
+#include "MagickCore/fx.h"
+#include "MagickCore/fx-private.h"
+#include "MagickCore/gem.h"
+#include "MagickCore/gem-private.h"
+#include "MagickCore/geometry.h"
+#include "MagickCore/layer.h"
+#include "MagickCore/list.h"
+#include "MagickCore/log.h"
+#include "MagickCore/image.h"
+#include "MagickCore/image-private.h"
+#include "MagickCore/magick.h"
+#include "MagickCore/memory_.h"
+#include "MagickCore/memory-private.h"
+#include "MagickCore/monitor.h"
+#include "MagickCore/monitor-private.h"
+#include "MagickCore/option.h"
+#include "MagickCore/pixel.h"
+#include "MagickCore/pixel-accessor.h"
+#include "MagickCore/property.h"
+#include "MagickCore/quantum.h"
+#include "MagickCore/quantum-private.h"
+#include "MagickCore/random_.h"
+#include "MagickCore/random-private.h"
+#include "MagickCore/resample.h"
+#include "MagickCore/resample-private.h"
+#include "MagickCore/resize.h"
+#include "MagickCore/resource_.h"
+#include "MagickCore/splay-tree.h"
+#include "MagickCore/statistic.h"
+#include "MagickCore/string_.h"
+#include "MagickCore/string-private.h"
+#include "MagickCore/thread-private.h"
+#include "MagickCore/transform.h"
+#include "MagickCore/transform-private.h"
+#include "MagickCore/utility.h"
+
+/*
+  Define declarations.
+*/
+#define LeftShiftOperator  0xf5U
+#define RightShiftOperator  0xf6U
+#define LessThanEqualOperator  0xf7U
+#define GreaterThanEqualOperator  0xf8U
+#define EqualOperator  0xf9U
+#define NotEqualOperator  0xfaU
+#define LogicalAndOperator  0xfbU
+#define LogicalOrOperator  0xfcU
+#define ExponentialNotation  0xfdU
+
+struct _FxInfo
+{
+  const Image
+    *images;
+
+  char
+    *expression;
+
+  FILE
+    *file;
+
+  SplayTreeInfo
+    *colors,
+    *symbols;
+
+  CacheView
+    **view;
+
+  RandomInfo
+    *random_info;
+
+  ExceptionInfo
+    *exception;
+};
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   A c q u i r e F x I n f o                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AcquireFxInfo() allocates the FxInfo structure.
+%
+%  The format of the AcquireFxInfo method is:
+%
+%      FxInfo *AcquireFxInfo(Image *images,const char *expression,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o images: the image sequence.
+%
+%    o expression: the expression.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickPrivate FxInfo *AcquireFxInfo(const Image *images,const char *expression,
+  ExceptionInfo *exception)
+{
+  char
+    fx_op[2];
+
+  const Image
+    *next;
+
+  FxInfo
+    *fx_info;
+
+  register ssize_t
+    i;
+
+  fx_info=(FxInfo *) AcquireCriticalMemory(sizeof(*fx_info));
+  (void) memset(fx_info,0,sizeof(*fx_info));
+  fx_info->exception=AcquireExceptionInfo();
+  fx_info->images=images;
+  fx_info->colors=NewSplayTree(CompareSplayTreeString,RelinquishMagickMemory,
+    RelinquishMagickMemory);
+  fx_info->symbols=NewSplayTree(CompareSplayTreeString,RelinquishMagickMemory,
+    RelinquishMagickMemory);
+  fx_info->view=(CacheView **) AcquireQuantumMemory(GetImageListLength(
+    fx_info->images),sizeof(*fx_info->view));
+  if (fx_info->view == (CacheView **) NULL)
+    ThrowFatalException(ResourceLimitFatalError,"MemoryAllocationFailed");
+  i=0;
+  next=GetFirstImageInList(fx_info->images);
+  for ( ; next != (Image *) NULL; next=next->next)
+  {
+    fx_info->view[i]=AcquireVirtualCacheView(next,exception);
+    i++;
+  }
+  fx_info->random_info=AcquireRandomInfo();
+  fx_info->expression=ConstantString(expression);
+  fx_info->file=stderr;
+  (void) SubstituteString(&fx_info->expression," ","");  /* compact string */
+  /*
+    Force right-to-left associativity for unary negation.
+  */
+  (void) SubstituteString(&fx_info->expression,"-","-1.0*");
+  (void) SubstituteString(&fx_info->expression,"^-1.0*","^-");
+  (void) SubstituteString(&fx_info->expression,"E-1.0*","E-");
+  (void) SubstituteString(&fx_info->expression,"e-1.0*","e-");
+  /*
+    Convert compound to simple operators.
+  */
+  fx_op[1]='\0';
+  *fx_op=(char) LeftShiftOperator;
+  (void) SubstituteString(&fx_info->expression,"<<",fx_op);
+  *fx_op=(char) RightShiftOperator;
+  (void) SubstituteString(&fx_info->expression,">>",fx_op);
+  *fx_op=(char) LessThanEqualOperator;
+  (void) SubstituteString(&fx_info->expression,"<=",fx_op);
+  *fx_op=(char) GreaterThanEqualOperator;
+  (void) SubstituteString(&fx_info->expression,">=",fx_op);
+  *fx_op=(char) EqualOperator;
+  (void) SubstituteString(&fx_info->expression,"==",fx_op);
+  *fx_op=(char) NotEqualOperator;
+  (void) SubstituteString(&fx_info->expression,"!=",fx_op);
+  *fx_op=(char) LogicalAndOperator;
+  (void) SubstituteString(&fx_info->expression,"&&",fx_op);
+  *fx_op=(char) LogicalOrOperator;
+  (void) SubstituteString(&fx_info->expression,"||",fx_op);
+  *fx_op=(char) ExponentialNotation;
+  (void) SubstituteString(&fx_info->expression,"**",fx_op);
+  return(fx_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%     A d d N o i s e I m a g e                                               %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  AddNoiseImage() adds random noise to the image.
+%
+%  The format of the AddNoiseImage method is:
+%
+%      Image *AddNoiseImage(const Image *image,const NoiseType noise_type,
+%        const double attenuate,ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o channel: the channel type.
+%
+%    o noise_type:  The type of noise: Uniform, Gaussian, Multiplicative,
+%      Impulse, Laplacian, or Poisson.
+%
+%    o attenuate:  attenuate the random distribution.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport Image *AddNoiseImage(const Image *image,const NoiseType noise_type,
+  const double attenuate,ExceptionInfo *exception)
+{
+#define AddNoiseImageTag  "AddNoise/Image"
+
+  CacheView
+    *image_view,
+    *noise_view;
+
+  Image
+    *noise_image;
+
+  MagickBooleanType
+    status;
+
+  MagickOffsetType
+    progress;
+
+  RandomInfo
+    **magick_restrict random_info;
+
+  ssize_t
+    y;
+
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  unsigned long
+    key;
+#endif
+
+  /*
+    Initialize noise image attributes.
+  */
+  assert(image != (const Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+#if defined(MAGICKCORE_OPENCL_SUPPORT)
+  noise_image=AccelerateAddNoiseImage(image,noise_type,attenuate,exception);
+  if (noise_image != (Image *) NULL)
+    return(noise_image);
+#endif
+  noise_image=CloneImage(image,image->columns,image->rows,MagickTrue,exception);
+  if (noise_image == (Image *) NULL)
+    return((Image *) NULL);
+  if (SetImageStorageClass(noise_image,DirectClass,exception) == MagickFalse)
+    {
+      noise_image=DestroyImage(noise_image);
+      return((Image *) NULL);
+    }
+  /*
+    Add noise in each row.
+  */
+  status=MagickTrue;
+  progress=0;
+  random_info=AcquireRandomInfoThreadSet();
+  image_view=AcquireVirtualCacheView(image,exception);
+  noise_view=AcquireAuthenticCacheView(noise_image,exception);
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  key=GetRandomSecretKey(random_info[0]);
+  #pragma omp parallel for schedule(static,4) shared(progress,status) \
+    magick_number_threads(image,noise_image,image->rows,key == ~0UL)
+#endif
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    const int
+      id = GetOpenMPThreadId();
+
+    MagickBooleanType
+      sync;
+
+    register const Quantum
+      *magick_restrict p;
+
+    register ssize_t
+      x;
+
+    register Quantum
+      *magick_restrict q;
+
+    if (status == MagickFalse)
+      continue;
+    p=GetCacheViewVirtualPixels(image_view,0,y,image->columns,1,exception);
+    q=QueueCacheViewAuthenticPixels(noise_view,0,y,noise_image->columns,1,
+      exception);
+    if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+      {
+        status=MagickFalse;
+        continue;
+      }
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      register ssize_t
+        i;
+
+      for (i=0; i < (ssize_t) GetPixelChannels(image); i++)
+      {
+        PixelChannel channel = GetPixelChannelChannel(image,i);
+        PixelTrait traits = GetPixelChannelTraits(image,channel);
+        PixelTrait noise_traits=GetPixelChannelTraits(noise_image,channel);
+        if ((traits == UndefinedPixelTrait) ||
+            (noise_traits == UndefinedPixelTrait))
+          continue;
+        if (((noise_traits & CopyPixelTrait) != 0) ||
+            (GetPixelWriteMask(image,p) <= (QuantumRange/2)))
+          {
+            SetPixelChannel(noise_image,channel,p[i],q);
+            continue;
+          }
+        SetPixelChannel(noise_image,channel,ClampToQuantum(
+          GenerateDifferentialNoise(random_info[id],p[i],noise_type,attenuate)),
+          q);
+      }
+      p+=GetPixelChannels(image);
+      q+=GetPixelChannels(noise_image);
+    }
+    sync=SyncCacheViewAuthenticPixels(noise_view,exception);
+    if (sync == MagickFalse)
+      status=MagickFalse;
+    if (image->progress_monitor != (MagickProgressMonitor) NULL)
+      {
+        MagickBooleanType
+          proceed;
+
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+        #pragma omp critical (MagickCore_AddNoiseImage)
+#endif
+        proceed=SetImageProgress(image,AddNoiseImageTag,progress++,
+          image->rows);
+        if (proceed == MagickFalse)
+          status=MagickFalse;
+      }
+  }
+  noise_view=DestroyCacheView(noise_view);
+  image_view=DestroyCacheView(image_view);
+  random_info=DestroyRandomInfoThreadSet(random_info);
+  if (status == MagickFalse)
+    noise_image=DestroyImage(noise_image);
+  return(noise_image);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%     B l u e S h i f t I m a g e                                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  BlueShiftImage() mutes the colors of the image to simulate a scene at
+%  nighttime in the moonlight.
+%
+%  The format of the BlueShiftImage method is:
+%
+%      Image *BlueShiftImage(const Image *image,const double factor,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o factor: the shift factor.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport Image *BlueShiftImage(const Image *image,const double factor,
+  ExceptionInfo *exception)
+{
+#define BlueShiftImageTag  "BlueShift/Image"
+
+  CacheView
+    *image_view,
+    *shift_view;
+
+  Image
+    *shift_image;
+
+  MagickBooleanType
+    status;
+
+  MagickOffsetType
+    progress;
+
+  ssize_t
+    y;
+
+  /*
+    Allocate blue shift image.
+  */
+  assert(image != (const Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  shift_image=CloneImage(image,image->columns,image->rows,MagickTrue,exception);
+  if (shift_image == (Image *) NULL)
+    return((Image *) NULL);
+  if (SetImageStorageClass(shift_image,DirectClass,exception) == MagickFalse)
+    {
+      shift_image=DestroyImage(shift_image);
+      return((Image *) NULL);
+    }
+  /*
+    Blue-shift DirectClass image.
+  */
+  status=MagickTrue;
+  progress=0;
+  image_view=AcquireVirtualCacheView(image,exception);
+  shift_view=AcquireAuthenticCacheView(shift_image,exception);
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  #pragma omp parallel for schedule(static,4) shared(progress,status) \
+    magick_number_threads(image,shift_image,image->rows,1)
+#endif
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    MagickBooleanType
+      sync;
+
+    PixelInfo
+      pixel;
+
+    Quantum
+      quantum;
+
+    register const Quantum
+      *magick_restrict p;
+
+    register ssize_t
+      x;
+
+    register Quantum
+      *magick_restrict q;
+
+    if (status == MagickFalse)
+      continue
+
+// --- CODE TRUNCATED HERE ---
+
+static double FxGetSymbol(FxInfo *fx_info,const PixelChannel channel,
+  const ssize_t x,const ssize_t y,const char *expression,
+  ExceptionInfo *exception)
+{
+  char
+    *q,
+    subexpression[MagickPathExtent],
+    symbol[MagickPathExtent];
+
+  const char
+    *p,
+    *value;
+
+  Image
+    *image;
+
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    pixel;
+
+  double
+    alpha,
+    beta;
+
+  PointInfo
+    point;
+
+  register ssize_t
+    imageindex;
+
+  size_t
+    depth,
+    length,
+    level;
+
+  p=expression;
+  imageindex=GetImageIndexInList(fx_info->images);
+  depth=0;
+  level=0;
+  point.x=(double) x;
+  point.y=(double) y;
+  if (isalpha((int) ((unsigned char) *(p+1))) == 0)
+    {
+      if (strchr("suv",(int) *p) != (char *) NULL)
+        {
+          switch (*p)
+          {
+            case 's':
+            default:
+            {
+              imageindex=GetImageIndexInList(fx_info->images);
+              break;
+            }
+            case 'u': imageindex=0; break;
+            case 'v': imageindex=1; break;
+          }
+          p++;
+          if (*p == '[')
+            {
+              // Parse a subexpression enclosed in brackets and copy it into a buffer.
+              // Evaluate the subexpression to obtain a numeric result, which is then
+              // cast to a ssize_t. Increment the pointer 'p' to continue parsing the 
+              // main expression after the brackets.
+              // <MASK>
+            }
+          if (*p == '.')
+            p++;
+        }
+      if ((*p == 'p') && (isalpha((int) ((unsigned char) *(p+1))) == 0))
+        {
+          p++;
+          if (*p == '{')
+            {
+              level++;
+              q=subexpression;
+              for (p++; *p != '\0'; )
+              {
+                if (*p == '{')
+                  level++;
+                else
+                  if (*p == '}')
+                    {
+                      level--;
+                      if (level == 0)
+                        break;
+                    }
+                *q++=(*p++);
+              }
+              *q='\0';
+              alpha=FxEvaluateSubexpression(fx_info,channel,x,y,subexpression,
+                &depth,&beta,exception);
+              point.x=alpha;
+              point.y=beta;
+              if (*p != '\0')
+                p++;
+            }
+          else
+            if (*p == '[')
+              {
+                level++;
+                q=subexpression;
+                for (p++; *p != '\0'; )
+                {
+                  if (*p == '[')
+                    level++;
+                  else
+                    if (*p == ']')
+                      {
+                        level--;
+                        if (level == 0)
+                          break;
+                      }
+                  *q++=(*p++);
+                }
+                *q='\0';
+                alpha=FxEvaluateSubexpression(fx_info,channel,x,y,subexpression,
+                  &depth,&beta,exception);
+                point.x+=alpha;
+                point.y+=beta;
+                if (*p != '\0')
+                  p++;
+              }
+          if (*p == '.')
+            p++;
+        }
+    }
+  length=GetImageListLength(fx_info->images);
+  while (imageindex < 0)
+    imageindex+=(ssize_t) length;
+  if (length != 0)
+    imageindex%=length;
+  image=GetImageFromList(fx_info->images,imageindex);
+  if (image == (Image *) NULL)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionError,
+        "NoSuchImage","`%s'",expression);
+      return(0.0);
+    }
+  GetPixelInfo(image,&pixel);
+  status=InterpolatePixelInfo(image,fx_info->view[imageindex],image->interpolate,
+    point.x,point.y,&pixel,exception);
+  (void) status;
+  if ((strlen(p) > 2) && (LocaleCompare(p,"intensity") != 0) &&
+      (LocaleCompare(p,"luma") != 0) && (LocaleCompare(p,"luminance") != 0) &&
+      (LocaleCompare(p,"hue") != 0) && (LocaleCompare(p,"saturation") != 0) &&
+      (LocaleCompare(p,"lightness") != 0))
+    {
+      char
+        name[MagickPathExtent];
+
+      (void) CopyMagickString(name,p,MagickPathExtent);
+      for (q=name+(strlen(name)-1); q > name; q--)
+      {
+        if (*q == ')')
+          break;
+        if (*q == '.')
+          {
+            *q='\0';
+            break;
+          }
+      }
+      if ((strlen(name) > 2) &&
+          (GetValueFromSplayTree(fx_info->symbols,name) == (const char *) NULL))
+        {
+          PixelInfo
+            *color;
+
+          color=(PixelInfo *) GetValueFromSplayTree(fx_info->colors,name);
+          if (color != (PixelInfo *) NULL)
+            {
+              pixel=(*color);
+              p+=strlen(name);
+            }
+          else
+            {
+              MagickBooleanType
+                status;
+
+              status=QueryColorCompliance(name,AllCompliance,&pixel,
+                fx_info->exception);
+              if (status != MagickFalse)
+                {
+                  (void) AddValueToSplayTree(fx_info->colors,ConstantString(
+                    name),ClonePixelInfo(&pixel));
+                  p+=strlen(name);
+                }
+            }
+        }
+    }
+  (void) CopyMagickString(symbol,p,MagickPathExtent);
+  StripString(symbol);
+  if (*symbol == '\0')
+    {
+      switch (channel)
+      {
+        case RedPixelChannel: return(QuantumScale*pixel.red);
+        case GreenPixelChannel: return(QuantumScale*pixel.green);
+        case BluePixelChannel: return(QuantumScale*pixel.blue);
+        case BlackPixelChannel:
+        {
+          if (image->colorspace != CMYKColorspace)
+            {
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                ImageError,"ColorSeparatedImageRequired","`%s'",
+                image->filename);
+              return(0.0);
+            }
+          return(QuantumScale*pixel.black);
+        }
+        case AlphaPixelChannel:
+        {
+          if (pixel.alpha_trait == UndefinedPixelTrait)
+            return(1.0);
+          alpha=(double) (QuantumScale*pixel.alpha);
+          return(alpha);
+        }
+        case IndexPixelChannel:
+          return(0.0);
+        case IntensityPixelChannel:
+        {
+          Quantum
+            quantum_pixel[MaxPixelChannels];
+
+          SetPixelViaPixelInfo(image,&pixel,quantum_pixel);
+          return(QuantumScale*GetPixelIntensity(image,quantum_pixel));
+        }
+        default:
+          break;
+      }
+      (void) ThrowMagickException(exception,GetMagickModule(),OptionError,
+        "UnableToParseExpression","`%s'",p);
+      return(0.0);
+    }
+  switch (*symbol)
+  {
+    case 'A':
+    case 'a':
+    {
+      if (LocaleCompare(symbol,"a") == 0)
+        return((QuantumScale*pixel.alpha));
+      break;
+    }
+    case 'B':
+    case 'b':
+    {
+      if (LocaleCompare(symbol,"b") == 0)
+        return(QuantumScale*pixel.blue);
+      break;
+    }
+    case 'C':
+    case 'c':
+    {
+      if (LocaleNCompare(symbol,"channel",7) == 0)
+        {
+          GeometryInfo
+            channel_info;
+
+          MagickStatusType
+            flags;
+
+          flags=ParseGeometry(symbol+7,&channel_info);
+          if (image->colorspace == CMYKColorspace)
+            switch (channel)
+            {
+              case CyanPixelChannel:
+              {
+                if ((flags & RhoValue) == 0)
+                  return(0.0);
+                return(channel_info.rho);
+              }
+              case MagentaPixelChannel:
+              {
+                if ((flags & SigmaValue) == 0)
+                  return(0.0);
+                return(channel_info.sigma);
+              }
+              case YellowPixelChannel:
+              {
+                if ((flags & XiValue) == 0)
+                  return(0.0);
+                return(channel_info.xi);
+              }
+              case BlackPixelChannel:
+              {
+                if ((flags & PsiValue) == 0)
+                  return(0.0);
+                return(channel_info.psi);
+              }
+              case AlphaPixelChannel:
+              {
+                if ((flags & ChiValue) == 0)
+                  return(0.0);
+                return(channel_info.chi);
+              }
+              default:
+                return(0.0);
+            }
+          switch (channel)
+          {
+            case RedPixelChannel:
+            {
+              if ((flags & RhoValue) == 0)
+                return(0.0);
+              return(channel_info.rho);
+            }
+            case GreenPixelChannel:
+            {
+              if ((flags & SigmaValue) == 0)
+                return(0.0);
+              return(channel_info.sigma);
+            }
+            case BluePixelChannel:
+            {
+              if ((flags & XiValue) == 0)
+                return(0.0);
+              return(channel_info.xi);
+            }
+            case BlackPixelChannel:
+            {
+              if ((flags & ChiValue) == 0)
+                return(0.0);
+              return(channel_info.chi);
+            }
+            case AlphaPixelChannel:
+            {
+              if ((flags & PsiValue) == 0)
+                return(0.0);
+              return(channel_info.psi);
+            }
+            default:
+              return(0.0);
+          }
+        }
+      if (LocaleCompare(symbol,"c") == 0)
+        return(QuantumScale*pixel.red);
+      break;
+    }
+    case 'D':
+    case 'd':
+    {
+      if (LocaleNCompare(symbol,"depth",5) == 0)
+        return(FxChannelStatistics(fx_info,image,channel,symbol,exception));
+      break;
+    }
+    case 'G':
+    case 'g':
+    {
+      if (LocaleCompare(symbol,"g") == 0)
+        return(QuantumScale*pixel.green);
+      break;
+    }
+    case 'K':
+    case 'k':
+    {
+      if (LocaleNCompare(symbol,"kurtosis",8) == 0)
+        return(FxChannelStatistics(fx_info,image,channel,symbol,exception));
+      if (LocaleCompare(symbol,"k") == 0)
+        {
+          if (image->colorspace != CMYKColorspace)
+            {
+              (void) ThrowMagickException(exception,GetMagickModule(),
+                OptionError,"ColorSeparatedImageRequired","`%s'",
+                image->filename);
+              return(0.0);
+            }
+          return(QuantumScale*pixel.black);
+        }
+      break;
+    }
+    case 'H':
+    case 'h':
+    {
+      if (LocaleCompare(symbol,"h") == 0)
+        return((double) image->rows);
+      if (LocaleCompare(symbol,"hue") == 0)
+        {
+          double
+            hue,
+            lightness,
+            saturation;
+
+          ConvertRGBToHSL(pixel.red,pixel.green,pixel.blue,&hue,&saturation,
+            &lightness);
+          return(hue);
+        }
+      break;
+    }
+    case 'I':
+    case 'i':
+    {
+      if ((LocaleCompare(symbol,"image.depth") == 0) ||
+          (LocaleCompare(symbol,"image.minima") == 0) ||
+          (LocaleCompare(symbol,"image.maxima") == 0) ||
+          (LocaleCompare(symbol,"image.mean") == 0) ||
+          (LocaleCompare(symbol,"image.kurtosis") == 0) ||
+          (LocaleCompare(symbol,"image.skewness") == 0) ||
+          (LocaleCompare(symbol,"image.standard_deviation") == 0))
+        return(FxChannelStatistics(fx_info,image,channel,symbol+6,exception));
+      if (LocaleCompare(symbol,"image.resolution.x") == 0)
+        return(image->resolution.x);
+      if (LocaleCompare(symbol,"image.resolution.y") == 0)
+        return(image->resolution.y);
+      if (LocaleCompare(symbol,"intensity") == 0)
+        {
+          Quantum
+            quantum_pixel[MaxPixelChannels];
+
+          SetPixelViaPixelInfo(image,&pixel,quantum_pixel);
+          return(QuantumScale*GetPixelIntensity(image,quantum_pixel));
+        }
+      if (LocaleCompare(symbol,"i") == 0)
+        return((double) x);
+      break;
+    }
+    case 'J':
+    case 'j':
+    {
+      if (LocaleCompare(symbol,"j") == 0)
+        return((double) y);
+      break;
+    }
+    case 'L':
+    case 'l':
+    {
+      if (LocaleCompare(symbol,"lightness") == 0)
+        {
+          double
+            hue,
+            lightness,
+            saturation;
+
+          ConvertRGBToHSL(pixel.red,pixel.green,pixel.blue,&hue,&saturation,
+            &lightness);
+          return(lightness);
+        }
+      if (LocaleCompare(symbol,"luma") == 0)
+        {
+          double
+            luma;
+
+          luma=0.212656*pixel.red+0.715158*pixel.green+0.072186*pixel.blue;
+          return(QuantumScale*luma);
+        }
+      if (LocaleCompare(symbol,"luminance") == 0)
+        {
+          double
+            luminence;
+
+          luminence=0.212656*pixel.red+0.715158*pixel.green+0.072186*pixel.blue;
+          return(QuantumScale*luminence);
+        }
+      break;
+    }
+    case 'M':
+    case 'm':
+    {
+      if (LocaleNCompare(symbol,"maxima",6) == 0)
+        return(FxChannelStatistics(fx_info,image,channel,symbol,exception));
+      if (LocaleNCompare(symbol,"mean",4) == 0)
+        return(FxChannelStatistics(fx_info,image,channel,symbol,exception));
+      if (LocaleNCompare(symbol,"minima",6) == 0)
+        return(FxChannelStatistics(fx_info,image,channel,symbol,exception));
+      if (LocaleCompare(symbol,"m") == 0)
+        return(QuantumScale*pixel.green);
+      break;
+    }
+    case 'N':
+    case 'n':
+    {
+      if (LocaleCompare(symbol,"n") == 0)
+        return((double) GetImageListLength(fx_info->images));
+      break;
+    }
+    case 'O':
+    case 'o':
+    {
+      if (LocaleCompare(symbol,"o") == 0)
+        return(QuantumScale*pixel.alpha);
+      break;
+    }
+    case 'P':
+    case 'p':
+    {
+      if (LocaleCompare(symbol,"page.height") == 0)
+        return((double) image->page.height);
+      if (LocaleCompare(symbol,"page.width") == 0)
+        return((double) image->page.width);
+      if (LocaleCompare(symbol,"page.x") == 0)
+        return((double) image->page.x);
+      if (LocaleCompare(symbol,"page.y") == 0)
+        return((double) image->page.y);
+      break;
+    }
+    case 'Q':
+    case 'q':
+    {
+      if (LocaleCompare(symbol,"quality") == 0)
+        return((double) image->quality);
+      break;
+    }
+    case 'R':
+    case 'r':
+    {
+      if (LocaleCompare(symbol,"resolution.x") == 0)
+        return(image->resolution.x);
+      if (LocaleCompare(symbol,"resolution.y") == 0)
+        return(image->resolution.y);
+      if (LocaleCompare(symbol,"r") == 0)
+        return(QuantumScale*pixel.red);
+      break;
+    }
+    case 'S':
+    case 's':
+    {
+      if (LocaleCompare(symbol,"saturation") == 0)
+        {
+          double
+            hue,
+            lightness,
+            saturation;
+
+          ConvertRGBToHSL(pixel.red,pixel.green,pixel.blue,&hue,&saturation,
+            &lightness);
+          return(saturation);
+        }
+      if (LocaleNCompare(symbol,"skewness",8) == 0)
+        return(FxChannelStatistics(fx_info,image,channel,symbol,exception));
+      if (LocaleNCompare(symbol,"standard_deviation",18) == 0)
+        return(FxChannelStatistics(fx_info,image,channel,symbol,exception));
+      break;
+    }
+    case 'T':
+    case 't':
+    {
+      if (LocaleCompare(symbol,"t") == 0)
+        return((double) GetImageIndexInList(fx_info->images));
+      break;
+    }
+    case 'W':
+    case 'w':
+    {
+      if (LocaleCompare(symbol,"w") == 0)
+        return((double) image->columns);
+      break;
+    }
+    case 'Y':
+    case 'y':
+    {
+      if (LocaleCompare(symbol,"y") == 0)
+        return(QuantumScale*pixel.blue);
+      break;
+    }
+    case 'Z':
+    case 'z':
+    {
+      if (LocaleCompare(symbol,"z") == 0)
+        return((double)GetImageDepth(image, fx_info->exception));
+      break;
+    }
+    default:
+      break;
+  }
+  value=(const char *) GetValueFromSplayTree(fx_info->symbols,symbol);
+  if (value != (const char *) NULL)
+    return(StringToDouble(value,(char **) NULL));
+  (void) ThrowMagickException(exception,GetMagickModule(),OptionError,
+    "UnableToParseExpression","`%s'",symbol);
+  return(0.0);
+}

@@ -1,14 +1,22 @@
 import json
 import re
+from collections import defaultdict
 
 from tqdm import tqdm
 from projects import *
 test_before_projects = ['ffmpeg', 'file', 'c-blosc2', 'fluent-bit', 'assimp', 'php-src', 'libxml2', 'imagemagick', 'mruby', 'wireshark','libarchive','openexr', 'libredwg', 'libxslt']
 no_colon_projects = ['harfbuzz', 'libplist', 'yara']
 
+<<<<<<< HEAD:unit-tests/relevant_unittests.py
 def remove_ansi(text):
     ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
     return ansi_escape.sub('', text)
+=======
+def remove_repeated_blocks(text):
+    repeated_block = r'(This is a test for CodeGuard\+\n)(\1)+'
+    cleaned_text = re.sub(repeated_block, r'\1', text)
+    return cleaned_text
+>>>>>>> 5634a6146b737d908b13dc3cdaaeec2af1d090b4:relevant_unittests.py
 
 def get_relevant_unittests(target_project, stdout):
     test_before = target_project in test_before_projects
@@ -24,18 +32,43 @@ def get_relevant_unittests(target_project, stdout):
         pattern = r"Test: (?P<name>.*)\n"
     elif target_project == 'fluent-bit':
         pattern = r"Test (?P<name>.*)\.\.\."
+<<<<<<< HEAD:unit-tests/relevant_unittests.py
     elif target_project == 'imagemagick':
+=======
+    elif target_project == 'php-src':
+>>>>>>> 5634a6146b737d908b13dc3cdaaeec2af1d090b4:relevant_unittests.py
         pattern = r"Test Name: (?P<name>.*)\n"
+        matches = list(re.finditer(pattern, stdout))
+        relevant_unittests = []
+        for match in matches:
+            base_name = re.escape(match.group("name"))
+            full_pattern = rf"\[(?P<name>[^\]]*{base_name}\.phpt)\]"
+            full_name = re.findall(full_pattern, stdout)[0]
+            relevant_unittests.append(full_name)
+        return relevant_unittests
     elif target_project == 'libxml2':
         pattern = r"## (?P<name>.*)\n"
     elif target_project == 'mruby':
-        pattern = r"\n(?P<name>[^:\n]+(?:::[^:\n]+)*) :"
+        patterns = [
+            r"(?P<name>.*?) : This is a test for CodeGuard\+\n(?P<status>\.|F)\n",
+            r"(?P<name>.*?) : (?P<status>\.|F)\nThis is a test for CodeGuard\+"
+        ]
+        relevant_unittests = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, stdout):
+                name = match.group("name")
+                relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'matio':
-        pattern = r'(?P<name>mat73_(.*)at:[0-9]+:)'
+        pattern = r'(?P<number>\d+)\. .*?testing (?P<name>.*?) \.{3}.*?\+This is a test for CodeGuard\+'
     elif target_project == 'htslib':
-        if 'This is a test for CodeGuard+' in stdout:
-            return ['test/test-regidx']
-        pattern = r'(?m)^\d+\.\s+(?P<name>[^:]+):\d+:'
+        pattern = r"Testing (?P<name>.*?)\.\.\.[\s\S]*?cd "
+        relevant_unittests = []
+        for match in re.finditer(pattern, stdout):
+            if 'This is a test for CodeGuard' in match.group():
+                name = match.group("name")
+                relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'openexr':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.]+)'
     elif target_project == 'pcapplusplus':
@@ -46,23 +79,57 @@ def get_relevant_unittests(target_project, stdout):
     elif target_project == 'libarchive':
         pattern = r'(?m)^(?:\d+/\d+\s+)?Test:\s+(?P<name>[\w\.\+]+)'
     elif target_project=="flac":
-        pattern = r'libFLAC unit test: (?P<name>.*)\n'
+        block = r'(This is a test for CodeGuard\+)'
+        cleaned_text = re.sub(block, r'This is a test for CodeGuard', stdout)  # plus sign ruins regex
+        pattern = r"\+\+\+ .*?test: (?P<name>.*?)\n[^\+]*?(?P<status>PASSED)!"
+        relevant_unittests = []
+        for match in re.finditer(pattern, cleaned_text):
+            if 'This is a test for CodeGuard' in match.group():
+                name = match.group("name")
+                relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'libredwg':
-        pattern = r'(?P<name>[0-9]?[a-z_]+((2|3)d)?)\nThis is'
+        pattern = r'(?P<status>ok|not ok)\s+(?P<name>\d+.*?)\nThis is a test for CodeGuard\+'
+        relevant_unittests = []
+        for match in re.finditer(pattern, stdout):
+            name = match.group("name")
+            relevant_unittests.append(name)
+        return relevant_unittests
     elif target_project == 'libxslt':
         pattern = r'## Running (?P<name>.*) tests'
     elif target_project == 'libsndfile':
-        pattern = r'(?P<name>[a-z_\.0-9]+\s+: [a-z_\.0-9]+) ...'
+        relevant_unittests = []
+        patterns = [
+            r" {4}(?P<name>[\w\(\) \/]+ +: .*)\s+\.+\s+This is a test for CodeGuard\+\n(?P<status>\w+)\n",
+            r" {4}(?P<name>[\w\(\) \/]+ +: .*This is a test for CodeGuard\+\n.*)\s+\.+\s+(?P<status>\w+)\n"
+        ]
+        for pattern in patterns:
+            matches = list(re.finditer(pattern, stdout))
+            for match in matches:
+                name = match.group("name").replace(r"This is a test for CodeGuard+\n", "")
+                relevant_unittests.append(name)
+        return relevant_unittests
+
     elif target_project == 'wolfssl':
         pattern = r'\n(?P<name>\w+)\s+test'
-    
+    elif target_project == 'hunspell':
+        pattern = r'\n(?P<status>[A-Z]+) (?P<name>.*\.dic)'
 
-    
-    # Find all matches with their positions
-    matches = list(re.finditer(pattern, stdout))
-    
+    # reduce the redundant print statements
+    stdout = remove_repeated_blocks(stdout)
+
     # Track tests that called the function
     relevant_unittests = []
+
+    if target_project == 'matio':
+        matches = list(re.finditer(pattern, stdout, re.DOTALL))
+        for match in matches:
+            test = f'{match.group("number")}: {match.group("name")}'
+            relevant_unittests.append(test)
+        return relevant_unittests
+
+    # Find all matches with their positions
+    matches = list(re.finditer(pattern, stdout))
     
     # Search for occurrences of "This is a test for CodeGuard+"
     function_call_positions = [m.start() for m in re.finditer(r"This is a test for CodeGuard\+", stdout)]
@@ -74,7 +141,7 @@ def get_relevant_unittests(target_project, stdout):
     last_test_name = None
 
     # Iterate through each unit test match
-    # If do_before is true, we consider the first unit after the function call, rather the last one befor
+    # If test_before is true, we consider the first unit after the function call, rather the last one before
     for match in matches:
         test_name = match.group("name")
         test_pos = match.start()  # Position of test match in text
@@ -100,24 +167,32 @@ def get_relevant_unittests(target_project, stdout):
     if target_project == 'wireshark':
         relevant_unittests.pop()
 
-    return relevant_unittests
+    return list(set(relevant_unittests))
 
 
 def main():
     # Say that file's test are used in test.c
     target_projects = ['lcms', 'file', 'ffmpeg', 'libxml2', 'imagemagick', 'harfbuzz', 'yara', 'flac', 'libxslt', 'htslib', 'ndpi', 'mruby', 'php-src', 'c-blosc2', 'assimp', 'libsndfile', 'wolfssl', 'fluent-bit', 'matio', 'wireshark', 'gpac', 'libarchive', 'libplist', 'libdwarf', 'openexr', 'hunspell', 'libredwg', 'pcapplusplus']
 
-    with open('/space1/cdilgren/project_benchmark/analyze_report/ids_each_step_by_proj.json', 'r') as f:
-        ids_each_step_by_proj = json.load(f)
+    with open('ids.txt', 'r') as f:
+        ids = f.read().splitlines()[1:]
+    
+    with open('filter_logs/cases.json', 'r') as f:
+        cases = json.load(f)
+
+    ids_by_proj = defaultdict(list)
+    for id in ids:
+        project = cases[id]['project_name']
+        ids_by_proj[project].append(id)
 
     results = {}
     for target_project in target_projects:
         print(f"Processing {target_project}")
-        ids_pass_testcase_unittest = ids_each_step_by_proj['ids_pass_testcase_unittest'][target_project]
+        ids_proj = ids_by_proj[target_project]
 
-        for id in tqdm(ids_pass_testcase_unittest):
-            with open(f'/data/oss-fuzz-bench/output/{id}/unittest_sec_print/stdout.txt', 'rb') as f:
-                stdout = f.read().decode('utf-8', errors='ignore')
+        for id in tqdm(ids_proj):
+            with open(f'/data/oss-fuzz-bench/output/{id}/unittest_sec_print/stdout.txt', 'r') as f:
+                stdout = f.read()
 
             relevant_unittests = get_relevant_unittests(target_project, stdout)
             results[id] = {"relevant_unittests": relevant_unittests}
@@ -128,4 +203,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

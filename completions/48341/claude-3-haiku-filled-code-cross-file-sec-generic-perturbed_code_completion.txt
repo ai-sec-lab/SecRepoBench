@@ -1,0 +1,268 @@
+switch (method)
+{
+  case ReadStripMethod:
+  {
+    /*
+      Read image data by processing each strip of the TIFF file.
+    */
+    for (y = 0; y < (ssize_t) image->rows; y += rows_per_strip)
+    {
+      ssize_t
+        length,
+        strip_size;
+
+      strip_size = TIFFReadEncodedStrip(tiff, y / rows_per_strip, pixels,
+        (tsize_t) -1);
+      if (strip_size < 0)
+        ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+      length = ImportQuantumPixels(image, (CacheView *) NULL, quantum_info,
+        quantum_type, pixels);
+      if (length != (ssize_t) image->columns * samples_per_pixel)
+        ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+      if (!SetImagePixels(image, 0, y, image->columns, rows_per_strip < image->rows - y ?
+        rows_per_strip : image->rows - y, exception))
+        break;
+
+      if (!SyncImagePixels(image, exception))
+        break;
+
+      if (image->previous == (Image *) NULL)
+      {
+        status = SetImageProgress(image, LoadImageTag, y, image->rows);
+        if (status == MagickFalse)
+          break;
+      }
+    }
+    break;
+  }
+  case ReadTileMethod:
+  {
+    /*
+      Read image data by processing each tile of the TIFF file.
+    */
+    uint32
+      tile_columns,
+      tile_rows,
+      tiles_per_row,
+      tiles_per_column;
+
+    TIFFGetField(tiff, TIFFTAG_TILEWIDTH, &tile_columns);
+    TIFFGetField(tiff, TIFFTAG_TILELENGTH, &tile_rows);
+    tiles_per_row = (image->columns + tile_columns - 1) / tile_columns;
+    tiles_per_column = (image->rows + tile_rows - 1) / tile_rows;
+
+    for (y = 0; y < (ssize_t) image->rows; y += tile_rows)
+    {
+      for (x = 0; x < (ssize_t) image->columns; x += tile_columns)
+      {
+        ssize_t
+          length,
+          tile_size;
+
+        tile_size = TIFFReadEncodedTile(tiff, TIFFComputeTile(tiff, (uint32) x,
+          (uint32) y, 0, 0), pixels, (tsize_t) -1);
+        if (tile_size < 0)
+          ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+        length = ImportQuantumPixels(image, (CacheView *) NULL, quantum_info,
+          quantum_type, pixels);
+        if (length != (ssize_t) tile_columns * tile_rows * samples_per_pixel)
+          ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+        if (!SetImagePixels(image, x, y, tile_columns < image->columns - x ?
+          tile_columns : image->columns - x, tile_rows < image->rows - y ?
+          tile_rows : image->rows - y, exception))
+          break;
+
+        if (!SyncImagePixels(image, exception))
+          break;
+
+        if (image->previous == (Image *) NULL)
+        {
+          status = SetImageProgress(image, LoadImageTag,
+            y * tiles_per_row + x, tiles_per_row * tiles_per_column);
+          if (status == MagickFalse)
+            break;
+        }
+      }
+    }
+    break;
+  }
+  case GetJPEGMethod:
+  {
+#if defined(JPEG_SUPPORT)
+    /*
+      Read JPEG-compressed TIFF image.
+    */
+    if (photometric == PHOTOMETRIC_YCBCR)
+    {
+      /*
+        Convert YCbCr TIFF image to RGB.
+      */
+      for (y = 0; y < (ssize_t) image->rows; y++)
+      {
+        Quantum
+          *magick_restrict q;
+
+        ssize_t
+          x;
+
+        unsigned char
+          *p;
+
+        tiff_status = TIFFReadPixels(tiff, 0, y, (char *) pixels);
+        if (tiff_status == -1)
+          break;
+        q = QueueAuthenticPixels(image, 0, y, image->columns, 1, exception);
+        if (q == (Quantum *) NULL)
+          break;
+        p = pixels;
+        for (x = 0; x < (ssize_t) image->columns; x++)
+        {
+          SetPixelRed(image, ScaleCharToQuantum(ClampYCC((double) *p +
+            (1.402 * (double) *(p + 2)) - 179.456)), q);
+          SetPixelGreen(image, ScaleCharToQuantum(ClampYCC((double) *p -
+            (0.34414 * (double) *(p + 1)) - (0.71414 * (double) *(p + 2)) +
+            135.45984)), q);
+          SetPixelBlue(image, ScaleCharToQuantum(ClampYCC((double) *p +
+            (1.772 * (double) *(p + 1)) - 226.816)), q);
+          q += GetPixelChannels(image);
+          p += 3;
+        }
+        if (!SyncAuthenticPixels(image, exception))
+          break;
+        if (image->previous == (Image *) NULL)
+        {
+          status = SetImageProgress(image, LoadImageTag, (MagickOffsetType) y,
+            image->rows);
+          if (status == MagickFalse)
+            break;
+        }
+      }
+    }
+    else
+    {
+      /*
+        Read JPEG-compressed TIFF image.
+      */
+      if (!TIFFIsTiled(tiff))
+      {
+        for (y = 0; y < (ssize_t) image->rows; y++)
+        {
+          Quantum
+            *magick_restrict q;
+
+          tiff_status = TIFFReadPixels(tiff, 0, y, (char *) pixels);
+          if (tiff_status == -1)
+            break;
+          q = QueueAuthenticPixels(image, 0, y, image->columns, 1, exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length = ImportQuantumPixels(image, (CacheView *) NULL, quantum_info,
+            quantum_type, pixels);
+          if (length != (ssize_t) image->columns * samples_per_pixel)
+            ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+          if (!SyncAuthenticPixels(image, exception))
+            break;
+          if (image->previous == (Image *) NULL)
+          {
+            status = SetImageProgress(image, LoadImageTag,
+              (MagickOffsetType) y, image->rows);
+            if (status == MagickFalse)
+              break;
+          }
+        }
+      }
+      else
+      {
+        uint32
+          tile_columns,
+          tile_rows,
+          tiles_per_row,
+          tiles_per_column;
+
+        TIFFGetField(tiff, TIFFTAG_TILEWIDTH, &tile_columns);
+        TIFFGetField(tiff, TIFFTAG_TILELENGTH, &tile_rows);
+        tiles_per_row = (image->columns + tile_columns - 1) / tile_columns;
+        tiles_per_column = (image->rows + tile_rows - 1) / tile_rows;
+
+        for (y = 0; y < (ssize_t) image->rows; y += tile_rows)
+        {
+          for (x = 0; x < (ssize_t) image->columns; x += tile_columns)
+          {
+            ssize_t
+              length,
+              tile_size;
+
+            tile_size = TIFFReadEncodedTile(tiff, TIFFComputeTile(tiff,
+              (uint32) x, (uint32) y, 0, 0), pixels, (tsize_t) -1);
+            if (tile_size < 0)
+              ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+            length = ImportQuantumPixels(image, (CacheView *) NULL, quantum_info,
+              quantum_type, pixels);
+            if (length != (ssize_t) tile_columns * tile_rows * samples_per_pixel)
+              ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+            if (!SetImagePixels(image, x, y, tile_columns < image->columns - x ?
+              tile_columns : image->columns - x, tile_rows < image->rows - y ?
+              tile_rows : image->rows - y, exception))
+              break;
+
+            if (!SyncImagePixels(image, exception))
+              break;
+
+            if (image->previous == (Image *) NULL)
+            {
+              status = SetImageProgress(image, LoadImageTag,
+                y * tiles_per_row + x, tiles_per_row * tiles_per_column);
+              if (status == MagickFalse)
+                break;
+            }
+          }
+        }
+      }
+    }
+#endif
+    break;
+  }
+  case ReadGenericMethod:
+  default:
+  {
+    /*
+      Read entire TIFF image.
+    */
+    if (!TIFFReadRGBAImage(tiff, (uint32) image->columns, (uint32) image->rows,
+        (uint32 *) pixels, 0))
+      ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+    for (y = 0; y < (ssize_t) image->rows; y++)
+    {
+      Quantum
+        *magick_restrict q;
+
+      q = QueueAuthenticPixels(image, 0, y, image->columns, 1, exception);
+      if (q == (Quantum *) NULL)
+        break;
+
+      length = ImportQuantumPixels(image, (CacheView *) NULL, quantum_info,
+        quantum_type, pixels + ((image->rows - y - 1) * image->columns *
+        samples_per_pixel * sizeof(uint32)));
+      if (length != (ssize_t) image->columns * samples_per_pixel)
+        ThrowTIFFException(CorruptImageError, "UnableToReadImageData");
+
+      if (!SyncAuthenticPixels(image, exception))
+        break;
+
+      if (image->previous == (Image *) NULL)
+      {
+        status = SetImageProgress(image, LoadImageTag, y, image->rows);
+        if (status == MagickFalse)
+          break;
+      }
+    }
+    break;
+  }
+}

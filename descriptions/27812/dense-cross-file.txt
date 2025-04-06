@@ -1,0 +1,362 @@
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// blosc/schunk.c
+int32_t blosc2_get_usermeta(blosc2_schunk* schunk, uint8_t** content) {
+  size_t nbytes, cbytes, blocksize;
+  blosc_cbuffer_sizes(schunk->usermeta, &nbytes, &cbytes, &blocksize);
+  *content = malloc(nbytes);
+  blosc2_context *dctx = blosc2_create_dctx(BLOSC2_DPARAMS_DEFAULTS);
+  int usermeta_nbytes = blosc2_decompress_ctx(dctx, schunk->usermeta, schunk->usermeta_len, *content, (int32_t)nbytes);
+  blosc2_free_ctx(dctx);
+  if (usermeta_nbytes < 0) {
+    return -1;
+  }
+  return (int32_t)nbytes;
+}
+
+// the below code fragment can be found in:
+// blosc/schunk.c
+int blosc2_update_usermeta(blosc2_schunk *schunk, uint8_t *content, int32_t content_len,
+                           blosc2_cparams cparams) {
+  if ((uint32_t) content_len > (1u << 31u)) {
+    BLOSC_TRACE_ERROR("content_len cannot exceed 2 GB.");
+    return -1;
+  }
+
+  // Compress the usermeta chunk
+  void* usermeta_chunk = malloc(content_len + BLOSC_MAX_OVERHEAD);
+  blosc2_context *cctx = blosc2_create_cctx(cparams);
+  int usermeta_cbytes = blosc2_compress_ctx(cctx, content, content_len, usermeta_chunk,
+                                            content_len + BLOSC_MAX_OVERHEAD);
+  blosc2_free_ctx(cctx);
+  if (usermeta_cbytes < 0) {
+    free(usermeta_chunk);
+    return -1;
+  }
+
+  // Update the contents of the usermeta chunk
+  if (schunk->usermeta_len > 0) {
+    free(schunk->usermeta);
+  }
+  schunk->usermeta = malloc(usermeta_cbytes);
+  memcpy(schunk->usermeta, usermeta_chunk, usermeta_cbytes);
+  free(usermeta_chunk);
+  schunk->usermeta_len = usermeta_cbytes;
+
+  if (schunk->frame != NULL) {
+    int rc = frame_update_trailer(schunk->frame, schunk);
+    if (rc < 0) {
+      return rc;
+    }
+  }
+
+  return usermeta_cbytes;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int frame_get_chunk(blosc2_frame *frame, int nchunk, uint8_t **chunk, bool *needs_free) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  *chunk = NULL;
+  *needs_free = false;
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  if (nchunk >= nchunks) {
+    BLOSC_TRACE_ERROR("nchunk ('%d') exceeds the number of chunks "
+                    "('%d') in frame.", nchunk, nchunks);
+    return -2;
+  }
+
+  // Get the offset to nchunk
+  int64_t offset = get_coffset(frame, header_len, cbytes, nchunk);
+
+  int32_t chunk_cbytes;
+  if (frame->sdata == NULL) {
+    FILE* fp = fopen(frame->fname, "rb");
+    fseek(fp, header_len + offset + BLOSC2_CHUNK_CBYTES, SEEK_SET);
+    size_t rbytes = fread(&chunk_cbytes, 1, sizeof(chunk_cbytes), fp);
+    if (rbytes != sizeof(chunk_cbytes)) {
+      BLOSC_TRACE_ERROR("Cannot read the cbytes for chunk in the fileframe.");
+      return -5;
+    }
+    chunk_cbytes = sw32_(&chunk_cbytes);
+    *chunk = malloc((size_t)chunk_cbytes);
+    fseek(fp, header_len + offset, SEEK_SET);
+    rbytes = fread(*chunk, 1, (size_t)chunk_cbytes, fp);
+    if (rbytes != (size_t)chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot read the chunk out of the fileframe.");
+      return -6;
+    }
+    fclose(fp);
+    *needs_free = true;
+  } else {
+    // The chunk is in memory and just one pointer away
+    *chunk = frame->sdata + header_len + offset;
+    chunk_cbytes = sw32_(*chunk + BLOSC2_CHUNK_CBYTES);
+  }
+
+  return chunk_cbytes;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+int get_header_info(blosc2_frame *frame, int32_t *header_len, int64_t *frame_len, int64_t *nbytes,
+                    int64_t *cbytes, int32_t *chunksize, int32_t *nchunks, int32_t *typesize,
+                    uint8_t *compcode, uint8_t *clevel, uint8_t *filters, uint8_t *filters_meta) {
+  uint8_t* framep = frame->sdata;
+  uint8_t header[FRAME_HEADER_MINLEN];
+
+  if (frame->len <= 0) {
+    return -1;
+  }
+
+  if (frame->sdata == NULL) {
+    size_t rbytes = 0;
+    FILE* fp = fopen(frame->fname, "rb");
+    if (fp != NULL) {
+      rbytes = fread(header, 1, FRAME_HEADER_MINLEN, fp);
+      fclose(fp);
+    }
+    (void) rbytes;
+    if (rbytes != FRAME_HEADER_MINLEN) {
+      return -1;
+    }
+    framep = header;
+  }
+
+  // Fetch some internal lengths
+  swap_store(header_len, framep + FRAME_HEADER_LEN, sizeof(*header_len));
+  swap_store(frame_len, framep + FRAME_LEN, sizeof(*frame_len));
+  swap_store(nbytes, framep + FRAME_NBYTES, sizeof(*nbytes));
+  swap_store(cbytes, framep + FRAME_CBYTES, sizeof(*cbytes));
+  swap_store(chunksize, framep + FRAME_CHUNKSIZE, sizeof(*chunksize));
+  if (typesize != NULL) {
+    swap_store(typesize, framep + FRAME_TYPESIZE, sizeof(*typesize));
+  }
+
+  // Codecs
+  uint8_t frame_codecs = framep[FRAME_CODECS];
+  if (clevel != NULL) {
+    *clevel = frame_codecs >> 4u;
+  }
+  if (compcode != NULL) {
+    *compcode = frame_codecs & 0xFu;
+  }
+
+  // Filters
+  if (filters != NULL && filters_meta != NULL) {
+    uint8_t nfilters = framep[FRAME_FILTER_PIPELINE];
+    if (nfilters > BLOSC2_MAX_FILTERS) {
+      BLOSC_TRACE_ERROR("The number of filters in frame header are too large for Blosc2.");
+      return -1;
+    }
+    uint8_t *filters_ = framep + FRAME_FILTER_PIPELINE + 1;
+    uint8_t *filters_meta_ = framep + FRAME_FILTER_PIPELINE + 1 + FRAME_FILTER_PIPELINE_MAX;
+    for (int i = 0; i < nfilters; i++) {
+      filters[i] = filters_[i];
+      filters_meta[i] = filters_meta_[i];
+    }
+  }
+
+  if (*nbytes > 0 && *chunksize > 0) {
+    // We can compute the number of chunks only when the frame has actual data
+    *nchunks = (int32_t) (*nbytes / *chunksize);
+    if (*nbytes % *chunksize > 0) {
+      if (*nchunks == INT32_MAX) {
+        return -1;
+      }
+      *nchunks += 1;
+    }
+  } else {
+    *nchunks = 0;
+  }
+
+  return 0;
+}
+
+// the below code fragment can be found in:
+// blosc/frame.c
+blosc2_schunk* blosc2_frame_to_schunk(blosc2_frame* frame, bool copy) {
+  int32_t header_len;
+  int64_t frame_len;
+
+  blosc2_schunk* schunk = calloc(1, sizeof(blosc2_schunk));
+  schunk->frame = frame;
+  int ret = get_header_info(frame, &header_len, &frame_len, &schunk->nbytes, &schunk->cbytes,
+                            &schunk->chunksize, &schunk->nchunks, &schunk->typesize,
+                            &schunk->compcode, &schunk->clevel, schunk->filters, schunk->filters_meta);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    free(schunk);
+    return NULL;
+  }
+  int32_t nchunks = schunk->nchunks;
+  int64_t nbytes = schunk->nbytes;
+  (void) nbytes;
+  int64_t cbytes = schunk->cbytes;
+
+  // Compression and decompression contexts
+  blosc2_cparams *cparams;
+  blosc2_schunk_get_cparams(schunk, &cparams);
+  schunk->cctx = blosc2_create_cctx(*cparams);
+  free(cparams);
+  blosc2_dparams *dparams;
+  blosc2_schunk_get_dparams(schunk, &dparams);
+  schunk->dctx = blosc2_create_dctx(*dparams);
+  free(dparams);
+
+  if (!copy || nchunks == 0) {
+    goto out;
+  }
+
+  // We are not attached to a frame anymore
+  schunk->frame = NULL;
+
+  // Get the compressed offsets
+  int32_t coffsets_cbytes = 0;
+  uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, &coffsets_cbytes);
+  if (coffsets == NULL) {
+    blosc2_free_ctx(schunk->cctx);
+    blosc2_free_ctx(schunk->dctx);
+    free(schunk);
+    BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+    return NULL;
+  }
+
+  // Decompress offsets
+  blosc2_dparams off_dparams = BLOSC2_DPARAMS_DEFAULTS;
+  blosc2_context *dctx = blosc2_create_dctx(off_dparams);
+  int64_t* offsets = (int64_t *) malloc((size_t)nchunks * 8);
+  int32_t off_nbytes = blosc2_decompress_ctx(dctx, coffsets, coffsets_cbytes, offsets, nchunks * 8);
+  blosc2_free_ctx(dctx);
+  if (off_nbytes < 0) {
+    free(offsets);
+    blosc2_free_ctx(schunk->cctx);
+    blosc2_free_ctx(schunk->dctx);
+    free(schunk);
+    BLOSC_TRACE_ERROR("Cannot decompress the offsets chunk.");
+    return NULL;
+  }
+
+  // We want the sequential schunk, so create the actual data chunks (and, while doing this,
+  // get a guess at the blocksize used in this frame)
+  int64_t acc_nbytes = 0;
+  int64_t acc_cbytes = 0;
+  int32_t blocksize = 0;
+  int32_t csize = 0;
+  uint8_t* data_chunk = NULL;
+  int32_t prev_alloc = BLOSC_MIN_HEADER_LENGTH;
+  FILE* fp = NULL;
+  if (frame->sdata == NULL) {
+    data_chunk = malloc((size_t)prev_alloc);
+    fp = fopen(frame->fname, "rb");
+    if (fp == NULL) {
+      free(offsets);
+      blosc2_free_ctx(schunk->cctx);
+      blosc2_free_ctx(schunk->dctx);
+      free(schunk);
+      return NULL;
+    }
+  }
+  schunk->data = malloc(nchunks * sizeof(void*));
+  for (int i = 0; i < nchunks; i++) {
+    if (frame->sdata != NULL) {
+      data_chunk = frame->sdata + header_len + offsets[i];
+      csize = sw32_(data_chunk + BLOSC2_CHUNK_CBYTES);
+    }
+    else {
+      fseek(fp, header_len + offsets[i], SEEK_SET);
+      size_t rbytes = fread(data_chunk, 1, BLOSC_MIN_HEADER_LENGTH, fp);
+      if (rbytes != BLOSC_MIN_HEADER_LENGTH) {
+        fclose(fp);
+        free(offsets);
+        blosc2_free_ctx(schunk->cctx);
+        blosc2_free_ctx(schunk->dctx);
+        free(schunk);
+        return NULL;
+      }
+      csize = sw32_(data_chunk + BLOSC2_CHUNK_CBYTES);
+      if (csize > prev_alloc) {
+        data_chunk = realloc(data_chunk, (size_t)csize);
+        prev_alloc = csize;
+      }
+      fseek(fp, header_len + offsets[i], SEEK_SET);
+      rbytes = fread(data_chunk, 1, (size_t)csize, fp);
+      if (rbytes != (size_t)csize) {
+        fclose(fp);
+        free(offsets);
+        blosc2_free_ctx(schunk->cctx);
+        blosc2_free_ctx(schunk->dctx);
+        free(schunk);
+        return NULL;
+      }
+    }
+    uint8_t* new_chunk = malloc((size_t)csize);
+    memcpy(new_chunk, data_chunk, (size_t)csize);
+    schunk->data[i] = new_chunk;
+    acc_nbytes += sw32_(data_chunk + BLOSC2_CHUNK_NBYTES);
+    acc_cbytes += csize;
+    int32_t blocksize_ = sw32_(data_chunk + BLOSC2_CHUNK_BLOCKSIZE);
+    if (i == 0) {
+      blocksize = blocksize_;
+    }
+    else if (blocksize != blocksize_) {
+      // Blocksize varies
+      blocksize = 0;
+    }
+  }
+  schunk->blocksize = blocksize;
+
+  if (frame->sdata == NULL) {
+    free(data_chunk);
+    fclose(fp);
+  }
+  free(offsets);
+
+  if (acc_nbytes != nbytes || acc_cbytes != cbytes) {
+    blosc2_free_ctx(schunk->cctx);
+    blosc2_free_ctx(schunk->dctx);
+    free(schunk);
+    return NULL;
+  }
+
+  uint8_t* usermeta;
+  int32_t usermeta_len;
+
+  int rc;
+  out:
+  rc = frame_get_metalayers(frame, schunk);
+  if (rc < 0) {
+    blosc2_free_ctx(schunk->cctx);
+    blosc2_free_ctx(schunk->dctx);
+    free(schunk);
+    BLOSC_TRACE_ERROR("Cannot access the metalayers.");
+    return NULL;
+  }
+
+  usermeta_len = frame_get_usermeta(frame, &usermeta);
+  if (usermeta_len < 0) {
+    blosc2_free_ctx(schunk->cctx);
+    blosc2_free_ctx(schunk->dctx);
+    free(schunk);
+    BLOSC_TRACE_ERROR("Cannot access the usermeta chunk.");
+    return NULL;
+  }
+  schunk->usermeta = usermeta;
+  schunk->usermeta_len = usermeta_len;
+
+  return schunk;
+}
+
