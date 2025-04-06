@@ -1,0 +1,357 @@
+_color,exception);
+  composite_mask->background_color.alpha=(MagickRealType) TransparentAlpha;
+  composite_mask->background_color.alpha_trait=BlendPixelTrait;
+  status=SetImageBackgroundColor(composite_mask,exception);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"\nbegin composite-mask %s",
+      id);
+  clone_info=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  (void) CloneString(&clone_info->primitive,mask_path);
+  status=QueryColorCompliance("#ffffff",AllCompliance,&clone_info->fill,
+    exception);
+  if (clone_info->clip_mask != (char *) NULL)
+    clone_info->clip_mask=DestroyString(clone_info->clip_mask);
+  status=QueryColorCompliance("#00000000",AllCompliance,&clone_info->stroke,
+    exception);
+  clone_info->stroke_width=0.0;
+  clone_info->alpha=OpaqueAlpha;
+  clone_info->clip_path=MagickFalse;
+  status=RenderMVGContent(composite_mask,clone_info,0,exception);
+  clone_info=DestroyDrawInfo(clone_info);
+  separate_mask=SeparateImage(composite_mask,AlphaChannel,exception);
+  if (separate_mask != (Image *) NULL)
+    {
+      composite_mask=DestroyImage(composite_mask);
+      composite_mask=separate_mask;
+      status=NegateImage(composite_mask,MagickFalse,exception);
+      if (status == MagickFalse)
+        composite_mask=DestroyImage(composite_mask);
+    }
+  if (status == MagickFalse)
+    composite_mask=DestroyImage(composite_mask);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(DrawEvent,GetMagickModule(),"end composite-mask");
+  return(composite_mask);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o m p o s i t e I m a g e                                       %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawCompositeImage() composites the source over the destination image as
+%  dictated by the composite operator.
+%
+%  The format of the DrawCompositeImage method is:
+%
+%      MagickBooleanType DrawCompositeImage(Image *image,const Image *source,
+%        const CompositeOperator compose,const double x,const double y,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o source: the source image.
+%
+%    o compose: the composite operator.
+%
+%    o x: the destination x-coordinate.
+%
+%    o y: the destination y-coordinate.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawCompositeImage(Image *image,
+  const Image *source,const CompositeOperator compose,const double x,
+  const double y,ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    zero;
+
+  PointInfo
+    point;
+
+  register ssize_t
+    i;
+
+  register Quantum
+    *magick_restrict q;
+
+  ssize_t
+    start,
+    stop,
+    y_offset;
+
+  /*
+    Composite image.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(source != (const Image *) NULL);
+  assert(source->signature == MagickCoreSignature);
+  GetPixelInfo(image,&zero);
+  start=(ssize_t) floor(y-0.5);
+  stop=(ssize_t) floor(y+(double) source->rows-0.5);
+  status=MagickTrue;
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  #pragma omp parallel for schedule(static) shared(status) \
+    magick_number_threads(source,image,stop-start,1)
+#endif
+  for (i=start; i <= stop; i++)
+  {
+    PixelInfo
+      composite,
+      pixel;
+
+    PointInfo
+      point;
+
+    register ssize_t
+      x_offset;
+
+    q=GetImagePixels(image,x,i,(size_t) source->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      continue;
+    pixel=zero;
+    composite=zero;
+    x_offset=0;
+    for (y_offset=0; y_offset < (ssize_t) source->rows; y_offset++)
+    {
+      point.x=x+x_offset;
+      point.y=i+y_offset;
+      status=GetOnePixel(source,point.x,point.y,&pixel,exception);
+      if (status == MagickFalse)
+        break;
+      GetPixelInfoPixel(image,q,&composite);
+      status=CompositePixelImage(image,source,compose,&pixel,&composite,
+        exception);
+      if (status == MagickFalse)
+        break;
+      SetPixelViaPixelInfo(image,&composite,q);
+      q+=GetPixelChannels(image);
+    }
+    if (SyncImagePixels(image,exception) == MagickFalse)
+      status=MagickFalse;
+  }
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w C o m p o s i t e P i x e l                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawCompositePixel() composites a pixel with the background pixel.
+%
+%  The format of the DrawCompositePixel method is:
+%
+%      MagickBooleanType DrawCompositePixel(Image *image,const Image *source,
+%        const CompositeOperator compose,PixelInfo *pixel,PixelInfo *background,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o source: the source image.
+%
+%    o compose: the composite operator.
+%
+%    o pixel: the pixel to composite.
+%
+%    o background: the background pixel.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawCompositePixel(Image *image,
+  const Image *source,const CompositeOperator compose,PixelInfo *pixel,
+  PixelInfo *background,ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  PixelChannel
+    channel;
+
+  register Quantum
+    *magick_restrict q;
+
+  /*
+    Composite pixel.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(source != (const Image *) NULL);
+  assert(source->signature == MagickCoreSignature);
+  assert(pixel != (PixelInfo *) NULL);
+  assert(background != (PixelInfo *) NULL);
+  q=GetImagePixels(image,0,0,1,1,exception);
+  if (q == (Quantum *) NULL)
+    return(MagickFalse);
+  for (channel=0; channel < (PixelChannel) GetPixelChannels(image); channel++)
+  {
+    if (IsPixelComponentGray(image,channel) != MagickFalse)
+      {
+        double
+          gray;
+
+        gray=ScaleQuantumToDouble(GetPixelRed(background,exception))+
+          ScaleQuantumToDouble(GetPixelGreen(background,exception))+
+          ScaleQuantumToDouble(GetPixelBlue(background,exception));
+        gray/=3.0;
+        SetPixelGray(pixel,gray);
+      }
+    else
+      if (IsPixelComponentCyan(image,channel) != MagickFalse)
+        {
+          double
+            cyan,
+            magenta,
+            yellow,
+            black;
+
+          cyan=ScaleQuantumToDouble(GetPixelRed(background,exception));
+          magenta=ScaleQuantumToDouble(GetPixelGreen(background,exception));
+          yellow=ScaleQuantumToDouble(GetPixelBlue(background,exception));
+          black=ScaleQuantumToDouble(GetPixelAlpha(background,exception));
+          cyan=QuantumScale(QuantumRange-QuantumRange*cyan);
+          magenta=QuantumScale(QuantumRange-QuantumRange*magenta);
+          yellow=QuantumScale(QuantumRange-QuantumRange*yellow);
+          black=QuantumScale(QuantumRange-QuantumRange*black);
+          cyan=QuantumScale(QuantumRange-QuantumRange*cyan);
+          magenta=QuantumScale(QuantumRange-QuantumRange*magenta);
+          yellow=QuantumScale(QuantumRange-QuantumRange*yellow);
+          black=QuantumScale(QuantumRange-QuantumRange*black);
+          SetPixelCyan(pixel,cyan);
+          SetPixelMagenta(pixel,magenta);
+          SetPixelYellow(pixel,yellow);
+          SetPixelBlack(pixel,black);
+        }
+      else
+        if (IsPixelComponentAlpha(image,channel) != MagickFalse)
+          {
+            double
+              alpha;
+
+            alpha=ScaleQuantumToDouble(GetPixelAlpha(background,exception));
+            alpha=QuantumScale(QuantumRange-QuantumRange*alpha);
+            SetPixelAlpha(pixel,alpha);
+          }
+        else
+          {
+            double
+              red,
+              green,
+              blue;
+
+            red=ScaleQuantumToDouble(GetPixelRed(background,exception));
+            green=ScaleQuantumToDouble(GetPixelGreen(background,exception));
+            blue=ScaleQuantumToDouble(GetPixelBlue(background,exception));
+            SetPixelRed(pixel,red);
+            SetPixelGreen(pixel,green);
+            SetPixelBlue(pixel,blue);
+          }
+  }
+  status=CompositePixelInfo(image,compose,pixel,background,exception);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%   D r a w D i s k P i x e l s                                               %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  DrawDiscPixels() draws a filled disc on the image at the specified
+%  coordinates.
+%
+%  The format of the DrawDiscPixels method is:
+%
+%      MagickBooleanType DrawDiscPixels(Image *image,const DrawInfo *draw_info,
+%        const double x,const double y,ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o draw_info: the draw info.
+%
+%    o x: the x-coordinate where the disc is drawn.
+%
+%    o y: the y-coordinate where the disc is drawn.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType DrawDiscPixels(Image *image,
+  const DrawInfo *draw_info,const double x,const double y,ExceptionInfo *exception)
+{
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    zero;
+
+  PointInfo
+    point;
+
+  register ssize_t
+    i,
+    j;
+
+  register Quantum
+    *magick_restrict q;
+
+  ssize_t
+    start,
+    stop;
+
+  /*
+    Draw a filled disc.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(draw_info != (const DrawInfo *) NULL);
+  GetPixelInfo(image,&zero);
+  start=(ssize_t) floor(y-draw_info->stroke_width-0.5);
+  stop=(ssize_t) floor(y+draw_info->stroke_width+0.5);
+  status=MagickTrue;
+#if defined(MAGICKCORE_OPENMP_SUPPORT)
+  #pragma omp parallel for schedule(static) shared(status) \
+    magick_number_threads(image,image,stop-start,1)
+#endif
+  for (i=start; i <= stop; i++)
+  {
+    PixelInfo
+      pixel;
+
+    double

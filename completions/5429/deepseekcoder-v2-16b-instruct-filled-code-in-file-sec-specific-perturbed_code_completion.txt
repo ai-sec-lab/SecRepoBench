@@ -1,0 +1,314 @@
+(status);
+}
+
+static MagickBooleanType DitherImage(Image *image,CubeInfo *cube_info,
+  ExceptionInfo *exception)
+{
+  if (FloydSteinbergDither(image,cube_info,exception) == MagickFalse)
+    return(MagickFalse);
+  return(MagickTrue);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t C u b e I n f o                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetCubeInfo() allocates the CubeInfo structure.
+%
+%  The format of the GetCubeInfo method is:
+%
+%      CubeInfo *GetCubeInfo(const QuantizeInfo *quantize_info,
+%        const size_t width,const size_t height)
+%
+%  A description of each parameter follows:
+%
+%    o quantize_info: the quantize info.
+%
+%    o width: the width of the image.
+%
+%    o height: the height of the image.
+%
+*/
+static CubeInfo *GetCubeInfo(const QuantizeInfo *quantize_info,
+  const size_t width,const size_t height)
+{
+  CubeInfo
+    *cube_info;
+
+  size_t
+    number_colors;
+
+  cube_info=(CubeInfo *) AcquireMagickMemory(sizeof(*cube_info));
+  if (cube_info == (CubeInfo *) NULL)
+    return((CubeInfo *) NULL);
+  GetCubeInfo(cube_info);
+  cube_info->colors=0;
+  cube_info->maximum_colors=quantize_info->number_colors;
+  cube_info->transparent_index=(-1);
+  cube_info->transparent_pixels=0;
+  cube_info->pruning_threshold=0.0;
+  cube_info->next_threshold=0.0;
+  cube_info->depth=0;
+  cube_info->nodes=0;
+  cube_info->free_nodes=0;
+  cube_info->color_number=0;
+  cube_info->memory_info=AcquireVirtualMemory(MaxNodes*sizeof(NodeInfo));
+  if (cube_info->memory_info == (MemoryInfo *) NULL)
+    {
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  cube_info->nodes=(NodeInfo *) AcquireVirtualMemory(MaxNodes*sizeof(NodeInfo));
+  if (cube_info->nodes == (NodeInfo *) NULL)
+    {
+      cube_info->memory_info=RelinquishVirtualMemory(cube_info->memory_info);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  cube_info->node_queue=(Nodes *) AcquireMagickMemory(sizeof(*cube_info->node_queue));
+  if (cube_info->node_queue == (Nodes *) NULL)
+    {
+      cube_info->memory_info=RelinquishVirtualMemory(cube_info->memory_info);
+      cube_info->nodes=RelinquishVirtualMemory(cube_info->nodes);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  cube_info->node_queue->nodes=cube_info->nodes;
+  cube_info->node_queue->next=NULL;
+  cube_info->cache=(ssize_t *) AcquireQuantumMemory(MaxNodes,sizeof(ssize_t));
+  if (cube_info->cache == (ssize_t *) NULL)
+    {
+      cube_info->memory_info=RelinquishVirtualMemory(cube_info->memory_info);
+      cube_info->nodes=RelinquishVirtualMemory(cube_info->nodes);
+      cube_info->node_queue=RelinquishMagickMemory(cube_info->node_queue);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  (void) ResetMagickMemory(cube_info->cache,0,MaxNodes*sizeof(ssize_t));
+  cube_info->quantize_info=CloneQuantizeInfo(quantize_info);
+  if (cube_info->quantize_info == (QuantizeInfo *) NULL)
+    {
+      cube_info->memory_info=RelinquishVirtualMemory(cube_info->memory_info);
+      cube_info->nodes=RelinquishVirtualMemory(cube_info->nodes);
+      cube_info->node_queue=RelinquishMagickMemory(cube_info->node_queue);
+      cube_info->cache=RelinquishQuantumMemory(cube_info->cache);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  number_colors=1UL << (size_t) (MaxTreeDepth-1);
+  if (number_colors < cube_info->maximum_colors)
+    cube_info->maximum_colors=number_colors;
+  cube_info->next_node=cube_info->nodes;
+  cube_info->free_nodes=MaxNodes;
+  return(cube_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t N o d e I n f o                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetNodeInfo() allocates the NodeInfo structure.
+%
+%  The format of the GetNodeInfo method is:
+%
+%      NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,
+%        const size_t level,NodeInfo *parent)
+%
+%  A description of each parameter follows:
+%
+%    o cube_info: the cube info.
+%
+%    o id: the node id.
+%
+%    o level: the node level.
+%
+%    o parent: the parent node.
+%
+*/
+static NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,
+  const size_t level,NodeInfo *parent)
+{
+  NodeInfo
+    *node_info;
+
+  if (cube_info->free_nodes == 0)
+    return((NodeInfo *) NULL);
+  node_info=cube_info->next_node++;
+  cube_info->free_nodes--;
+  node_info->id=id;
+  node_info->level=level;
+  node_info->parent=parent;
+  node_info->number_unique=0;
+  node_info->total_color.red=0.0;
+  node_info->total_color.green=0.0;
+  node_info->total_color.blue=0.0;
+  node_info->total_color.alpha=0.0;
+  node_info->quantize_error=0.0;
+  node_info->color_number=0;
+  (void) ResetMagickMemory(node_info->child,0,sizeof(node_info->child));
+  return(node_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t Q u a n t i z e I n f o                                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetQuantizeInfo() initializes the QuantizeInfo structure.
+%
+%  The format of the GetQuantizeInfo method is:
+%
+%      void GetQuantizeInfo(QuantizeInfo *quantize_info)
+%
+%  A description of each parameter follows:
+%
+%    o quantize_info: the quantize info.
+%
+*/
+static void GetQuantizeInfo(QuantizeInfo *quantize_info)
+{
+  quantize_info->number_colors=256;
+  quantize_info->tree_depth=MaxTreeDepth;
+  quantize_info->dither_method=RiemersmaDitherMethod;
+  quantize_info->colorspace=sRGBColorspace;
+  quantize_info->measure_error=MagickFalse;
+  quantize_info->signature=MagickCoreSignature;
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t T r a n s f o r m I m a g e C o l o r s p a c e                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetTransformImageColorspace() transforms an image to a specified colorspace.
+%
+%  The format of the GetTransformImageColorspace method is:
+%
+%      MagickBooleanType GetTransformImageColorspace(Image *image,
+%        const ColorspaceType colorspace,ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o colorspace: the colorspace to transform the image to.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType GetTransformImageColorspace(Image *image,
+  const ColorspaceType colorspace,ExceptionInfo *exception)
+{
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  if (image->colorspace == colorspace)
+    return(MagickTrue);
+  if (colorspace == UndefinedColorspace)
+    return(MagickTrue);
+  if (colorspace == CMYKColorspace)
+    return(TransformImageColorspace(image,CMYKColorspace,exception));
+  if (IssRGBCompatibleColorspace(image->colorspace) == MagickFalse)
+    return(TransformImageColorspace(image,sRGBColorspace,exception));
+  return(TransformImageColorspace(image,colorspace,exception));
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t T r a n s f o r m I m a g e C o l o r s p a c e M e t h o d           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetTransformImageColorspaceMethod() gets the method used to transform an
+%  image to a specified colorspace.
+%
+%  The format of the GetTransformImageColorspaceMethod method is:
+%
+%      ColorspaceType GetTransformImageColorspaceMethod(const Image *image,
+%        const ColorspaceType colorspace)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o colorspace: the colorspace to transform the image to.
+%
+*/
+MagickExport ColorspaceType GetTransformImageColorspaceMethod(const Image *image,
+  const ColorspaceType colorspace)
+{
+  if (image->colorspace == colorspace)
+    return(PerceptualColorspace);
+  if (colorspace == UndefinedColorspace)
+    return(PerceptualColorspace);
+  if (colorspace == CMYKColorspace)
+    return(CMYKColorspace);
+  if (IssRGBCompatibleColorspace(image->colorspace) == MagickFalse)
+    return(sRGBColorspace);
+  return(PerceptualColorspace);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t T r a n s f o r m I m a g e C o l o r s p a c e M e t h o d S i g n a t u r e
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetTransformImageColorspaceMethodSignature() gets the method signature
+%  used to transform an image to a specified colorspace.
+%
+%  The format of the GetTransformImageColorspaceMethodSignature method is:
+%
+%      MagickBooleanType GetTransformImageColorspaceMethodSignature(const Image *image,
+%        const ColorspaceType colorspace)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o colorspace: the colorspace to transform the image to.
+%
+*/
+MagickExport MagickBooleanType GetTransformImageColorspaceMethodSignature(const Image *image,
+  const ColorspaceType colorspace)
+{
+  if (image->colorspace == colorspace)
+    return(MagickTrue);
+  if (colorspace == UndefinedColorspace

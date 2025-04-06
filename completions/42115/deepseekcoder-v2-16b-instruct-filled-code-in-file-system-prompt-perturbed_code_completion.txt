@@ -1,0 +1,205 @@
+_len) break;
+
+#ifdef DEBUG_TLS
+	printf("TLS [server][extension_id: %04X][extension_len: %u]\n", extension_id, extension_len);
+#endif
+
+        checkExtensions(ndpi_struct, flow, is_dtls, extension_id, extension_len, offset+4);
+
+        if(extension_id == 0x000a) { /* Supported Versions */
+          u_int16_t *versions = (u_int16_t*)&packet->payload[offset+4];
+          u_int8_t num_versions = extension_len / 2;
+
+          for(j=0; j<num_versions; j++) {
+            u_int16_t version = ntohs(versions[j]);
+
+            if(version < 0x301) {
+              if(version == 0x300)
+                flow->protos.tls_quic.server_tls_version = NDPI_TLS_VERSION_1_0;
+              else if(version == 0x301)
+                flow->protos.tls_quic.server_tls_version = NDPI_TLS_VERSION_1_1;
+              else if(version == 0x302)
+                flow->protos.tls_quic.server_tls_version = NDPI_TLS_VERSION_1_2;
+              else if(version == 0x303)
+                flow->protos.tls_quic.server_tls_version = NDPI_TLS_VERSION_1_3;
+              else
+                flow->protos.tls_quic.server_tls_version = NDPI_TLS_VERSION_UNKNOWN;
+
+#ifdef DEBUG_TLS
+              printf("TLS [server][supported_versions][version: 0x%04X]\n", version);
+#endif
+            }
+          }
+        } else if(extension_id == 0x000d) { /* Elliptic Curves */
+          u_int8_t *curves = (u_int8_t*)&packet->payload[offset+4];
+          u_int8_t num_curves = extension_len;
+
+          for(j=0; j<num_curves; j++) {
+            u_int16_t curve = ntohs(curves[j]);
+
+            if(curve == 0x000a)
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_SECP256R1;
+            else if(curve == 0x000b)
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_SECP384R1;
+            else if(curve == 0x000c)
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_SECP521R1;
+            else if(curve == 0x000d)
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_X25519;
+            else if(curve == 0x000e)
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_X448;
+            else if(curve == 0x000f)
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_ED25519;
+            else if(curve == 0x0010)
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_ED448;
+            else
+              flow->protos.tls_quic.server_elliptic_curve = NDPI_TLS_CURVE_UNKNOWN;
+
+#ifdef DEBUG_TLS
+            printf("TLS [server][supported_curves][curve: 0x%04X]\n", curve);
+#endif
+          }
+        } else if(extension_id == 0x000c) { /* EC Point Formats */
+          u_int8_t *point_formats = (u_int8_t*)&packet->payload[offset+4];
+          u_int8_t num_point_formats = extension_len;
+
+          for(j=0; j<num_point_formats; j++) {
+            if(point_formats[j] == 0x00)
+              flow->protos.tls_quic.server_elliptic_curve_point_format = NDPI_TLS_POINT_FORMAT_UNCOMPRESSED;
+            else if(point_formats[j] == 0x01)
+              flow->protos.tls_quic.server_elliptic_curve_point_format = NDPI_TLS_POINT_FORMAT_ANSIX962_COMPRESSED_PRIME;
+            else if(point_formats[j] == 0x02)
+              flow->protos.tls_quic.server_elliptic_curve_point_format = NDPI_TLS_POINT_FORMAT_ANSIX962_COMPRESSED_CHAR2;
+            else
+              flow->protos.tls_quic.server_elliptic_curve_point_format = NDPI_TLS_POINT_FORMAT_UNKNOWN;
+
+#ifdef DEBUG_TLS
+            printf("TLS [server][supported_point_formats][point_format: 0x%02X]\n", point_formats[j]);
+#endif
+          }
+        } else if(extension_id == 0x0010) { /* Application Layer Protocol Negotiation */
+          char *alpn_start = (char*)&packet->payload[offset+4];
+          char *comma_or_nul = alpn_start;
+          do {
+            int alpn_len;
+
+            comma_or_nul = strchr(comma_or_nul, ',');
+
+            if(comma_or_nul == NULL)
+              comma_or_nul = alpn_start + strlen(alpn_start);
+
+            alpn_len = comma_or_nul - alpn_start;
+
+            if(ja3.server.num_cipher < MAX_NUM_JA3) {
+              strncpy(ja3.server.alpn + ja3.server.num_cipher * MAX_JA3_STRLEN, alpn_start, alpn_len);
+              ja3.server.alpn[ja3.server.num_cipher * MAX_JA3_STRLEN + alpn_len] = '\0';
+              ja3.server.num_cipher++;
+            }
+
+            alpn_start = comma_or_nul + 1;
+          } while (*(comma_or_nul++) != '\0');
+
+#ifdef DEBUG_TLS
+          printf("TLS [server][ALPN][%.*s]\n", (int)extension_len, alpn_start);
+#endif
+        } else if(extension_id == 0x001c) { /* Signature Algorithms */
+          char *sig_algs_start = (char*)&packet->payload[offset+4];
+          char *comma_or_nul = sig_algs_start;
+          do {
+            int sig_alg_len;
+
+            comma_or_nul = strchr(comma_or_nul, ',');
+
+            if(comma_or_nul == NULL)
+              comma_or_nul = sig_algs_start + strlen(sig_algs_start);
+
+            sig_alg_len = comma_or_nul - sig_algs_start;
+
+            if(ja3.server.num_cipher < MAX_NUM_JA3) {
+              strncpy(ja3.server.signature_algorithms + ja3.server.num_cipher * MAX_JA3_STRLEN, sig_algs_start, sig_alg_len);
+              ja3.server.signature_algorithms[ja3.server.num_cipher * MAX_JA3_STRLEN + sig_alg_len] = '\0';
+              ja3.server.num_cipher++;
+            }
+
+            sig_algs_start = comma_or_nul + 1;
+          } while (*(comma_or_nul++) != '\0');
+
+#ifdef DEBUG_TLS
+          printf("TLS [server][Signature Algorithms][%.*s]\n", (int)extension_len, sig_algs_start);
+#endif
+        }
+
+        i += 4 + extension_len;
+        offset += 4 + extension_len;
+      }
+
+      if(ja3.server.num_cipher > 0) {
+        ndpi_MD5_Init(&ctx);
+        ndpi_MD5_Update(&ctx, (u_char*)&ja3.server.cipher[0], ja3.server.num_cipher * 2);
+        ndpi_MD5_Final(md5_hash, &ctx);
+
+        for(i=0; i<16; i++)
+          snprintf(&ja3_str[i*2], 3, "%02X", md5_hash[i]);
+
+        ja3_str_len = 32;
+
+        if(ndpi_struct->malicious_ja3_automa.ac_automa != NULL) {
+          rc = ndpi_match_string(ndpi_struct->malicious_ja3_automa.ac_automa, ja3_str);
+          if(rc > 0) {
+            ndpi_set_risk(ndpi_struct, flow, NDPI_MALICIOUS_JA3);
+            invalid_ja3 = 1;
+          }
+        }
+
+        if(!invalid_ja3) {
+          if(ndpi_struct->ja3_automa.ac_automa != NULL) {
+            rc = ndpi_match_string(ndpi_struct->ja3_automa.ac_automa, ja3_str);
+            if(rc > 0) {
+              ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_COMMON_JA3);
+              invalid_ja3 = 1;
+            }
+          }
+        }
+
+        if(!invalid_ja3) {
+          if(ndpi_struct->ja3s_automa.ac_automa != NULL) {
+            rc = ndpi_match_string(ndpi_struct->ja3s_automa.ac_automa, ja3_str);
+            if(rc > 0) {
+              ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_COMMON_JA3S);
+              invalid_ja3 = 1;
+            }
+          }
+        }
+
+        if(!invalid_ja3) {
+          if(ndpi_struct->ja3_heuristic_automa.ac_automa != NULL) {
+            rc = ndpi_match_string_heuristic(ndpi_struct->ja3_heuristic_automa.ac_automa, ja3_str, ja3_str_len);
+            if(rc > 0) {
+              ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_COMMON_JA3_HEURISTIC);
+              invalid_ja3 = 1;
+            }
+          }
+        }
+
+        if(!invalid_ja3) {
+          if(ndpi_struct->ja3s_heuristic_automa.ac_automa != NULL) {
+            rc = ndpi_match_string_heuristic(ndpi_struct->ja3s_heuristic_automa.ac_automa, ja3_str, ja3_str_len);
+            if(rc > 0) {
+              ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_COMMON_JA3S_HEURISTIC);
+              invalid_ja3 = 1;
+            }
+          }
+        }
+
+        if(!invalid_ja3) {
+          if(ndpi_struct->ja3_heuristic_automa.ac_automa != NULL) {
+            rc = ndpi_match_string_heuristic(ndpi_struct->ja3_heuristic_automa.ac_automa, ja3_str, ja3_str_len);
+            if(rc > 0) {
+              ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_COMMON_JA3_HEURISTIC);
+              invalid_ja3 = 1;
+            }
+          }
+        }
+
+        if(!invalid_ja3) {
+          if(ndpi_struct->ja3s_heuristic_automa.ac_automa != NULL) {
+            rc = ndpi_match_string_heuristic(ndpi_struct->ja3s_heuristic_automa.ac_automa, ja3_str, ja3_str_len

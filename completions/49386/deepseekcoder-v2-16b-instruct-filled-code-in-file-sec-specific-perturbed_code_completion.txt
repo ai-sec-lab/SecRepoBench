@@ -1,0 +1,269 @@
+NULL) {
+
+        i = _cmsSearchTag(Icc, sig, FALSE);
+        if (i >= 0) {
+            _cmsDeleteTagByPos(Icc, i);
+            Icc -> TagNames[i] = (cmsTagSignature) 0;
+        }
+
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return TRUE;
+    }
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i >= 0) {
+
+        // Already exists, delete it
+        _cmsDeleteTagByPos(Icc, i);
+    }
+    else {
+
+        // No, make a new one
+        if (Icc -> TagCount >= MAX_TABLE_TAG) {
+            cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return FALSE;
+        }
+
+        Icc -> TagCount++;
+        i = (int) Icc -> TagCount - 1;
+    }
+
+    // Get the handler. The true type is there
+    Type = _cmsGetTagTrueType(hProfile, sig);
+    if (Type == 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get type handler
+    TypeHandler = _cmsGetTagTypeHandler(Icc ->ContextID, Type);
+    if (TypeHandler == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get tag descriptor
+    TagDescriptor = _cmsGetTagDescriptor(Icc->ContextID, sig);
+    if (TagDescriptor == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Check if type is supported
+    if (!IsTypeSupported(TagDescriptor, Type)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get version
+    Version = cmsGetProfileVersion(hProfile);
+
+    // Write the tag
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+    Icc -> TagPtrs[i] = LocalTypeHandler.WritePtr(&LocalTypeHandler, data, TagDescriptor ->ElemCount);
+
+    if (Icc -> TagPtrs[i] == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Save the tag info
+    Icc -> TagNames[i] = sig;
+    Icc -> TagOffsets[i] = 0;
+    Icc -> TagSizes[i] = 0;
+    Icc -> TagTypeHandlers[i] = TypeHandler;
+    Icc -> TagSaveAsRaw[i] = FALSE;
+
+    // Write tag signature
+    _cmsTagSignature2String(SigString, sig);
+    _cmsTagTypeSignature2String(TypeString, Type);
+    cmsSignalInfo(Icc->ContextID, cmsINFO_TAG_CREATED, "Tag '%s' (%s) created", SigString, TypeString);
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagMemory(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number size)
+{
+    cmsBool rc;
+    cmsUInt8Number* Mem;
+
+    Mem = (cmsUInt8Number*) _cmsMalloc(cmsGetProfileContextID(hProfile), size);
+    if (Mem == NULL) return FALSE;
+
+    memmove(Mem, data, size);
+    rc = cmsWriteTag(hProfile, sig, Mem);
+    if (!rc) _cmsFree(cmsGetProfileContextID(hProfile), Mem);
+
+    return rc;
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagRaw(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number size)
+{
+    cmsBool rc;
+
+    rc = cmsWriteTag(hProfile, sig, data);
+    if (rc) {
+        cmsTagDescriptor* TagDescriptor = _cmsGetTagDescriptor(cmsGetProfileContextID(hProfile), sig);
+        if (TagDescriptor != NULL) {
+            TagDescriptor->SaveAsRaw(cmsGetProfileContextID(hProfile), sig, data, size);
+        }
+    }
+
+    return rc;
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagFloat64(cmsHPROFILE hProfile, cmsTagSignature sig, cmsFloat64Number Value)
+{
+    cmsUInt8Number Buffer[8];
+
+    _cmsDoubleToFloat64Number(Value, Buffer);
+    return cmsWriteTagRaw(hProfile, sig, Buffer, 8);
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagFloat32(cmsHPROFILE hProfile, cmsTagSignature sig, cmsFloat32Number Value)
+{
+    cmsUInt8Number Buffer[4];
+
+    _cmsFloat32NumberToFloat32Number(Value, Buffer);
+    return cmsWriteTagRaw(hProfile, sig, Buffer, 4);
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagUInt32(cmsHPROFILE hProfile, cmsTagSignature sig, cmsUInt32Number Value)
+{
+    cmsUInt8Number Buffer[4];
+
+    _cmsUInt32NumberToFloat32Number(Value, Buffer);
+    return cmsWriteTagRaw(hProfile, sig, Buffer, 4);
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagUInt16(cmsHPROFILE hProfile, cmsTagSignature sig, cmsUInt16Number Value)
+{
+    cmsUInt8Number Buffer[2];
+
+    _cmsUInt16NumberToFloat32Number(Value, Buffer);
+    return cmsWriteTagRaw(hProfile, sig, Buffer, 2);
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagUInt8(cmsHPROFILE hProfile, cmsTagSignature sig, cmsUInt8Number Value)
+{
+    cmsUInt8Number Buffer[1];
+
+    Buffer[0] = Value;
+    return cmsWriteTagRaw(hProfile, sig, Buffer, 1);
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagASCII(cmsHPROFILE hProfile, cmsTagSignature sig, const char* String)
+{
+    cmsUInt32Number i, len;
+    cmsUInt8Number* Buffer;
+
+    len = (cmsUInt32Number) strlen(String);
+    Buffer = (cmsUInt8Number*) _cmsMalloc(cmsGetProfileContextID(hProfile), len + 1);
+    if (Buffer == NULL) return FALSE;
+
+    for (i=0; i < len; i++) Buffer[i] = (cmsUInt8Number) String[i];
+    Buffer[len] = 0;
+
+    cmsBool rc = cmsWriteTagRaw(hProfile, sig, Buffer, len + 1);
+    _cmsFree(cmsGetProfileContextID(hProfile), Buffer);
+
+    return rc;
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagBytes(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number size)
+{
+    return cmsWriteTagRaw(hProfile, sig, data, size);
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagType(cmsHPROFILE hProfile, cmsTagSignature sig, cmsTagTypeSignature Type, const void* data, cmsUInt32Number size)
+{
+    cmsBool rc;
+    cmsTagDescriptor* TagDescriptor = _cmsGetTagDescriptor(cmsGetProfileContextID(hProfile), sig);
+
+    if (TagDescriptor == NULL || !IsTypeSupported(TagDescriptor, Type)) return FALSE;
+
+    rc = cmsWriteTagRaw(hProfile, sig, data, size);
+    if (rc) {
+        TagDescriptor->SaveAsRaw(cmsGetProfileContextID(hProfile), sig, data, size);
+    }
+
+    return rc;
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagFloat64Array(cmsHPROFILE hProfile, cmsTagSignature sig, cmsFloat64Number* Values, cmsUInt32Number Count)
+{
+    return cmsWriteTagType(hProfile, sig, cmsSigFloat64Array, Values, Count * sizeof(cmsFloat64Number));
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagFloat32Array(cmsHPROFILE hProfile, cmsTagSignature sig, cmsFloat32Number* Values, cmsUInt32Number Count)
+{
+    return cmsWriteTagType(hProfile, sig, cmsSigFloat32Array, Values, Count * sizeof(cmsFloat32Number));
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagUInt32Array(cmsHPROFILE hProfile, cmsTagSignature sig, cmsUInt32Number* Values, cmsUInt32Number Count)
+{
+    return cmsWriteTagType(hProfile, sig, cmsSigUInt32Array, Values, Count * sizeof(cmsUInt32Number));
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagUInt16Array(cmsHPROFILE hProfile, cmsTagSignature sig, cmsUInt16Number* Values, cmsUInt32Number Count)
+{
+    return cmsWriteTagType(hProfile, sig, cmsSigUInt16Array, Values, Count * sizeof(cmsUInt16Number));
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already
+// in that list, the previous version is deleted.
+cmsBool CMSEXPORT cmsWriteTagUInt8Array(cmsHPROFILE hProfile, cmsTagSignature sig, cmsUInt8Number* Values, cmsUInt32Number Count)
+{
+    return cmsWriteTagType(hProfile, sig, cmsSigUInt8Array, Values, Count * sizeof(cmsUInt8Number));
+}
+
+
+// Write a single tag. This just keeps track of the tag into a list of "to be written". If the tag is already

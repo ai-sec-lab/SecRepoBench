@@ -1,0 +1,170 @@
+long_term_ref_pics[i].pic_order_cnt_lsb = get_ue_golomb_long(gb);
+            sps->long_term_ref_pics[i].enabled_flag      = get_bits1(gb);
+            sps->long_term_ref_pics[i].poc_lsb_offset    = get_se_golomb(gb);
+            if (sps->long_term_ref_pics[i].enabled_flag) {
+                sps->long_term_ref_pics[i].use_delta_pic_order_cnt_bits = get_bits(gb, 2);
+                sps->long_term_ref_pics[i].delta_pic_order_cnt[0] = get_se_golomb(gb);
+                sps->long_term_ref_pics[i].delta_pic_order_cnt[1] = get_se_golomb(gb);
+            }
+        }
+    }
+
+    sps->sps_temporal_id_nesting_flag = get_bits1(gb);
+
+    sps->dpb_output_delay_length_minus1 = get_ue_golomb_long(gb);
+    if (sps->dpb_output_delay_length_minus1 > 255) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid value for dpb_output_delay_length_minus1: %d\n",
+               sps->dpb_output_delay_length_minus1);
+        return AVERROR_INVALIDDATA;
+    }
+
+    sps->max_num_reorder_pics = get_ue_golomb_long(gb);
+    if (sps->max_num_reorder_pics > HEVC_MAX_DPB_SIZE) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid value for max_num_reorder_pics: %d\n",
+               sps->max_num_reorder_pics);
+        return AVERROR_INVALIDDATA;
+    }
+
+    sps->max_latency_increase_plus1 = get_ue_golomb_long(gb);
+    if (sps->max_latency_increase_plus1 > 256) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid value for max_latency_increase_plus1: %d\n",
+               sps->max_latency_increase_plus1);
+        return AVERROR_INVALIDDATA;
+    }
+
+    sps->max_dec_pic_buffering_minus1 = get_ue_golomb_long(gb) + 1;
+    if (sps->max_dec_pic_buffering_minus1 > HEVC_MAX_DPB_SIZE) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid value for max_dec_pic_buffering_minus1: %d\n",
+               sps->max_dec_pic_buffering_minus1);
+        return AVERROR_INVALIDDATA;
+    }
+
+    sps->temporal_layer_pattern_present_flag = get_bits1(gb);
+    if (sps->temporal_layer_pattern_present_flag) {
+        for (i = 0; i < sps->max_sub_layers; i++) {
+            sps->temporal_layer[i].temporal_id = get_bits(gb, 4);
+            sps->temporal_layer[i].priority_id = get_bits(gb, 4);
+        }
+    }
+
+    sps->vui_parameters_present_flag = get_bits1(gb);
+    if (sps->vui_parameters_present_flag) {
+        vui_present = 1;
+        decode_vui(gb, avctx, apply_defdispwin, sps);
+    } else {
+        vui_present = 0;
+    }
+
+    sps->range_extension_flag = get_bits1(gb);
+    if (sps->range_extension_flag) {
+        sps->color_primaries = get_bits(gb, 8);
+        sps->transfer_characteristics = get_bits(gb, 8);
+        sps->matrix_coeffs = get_bits(gb, 8);
+        if (sps->matrix_coeffs == AVCOL_SPC_RGB) {
+            av_log(avctx, AV_LOG_ERROR, "RGB color space is not supported\n");
+            return AVERROR_INVALIDDATA;
+        }
+        sps->video_signal_type_present_flag = get_bits1(gb);
+        if (sps->video_signal_type_present_flag) {
+            sps->video_format = get_bits(gb, 3);
+            sps->video_full_range_flag = get_bits1(gb);
+            sps->color_description_present_flag = get_bits1(gb);
+            if (sps->color_description_present_flag) {
+                sps->color_primaries = get_bits(gb, 8);
+                sps->transfer_characteristics = get_bits(gb, 8);
+                sps->matrix_coeffs = get_bits(gb, 8);
+            }
+        }
+    }
+
+    sps->timing_info_present_flag = get_bits1(gb);
+    if (sps->timing_info_present_flag) {
+        sps->num_units_in_tick = get_bits_long(gb, 32);
+        sps->time_scale = get_bits_long(gb, 32);
+        sps->poc_proportional_to_timing_flag = get_bits1(gb);
+        if (sps->poc_proportional_to_timing_flag)
+            sps->num_ticks_poc_diff_one_minus1 = get_ue_golomb_long(gb) + 1;
+    }
+
+    sps->bitstream_restriction_flag = get_bits1(gb);
+    if (sps->bitstream_restriction_flag) {
+        sps->tiles_fixed_structure_flag = get_bits1(gb);
+        sps->motion_vectors_over_pic_boundaries_flag = get_bits1(gb);
+        sps->restricted_ref_pic_lists_flag = get_bits1(gb);
+        sps->min_spatial_segmentation_idc = get_ue_golomb_long(gb);
+        sps->max_bytes_per_pic_denom = get_ue_golomb_long(gb);
+        sps->max_bits_per_min_cu_denom = get_ue_golomb_long(gb);
+        sps->log2_max_mv_length_horizontal = get_ue_golomb_long(gb);
+        sps->log2_max_mv_length_vertical = get_ue_golomb_long(gb);
+    }
+
+    if (get_bits_left(gb) < 0) {
+        av_log(avctx, AV_LOG_ERROR,
+               "Overread SPS by %d bits\n", -get_bits_left(gb));
+        return AVERROR_INVALIDDATA;
+    }
+
+    // Output parameters
+
+    if (vps_list)
+        vps_list[sps->vps_id] = vps_list[sps->vps_id] ? vps_list[sps->vps_id] : av_buffer_ref(vps_list[0]);
+
+    if (sps->vps_id != 0) {
+        sps->vps = (const HEVCVPS*)vps_list[sps->vps_id]->data;
+        sps->vps_id = sps->vps->vps_id;
+    } else {
+        sps->vps = NULL;
+    }
+
+    if (sps->vps && sps->vps->vps_sub_layer_ordering_info_present_flag) {
+        for (i = 0; i < sps->max_sub_layers; i++) {
+            sps->temporal_layer[i].temporal_id = sps->vps->vps_temporal_layer[i].temporal_id;
+            sps->temporal_layer[i].priority_id = sps->vps->vps_temporal_layer[i].priority_id;
+        }
+    }
+
+    if (sps->vui_parameters_present_flag && vui_present) {
+        sps->vui = sps->vps->vui;
+    } else {
+        sps->vui.common.video_signal_type_present_flag = vui_present;
+        sps->vui.common.video_full_range_flag = sps->video_full_range_flag;
+        sps->vui.common.colour_description_present_flag = sps->color_description_present_flag;
+        sps->vui.common.colour_primaries = sps->color_primaries;
+        sps->vui.common.transfer_characteristics = sps->transfer_characteristics;
+        sps->vui.common.matrix_coeffs = sps->matrix_coeffs;
+        sps->vui.default_display_window_flag = sps->default_display_window_flag;
+        sps->vui.def_disp_win.left_offset   = sps->pic_conf_win.left_offset;
+        sps->vui.def_disp_win.right_offset  = sps->pic_conf_win.right_offset;
+        sps->vui.def_disp_win.top_offset    = sps->pic_conf_win.top_offset;
+        sps->vui.def_disp_win.bottom_offset = sps->pic_conf_win.bottom_offset;
+        sps->vui.vui_timing_info_present_flag = sps->timing_info_present_flag;
+        sps->vui.vui_num_units_in_tick = sps->num_units_in_tick;
+        sps->vui.vui_time_scale = sps->time_scale;
+        sps->vui.vui_poc_proportional_to_timing_flag = sps->poc_proportional_to_timing_flag;
+        sps->vui.vui_num_ticks_poc_diff_one_minus1 = sps->num_ticks_poc_diff_one_minus1;
+        sps->vui.vui_hrd_parameters_present_flag = sps->hrd_parameters_present_flag;
+        sps->vui.bitstream_restriction_flag = sps->bitstream_restriction_flag;
+        sps->vui.tiles_fixed_structure_flag = sps->tiles_fixed_structure_flag;
+        sps->vui.motion_vectors_over_pic_boundaries_flag = sps->motion_vectors_over_pic_boundaries_flag;
+        sps->vui.restricted_ref_pic_lists_flag = sps->restricted_ref_pic_lists_flag;
+        sps->vui.min_spatial_segmentation_idc = sps->min_spatial_segmentation_idc;
+        sps->vui.max_bytes_per_pic_denom = sps->max_bytes_per_pic_denom;
+        sps->vui.max_bits_per_min_cu_denom = sps->max_bits_per_min_cu_denom;
+        sps->vui.log2_max_mv_length_horizontal = sps->log2_max_mv_length_horizontal;
+        sps->vui.log2_max_mv_length_vertical = sps->log2_max_mv_length_vertical;
+    }
+
+    if (sps->range_extension_flag) {
+        sps->vui.common.video_signal_type_present_flag = 1;
+        sps->vui.common.video_full_range_flag = sps->video_full_range_flag;
+        sps->vui.common.colour_description_present_flag = sps->color_description_present_flag;
+        sps->vui.common.colour_primaries = sps->color_primaries;
+        sps->vui.common.transfer_characteristics = sps->transfer_characteristics;
+        sps->vui.common.matrix_coeffs = sps->matrix_coeffs;
+    }
+
+    if (sps->pcm_enabled_flag) {
+        sps->pcm = sps->vps->pcm;
+    }
+
+    if (sps->scaling_list_enable

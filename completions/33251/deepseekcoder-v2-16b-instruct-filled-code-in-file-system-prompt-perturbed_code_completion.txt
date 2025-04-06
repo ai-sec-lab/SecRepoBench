@@ -1,0 +1,266 @@
+nmetalayers);
+  if (trailer_len < trailer_pos) {
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+  from_big(&nmetalayers, idxp, sizeof(uint16_t));
+  idxp += sizeof(nmetalayers);
+  if (nmetalayers < 0 || nmetalayers > BLOSC2_MAX_METALAYERS) {
+    return BLOSC2_ERROR_DATA;
+  }
+  schunk->nvlmetalayers = nmetalayers;
+
+  // Populate the metalayers and its serialized values
+  for (int nmetalayer = 0; nmetalayer < nmetalayers; nmetalayer++) {
+    trailer_pos += 1;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if ((*idxp & 0xe0u) != 0xa0u) {   // sanity check
+      return BLOSC2_ERROR_DATA;
+    }
+    blosc2_metalayer* current_metalayer = calloc(sizeof(blosc2_metalayer), 1);
+    schunk->vlmetalayers[nmetalayer] = current_metalayer;
+
+    // Populate the metalayer string
+    int8_t nslen = *idxp & (uint8_t)0x1F;
+    idxp += 1;
+    trailer_pos += nslen;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    char* ns = malloc((size_t)nslen + 1);
+    memcpy(ns, idxp, nslen);
+    ns[nslen] = '\0';
+    idxp += nslen;
+    current_metalayer->name = ns;
+
+    // Populate the serialized value for this metalayer
+    // Get the offset
+    trailer_pos += 1;
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    if ((*idxp & 0xffu) != 0xd2u) {   // sanity check
+      return BLOSC2_ERROR_DATA;
+    }
+    idxp += 1;
+    int32_t offset;
+    trailer_pos += sizeof(offset);
+    if (trailer_len < trailer_pos) {
+      return BLOSC2_ERROR_READ_BUFFER;
+    }
+    from_big(&offset, idxp, sizeof(offset));
+    idxp += 4;
+    if (offset < 0 || offset >= trailer_len) {
+      // Offset is less than zero or exceeds trailer length
+      return BLOSC2_ERROR_DATA;
+    }
+    // Go to offset and see if we have the correct marker
+    uint8_t* content_marker = trailer + offset;
+    // Retrieve the length of the serialized content that follows the marker.
+    // Store the length in the metalayer structure.
+    // Use the obtained length to correctly position within the trailer and extract the content.
+    // Assign the extracted content to the metalayer's content field.
+    // <MASK>
+    int32_t content_len;
+    from_big(&content_len, content_marker + 1, sizeof(content_len));
+    char* content = malloc((size_t)content_len);
+    memcpy(content, content_marker + 1 + 4, (size_t)content_len);
+    current_metalayer->content = (uint8_t*)content;
+  }
+
+  return 1;
+}
+
+int frame_get_vlmetalayers(blosc2_frame_s* frame, blosc2_schunk* schunk) {
+  int32_t trailer_len;
+  int64_t frame_len;
+  int ret = get_header_info(frame, &trailer_len, &frame_len, NULL, NULL,
+                            NULL, NULL, NULL,
+                            NULL, NULL, NULL, NULL, NULL, NULL,
+                            schunk->storage->io);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get the trailer info from frame.");
+    return ret;
+  }
+
+  // Get the trailer
+  uint8_t* trailer = NULL;
+  if (frame->cframe != NULL) {
+    trailer = frame->cframe + frame_len - trailer_len;
+  } else {
+    int64_t rbytes = 0;
+    trailer = malloc(trailer_len);
+    blosc2_io_cb *io_cb = blosc2_get_io_cb(frame->schunk->storage->io->id);
+    if (io_cb == NULL) {
+      BLOSC_TRACE_ERROR("Error getting the input/output API");
+      return BLOSC2_ERROR_PLUGIN_IO;
+    }
+
+    void* fp = NULL;
+    if (frame->sframe) {
+      fp = sframe_open_index(frame->urlpath, "rb",
+                             frame->schunk->storage->io);
+    }
+    else {
+      fp = io_cb->open(frame->urlpath, "rb", frame->schunk->storage->io->params);
+    }
+    if (fp != NULL) {
+      rbytes = io_cb->read(trailer, 1, trailer_len, fp);
+      io_cb->close(fp);
+    }
+    if (rbytes != (size_t) trailer_len) {
+      BLOSC_TRACE_ERROR("Cannot access the trailer out of the frame.");
+      free(trailer);
+      return BLOSC2_ERROR_FILE_READ;
+    }
+  }
+
+  ret = get_vlmeta_from_trailer(frame, schunk, trailer, trailer_len);
+
+  if (frame->cframe == NULL) {
+    free(trailer);
+  }
+
+  return ret;
+}
+
+
+int frame_get_metalayer_content(blosc2_frame_s* frame, blosc2_schunk* schunk, const char* name,
+                                uint8_t** content, int32_t* content_len) {
+  int ret = frame_get_metalayers(frame, schunk);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get metalayers from frame.");
+    return ret;
+  }
+
+  for (int nmetalayer = 0; nmetalayer < schunk->nmetalayers; nmetalayer++) {
+    blosc2_metalayer* metalayer = schunk->metalayers[nmetalayer];
+    if (strcmp(metalayer->name, name) == 0) {
+      *content = metalayer->content;
+      *content_len = metalayer->content_len;
+      return 1;
+    }
+  }
+
+  return BLOSC2_ERROR_METALAYER_NOT_FOUND;
+}
+
+int frame_get_vlmetalayer_content(blosc2_frame_s* frame, blosc2_schunk* schunk, const char* name,
+                                  uint8_t** content, int32_t* content_len) {
+  int ret = frame_get_vlmetalayers(frame, schunk);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get variable-length metalayers from frame.");
+    return ret;
+  }
+
+  for (int nvlmetalayer = 0; nvlmetalayer < schunk->nvlmetalayers; nvlmetalayer++) {
+    blosc2_metalayer* metalayer = schunk->vlmetalayers[nvlmetalayer];
+    if (strcmp(metalayer->name, name) == 0) {
+      *content = metalayer->content;
+      *content_len = metalayer->content_len;
+      return 1;
+    }
+  }
+
+  return BLOSC2_ERROR_METALAYER_NOT_FOUND;
+}
+
+
+int frame_set_metalayer_content(blosc2_frame_s* frame, blosc2_schunk* schunk, const char* name,
+                                uint8_t* content, int32_t content_len) {
+  int ret = frame_get_metalayers(frame, schunk);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get metalayers from frame.");
+    return ret;
+  }
+
+  for (int nmetalayer = 0; nmetalayer < schunk->nmetalayers; nmetalayer++) {
+    blosc2_metalayer* metalayer = schunk->metalayers[nmetalayer];
+    if (strcmp(metalayer->name, name) == 0) {
+      if (metalayer->content != NULL) {
+        free(metalayer->content);
+      }
+      metalayer->content = malloc(content_len);
+      memcpy(metalayer->content, content, content_len);
+      metalayer->content_len = content_len;
+      return frame_update_header(frame, schunk, false);
+    }
+  }
+
+  return BLOSC2_ERROR_METALAYER_NOT_FOUND;
+}
+
+int frame_set_vlmetalayer_content(blosc2_frame_s* frame, blosc2_schunk* schunk, const char* name,
+                                  uint8_t* content, int32_t content_len) {
+  int ret = frame_get_vlmetalayers(frame, schunk);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get variable-length metalayers from frame.");
+    return ret;
+  }
+
+  for (int nvlmetalayer = 0; nvlmetalayer < schunk->nvlmetalayers; nvlmetalayer++) {
+    blosc2_metalayer* metalayer = schunk->vlmetalayers[nvlmetalayer];
+    if (strcmp(metalayer->name, name) == 0) {
+      if (metalayer->content != NULL) {
+        free(metalayer->content);
+      }
+      metalayer->content = malloc(content_len);
+      memcpy(metalayer->content, content, content_len);
+      metalayer->content_len = content_len;
+      return frame_update_trailer(frame, schunk);
+    }
+  }
+
+  return BLOSC2_ERROR_METALAYER_NOT_FOUND;
+}
+
+
+int frame_remove_metalayer(blosc2_frame_s* frame, blosc2_schunk* schunk, const char* name) {
+  int ret = frame_get_metalayers(frame, schunk);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get metalayers from frame.");
+    return ret;
+  }
+
+  for (int nmetalayer = 0; nmetalayer < schunk->nmetalayers; nmetalayer++) {
+    blosc2_metalayer* metalayer = schunk->metalayers[nmetalayer];
+    if (strcmp(metalayer->name, name) == 0) {
+      free(metalayer->name);
+      free(metalayer->content);
+      for (int i = nmetalayer; i < schunk->nmetalayers - 1; i++) {
+        schunk->metalayers[i] = schunk->metalayers[i + 1];
+      }
+      schunk->nmetalayers--;
+      return frame_update_header(frame, schunk, false);
+    }
+  }
+
+  return BLOSC2_ERROR_METALAYER_NOT_FOUND;
+}
+
+int frame_remove_vlmetalayer(blosc2_frame_s* frame, blosc2_schunk* schunk, const char* name) {
+  int ret = frame_get_vlmetalayers(frame, schunk);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get variable-length metalayers from frame.");
+    return ret;
+  }
+
+  for (int nvlmetalayer = 0; nvlmetalayer < schunk->nvlmetalayers; nvlmetalayer++) {
+    blosc2_metalayer* metalayer = schunk->vlmetalayers[nvlmetalayer];
+    if (strcmp(metalayer->name, name) == 0) {
+      free(metalayer->name);
+      free(metalayer->content);
+      for (int i = nvlmetalayer; i < schunk->nvlmetalayers - 1; i++) {
+        schunk->vlmetalayers[i] = schunk->vlmetalayers[i + 1];
+      }
+      schunk->nvlmetalayers--;
+      return frame_update_trailer(frame, schunk);
+    }
+  }
+
+  return BLOSC2_ERROR_METALAYER_NOT_FOUND;
+}
+
+
+int

@@ -1,0 +1,384 @@
+xmlBufferPtr buf, xmlEnumerationPtr enum_) {
+    if ((buf == NULL) || (enum_ == NULL))
+        return;
+    if (enum_->name != NULL) {
+        xmlBufferWriteCHAR(buf, enum_->name);
+        xmlBufferWriteChar(buf, ' ');
+    }
+}
+
+/**
+ * xmlDumpEnumerationList:
+ * @buf:  the XML buffer output
+ * @enum:  An enumeration list
+ *
+ * This will dump the content of the enumeration list
+ */
+static void
+xmlDumpEnumerationList(xmlBufferPtr buf, xmlEnumerationPtr enum_) {
+    if ((buf == NULL) || (enum_ == NULL))
+        return;
+    xmlDumpEnumeration(buf, enum_);
+    if (enum_->next != NULL) {
+        xmlBufferWriteChar(buf, '|');
+        xmlBufferWriteChar(buf, ' ');
+        xmlDumpEnumerationList(buf, enum_->next);
+    }
+}
+
+/**
+ * xmlDumpAttributeDecl:
+ * @buf:  the XML buffer output
+ * @attr:  An attribute
+ *
+ * This will dump the content of the attribute declaration
+ */
+void
+xmlDumpAttributeDecl(xmlBufferPtr buf, xmlAttributePtr attr) {
+    if ((buf == NULL) || (attr == NULL))
+        return;
+    if (attr->name != NULL) {
+        xmlBufferWriteCHAR(buf, attr->name);
+        xmlBufferWriteChar(buf, ' ');
+    }
+    if (attr->def != XML_ATTRIBUTE_NOTATION) {
+        if (attr->values != NULL) {
+            xmlBufferWriteChar(buf, '(');
+            xmlDumpEnumerationList(buf, attr->values);
+            xmlBufferWriteChar(buf, ')');
+        } else if (attr->defaultValue != NULL) {
+            xmlBufferWriteCHAR(buf, attr->defaultValue);
+        }
+    }
+    xmlBufferWriteChar(buf, '\n');
+}
+
+/**
+ * xmlDumpAttributeTable:
+ * @buf:  the XML buffer output
+ * @table:  An attribute table
+ *
+ * This will dump the content of the attribute table as an XML DTD definition
+ */
+void
+xmlDumpAttributeTable(xmlBufferPtr buf, xmlAttributeTablePtr table) {
+    if ((buf == NULL) || (table == NULL))
+        return;
+    xmlHashScan(table, (xmlHashScanner) xmlDumpAttributeDecl, buf);
+}
+#endif /* LIBXML_OUTPUT_ENABLED */
+
+/**
+ * xmlAddAttributeDecl:
+ * @ctxt:  the validation context
+ * @dtd:  pointer to the DTD
+ * @elem:  the element
+ * @name:  the attribute name
+ * @ns:  the attribute namespace
+ * @atype:  the attribute type
+ * @def:  the default value
+ * @values:  the enumeration values or NULL
+ *
+ * Register a new attribute declaration
+ *
+ * Returns NULL if not, otherwise the attribute
+ */
+xmlAttributePtr
+xmlAddAttributeDecl(xmlValidCtxtPtr ctxt,
+                     xmlDtdPtr dtd, xmlElementPtr elem,
+                     const xmlChar *name, const xmlChar *ns,
+                     xmlAttributeType atype, const xmlChar *def,
+                     xmlEnumerationPtr values) {
+    xmlAttributePtr ret;
+    xmlAttributeTablePtr table;
+    xmlChar *uqname;
+
+    if (dtd == NULL) {
+	return(NULL);
+    }
+    if (name == NULL) {
+	return(NULL);
+    }
+
+    /*
+     * check if name is a QName
+     */
+    uqname = xmlSplitQName2(name, NULL);
+    if (uqname != NULL)
+	name = uqname;
+
+    /*
+     * Create the Attribute table if needed.
+     */
+    table = (xmlAttributeTablePtr) dtd->attributes;
+    if (table == NULL) {
+	xmlDictPtr dict = NULL;
+
+	if (dtd->doc != NULL)
+	    dict = dtd->doc->dict;
+        table = xmlHashCreateDict(0, dict);
+	dtd->attributes = (void *) table;
+    }
+    if (table == NULL) {
+	xmlVErrMemory(ctxt,
+            "xmlAddAttributeDecl: Table creation failed!\n");
+	if (uqname != NULL)
+	    xmlFree(uqname);
+        return(NULL);
+    }
+
+    /*
+     * The attribute may already be present if one of its attribute
+     * was registered first
+     */
+    ret = xmlHashLookup2(table, name, ns);
+    if (ret != NULL) {
+	if (ret->etype != XML_ELEMENT_TYPE_UNDEFINED) {
+#ifdef LIBXML_VALID_ENABLED
+	    /*
+	     * The attribute is already defined in this DTD.
+	     */
+	    xmlErrValidNode(ctxt, (xmlNodePtr) dtd, XML_DTD_ATTR_REDEFINED,
+	                    "Redefinition of attribute %s\n",
+			    name, NULL, NULL);
+#endif /* LIBXML_VALID_ENABLED */
+	    if (uqname != NULL)
+		xmlFree(uqname);
+            return(NULL);
+	}
+	if (ns != NULL) {
+	    xmlFree(ns);
+	    ns = NULL;
+	}
+    } else {
+	ret = (xmlAttributePtr) xmlMalloc(sizeof(xmlAttribute));
+	if (ret == NULL) {
+	    xmlVErrMemory(ctxt, "malloc failed");
+	    if (uqname != NULL)
+		xmlFree(uqname);
+            return(NULL);
+	}
+	memset(ret, 0, sizeof(xmlAttribute));
+	ret->type = atype;
+	ret->def = XML_ATTRIBUTE_NOT_DEFINED;
+	ret->values = xmlCopyEnumeration(values);
+	ret->name = xmlStrdup(name);
+	ret->prefix = ns;
+	ret->etype = XML_ATTRIBUTE_DECL;
+	ret->parent = elem;
+
+	/*
+	 * Validity Check:
+	 * Insertion must not fail
+	 */
+	if (xmlHashAddEntry2(table, name, ns, ret)) {
+#ifdef LIBXML_VALID_ENABLED
+	    /*
+	     * The attribute is already defined in this DTD.
+	     */
+	    xmlErrValidNode(ctxt, (xmlNodePtr) dtd, XML_DTD_ATTR_REDEFINED,
+	                    "Redefinition of attribute %s\n",
+			    name, NULL, NULL);
+#endif /* LIBXML_VALID_ENABLED */
+	    xmlFreeAttribute(ret);
+	    if (uqname != NULL)
+		xmlFree(uqname);
+	    return(NULL);
+	}
+    }
+
+    /*
+     * Finish to fill the structure.
+     */
+    ret->def = def;
+    ret->defaultValue = xmlStrdup(def);
+
+    /*
+     * Link it to the DTD
+     */
+    ret->doc = dtd->doc;
+    if (dtd->last == NULL) {
+	dtd->children = dtd->last = (xmlNodePtr) ret;
+    } else {
+        dtd->last->next = (xmlNodePtr) ret;
+	ret->prev = dtd->last;
+	dtd->last = (xmlNodePtr) ret;
+    }
+    if (uqname != NULL)
+	xmlFree(uqname);
+    return(ret);
+}
+
+/**
+ * xmlFreeAttributeTable:
+ * @table:  An attribute table
+ *
+ * Deallocate the memory used by an attribute hash table.
+ */
+void
+xmlFreeAttributeTable(xmlAttributeTablePtr table) {
+    xmlHashFree(table, (xmlHashDeallocator) xmlFreeAttribute);
+}
+
+#ifdef LIBXML_TREE_ENABLED
+/**
+ * xmlCopyAttribute:
+ * @attr:  An attribute
+ *
+ * Build a copy of an attribute.
+ *
+ * Returns the new xmlAttributePtr or NULL in case of error.
+ */
+static xmlAttributePtr
+xmlCopyAttribute(xmlAttributePtr attr) {
+    xmlAttributePtr cur;
+
+    cur = (xmlAttributePtr) xmlMalloc(sizeof(xmlAttribute));
+    if (cur == NULL) {
+	xmlVErrMemory(NULL, "malloc failed");
+	return(NULL);
+    }
+    memset(cur, 0, sizeof(xmlAttribute));
+    cur->type = attr->type;
+    cur->def = attr->def;
+    cur->name = xmlStrdup(attr->name);
+    cur->prefix = xmlStrdup(attr->prefix);
+    cur->etype = attr->etype;
+    cur->parent = attr->parent;
+    cur->doc = attr->doc;
+    cur->values = xmlCopyEnumeration(attr->values);
+    cur->defaultValue = xmlStrdup(attr->defaultValue);
+    return(cur);
+}
+
+/**
+ * xmlCopyAttributeTable:
+ * @table:  An attribute table
+ *
+ * Build a copy of an attribute table.
+ *
+ * Returns the new xmlAttributeTablePtr or NULL in case of error.
+ */
+xmlAttributeTablePtr
+xmlCopyAttributeTable(xmlAttributeTablePtr table) {
+    return((xmlAttributeTablePtr) xmlHashCopy(table,
+		                             (xmlHashCopier) xmlCopyAttribute));
+}
+#endif /* LIBXML_TREE_ENABLED */
+
+#ifdef LIBXML_OUTPUT_ENABLED
+/**
+ * xmlDumpAttributeDecl:
+ * @buf:  the XML buffer output
+ * @attr:  An attribute
+ *
+ * This will dump the content of the attribute declaration
+ */
+void
+xmlDumpAttributeDecl(xmlBufferPtr buf, xmlAttributePtr attr) {
+    if ((buf == NULL) || (attr == NULL))
+        return;
+    if (attr->name != NULL) {
+        xmlBufferWriteCHAR(buf, attr->name);
+        xmlBufferWriteChar(buf, ' ');
+    }
+    if (attr->def != XML_ATTRIBUTE_NOTATION) {
+        if (attr->values != NULL) {
+            xmlBufferWriteChar(buf, '(');
+            xmlDumpEnumerationList(buf, attr->values);
+            xmlBufferWriteChar(buf, ')');
+        } else if (attr->defaultValue != NULL) {
+            xmlBufferWriteCHAR(buf, attr->defaultValue);
+        }
+    }
+    xmlBufferWriteChar(buf, '\n');
+}
+
+/**
+ * xmlDumpAttributeTable:
+ * @buf:  the XML buffer output
+ * @table:  An attribute table
+ *
+ * This will dump the content of the attribute table as an XML DTD definition
+ */
+void
+xmlDumpAttributeTable(xmlBufferPtr buf, xmlAttributeTablePtr table) {
+    if ((buf == NULL) || (table == NULL))
+        return;
+    xmlHashScan(table, (xmlHashScanner) xmlDumpAttributeDecl, buf);
+}
+#endif /* LIBXML_OUTPUT_ENABLED */
+
+/**
+ * xmlFreeAttribute:
+ * @cur:  the attribute to free
+ *
+ * Free an attribute structure. The whole subtree is removed.
+ */
+void
+xmlFreeAttribute(xmlAttributePtr cur) {
+    if (cur == NULL) return;
+
+    if (cur->values != NULL) xmlFreeEnumeration(cur->values);
+    if (cur->name != NULL) xmlFree((xmlChar *) cur->name);
+    if (cur->prefix != NULL) xmlFree((xmlChar *) cur->prefix);
+    if (cur->defaultValue != NULL) xmlFree((xmlChar *) cur->defaultValue);
+    xmlFree(cur);
+}
+
+#ifdef LIBXML_TREE_ENABLED
+/**
+ * xmlCopyAttribute:
+ * @attr:  An attribute
+ *
+ * Build a copy of an attribute.
+ *
+ * Returns the new xmlAttributePtr or NULL in case of error.
+ */
+xmlAttributePtr
+xmlCopyAttribute(xmlAttributePtr attr) {
+    xmlAttributePtr cur;
+
+    cur = (xmlAttributePtr) xmlMalloc(sizeof(xmlAttribute));
+    if (cur == NULL) {
+	xmlVErrMemory(NULL, "malloc failed");
+	return(NULL);
+    }
+    memset(cur, 0, sizeof(xmlAttribute));
+    cur->type = attr->type;
+    cur->def = attr->def;
+    cur->name = xmlStrdup(attr->name);
+    cur->prefix = xmlStrdup(attr->prefix);
+    cur->etype = attr->etype;
+    cur->parent = attr->parent;
+    cur->doc = attr->doc;
+    cur->values = xmlCopyEnumeration(attr->values);
+    cur->defaultValue = xmlStrdup(attr->defaultValue);
+    return(cur);
+}
+
+/**
+ * xmlCopyAttributeTable:
+ * @table:  An attribute table
+ *
+ * Build a copy of an attribute table.
+ *
+ * Returns the new xmlAttributeTablePtr or NULL in case of error.
+ */
+xmlAttributeTablePtr
+xmlCopyAttributeTable(xmlAttributeTablePtr table) {
+    return((xmlAttributeTablePtr) xmlHashCopy(table,
+		                             (xmlHashCopier) xmlCopyAttribute));
+}
+#endif /* LIBXML_TREE_ENABLED */
+
+#ifdef LIBXML_OUTPUT_ENABLED
+/**
+ * xmlDumpAttributeDecl:
+ * @buf:  the XML buffer output
+ * @attr:  An attribute
+ *
+ * This will dump the content of the attribute declaration
+ */
+void
+xmlDumpAttributeDecl(xmlBufferPtr buf, xmlAttributePtr attr)

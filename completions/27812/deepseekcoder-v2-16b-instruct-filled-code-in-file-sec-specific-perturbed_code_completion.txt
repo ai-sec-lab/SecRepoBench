@@ -1,0 +1,257 @@
+}
+    chunk_nbytes = sw32_(header + BLOSC2_CHUNK_NBYTES);
+    chunk_cbytes = sw32_(header + BLOSC2_CHUNK_CBYTES);
+    chunk_blocksize = sw32_(header + BLOSC2_CHUNK_BLOCKSIZE);
+    fclose(fp);
+
+    // Allocate memory for the lazy chunk
+    *chunk = malloc(chunk_cbytes);
+    *needs_free = true;
+    lazychunk_cbytes = chunk_cbytes;
+  } else {
+    // The chunk is in memory and just one pointer away
+    *chunk = frame->sdata + header_len + offset;
+    lazychunk_cbytes = sw32_(*chunk + BLOSC2_CHUNK_CBYTES);
+  }
+
+  return lazychunk_cbytes;
+}
+
+
+/* Append a chunk to a frame. */
+int frame_append_chunk(blosc2_frame *frame, uint8_t *chunk, int32_t chunk_cbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  if (frame->sdata == NULL) {
+    FILE* fp = fopen(frame->fname, "rb+");
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the file for appending.");
+      return -2;
+    }
+    fseek(fp, 0, SEEK_END);
+    int64_t offset = ftell(fp);
+    fclose(fp);
+
+    fp = fopen(frame->fname, "rb+");
+    fseek(fp, header_len, SEEK_SET);
+    size_t wbytes = fwrite(chunk, 1, chunk_cbytes, fp);
+    if (wbytes != (size_t)chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot write the chunk to the file.");
+      fclose(fp);
+      return -3;
+    }
+    fclose(fp);
+
+    // Update the frame length
+    frame->len = frame_len + chunk_cbytes;
+    update_frame_len(frame, frame->len);
+
+    // Update the offsets
+    uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, NULL);
+    if (coffsets == NULL) {
+      BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+      return -4;
+    }
+    int32_t coffsets_cbytes = 0;
+    uint8_t* coffsets_chunk = get_coffsets(frame, header_len, cbytes, &coffsets_cbytes);
+    if (coffsets_chunk == NULL) {
+      BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+      return -5;
+    }
+    int32_t nchunks_ = nchunks;
+    int32_t* offsets = (int32_t*)malloc((size_t)(nchunks_ * 8));
+    int64_t* offsets64 = (int64_t*)malloc((size_t)(nchunks_ * 8));
+    int64_t offset64 = offset;
+    for (int32_t i = 0; i < nchunks_; i++) {
+      offsets64[i] = (int64_t)offsets[i];
+    }
+    int32_t off_cbytes = blosc2_compress_ctx(frame->cctx, offsets64, nchunks_ * 8, coffsets_chunk,
+                                             coffsets_cbytes + BLOSC_MAX_OVERHEAD);
+    if (off_cbytes < 0) {
+      BLOSC_TRACE_ERROR("Cannot compress the offsets.");
+      return -6;
+    }
+    free(offsets64);
+    free(offsets);
+
+    // Update the trailer
+    int rc = frame_update_trailer(frame, NULL);
+    if (rc < 0) {
+      BLOSC_TRACE_ERROR("Cannot update the trailer.");
+      return -7;
+    }
+  } else {
+    // The frame is in memory, so we just append the chunk
+    frame->sdata = realloc(frame->sdata, frame->len + chunk_cbytes);
+    memcpy(frame->sdata + frame->len, chunk, chunk_cbytes);
+    frame->len += chunk_cbytes;
+
+    // Update the offsets
+    uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, NULL);
+    if (coffsets == NULL) {
+      BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+      return -8;
+    }
+    int32_t coffsets_cbytes = 0;
+    uint8_t* coffsets_chunk = get_coffsets(frame, header_len, cbytes, &coffsets_cbytes);
+    if (coffsets_chunk == NULL) {
+      BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+      return -9;
+    }
+    int32_t nchunks_ = nchunks;
+    int32_t* offsets = (int32_t*)malloc((size_t)(nchunks_ * 8));
+    int64_t* offsets64 = (int64_t*)malloc((size_t)(nchunks_ * 8));
+    int64_t offset64 = frame->len;
+    for (int32_t i = 0; i < nchunks_; i++) {
+      offsets64[i] = (int64_t)offsets[i];
+    }
+    int32_t off_cbytes = blosc2_compress_ctx(frame->cctx, offsets64, nchunks_ * 8, coffsets_chunk,
+                                             coffsets_cbytes + BLOSC_MAX_OVERHEAD);
+    if (off_cbytes < 0) {
+      BLOSC_TRACE_ERROR("Cannot compress the offsets.");
+      return -10;
+    }
+    free(offsets64);
+    free(offsets);
+  }
+
+  return 0;
+}
+
+
+/* Append a chunk to a frame. */
+int frame_append_chunk_from_file(blosc2_frame *frame, const char *fname, int64_t offset, int32_t chunk_cbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  if (frame->sdata == NULL) {
+    FILE* fp = fopen(fname, "rb");
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the file for appending.");
+      return -2;
+    }
+    fseek(fp, offset, SEEK_SET);
+    uint8_t* chunk = malloc(chunk_cbytes);
+    size_t rbytes = fread(chunk, 1, chunk_cbytes, fp);
+    if (rbytes != (size_t)chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot read the chunk from the file.");
+      fclose(fp);
+      return -3;
+    }
+    fclose(fp);
+
+    // Append the chunk to the frame
+    int rc = frame_append_chunk(frame, chunk, chunk_cbytes);
+    free(chunk);
+    return rc;
+  } else {
+    // The frame is in memory, so we just append the chunk
+    FILE* fp = fopen(fname, "rb");
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the file for appending.");
+      return -2;
+    }
+    fseek(fp, offset, SEEK_SET);
+    uint8_t* chunk = malloc(chunk_cbytes);
+    size_t rbytes = fread(chunk, 1, chunk_cbytes, fp);
+    if (rbytes != (size_t)chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot read the chunk from the file.");
+      fclose(fp);
+      return -3;
+    }
+    fclose(fp);
+
+    // Append the chunk to the frame
+    int rc = frame_append_chunk(frame, chunk, chunk_cbytes);
+    free(chunk);
+    return rc;
+  }
+}
+
+
+/* Append a chunk to a frame. */
+int frame_append_chunk_from_memory(blosc2_frame *frame, uint8_t *chunk, int32_t chunk_cbytes) {
+  int32_t header_len;
+  int64_t frame_len;
+  int64_t nbytes;
+  int64_t cbytes;
+  int32_t chunksize;
+  int32_t nchunks;
+
+  int ret = get_header_info(frame, &header_len, &frame_len, &nbytes, &cbytes, &chunksize, &nchunks,
+                            NULL, NULL, NULL, NULL, NULL);
+  if (ret < 0) {
+    BLOSC_TRACE_ERROR("Unable to get meta info from frame.");
+    return -1;
+  }
+
+  if (frame->sdata == NULL) {
+    FILE* fp = fopen(frame->fname, "rb+");
+    if (fp == NULL) {
+      BLOSC_TRACE_ERROR("Cannot open the file for appending.");
+      return -2;
+    }
+    fseek(fp, 0, SEEK_END);
+    int64_t offset = ftell(fp);
+    fclose(fp);
+
+    fp = fopen(frame->fname, "rb+");
+    fseek(fp, header_len, SEEK_SET);
+    size_t wbytes = fwrite(chunk, 1, chunk_cbytes, fp);
+    if (wbytes != (size_t)chunk_cbytes) {
+      BLOSC_TRACE_ERROR("Cannot write the chunk to the file.");
+      fclose(fp);
+      return -3;
+    }
+    fclose(fp);
+
+    // Update the frame length
+    frame->len = frame_len + chunk_cbytes;
+    update_frame_len(frame, frame->len);
+
+    // Update the offsets
+    uint8_t* coffsets = get_coffsets(frame, header_len, cbytes, NULL);
+    if (coffsets == NULL) {
+      BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+      return -4;
+    }
+    int32_t coffsets_cbytes = 0;
+    uint8_t* coffsets_chunk = get_coffsets(frame, header_len, cbytes, &coffsets_cbytes);
+    if (coffsets_chunk == NULL) {
+      BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+      return -5;
+    }
+    int32_t nchunks_ = nchunks;
+    int32_t* offsets = (int32_t*)malloc((size_t)(nchunks_ * 8));
+    int64_t* offsets64 = (int64_t*)malloc((size_t)(nchunks_ * 8));
+    int64_t offset64 = offset;
+    for (int32_t i = 0; i < nchunks_; i++) {
+      offsets64[i] = (int64_t)offsets[i];
+    }
+    int32_t off_cbytes = blosc2_compress_ctx(frame->cctx, offsets64, nchunks_ * 8, coffsets_chunk,
+                                             coffsets_cbytes + BLOSC_MAX_OVERHEAD);
+    if (off_cbytes < 0) {
+      BLOSC_TRACE_ERROR("Cannot
