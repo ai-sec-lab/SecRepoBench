@@ -1,0 +1,154 @@
+static int jpeg2000_read_main_headers(Jpeg2000DecoderContext *s)
+{
+    Jpeg2000CodingStyle *codsty = s->codsty;
+    Jpeg2000QuantStyle *qntsty  = s->qntsty;
+    Jpeg2000POC         *poc    = &s->poc;
+    uint8_t *properties         = s->properties;
+
+    for (;;) {
+        int len, ret = 0;
+        uint16_t marker;
+        int oldpos;
+
+        if (bytestream2_get_bytes_left(&s->g) < 2) {
+            av_log(s->avctx, AV_LOG_ERROR, "Missing EOC\n");
+            break;
+        }
+
+        marker = bytestream2_get_be16u(&s->g);
+        oldpos = bytestream2_tell(&s->g);
+        if (marker >= 0xFF30 && marker <= 0xFF3F)
+            continue;
+        if (marker == JPEG2000_SOD) {
+            Jpeg2000Tile *tile;
+            Jpeg2000TilePart *tp;
+
+            if (!s->tile) {
+                av_log(s->avctx, AV_LOG_ERROR, "Missing SIZ\n");
+                return AVERROR_INVALIDDATA;
+            }
+            if (s->curtileno < 0) {
+                av_log(s->avctx, AV_LOG_ERROR, "Missing SOT\n");
+                return AVERROR_INVALIDDATA;
+            }
+
+            tile = s->tile + s->curtileno;
+            tp = tile->tile_part + tile->tp_idx;
+            if (tp->tp_end < s->g.buffer) {
+                av_log(s->avctx, AV_LOG_ERROR, "Invalid tpend\n");
+                return AVERROR_INVALIDDATA;
+            }
+
+            // Initialize the bytestream for tile-part headers using packed header streams if PPM is present.
+            // Initialize the bytestream for packed packet headers if PPT is present and it's the first tile-part.
+            // Set up the data stream for the current tile-part by calculating its size and skipping to its end in the buffer.
+            // Continue to the next iteration of the loop to process more headers or reach the end marker.
+            // <MASK>
+        }
+        if (marker == JPEG2000_EOC)
+            break;
+
+        len = bytestream2_get_be16(&s->g);
+        if (len < 2 || bytestream2_get_bytes_left(&s->g) < len - 2) {
+            if (s->avctx->strict_std_compliance >= FF_COMPLIANCE_STRICT) {
+                av_log(s->avctx, AV_LOG_ERROR, "Invalid len %d left=%d\n", len, bytestream2_get_bytes_left(&s->g));
+                return AVERROR_INVALIDDATA;
+            }
+            av_log(s->avctx, AV_LOG_WARNING, "Missing EOC Marker.\n");
+            break;
+        }
+
+        switch (marker) {
+        case JPEG2000_SIZ:
+            if (s->ncomponents) {
+                av_log(s->avctx, AV_LOG_ERROR, "Duplicate SIZ\n");
+                return AVERROR_INVALIDDATA;
+            }
+            ret = get_siz(s);
+            if (!s->tile)
+                s->numXtiles = s->numYtiles = 0;
+            break;
+        case JPEG2000_COC:
+            ret = get_coc(s, codsty, properties);
+            break;
+        case JPEG2000_COD:
+            ret = get_cod(s, codsty, properties);
+            break;
+        case JPEG2000_RGN:
+            ret = get_rgn(s, len);
+            break;
+        case JPEG2000_QCC:
+            ret = get_qcc(s, len, qntsty, properties);
+            break;
+        case JPEG2000_QCD:
+            ret = get_qcd(s, len, qntsty, properties);
+            break;
+        case JPEG2000_POC:
+            ret = get_poc(s, len, poc);
+            break;
+        case JPEG2000_SOT:
+            if (!s->in_tile_headers) {
+                s->in_tile_headers = 1;
+                if (s->has_ppm) {
+                    bytestream2_init(&s->packed_headers_stream, s->packed_headers, s->packed_headers_size);
+                }
+            }
+            if (!(ret = get_sot(s, len))) {
+                av_assert1(s->curtileno >= 0);
+                codsty = s->tile[s->curtileno].codsty;
+                qntsty = s->tile[s->curtileno].qntsty;
+                poc    = &s->tile[s->curtileno].poc;
+                properties = s->tile[s->curtileno].properties;
+            }
+            break;
+        case JPEG2000_PLM:
+            // the PLM marker is ignored
+        case JPEG2000_COM:
+            // the comment is ignored
+            bytestream2_skip(&s->g, len - 2);
+            break;
+        case JPEG2000_CRG:
+            ret = read_crg(s, len);
+            break;
+        case JPEG2000_TLM:
+            // Tile-part lengths
+            ret = get_tlm(s, len);
+            break;
+        case JPEG2000_PLT:
+            // Packet length, tile-part header
+            ret = get_plt(s, len);
+            break;
+        case JPEG2000_PPM:
+            // Packed headers, main header
+            if (s->in_tile_headers) {
+                av_log(s->avctx, AV_LOG_ERROR, "PPM Marker can only be in Main header\n");
+                return AVERROR_INVALIDDATA;
+            }
+            ret = get_ppm(s, len);
+            break;
+        case JPEG2000_PPT:
+            // Packed headers, tile-part header
+            if (s->has_ppm) {
+                av_log(s->avctx, AV_LOG_ERROR,
+                       "Cannot have both PPT and PPM marker.\n");
+                return AVERROR_INVALIDDATA;
+            }
+
+            ret = get_ppt(s, len);
+            break;
+        default:
+            av_log(s->avctx, AV_LOG_ERROR,
+                   "unsupported marker 0x%.4"PRIX16" at pos 0x%X\n",
+                   marker, bytestream2_tell(&s->g) - 4);
+            bytestream2_skip(&s->g, len - 2);
+            break;
+        }
+        if (bytestream2_tell(&s->g) - oldpos != len || ret) {
+            av_log(s->avctx, AV_LOG_ERROR,
+                   "error during processing marker segment %.4"PRIx16"\n",
+                   marker);
+            return ret ? ret : -1;
+        }
+    }
+    return 0;
+}

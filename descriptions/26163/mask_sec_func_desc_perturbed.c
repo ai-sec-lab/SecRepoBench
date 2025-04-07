@@ -1,0 +1,37 @@
+static int fp_read_radix_16(fp_int *fpnumber, const char *str)
+{
+  int     i, j, k, neg;
+  char    ch;
+
+  /* if the leading digit is a
+   * minus set the sign to negative.
+   */
+  if (*str == '-') {
+    ++str;
+    neg = FP_NEG;
+  } else {
+    neg = FP_ZPOS;
+  }
+
+  j = 0;
+  k = 0;
+  for (i = (int)(XSTRLEN(str) - 1); i >= 0; i--) {
+      ch = str[i];
+      // Convert the current character in the string to its corresponding numeric value
+      // based on whether it is a digit or a hexadecimal letter (both uppercase and lowercase).
+      // If the character is not valid, return an error code.
+      // Compute the current position in the array where the resulting value should be stored.
+      // Update the array dp to reflect the decoded number.
+      // Manage the current bit position and digit index appropriately.
+      // Ensure that the number of digits does not exceed the maximum size (`FP_SIZE`).
+      // <MASK>
+  }
+
+  fpnumber->used = k + 1;
+  fp_clamp(fpnumber);
+  /* set the sign only if a != 0 */
+  if (fp_iszero(fpnumber) != FP_YES) {
+     fpnumber->sign = neg;
+  }
+  return FP_OKAY;
+}

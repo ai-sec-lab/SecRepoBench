@@ -1,4 +1,4 @@
-void SMDImporter::ParseNodeInfo(const char* szCurrent, const char** szCurrentOut) {
+void SMDImporter::ParseNodeInfo(const char* currentChar, const char** szCurrentOut) {
     // Initialize a variable to store the bone index.
     // Skip any spaces or line endings from the current position in the string.
     // Parse an unsigned integer from the current position in the string to get the bone index.
@@ -7,22 +7,22 @@ void SMDImporter::ParseNodeInfo(const char* szCurrent, const char** szCurrentOut
     // Retrieve the bone object from the list using the parsed index.
     // Set a flag to indicate if the bone name should be enclosed in double quotes.
     // <MASK>
-    if ('\"' != *szCurrent) {
+    if ('\"' != *currentChar) {
         LogWarning("Bone name is expected to be enclosed in "
             "double quotation marks. ");
         bQuota = false;
     } else {
-        ++szCurrent;
+        ++currentChar;
     }
 
-    const char* szEnd = szCurrent;
+    const char* szEnd = currentChar;
     for ( ;; ) {
         if (bQuota && '\"' == *szEnd) {
-            boneNameLength = (unsigned int)(szEnd - szCurrent);
+            iBone = (unsigned int)(szEnd - currentChar);
             ++szEnd;
             break;
         } else if (!bQuota && IsSpaceOrNewLine(*szEnd)) {
-            boneNameLength = (unsigned int)(szEnd - szCurrent);
+            iBone = (unsigned int)(szEnd - currentChar);
             break;
         } else if (!(*szEnd)) {
             LogErrorNoThrow("Unexpected EOF/EOL while parsing bone name");
@@ -30,11 +30,11 @@ void SMDImporter::ParseNodeInfo(const char* szCurrent, const char** szCurrentOut
         }
         ++szEnd;
     }
-    bone.mName = std::string(szCurrent,boneNameLength);
-    szCurrent = szEnd;
+    bone.mName = std::string(currentChar,iBone);
+    currentChar = szEnd;
 
     // the only negative bone parent index that could occur is -1 AFAIK
-    if(!ParseSignedInt(szCurrent,&szCurrent,(int&)bone.iParent))  {
+    if(!ParseSignedInt(currentChar,&currentChar,(int&)bone.iParent))  {
         LogErrorNoThrow("Unexpected EOF/EOL while parsing bone parent index. Assuming -1");
         SMDI_PARSE_RETURN;
     }

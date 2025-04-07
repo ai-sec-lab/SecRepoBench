@@ -1,0 +1,72 @@
+static SplayTreeInfo *GetMVGMacros(const char *primitive)
+{
+  char
+    *token;
+
+  const char
+    *q;
+
+  size_t
+    extent;
+
+  SplayTreeInfo
+    *macros;
+
+  /*
+    Scan graphic primitives for definitions and classes.
+  */
+  if (primitive == (const char *) NULL)
+    return((SplayTreeInfo *) NULL);
+  macros=NewSplayTree(CompareSplayTreeString,RelinquishMagickMemory,
+    RelinquishMagickMemory);
+  token=AcquireString(primitive);
+  extent=strlen(token)+MagickPathExtent;
+  for (q=primitive; *q != '\0'; )
+  {
+    GetNextToken(q,&q,extent,token);
+    if (*token == '\0')
+      break;
+    if (*token == '#')
+      {
+        /*
+          Skip comment.
+        */
+        while ((*q != '\n') && (*q != '\0'))
+          q++;
+        continue;
+      }
+    if (LocaleCompare("push",token) == 0)
+      {
+        register const char
+          *end,
+          *start;
+
+        GetNextToken(q,&q,extent,token);
+        if (*q == '"')
+          {
+            char
+              name[MagickPathExtent];
+
+            const char
+              *p;
+
+            ssize_t
+             n;
+
+            /*
+              Named macro (e.g. push graphic-context "wheel").
+            */
+            GetNextToken(q,&q,extent,token);
+            start=q;
+            // Extract macros from the MVG string. The code iterates through the string 
+            // to find 'push' and 'pop' commands, handling nested structures accordingly.
+            // It skips comments starting with '#'. When a complete macro is identified, 
+            // it extracts the macro definition and adds it to a splay tree 
+            // for later retrieval using the macro name as the key.
+            // <MASK>
+          }
+      }
+  }
+  token=DestroyString(token);
+  return(macros);
+}

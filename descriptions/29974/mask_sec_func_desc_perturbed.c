@@ -1,0 +1,117 @@
+static int
+dissect_tcpopt_sack(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data)
+{
+    proto_tree *field_tree = NULL;
+    proto_item *tf, *ti;
+    guint32 leftedge, rightedge;
+    struct tcp_analysis *tcpd=NULL;
+    struct tcpheader *tcph = (struct tcpheader *)data;
+    guint32 base_ack=0;
+    guint  sack_range_count = 0;
+    int offset = 0;
+    int sackoffset;
+    int optlen = tvb_reported_length(tvb);
+
+    /*
+     * SEQ analysis is the condition for both relative analysis obviously,
+     * and SACK handling for the in-flight update
+     */
+    if(tcp_analyze_seq) {
+        /* find(or create if needed) the conversation for this tcp session */
+        tcpd=get_tcp_conversation_data(NULL,pinfo);
+
+        if (tcpd) {
+            if (tcp_relative_seq) {
+                base_ack=tcpd->rev->base_seq;
+            }
+
+            /*
+             * initialize the number of SACK blocks to 0, it will be
+             * updated some lines later
+             */
+            if (tcp_track_bytes_in_flight && tcpd->fwd->tcp_analyze_seq_info) {
+                tcpd->fwd->tcp_analyze_seq_info->num_sack_ranges = 0;
+            }
+        }
+    }
+
+    ti = proto_tree_add_item(tree, proto_tcp_option_sack, tvb, offset, -1, ENC_NA);
+    field_tree = proto_item_add_subtree(ti, ett_tcp_option_sack);
+
+    proto_tree_add_item(field_tree, hf_tcp_option_kind, tvb,
+                        offset, 1, ENC_BIG_ENDIAN);
+    proto_tree_add_item(field_tree, hf_tcp_option_len, tvb,
+                        offset + 1, 1, ENC_BIG_ENDIAN);
+
+    offset += 2;    /* skip past type and length */
+    optlen -= 2;    /* subtract size of type and length */
+
+    sackoffset = offset;
+    while (optlen > 0) {
+        if (optlen < 4) {
+            proto_tree_add_expert(field_tree, pinfo, &ei_tcp_suboption_malformed, tvb, offset, optlen);
+            break;
+        }
+        leftedge = tvb_get_ntohl(tvb, offset)-base_ack;
+        proto_tree_add_uint_format(field_tree, hf_tcp_option_sack_sle, tvb,
+                                   offset, 4, leftedge,
+                                   "left edge = %u%s", leftedge,
+                                   (tcp_analyze_seq && tcp_relative_seq) ? " (relative)" : "");
+        optlen -= 4;
+        if (optlen < 4) {
+            proto_tree_add_expert(field_tree, pinfo, &ei_tcp_suboption_malformed, tvb, offset, optlen);
+            break;
+        }
+        /* XXX - check whether it goes past end of packet */
+        rightedge = tvb_get_ntohl(tvb, offset + 4)-base_ack;
+        optlen -= 4;
+        // Add formatted representation of the right edge of the SACK block to the protocol tree.
+        // Append the left edge and right edge values to the packet info for further analysis.
+        // Increment the counter of SACK ranges.
+        // If sequence analysis and byte tracking are enabled, and the forward sequence info is available,
+        // store the left and right edge of the SACK block for bytes-in-flight analysis.
+        // Update number of SACK ranges in the forward sequence information.
+        // <MASK>
+        if (tcph != NULL && (tcph->num_sack_ranges < MAX_TCP_SACK_RANGES)) {
+            tcph->sack_left_edge[tcph->num_sack_ranges] = leftedge;
+            tcph->sack_right_edge[tcph->num_sack_ranges] = rightedge;
+            tcph->num_sack_ranges++;
+        }
+
+        proto_item_append_text(field_tree, " %u-%u", leftedge, rightedge);
+        offset += 8;
+    }
+
+
+    /* Show number of SACK ranges in this option as a generated field */
+    tf = proto_tree_add_uint(field_tree, hf_tcp_option_sack_range_count,
+                             tvb, 0, 0, sack_range_count);
+    proto_item_set_generated(tf);
+
+    /* RFC 2883 "An Extension to the Selective Acknowledgement (SACK) Option for TCP" aka "D-SACK"
+     * Section 4
+     *   Conditions: Either the first sack-block is inside the already acknowledged range or
+     *               the first sack block is inside the second sack block.
+     *
+     * Maybe add later:
+     * (1) A D-SACK block is only used to report a duplicate contiguous sequence of data received by
+     *     the receiver in the most recent packet.
+     */
+    if (GE_SEQ(tcph->sack_right_edge[0], tcph->th_ack) ||
+         (tcph->num_sack_ranges > 1 &&
+          LT_SEQ(tcph->sack_left_edge[1], tcph->sack_right_edge[0]) &&
+          GE_SEQ(tcph->sack_right_edge[1], tcph->sack_right_edge[0]))
+    ) {
+        leftedge = tvb_get_ntohl(tvb, sackoffset)-base_ack;
+        tf = proto_tree_add_uint_format(field_tree, hf_tcp_option_sack_dsack_le, tvb, sackoffset, 4, leftedge,
+            "D-SACK Left Edge = %u%s", leftedge, (tcp_analyze_seq && tcp_relative_seq) ? " (relative)" : "");
+        proto_item_set_generated(tf);
+        rightedge = tvb_get_ntohl(tvb, sackoffset+4)-base_ack;
+        tf = proto_tree_add_uint_format(field_tree, hf_tcp_option_sack_dsack_re, tvb, sackoffset+4, 4, rightedge,
+            "D-SACK Right Edge = %u%s", rightedge, (tcp_analyze_seq && tcp_relative_seq) ? " (relative)" : "");
+        proto_item_set_generated(tf);
+        proto_tree_add_expert(field_tree, pinfo, &ei_tcp_option_sack_dsack, tvb, sackoffset, 8);
+    }
+
+    return tvb_captured_length(tvb);
+}

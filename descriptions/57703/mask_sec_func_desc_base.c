@@ -1,0 +1,14 @@
+static void
+clear_all_old(mrb_state *mrb, mrb_gc *gc)
+{
+  mrb_assert(is_generational(gc));
+  if (gc->full) {
+    /* finish the half baked GC */
+    incremental_gc_finish(mrb, gc);
+  }
+  // This block handles the transition of all live objects, including old ones, to the white color during garbage collection. 
+  // The generational mode is temporarily disabled to reset the state, allowing the incremental sweep and finish processes 
+  // to occur. After completing the sweep, the generational mode is re-enabled to continue with the generational garbage collection process.
+  // <MASK>
+  gc->atomic_gray_list = gc->gray_list = NULL;
+}

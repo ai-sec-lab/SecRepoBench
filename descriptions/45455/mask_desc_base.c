@@ -12632,3 +12632,2902 @@ xmlCreateIOParserCtxt(xmlSAXHandlerPtr sax, void *user_data,
 }
 
 #ifdef LIBXML_VALID_ENABLED
+/************************************************************************
+ *									*
+ *		Front ends when parsing a DTD				*
+ *									*
+ ************************************************************************/
+
+/**
+ * xmlIOParseDTD:
+ * @sax:  the SAX handler block or NULL
+ * @input:  an Input Buffer
+ * @enc:  the charset encoding if known
+ *
+ * Load and parse a DTD
+ *
+ * Returns the resulting xmlDtdPtr or NULL in case of error.
+ * @input will be freed by the function in any case.
+ */
+
+xmlDtdPtr
+xmlIOParseDTD(xmlSAXHandlerPtr sax, xmlParserInputBufferPtr input,
+	      xmlCharEncoding enc) {
+    xmlDtdPtr ret = NULL;
+    xmlParserCtxtPtr ctxt;
+    xmlParserInputPtr pinput = NULL;
+    xmlChar start[4];
+
+    if (input == NULL)
+	return(NULL);
+
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL) {
+        xmlFreeParserInputBuffer(input);
+	return(NULL);
+    }
+
+    /* We are loading a DTD */
+    ctxt->options |= XML_PARSE_DTDLOAD;
+
+    /*
+     * Set-up the SAX context
+     */
+    if (sax != NULL) {
+	if (ctxt->sax != NULL)
+	    xmlFree(ctxt->sax);
+        ctxt->sax = sax;
+        ctxt->userData = ctxt;
+    }
+    xmlDetectSAX2(ctxt);
+
+    /*
+     * generate a parser input from the I/O handler
+     */
+
+    pinput = xmlNewIOInputStream(ctxt, input, XML_CHAR_ENCODING_NONE);
+    if (pinput == NULL) {
+        if (sax != NULL) ctxt->sax = NULL;
+        xmlFreeParserInputBuffer(input);
+	xmlFreeParserCtxt(ctxt);
+	return(NULL);
+    }
+
+    /*
+     * plug some encoding conversion routines here.
+     */
+    if (xmlPushInput(ctxt, pinput) < 0) {
+        if (sax != NULL) ctxt->sax = NULL;
+	xmlFreeParserCtxt(ctxt);
+	return(NULL);
+    }
+    if (enc != XML_CHAR_ENCODING_NONE) {
+        xmlSwitchEncoding(ctxt, enc);
+    }
+
+    pinput->filename = NULL;
+    pinput->line = 1;
+    pinput->col = 1;
+    pinput->base = ctxt->input->cur;
+    pinput->cur = ctxt->input->cur;
+    pinput->free = NULL;
+
+    /*
+     * let's parse that entity knowing it's an external subset.
+     */
+    ctxt->inSubset = 2;
+    ctxt->myDoc = xmlNewDoc(BAD_CAST "1.0");
+    if (ctxt->myDoc == NULL) {
+	xmlErrMemory(ctxt, "New Doc failed");
+	return(NULL);
+    }
+    ctxt->myDoc->properties = XML_DOC_INTERNAL;
+    ctxt->myDoc->extSubset = xmlNewDtd(ctxt->myDoc, BAD_CAST "none",
+	                               BAD_CAST "none", BAD_CAST "none");
+
+    if ((enc == XML_CHAR_ENCODING_NONE) &&
+        ((ctxt->input->end - ctxt->input->cur) >= 4)) {
+	/*
+	 * Get the 4 first bytes and decode the charset
+	 * if enc != XML_CHAR_ENCODING_NONE
+	 * plug some encoding conversion routines.
+	 */
+	start[0] = RAW;
+	start[1] = NXT(1);
+	start[2] = NXT(2);
+	start[3] = NXT(3);
+	enc = xmlDetectCharEncoding(start, 4);
+	if (enc != XML_CHAR_ENCODING_NONE) {
+	    xmlSwitchEncoding(ctxt, enc);
+	}
+    }
+
+    xmlParseExternalSubset(ctxt, BAD_CAST "none", BAD_CAST "none");
+
+    if (ctxt->myDoc != NULL) {
+	if (ctxt->wellFormed) {
+	    ret = ctxt->myDoc->extSubset;
+	    ctxt->myDoc->extSubset = NULL;
+	    if (ret != NULL) {
+		xmlNodePtr tmp;
+
+		ret->doc = NULL;
+		tmp = ret->children;
+		while (tmp != NULL) {
+		    tmp->doc = NULL;
+		    tmp = tmp->next;
+		}
+	    }
+	} else {
+	    ret = NULL;
+	}
+        xmlFreeDoc(ctxt->myDoc);
+        ctxt->myDoc = NULL;
+    }
+    if (sax != NULL) ctxt->sax = NULL;
+    xmlFreeParserCtxt(ctxt);
+
+    return(ret);
+}
+
+/**
+ * xmlSAXParseDTD:
+ * @sax:  the SAX handler block
+ * @ExternalID:  a NAME* containing the External ID of the DTD
+ * @SystemID:  a NAME* containing the URL to the DTD
+ *
+ * Load and parse an external subset.
+ *
+ * Returns the resulting xmlDtdPtr or NULL in case of error.
+ */
+
+xmlDtdPtr
+xmlSAXParseDTD(xmlSAXHandlerPtr sax, const xmlChar *ExternalID,
+                          const xmlChar *SystemID) {
+    xmlDtdPtr ret = NULL;
+    xmlParserCtxtPtr ctxt;
+    xmlParserInputPtr input = NULL;
+    xmlCharEncoding enc;
+    xmlChar* systemIdCanonic;
+
+    if ((ExternalID == NULL) && (SystemID == NULL)) return(NULL);
+
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL) {
+	return(NULL);
+    }
+
+    /* We are loading a DTD */
+    ctxt->options |= XML_PARSE_DTDLOAD;
+
+    /*
+     * Set-up the SAX context
+     */
+    if (sax != NULL) {
+	if (ctxt->sax != NULL)
+	    xmlFree(ctxt->sax);
+        ctxt->sax = sax;
+        ctxt->userData = ctxt;
+    }
+
+    /*
+     * Canonicalise the system ID
+     */
+    systemIdCanonic = xmlCanonicPath(SystemID);
+    if ((SystemID != NULL) && (systemIdCanonic == NULL)) {
+	xmlFreeParserCtxt(ctxt);
+	return(NULL);
+    }
+
+    /*
+     * Ask the Entity resolver to load the damn thing
+     */
+
+    if ((ctxt->sax != NULL) && (ctxt->sax->resolveEntity != NULL))
+	input = ctxt->sax->resolveEntity(ctxt->userData, ExternalID,
+	                                 systemIdCanonic);
+    if (input == NULL) {
+        if (sax != NULL) ctxt->sax = NULL;
+	xmlFreeParserCtxt(ctxt);
+	if (systemIdCanonic != NULL)
+	    xmlFree(systemIdCanonic);
+	return(NULL);
+    }
+
+    /*
+     * plug some encoding conversion routines here.
+     */
+    if (xmlPushInput(ctxt, input) < 0) {
+        if (sax != NULL) ctxt->sax = NULL;
+	xmlFreeParserCtxt(ctxt);
+	if (systemIdCanonic != NULL)
+	    xmlFree(systemIdCanonic);
+	return(NULL);
+    }
+    if ((ctxt->input->end - ctxt->input->cur) >= 4) {
+	enc = xmlDetectCharEncoding(ctxt->input->cur, 4);
+	xmlSwitchEncoding(ctxt, enc);
+    }
+
+    if (input->filename == NULL)
+	input->filename = (char *) systemIdCanonic;
+    else
+	xmlFree(systemIdCanonic);
+    input->line = 1;
+    input->col = 1;
+    input->base = ctxt->input->cur;
+    input->cur = ctxt->input->cur;
+    input->free = NULL;
+
+    /*
+     * let's parse that entity knowing it's an external subset.
+     */
+    ctxt->inSubset = 2;
+    ctxt->myDoc = xmlNewDoc(BAD_CAST "1.0");
+    if (ctxt->myDoc == NULL) {
+	xmlErrMemory(ctxt, "New Doc failed");
+        if (sax != NULL) ctxt->sax = NULL;
+	xmlFreeParserCtxt(ctxt);
+	return(NULL);
+    }
+    ctxt->myDoc->properties = XML_DOC_INTERNAL;
+    ctxt->myDoc->extSubset = xmlNewDtd(ctxt->myDoc, BAD_CAST "none",
+	                               ExternalID, SystemID);
+    xmlParseExternalSubset(ctxt, ExternalID, SystemID);
+
+    if (ctxt->myDoc != NULL) {
+	if (ctxt->wellFormed) {
+	    ret = ctxt->myDoc->extSubset;
+	    ctxt->myDoc->extSubset = NULL;
+	    if (ret != NULL) {
+		xmlNodePtr tmp;
+
+		ret->doc = NULL;
+		tmp = ret->children;
+		while (tmp != NULL) {
+		    tmp->doc = NULL;
+		    tmp = tmp->next;
+		}
+	    }
+	} else {
+	    ret = NULL;
+	}
+        xmlFreeDoc(ctxt->myDoc);
+        ctxt->myDoc = NULL;
+    }
+    if (sax != NULL) ctxt->sax = NULL;
+    xmlFreeParserCtxt(ctxt);
+
+    return(ret);
+}
+
+
+/**
+ * xmlParseDTD:
+ * @ExternalID:  a NAME* containing the External ID of the DTD
+ * @SystemID:  a NAME* containing the URL to the DTD
+ *
+ * Load and parse an external subset.
+ *
+ * Returns the resulting xmlDtdPtr or NULL in case of error.
+ */
+
+xmlDtdPtr
+xmlParseDTD(const xmlChar *ExternalID, const xmlChar *SystemID) {
+    return(xmlSAXParseDTD(NULL, ExternalID, SystemID));
+}
+#endif /* LIBXML_VALID_ENABLED */
+
+/************************************************************************
+ *									*
+ *		Front ends when parsing an Entity			*
+ *									*
+ ************************************************************************/
+
+/**
+ * xmlParseCtxtExternalEntity:
+ * @ctx:  the existing parsing context
+ * @URL:  the URL for the entity to load
+ * @ID:  the System ID for the entity to load
+ * @lst:  the return value for the set of parsed nodes
+ *
+ * Parse an external general entity within an existing parsing context
+ * An external general parsed entity is well-formed if it matches the
+ * production labeled extParsedEnt.
+ *
+ * [78] extParsedEnt ::= TextDecl? content
+ *
+ * Returns 0 if the entity is well formed, -1 in case of args problem and
+ *    the parser error code otherwise
+ */
+
+int
+xmlParseCtxtExternalEntity(xmlParserCtxtPtr ctx, const xmlChar *URL,
+	               const xmlChar *ID, xmlNodePtr *lst) {
+    void *userData;
+
+    if (ctx == NULL) return(-1);
+    /*
+     * If the user provided their own SAX callbacks, then reuse the
+     * userData callback field, otherwise the expected setup in a
+     * DOM builder is to have userData == ctxt
+     */
+    if (ctx->userData == ctx)
+        userData = NULL;
+    else
+        userData = ctx->userData;
+    return xmlParseExternalEntityPrivate(ctx->myDoc, ctx, ctx->sax,
+                                         userData, ctx->depth + 1,
+                                         URL, ID, lst);
+}
+
+/**
+ * xmlParseExternalEntityPrivate:
+ * @doc:  the document the chunk pertains to
+ * @oldctxt:  the previous parser context if available
+ * @sax:  the SAX handler block (possibly NULL)
+ * @user_data:  The user data returned on SAX callbacks (possibly NULL)
+ * @depth:  Used for loop detection, use 0
+ * @URL:  the URL for the entity to load
+ * @ID:  the System ID for the entity to load
+ * @list:  the return value for the set of parsed nodes
+ *
+ * Private version of xmlParseExternalEntity()
+ *
+ * Returns 0 if the entity is well formed, -1 in case of args problem and
+ *    the parser error code otherwise
+ */
+
+static xmlParserErrors
+xmlParseExternalEntityPrivate(xmlDocPtr doc, xmlParserCtxtPtr oldctxt,
+	              xmlSAXHandlerPtr sax,
+		      void *user_data, int depth, const xmlChar *URL,
+		      const xmlChar *ID, xmlNodePtr *list) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr newDoc;
+    xmlNodePtr newRoot;
+    xmlSAXHandlerPtr oldsax = NULL;
+    xmlParserErrors ret = XML_ERR_OK;
+    xmlChar start[4];
+    xmlCharEncoding enc;
+
+    if (((depth > 40) &&
+	((oldctxt == NULL) || (oldctxt->options & XML_PARSE_HUGE) == 0)) ||
+	(depth > 1024)) {
+	return(XML_ERR_ENTITY_LOOP);
+    }
+
+    if (list != NULL)
+        *list = NULL;
+    if ((URL == NULL) && (ID == NULL))
+	return(XML_ERR_INTERNAL_ERROR);
+    if (doc == NULL)
+	return(XML_ERR_INTERNAL_ERROR);
+
+
+    ctxt = xmlCreateEntityParserCtxtInternal(URL, ID, NULL, oldctxt);
+    if (ctxt == NULL) return(XML_WAR_UNDECLARED_ENTITY);
+    ctxt->userData = ctxt;
+    if (sax != NULL) {
+	oldsax = ctxt->sax;
+        ctxt->sax = sax;
+	if (user_data != NULL)
+	    ctxt->userData = user_data;
+    }
+    xmlDetectSAX2(ctxt);
+    newDoc = xmlNewDoc(BAD_CAST "1.0");
+    if (newDoc == NULL) {
+	xmlFreeParserCtxt(ctxt);
+	return(XML_ERR_INTERNAL_ERROR);
+    }
+    newDoc->properties = XML_DOC_INTERNAL;
+    if (doc) {
+        newDoc->intSubset = doc->intSubset;
+        newDoc->extSubset = doc->extSubset;
+        if (doc->dict) {
+            newDoc->dict = doc->dict;
+            xmlDictReference(newDoc->dict);
+        }
+        if (doc->URL != NULL) {
+            newDoc->URL = xmlStrdup(doc->URL);
+        }
+    }
+    newRoot = xmlNewDocNode(newDoc, NULL, BAD_CAST "pseudoroot", NULL);
+    if (newRoot == NULL) {
+	if (sax != NULL)
+	    ctxt->sax = oldsax;
+	xmlFreeParserCtxt(ctxt);
+	newDoc->intSubset = NULL;
+	newDoc->extSubset = NULL;
+        xmlFreeDoc(newDoc);
+	return(XML_ERR_INTERNAL_ERROR);
+    }
+    xmlAddChild((xmlNodePtr) newDoc, newRoot);
+    nodePush(ctxt, newDoc->children);
+    if (doc == NULL) {
+        ctxt->myDoc = newDoc;
+    } else {
+        ctxt->myDoc = doc;
+        newRoot->doc = doc;
+    }
+
+    /*
+     * Get the 4 first bytes and decode the charset
+     * if enc != XML_CHAR_ENCODING_NONE
+     * plug some encoding conversion routines.
+     */
+    GROW;
+    if ((ctxt->input->end - ctxt->input->cur) >= 4) {
+	start[0] = RAW;
+	start[1] = NXT(1);
+	start[2] = NXT(2);
+	start[3] = NXT(3);
+	enc = xmlDetectCharEncoding(start, 4);
+	if (enc != XML_CHAR_ENCODING_NONE) {
+	    xmlSwitchEncoding(ctxt, enc);
+	}
+    }
+
+    /*
+     * Parse a possible text declaration first
+     */
+    if ((CMP5(CUR_PTR, '<', '?', 'x', 'm', 'l')) && (IS_BLANK_CH(NXT(5)))) {
+	xmlParseTextDecl(ctxt);
+        /*
+         * An XML-1.0 document can't reference an entity not XML-1.0
+         */
+        if ((xmlStrEqual(oldctxt->version, BAD_CAST "1.0")) &&
+            (!xmlStrEqual(ctxt->input->version, BAD_CAST "1.0"))) {
+            xmlFatalErrMsg(ctxt, XML_ERR_VERSION_MISMATCH,
+                           "Version mismatch between document and entity\n");
+        }
+    }
+
+    ctxt->instate = XML_PARSER_CONTENT;
+    ctxt->depth = depth;
+    if (oldctxt != NULL) {
+	ctxt->_private = oldctxt->_private;
+	ctxt->loadsubset = oldctxt->loadsubset;
+	ctxt->validate = oldctxt->validate;
+	ctxt->valid = oldctxt->valid;
+	ctxt->replaceEntities = oldctxt->replaceEntities;
+        if (oldctxt->validate) {
+            ctxt->vctxt.error = oldctxt->vctxt.error;
+            ctxt->vctxt.warning = oldctxt->vctxt.warning;
+            ctxt->vctxt.userData = oldctxt->vctxt.userData;
+        }
+	ctxt->external = oldctxt->external;
+        if (ctxt->dict) xmlDictFree(ctxt->dict);
+        ctxt->dict = oldctxt->dict;
+        ctxt->str_xml = xmlDictLookup(ctxt->dict, BAD_CAST "xml", 3);
+        ctxt->str_xmlns = xmlDictLookup(ctxt->dict, BAD_CAST "xmlns", 5);
+        ctxt->str_xml_ns = xmlDictLookup(ctxt->dict, XML_XML_NAMESPACE, 36);
+        ctxt->dictNames = oldctxt->dictNames;
+        ctxt->attsDefault = oldctxt->attsDefault;
+        ctxt->attsSpecial = oldctxt->attsSpecial;
+        ctxt->linenumbers = oldctxt->linenumbers;
+	ctxt->record_info = oldctxt->record_info;
+	ctxt->node_seq.maximum = oldctxt->node_seq.maximum;
+	ctxt->node_seq.length = oldctxt->node_seq.length;
+	ctxt->node_seq.buffer = oldctxt->node_seq.buffer;
+    } else {
+	/*
+	 * Doing validity checking on chunk without context
+	 * doesn't make sense
+	 */
+	ctxt->_private = NULL;
+	ctxt->validate = 0;
+	ctxt->external = 2;
+	ctxt->loadsubset = 0;
+    }
+
+    xmlParseContent(ctxt);
+
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW != 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if (ctxt->node != newDoc->children) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    }
+
+    if (!ctxt->wellFormed) {
+        if (ctxt->errNo == 0)
+	    ret = XML_ERR_INTERNAL_ERROR;
+	else
+	    ret = (xmlParserErrors)ctxt->errNo;
+    } else {
+	if (list != NULL) {
+	    xmlNodePtr cur;
+
+	    /*
+	     * Return the newly created nodeset after unlinking it from
+	     * they pseudo parent.
+	     */
+	    cur = newDoc->children->children;
+	    *list = cur;
+	    while (cur != NULL) {
+		cur->parent = NULL;
+		cur = cur->next;
+	    }
+            newDoc->children->children = NULL;
+	}
+	ret = XML_ERR_OK;
+    }
+
+    /*
+     * Record in the parent context the number of entities replacement
+     * done when parsing that reference.
+     */
+    if (oldctxt != NULL)
+        oldctxt->nbentities += ctxt->nbentities;
+
+    /*
+     * Also record the size of the entity parsed
+     */
+    if (ctxt->input != NULL && oldctxt != NULL) {
+	oldctxt->sizeentities += ctxt->input->consumed;
+	oldctxt->sizeentities += (ctxt->input->cur - ctxt->input->base);
+    }
+    /*
+     * And record the last error if any
+     */
+    if ((oldctxt != NULL) && (ctxt->lastError.code != XML_ERR_OK))
+        xmlCopyError(&ctxt->lastError, &oldctxt->lastError);
+
+    if (sax != NULL)
+	ctxt->sax = oldsax;
+    if (oldctxt != NULL) {
+        ctxt->dict = NULL;
+        ctxt->attsDefault = NULL;
+        ctxt->attsSpecial = NULL;
+        oldctxt->validate = ctxt->validate;
+        oldctxt->valid = ctxt->valid;
+        oldctxt->node_seq.maximum = ctxt->node_seq.maximum;
+        oldctxt->node_seq.length = ctxt->node_seq.length;
+        oldctxt->node_seq.buffer = ctxt->node_seq.buffer;
+    }
+    ctxt->node_seq.maximum = 0;
+    ctxt->node_seq.length = 0;
+    ctxt->node_seq.buffer = NULL;
+    xmlFreeParserCtxt(ctxt);
+    newDoc->intSubset = NULL;
+    newDoc->extSubset = NULL;
+    xmlFreeDoc(newDoc);
+
+    return(ret);
+}
+
+#ifdef LIBXML_SAX1_ENABLED
+/**
+ * xmlParseExternalEntity:
+ * @doc:  the document the chunk pertains to
+ * @sax:  the SAX handler block (possibly NULL)
+ * @user_data:  The user data returned on SAX callbacks (possibly NULL)
+ * @depth:  Used for loop detection, use 0
+ * @URL:  the URL for the entity to load
+ * @ID:  the System ID for the entity to load
+ * @lst:  the return value for the set of parsed nodes
+ *
+ * Parse an external general entity
+ * An external general parsed entity is well-formed if it matches the
+ * production labeled extParsedEnt.
+ *
+ * [78] extParsedEnt ::= TextDecl? content
+ *
+ * Returns 0 if the entity is well formed, -1 in case of args problem and
+ *    the parser error code otherwise
+ */
+
+int
+xmlParseExternalEntity(xmlDocPtr doc, xmlSAXHandlerPtr sax, void *user_data,
+	  int depth, const xmlChar *URL, const xmlChar *ID, xmlNodePtr *lst) {
+    return(xmlParseExternalEntityPrivate(doc, NULL, sax, user_data, depth, URL,
+		                       ID, lst));
+}
+
+/**
+ * xmlParseBalancedChunkMemory:
+ * @doc:  the document the chunk pertains to (must not be NULL)
+ * @sax:  the SAX handler block (possibly NULL)
+ * @user_data:  The user data returned on SAX callbacks (possibly NULL)
+ * @depth:  Used for loop detection, use 0
+ * @string:  the input string in UTF8 or ISO-Latin (zero terminated)
+ * @lst:  the return value for the set of parsed nodes
+ *
+ * Parse a well-balanced chunk of an XML document
+ * called by the parser
+ * The allowed sequence for the Well Balanced Chunk is the one defined by
+ * the content production in the XML grammar:
+ *
+ * [43] content ::= (element | CharData | Reference | CDSect | PI | Comment)*
+ *
+ * Returns 0 if the chunk is well balanced, -1 in case of args problem and
+ *    the parser error code otherwise
+ */
+
+int
+xmlParseBalancedChunkMemory(xmlDocPtr doc, xmlSAXHandlerPtr sax,
+     void *user_data, int depth, const xmlChar *string, xmlNodePtr *lst) {
+    return xmlParseBalancedChunkMemoryRecover( doc, sax, user_data,
+                                                depth, string, lst, 0 );
+}
+#endif /* LIBXML_SAX1_ENABLED */
+
+/**
+ * xmlParseBalancedChunkMemoryInternal:
+ * @oldctxt:  the existing parsing context
+ * @string:  the input string in UTF8 or ISO-Latin (zero terminated)
+ * @user_data:  the user data field for the parser context
+ * @lst:  the return value for the set of parsed nodes
+ *
+ *
+ * Parse a well-balanced chunk of an XML document
+ * called by the parser
+ * The allowed sequence for the Well Balanced Chunk is the one defined by
+ * the content production in the XML grammar:
+ *
+ * [43] content ::= (element | CharData | Reference | CDSect | PI | Comment)*
+ *
+ * Returns XML_ERR_OK if the chunk is well balanced, and the parser
+ * error code otherwise
+ *
+ * In case recover is set to 1, the nodelist will not be empty even if
+ * the parsed chunk is not well balanced.
+ */
+static xmlParserErrors
+xmlParseBalancedChunkMemoryInternal(xmlParserCtxtPtr oldctxt,
+	const xmlChar *string, void *user_data, xmlNodePtr *lst) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr newDoc = NULL;
+    xmlNodePtr newRoot;
+    xmlSAXHandlerPtr oldsax = NULL;
+    xmlNodePtr content = NULL;
+    xmlNodePtr last = NULL;
+    int size;
+    xmlParserErrors ret = XML_ERR_OK;
+#ifdef SAX2
+    int i;
+#endif
+
+    if (((oldctxt->depth > 40) && ((oldctxt->options & XML_PARSE_HUGE) == 0)) ||
+        (oldctxt->depth >  1024)) {
+	return(XML_ERR_ENTITY_LOOP);
+    }
+
+
+    if (lst != NULL)
+        *lst = NULL;
+    if (string == NULL)
+        return(XML_ERR_INTERNAL_ERROR);
+
+    size = xmlStrlen(string);
+
+    ctxt = xmlCreateMemoryParserCtxt((char *) string, size);
+    if (ctxt == NULL) return(XML_WAR_UNDECLARED_ENTITY);
+    if (user_data != NULL)
+	ctxt->userData = user_data;
+    else
+	ctxt->userData = ctxt;
+    if (ctxt->dict != NULL) xmlDictFree(ctxt->dict);
+    ctxt->dict = oldctxt->dict;
+    ctxt->input_id = oldctxt->input_id + 1;
+    ctxt->str_xml = xmlDictLookup(ctxt->dict, BAD_CAST "xml", 3);
+    ctxt->str_xmlns = xmlDictLookup(ctxt->dict, BAD_CAST "xmlns", 5);
+    ctxt->str_xml_ns = xmlDictLookup(ctxt->dict, XML_XML_NAMESPACE, 36);
+
+#ifdef SAX2
+    /* propagate namespaces down the entity */
+    for (i = 0;i < oldctxt->nsNr;i += 2) {
+        nsPush(ctxt, oldctxt->nsTab[i], oldctxt->nsTab[i+1]);
+    }
+#endif
+
+    oldsax = ctxt->sax;
+    ctxt->sax = oldctxt->sax;
+    xmlDetectSAX2(ctxt);
+    ctxt->replaceEntities = oldctxt->replaceEntities;
+    ctxt->options = oldctxt->options;
+
+    ctxt->_private = oldctxt->_private;
+    if (oldctxt->myDoc == NULL) {
+	newDoc = xmlNewDoc(BAD_CAST "1.0");
+	if (newDoc == NULL) {
+	    ctxt->sax = oldsax;
+	    ctxt->dict = NULL;
+	    xmlFreeParserCtxt(ctxt);
+	    return(XML_ERR_INTERNAL_ERROR);
+	}
+	newDoc->properties = XML_DOC_INTERNAL;
+	newDoc->dict = ctxt->dict;
+	xmlDictReference(newDoc->dict);
+	ctxt->myDoc = newDoc;
+    } else {
+	ctxt->myDoc = oldctxt->myDoc;
+        content = ctxt->myDoc->children;
+	last = ctxt->myDoc->last;
+    }
+    newRoot = xmlNewDocNode(ctxt->myDoc, NULL, BAD_CAST "pseudoroot", NULL);
+    if (newRoot == NULL) {
+	ctxt->sax = oldsax;
+	ctxt->dict = NULL;
+	xmlFreeParserCtxt(ctxt);
+	if (newDoc != NULL) {
+	    xmlFreeDoc(newDoc);
+	}
+	return(XML_ERR_INTERNAL_ERROR);
+    }
+    ctxt->myDoc->children = NULL;
+    ctxt->myDoc->last = NULL;
+    xmlAddChild((xmlNodePtr) ctxt->myDoc, newRoot);
+    nodePush(ctxt, ctxt->myDoc->children);
+    ctxt->instate = XML_PARSER_CONTENT;
+    ctxt->depth = oldctxt->depth + 1;
+
+    ctxt->validate = 0;
+    ctxt->loadsubset = oldctxt->loadsubset;
+    if ((oldctxt->validate) || (oldctxt->replaceEntities != 0)) {
+	/*
+	 * ID/IDREF registration will be done in xmlValidateElement below
+	 */
+	ctxt->loadsubset |= XML_SKIP_IDS;
+    }
+    ctxt->dictNames = oldctxt->dictNames;
+    ctxt->attsDefault = oldctxt->attsDefault;
+    ctxt->attsSpecial = oldctxt->attsSpecial;
+
+    xmlParseContent(ctxt);
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW != 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if (ctxt->node != ctxt->myDoc->children) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    }
+
+    if (!ctxt->wellFormed) {
+        if (ctxt->errNo == 0)
+	    ret = XML_ERR_INTERNAL_ERROR;
+	else
+	    ret = (xmlParserErrors)ctxt->errNo;
+    } else {
+      ret = XML_ERR_OK;
+    }
+
+    if ((lst != NULL) && (ret == XML_ERR_OK)) {
+	xmlNodePtr cur;
+
+	/*
+	 * Return the newly created nodeset after unlinking it from
+	 * they pseudo parent.
+	 */
+	cur = ctxt->myDoc->children->children;
+	*lst = cur;
+	while (cur != NULL) {
+#ifdef LIBXML_VALID_ENABLED
+	    if ((oldctxt->validate) && (oldctxt->wellFormed) &&
+		(oldctxt->myDoc) && (oldctxt->myDoc->intSubset) &&
+		(cur->type == XML_ELEMENT_NODE)) {
+		oldctxt->valid &= xmlValidateElement(&oldctxt->vctxt,
+			oldctxt->myDoc, cur);
+	    }
+#endif /* LIBXML_VALID_ENABLED */
+	    cur->parent = NULL;
+	    cur = cur->next;
+	}
+	ctxt->myDoc->children->children = NULL;
+    }
+    if (ctxt->myDoc != NULL) {
+	xmlFreeNode(ctxt->myDoc->children);
+        ctxt->myDoc->children = content;
+        ctxt->myDoc->last = last;
+    }
+
+    /*
+     * Record in the parent context the number of entities replacement
+     * done when parsing that reference.
+     */
+    if (oldctxt != NULL)
+        oldctxt->nbentities += ctxt->nbentities;
+
+    /*
+     * Also record the last error if any
+     */
+    if (ctxt->lastError.code != XML_ERR_OK)
+        xmlCopyError(&ctxt->lastError, &oldctxt->lastError);
+
+    ctxt->sax = oldsax;
+    ctxt->dict = NULL;
+    ctxt->attsDefault = NULL;
+    ctxt->attsSpecial = NULL;
+    xmlFreeParserCtxt(ctxt);
+    if (newDoc != NULL) {
+	xmlFreeDoc(newDoc);
+    }
+
+    return(ret);
+}
+
+/**
+ * xmlParseInNodeContext:
+ * @node:  the context node
+ * @data:  the input string
+ * @datalen:  the input string length in bytes
+ * @options:  a combination of xmlParserOption
+ * @lst:  the return value for the set of parsed nodes
+ *
+ * Parse a well-balanced chunk of an XML document
+ * within the context (DTD, namespaces, etc ...) of the given node.
+ *
+ * The allowed sequence for the data is a Well Balanced Chunk defined by
+ * the content production in the XML grammar:
+ *
+ * [43] content ::= (element | CharData | Reference | CDSect | PI | Comment)*
+ *
+ * Returns XML_ERR_OK if the chunk is well balanced, and the parser
+ * error code otherwise
+ */
+xmlParserErrors
+xmlParseInNodeContext(xmlNodePtr node, const char *data, int datalen,
+                      int options, xmlNodePtr *lst) {
+#ifdef SAX2
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr doc = NULL;
+    xmlNodePtr fake, cur;
+    int nsnr = 0;
+
+    xmlParserErrors ret = XML_ERR_OK;
+
+    /*
+     * check all input parameters, grab the document
+     */
+    if ((lst == NULL) || (node == NULL) || (data == NULL) || (datalen < 0))
+        return(XML_ERR_INTERNAL_ERROR);
+    switch (node->type) {
+        case XML_ELEMENT_NODE:
+        case XML_ATTRIBUTE_NODE:
+        case XML_TEXT_NODE:
+        case XML_CDATA_SECTION_NODE:
+        case XML_ENTITY_REF_NODE:
+        case XML_PI_NODE:
+        case XML_COMMENT_NODE:
+        case XML_DOCUMENT_NODE:
+        case XML_HTML_DOCUMENT_NODE:
+	    break;
+	default:
+	    return(XML_ERR_INTERNAL_ERROR);
+
+    }
+    while ((node != NULL) && (node->type != XML_ELEMENT_NODE) &&
+           (node->type != XML_DOCUMENT_NODE) &&
+	   (node->type != XML_HTML_DOCUMENT_NODE))
+	node = node->parent;
+    if (node == NULL)
+	return(XML_ERR_INTERNAL_ERROR);
+    if (node->type == XML_ELEMENT_NODE)
+	doc = node->doc;
+    else
+        doc = (xmlDocPtr) node;
+    if (doc == NULL)
+	return(XML_ERR_INTERNAL_ERROR);
+
+    /*
+     * allocate a context and set-up everything not related to the
+     * node position in the tree
+     */
+    if (doc->type == XML_DOCUMENT_NODE)
+	ctxt = xmlCreateMemoryParserCtxt((char *) data, datalen);
+#ifdef LIBXML_HTML_ENABLED
+    else if (doc->type == XML_HTML_DOCUMENT_NODE) {
+	ctxt = htmlCreateMemoryParserCtxt((char *) data, datalen);
+        /*
+         * When parsing in context, it makes no sense to add implied
+         * elements like html/body/etc...
+         */
+        options |= HTML_PARSE_NOIMPLIED;
+    }
+#endif
+    else
+        return(XML_ERR_INTERNAL_ERROR);
+
+    if (ctxt == NULL)
+        return(XML_ERR_NO_MEMORY);
+
+    /*
+     * Use input doc's dict if present, else assure XML_PARSE_NODICT is set.
+     * We need a dictionary for xmlDetectSAX2, so if there's no doc dict
+     * we must wait until the last moment to free the original one.
+     */
+    if (doc->dict != NULL) {
+        if (ctxt->dict != NULL)
+	    xmlDictFree(ctxt->dict);
+	ctxt->dict = doc->dict;
+    } else
+        options |= XML_PARSE_NODICT;
+
+    if (doc->encoding != NULL) {
+        xmlCharEncodingHandlerPtr hdlr;
+
+        if (ctxt->encoding != NULL)
+	    xmlFree((xmlChar *) ctxt->encoding);
+        ctxt->encoding = xmlStrdup((const xmlChar *) doc->encoding);
+
+        hdlr = xmlFindCharEncodingHandler((const char *) doc->encoding);
+        if (hdlr != NULL) {
+            xmlSwitchToEncoding(ctxt, hdlr);
+	} else {
+            return(XML_ERR_UNSUPPORTED_ENCODING);
+        }
+    }
+
+    xmlCtxtUseOptionsInternal(ctxt, options, NULL);
+    xmlDetectSAX2(ctxt);
+    ctxt->myDoc = doc;
+    /* parsing in context, i.e. as within existing content */
+    ctxt->input_id = 2;
+    ctxt->instate = XML_PARSER_CONTENT;
+
+    fake = xmlNewComment(NULL);
+    if (fake == NULL) {
+        xmlFreeParserCtxt(ctxt);
+	return(XML_ERR_NO_MEMORY);
+    }
+    xmlAddChild(node, fake);
+
+    if (node->type == XML_ELEMENT_NODE) {
+	nodePush(ctxt, node);
+	/*
+	 * initialize the SAX2 namespaces stack
+	 */
+	cur = node;
+	while ((cur != NULL) && (cur->type == XML_ELEMENT_NODE)) {
+	    xmlNsPtr ns = cur->nsDef;
+	    const xmlChar *iprefix, *ihref;
+
+	    while (ns != NULL) {
+		if (ctxt->dict) {
+		    iprefix = xmlDictLookup(ctxt->dict, ns->prefix, -1);
+		    ihref = xmlDictLookup(ctxt->dict, ns->href, -1);
+		} else {
+		    iprefix = ns->prefix;
+		    ihref = ns->href;
+		}
+
+	        if (xmlGetNamespace(ctxt, iprefix) == NULL) {
+		    nsPush(ctxt, iprefix, ihref);
+		    nsnr++;
+		}
+		ns = ns->next;
+	    }
+	    cur = cur->parent;
+	}
+    }
+
+    if ((ctxt->validate) || (ctxt->replaceEntities != 0)) {
+	/*
+	 * ID/IDREF registration will be done in xmlValidateElement below
+	 */
+	ctxt->loadsubset |= XML_SKIP_IDS;
+    }
+
+#ifdef LIBXML_HTML_ENABLED
+    if (doc->type == XML_HTML_DOCUMENT_NODE)
+        __htmlParseContent(ctxt);
+    else
+#endif
+	xmlParseContent(ctxt);
+
+    nsPop(ctxt, nsnr);
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW != 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if ((ctxt->node != NULL) && (ctxt->node != node)) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+	ctxt->wellFormed = 0;
+    }
+
+    if (!ctxt->wellFormed) {
+        if (ctxt->errNo == 0)
+	    ret = XML_ERR_INTERNAL_ERROR;
+	else
+	    ret = (xmlParserErrors)ctxt->errNo;
+    } else {
+        ret = XML_ERR_OK;
+    }
+
+    /*
+     * Return the newly created nodeset after unlinking it from
+     * the pseudo sibling.
+     */
+
+    cur = fake->next;
+    fake->next = NULL;
+    node->last = fake;
+
+    if (cur != NULL) {
+	cur->prev = NULL;
+    }
+
+    *lst = cur;
+
+    while (cur != NULL) {
+	cur->parent = NULL;
+	cur = cur->next;
+    }
+
+    xmlUnlinkNode(fake);
+    xmlFreeNode(fake);
+
+
+    if (ret != XML_ERR_OK) {
+        xmlFreeNodeList(*lst);
+	*lst = NULL;
+    }
+
+    if (doc->dict != NULL)
+        ctxt->dict = NULL;
+    xmlFreeParserCtxt(ctxt);
+
+    return(ret);
+#else /* !SAX2 */
+    return(XML_ERR_INTERNAL_ERROR);
+#endif
+}
+
+#ifdef LIBXML_SAX1_ENABLED
+/**
+ * xmlParseBalancedChunkMemoryRecover:
+ * @doc:  the document the chunk pertains to (must not be NULL)
+ * @sax:  the SAX handler block (possibly NULL)
+ * @user_data:  The user data returned on SAX callbacks (possibly NULL)
+ * @depth:  Used for loop detection, use 0
+ * @string:  the input string in UTF8 or ISO-Latin (zero terminated)
+ * @lst:  the return value for the set of parsed nodes
+ * @recover: return nodes even if the data is broken (use 0)
+ *
+ *
+ * Parse a well-balanced chunk of an XML document
+ * called by the parser
+ * The allowed sequence for the Well Balanced Chunk is the one defined by
+ * the content production in the XML grammar:
+ *
+ * [43] content ::= (element | CharData | Reference | CDSect | PI | Comment)*
+ *
+ * Returns 0 if the chunk is well balanced, -1 in case of args problem and
+ *    the parser error code otherwise
+ *
+ * In case recover is set to 1, the nodelist will not be empty even if
+ * the parsed chunk is not well balanced, assuming the parsing succeeded to
+ * some extent.
+ */
+int
+xmlParseBalancedChunkMemoryRecover(xmlDocPtr doc, xmlSAXHandlerPtr sax,
+     void *user_data, int depth, const xmlChar *string, xmlNodePtr *lst,
+     int recover) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr newDoc;
+    xmlSAXHandlerPtr oldsax = NULL;
+    xmlNodePtr content, newRoot;
+    int size;
+    int ret = 0;
+
+    if (depth > 40) {
+	return(XML_ERR_ENTITY_LOOP);
+    }
+
+
+    if (lst != NULL)
+        *lst = NULL;
+    if (string == NULL)
+        return(-1);
+
+    size = xmlStrlen(string);
+
+    ctxt = xmlCreateMemoryParserCtxt((char *) string, size);
+    if (ctxt == NULL) return(-1);
+    ctxt->userData = ctxt;
+    if (sax != NULL) {
+	oldsax = ctxt->sax;
+        ctxt->sax = sax;
+	if (user_data != NULL)
+	    ctxt->userData = user_data;
+    }
+    newDoc = xmlNewDoc(BAD_CAST "1.0");
+    if (newDoc == NULL) {
+	xmlFreeParserCtxt(ctxt);
+	return(-1);
+    }
+    newDoc->properties = XML_DOC_INTERNAL;
+    if ((doc != NULL) && (doc->dict != NULL)) {
+        xmlDictFree(ctxt->dict);
+	ctxt->dict = doc->dict;
+	xmlDictReference(ctxt->dict);
+	ctxt->str_xml = xmlDictLookup(ctxt->dict, BAD_CAST "xml", 3);
+	ctxt->str_xmlns = xmlDictLookup(ctxt->dict, BAD_CAST "xmlns", 5);
+	ctxt->str_xml_ns = xmlDictLookup(ctxt->dict, XML_XML_NAMESPACE, 36);
+	ctxt->dictNames = 1;
+    } else {
+	xmlCtxtUseOptionsInternal(ctxt, XML_PARSE_NODICT, NULL);
+    }
+    /* doc == NULL is only supported for historic reasons */
+    if (doc != NULL) {
+	newDoc->intSubset = doc->intSubset;
+	newDoc->extSubset = doc->extSubset;
+    }
+    newRoot = xmlNewDocNode(newDoc, NULL, BAD_CAST "pseudoroot", NULL);
+    if (newRoot == NULL) {
+	if (sax != NULL)
+	    ctxt->sax = oldsax;
+	xmlFreeParserCtxt(ctxt);
+	newDoc->intSubset = NULL;
+	newDoc->extSubset = NULL;
+        xmlFreeDoc(newDoc);
+	return(-1);
+    }
+    xmlAddChild((xmlNodePtr) newDoc, newRoot);
+    nodePush(ctxt, newRoot);
+    /* doc == NULL is only supported for historic reasons */
+    if (doc == NULL) {
+	ctxt->myDoc = newDoc;
+    } else {
+	ctxt->myDoc = newDoc;
+	newDoc->children->doc = doc;
+	/* Ensure that doc has XML spec namespace */
+	xmlSearchNsByHref(doc, (xmlNodePtr)doc, XML_XML_NAMESPACE);
+	newDoc->oldNs = doc->oldNs;
+    }
+    ctxt->instate = XML_PARSER_CONTENT;
+    ctxt->input_id = 2;
+    ctxt->depth = depth;
+
+    /*
+     * Doing validity checking on chunk doesn't make sense
+     */
+    ctxt->validate = 0;
+    ctxt->loadsubset = 0;
+    xmlDetectSAX2(ctxt);
+
+    if ( doc != NULL ){
+        content = doc->children;
+        doc->children = NULL;
+        xmlParseContent(ctxt);
+        doc->children = content;
+    }
+    else {
+        xmlParseContent(ctxt);
+    }
+    if ((RAW == '<') && (NXT(1) == '/')) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    } else if (RAW != 0) {
+	xmlFatalErr(ctxt, XML_ERR_EXTRA_CONTENT, NULL);
+    }
+    if (ctxt->node != newDoc->children) {
+	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+    }
+
+    if (!ctxt->wellFormed) {
+        if (ctxt->errNo == 0)
+	    ret = 1;
+	else
+	    ret = ctxt->errNo;
+    } else {
+      ret = 0;
+    }
+
+    if ((lst != NULL) && ((ret == 0) || (recover == 1))) {
+	xmlNodePtr cur;
+
+	/*
+	 * Return the newly created nodeset after unlinking it from
+	 * they pseudo parent.
+	 */
+	cur = newDoc->children->children;
+	*lst = cur;
+	while (cur != NULL) {
+	    xmlSetTreeDoc(cur, doc);
+	    cur->parent = NULL;
+	    cur = cur->next;
+	}
+	newDoc->children->children = NULL;
+    }
+
+    if (sax != NULL)
+	ctxt->sax = oldsax;
+    xmlFreeParserCtxt(ctxt);
+    newDoc->intSubset = NULL;
+    newDoc->extSubset = NULL;
+    /* This leaks the namespace list if doc == NULL */
+    newDoc->oldNs = NULL;
+    xmlFreeDoc(newDoc);
+
+    return(ret);
+}
+
+/**
+ * xmlSAXParseEntity:
+ * @sax:  the SAX handler block
+ * @filename:  the filename
+ *
+ * parse an XML external entity out of context and build a tree.
+ * It use the given SAX function block to handle the parsing callback.
+ * If sax is NULL, fallback to the default DOM tree building routines.
+ *
+ * [78] extParsedEnt ::= TextDecl? content
+ *
+ * This correspond to a "Well Balanced" chunk
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr
+xmlSAXParseEntity(xmlSAXHandlerPtr sax, const char *filename) {
+    xmlDocPtr ret;
+    xmlParserCtxtPtr ctxt;
+
+    ctxt = xmlCreateFileParserCtxt(filename);
+    if (ctxt == NULL) {
+	return(NULL);
+    }
+    if (sax != NULL) {
+	if (ctxt->sax != NULL)
+	    xmlFree(ctxt->sax);
+        ctxt->sax = sax;
+        ctxt->userData = NULL;
+    }
+
+    xmlParseExtParsedEnt(ctxt);
+
+    if (ctxt->wellFormed)
+	ret = ctxt->myDoc;
+    else {
+        ret = NULL;
+        xmlFreeDoc(ctxt->myDoc);
+        ctxt->myDoc = NULL;
+    }
+    if (sax != NULL)
+        ctxt->sax = NULL;
+    xmlFreeParserCtxt(ctxt);
+
+    return(ret);
+}
+
+/**
+ * xmlParseEntity:
+ * @filename:  the filename
+ *
+ * parse an XML external entity out of context and build a tree.
+ *
+ * [78] extParsedEnt ::= TextDecl? content
+ *
+ * This correspond to a "Well Balanced" chunk
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr
+xmlParseEntity(const char *filename) {
+    return(xmlSAXParseEntity(NULL, filename));
+}
+#endif /* LIBXML_SAX1_ENABLED */
+
+/**
+ * xmlCreateEntityParserCtxtInternal:
+ * @URL:  the entity URL
+ * @ID:  the entity PUBLIC ID
+ * @base:  a possible base for the target URI
+ * @pctx:  parser context used to set options on new context
+ *
+ * Create a parser context for an external entity
+ * Automatic support for ZLIB/Compress compressed document is provided
+ * by default if found at compile-time.
+ *
+ * Returns the new parser context or NULL
+ */
+static xmlParserCtxtPtr
+xmlCreateEntityParserCtxtInternal(const xmlChar *URL, const xmlChar *ID,
+	                  const xmlChar *base, xmlParserCtxtPtr pctx) {
+    xmlParserCtxtPtr ctxt;
+    xmlParserInputPtr inputStream;
+    char *directory = NULL;
+    xmlChar *uri;
+
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL) {
+	return(NULL);
+    }
+
+    if (pctx != NULL) {
+        ctxt->options = pctx->options;
+        ctxt->_private = pctx->_private;
+	/*
+	 * this is a subparser of pctx, so the input_id should be
+	 * incremented to distinguish from main entity
+	 */
+	ctxt->input_id = pctx->input_id + 1;
+    }
+
+    /* Don't read from stdin. */
+    if (xmlStrcmp(URL, BAD_CAST "-") == 0)
+        URL = BAD_CAST "./-";
+
+    uri = xmlBuildURI(URL, base);
+
+    if (uri == NULL) {
+	inputStream = xmlLoadExternalEntity((char *)URL, (char *)ID, ctxt);
+	if (inputStream == NULL) {
+	    xmlFreeParserCtxt(ctxt);
+	    return(NULL);
+	}
+
+	inputPush(ctxt, inputStream);
+
+	if ((ctxt->directory == NULL) && (directory == NULL))
+	    directory = xmlParserGetDirectory((char *)URL);
+	if ((ctxt->directory == NULL) && (directory != NULL))
+	    ctxt->directory = directory;
+    } else {
+	inputStream = xmlLoadExternalEntity((char *)uri, (char *)ID, ctxt);
+	if (inputStream == NULL) {
+	    xmlFree(uri);
+	    xmlFreeParserCtxt(ctxt);
+	    return(NULL);
+	}
+
+	inputPush(ctxt, inputStream);
+
+	if ((ctxt->directory == NULL) && (directory == NULL))
+	    directory = xmlParserGetDirectory((char *)uri);
+	if ((ctxt->directory == NULL) && (directory != NULL))
+	    ctxt->directory = directory;
+	xmlFree(uri);
+    }
+    return(ctxt);
+}
+
+/**
+ * xmlCreateEntityParserCtxt:
+ * @URL:  the entity URL
+ * @ID:  the entity PUBLIC ID
+ * @base:  a possible base for the target URI
+ *
+ * Create a parser context for an external entity
+ * Automatic support for ZLIB/Compress compressed document is provided
+ * by default if found at compile-time.
+ *
+ * Returns the new parser context or NULL
+ */
+xmlParserCtxtPtr
+xmlCreateEntityParserCtxt(const xmlChar *URL, const xmlChar *ID,
+	                  const xmlChar *base) {
+    return xmlCreateEntityParserCtxtInternal(URL, ID, base, NULL);
+
+}
+
+/************************************************************************
+ *									*
+ *		Front ends when parsing from a file			*
+ *									*
+ ************************************************************************/
+
+/**
+ * xmlCreateURLParserCtxt:
+ * @filename:  the filename or URL
+ * @options:  a combination of xmlParserOption
+ *
+ * Create a parser context for a file or URL content.
+ * Automatic support for ZLIB/Compress compressed document is provided
+ * by default if found at compile-time and for file accesses
+ *
+ * Returns the new parser context or NULL
+ */
+xmlParserCtxtPtr
+xmlCreateURLParserCtxt(const char *filename, int options)
+{
+    xmlParserCtxtPtr ctxt;
+    xmlParserInputPtr inputStream;
+    char *directory = NULL;
+
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL) {
+	xmlErrMemory(NULL, "cannot allocate parser context");
+	return(NULL);
+    }
+
+    if (options)
+	xmlCtxtUseOptionsInternal(ctxt, options, NULL);
+    ctxt->linenumbers = 1;
+
+    inputStream = xmlLoadExternalEntity(filename, NULL, ctxt);
+    if (inputStream == NULL) {
+	xmlFreeParserCtxt(ctxt);
+	return(NULL);
+    }
+
+    inputPush(ctxt, inputStream);
+    if ((ctxt->directory == NULL) && (directory == NULL))
+        directory = xmlParserGetDirectory(filename);
+    if ((ctxt->directory == NULL) && (directory != NULL))
+        ctxt->directory = directory;
+
+    return(ctxt);
+}
+
+/**
+ * xmlCreateFileParserCtxt:
+ * @filename:  the filename
+ *
+ * Create a parser context for a file content.
+ * Automatic support for ZLIB/Compress compressed document is provided
+ * by default if found at compile-time.
+ *
+ * Returns the new parser context or NULL
+ */
+xmlParserCtxtPtr
+xmlCreateFileParserCtxt(const char *filename)
+{
+    return(xmlCreateURLParserCtxt(filename, 0));
+}
+
+#ifdef LIBXML_SAX1_ENABLED
+/**
+ * xmlSAXParseFileWithData:
+ * @sax:  the SAX handler block
+ * @filename:  the filename
+ * @recovery:  work in recovery mode, i.e. tries to read no Well Formed
+ *             documents
+ * @data:  the userdata
+ *
+ * parse an XML file and build a tree. Automatic support for ZLIB/Compress
+ * compressed document is provided by default if found at compile-time.
+ * It use the given SAX function block to handle the parsing callback.
+ * If sax is NULL, fallback to the default DOM tree building routines.
+ *
+ * User data (void *) is stored within the parser context in the
+ * context's _private member, so it is available nearly everywhere in libxml
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr
+xmlSAXParseFileWithData(xmlSAXHandlerPtr sax, const char *filename,
+                        int recovery, void *data) {
+    xmlDocPtr ret;
+    xmlParserCtxtPtr ctxt;
+
+    xmlInitParser();
+
+    ctxt = xmlCreateFileParserCtxt(filename);
+    if (ctxt == NULL) {
+	return(NULL);
+    }
+    if (sax != NULL) {
+	if (ctxt->sax != NULL)
+	    xmlFree(ctxt->sax);
+        ctxt->sax = sax;
+    }
+    xmlDetectSAX2(ctxt);
+    if (data!=NULL) {
+	ctxt->_private = data;
+    }
+
+    if (ctxt->directory == NULL)
+        ctxt->directory = xmlParserGetDirectory(filename);
+
+    ctxt->recovery = recovery;
+
+    xmlParseDocument(ctxt);
+
+    if ((ctxt->wellFormed) || recovery) {
+        ret = ctxt->myDoc;
+	if ((ret != NULL) && (ctxt->input->buf != NULL)) {
+	    if (ctxt->input->buf->compressed > 0)
+		ret->compression = 9;
+	    else
+		ret->compression = ctxt->input->buf->compressed;
+	}
+    }
+    else {
+       ret = NULL;
+       xmlFreeDoc(ctxt->myDoc);
+       ctxt->myDoc = NULL;
+    }
+    if (sax != NULL)
+        ctxt->sax = NULL;
+    xmlFreeParserCtxt(ctxt);
+
+    return(ret);
+}
+
+/**
+ * xmlSAXParseFile:
+ * @sax:  the SAX handler block
+ * @filename:  the filename
+ * @recovery:  work in recovery mode, i.e. tries to read no Well Formed
+ *             documents
+ *
+ * parse an XML file and build a tree. Automatic support for ZLIB/Compress
+ * compressed document is provided by default if found at compile-time.
+ * It use the given SAX function block to handle the parsing callback.
+ * If sax is NULL, fallback to the default DOM tree building routines.
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr
+xmlSAXParseFile(xmlSAXHandlerPtr sax, const char *filename,
+                          int recovery) {
+    return(xmlSAXParseFileWithData(sax,filename,recovery,NULL));
+}
+
+/**
+ * xmlRecoverDoc:
+ * @cur:  a pointer to an array of xmlChar
+ *
+ * parse an XML in-memory document and build a tree.
+ * In the case the document is not Well Formed, a attempt to build a
+ * tree is tried anyway
+ *
+ * Returns the resulting document tree or NULL in case of failure
+ */
+
+xmlDocPtr
+xmlRecoverDoc(const xmlChar *cur) {
+    return(xmlSAXParseDoc(NULL, cur, 1));
+}
+
+/**
+ * xmlParseFile:
+ * @filename:  the filename
+ *
+ * parse an XML file and build a tree. Automatic support for ZLIB/Compress
+ * compressed document is provided by default if found at compile-time.
+ *
+ * Returns the resulting document tree if the file was wellformed,
+ * NULL otherwise.
+ */
+
+xmlDocPtr
+xmlParseFile(const char *filename) {
+    return(xmlSAXParseFile(NULL, filename, 0));
+}
+
+/**
+ * xmlRecoverFile:
+ * @filename:  the filename
+ *
+ * parse an XML file and build a tree. Automatic support for ZLIB/Compress
+ * compressed document is provided by default if found at compile-time.
+ * In the case the document is not Well Formed, it attempts to build
+ * a tree anyway
+ *
+ * Returns the resulting document tree or NULL in case of failure
+ */
+
+xmlDocPtr
+xmlRecoverFile(const char *filename) {
+    return(xmlSAXParseFile(NULL, filename, 1));
+}
+
+
+/**
+ * xmlSetupParserForBuffer:
+ * @ctxt:  an XML parser context
+ * @buffer:  a xmlChar * buffer
+ * @filename:  a file name
+ *
+ * Setup the parser context to parse a new buffer; Clears any prior
+ * contents from the parser context. The buffer parameter must not be
+ * NULL, but the filename parameter can be
+ */
+void
+xmlSetupParserForBuffer(xmlParserCtxtPtr ctxt, const xmlChar* buffer,
+                             const char* filename)
+{
+    xmlParserInputPtr input;
+
+    if ((ctxt == NULL) || (buffer == NULL))
+        return;
+
+    input = xmlNewInputStream(ctxt);
+    if (input == NULL) {
+        xmlErrMemory(NULL, "parsing new buffer: out of memory\n");
+        xmlClearParserCtxt(ctxt);
+        return;
+    }
+
+    xmlClearParserCtxt(ctxt);
+    if (filename != NULL)
+        input->filename = (char *) xmlCanonicPath((const xmlChar *)filename);
+    input->base = buffer;
+    input->cur = buffer;
+    input->end = &buffer[xmlStrlen(buffer)];
+    inputPush(ctxt, input);
+}
+
+/**
+ * xmlSAXUserParseFile:
+ * @sax:  a SAX handler
+ * @user_data:  The user data returned on SAX callbacks
+ * @filename:  a file name
+ *
+ * parse an XML file and call the given SAX handler routines.
+ * Automatic support for ZLIB/Compress compressed document is provided
+ *
+ * Returns 0 in case of success or a error number otherwise
+ */
+int
+xmlSAXUserParseFile(xmlSAXHandlerPtr sax, void *user_data,
+                    const char *filename) {
+    int ret = 0;
+    xmlParserCtxtPtr ctxt;
+
+    ctxt = xmlCreateFileParserCtxt(filename);
+    if (ctxt == NULL) return -1;
+    if (ctxt->sax != (xmlSAXHandlerPtr) &xmlDefaultSAXHandler)
+	xmlFree(ctxt->sax);
+    ctxt->sax = sax;
+    xmlDetectSAX2(ctxt);
+
+    if (user_data != NULL)
+	ctxt->userData = user_data;
+
+    xmlParseDocument(ctxt);
+
+    if (ctxt->wellFormed)
+	ret = 0;
+    else {
+        if (ctxt->errNo != 0)
+	    ret = ctxt->errNo;
+	else
+	    ret = -1;
+    }
+    if (sax != NULL)
+	ctxt->sax = NULL;
+    if (ctxt->myDoc != NULL) {
+        xmlFreeDoc(ctxt->myDoc);
+	ctxt->myDoc = NULL;
+    }
+    xmlFreeParserCtxt(ctxt);
+
+    return ret;
+}
+#endif /* LIBXML_SAX1_ENABLED */
+
+/************************************************************************
+ *									*
+ *		Front ends when parsing from memory			*
+ *									*
+ ************************************************************************/
+
+/**
+ * xmlCreateMemoryParserCtxt:
+ * @buffer:  a pointer to a char array
+ * @size:  the size of the array
+ *
+ * Create a parser context for an XML in-memory document.
+ *
+ * Returns the new parser context or NULL
+ */
+xmlParserCtxtPtr
+xmlCreateMemoryParserCtxt(const char *buffer, int size) {
+    xmlParserCtxtPtr ctxt;
+    xmlParserInputPtr input;
+    xmlParserInputBufferPtr buf;
+
+    if (buffer == NULL)
+	return(NULL);
+    if (size <= 0)
+	return(NULL);
+
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL)
+	return(NULL);
+
+    /* TODO: xmlParserInputBufferCreateStatic, requires some serious changes */
+    buf = xmlParserInputBufferCreateMem(buffer, size, XML_CHAR_ENCODING_NONE);
+    if (buf == NULL) {
+	xmlFreeParserCtxt(ctxt);
+	return(NULL);
+    }
+
+    input = xmlNewInputStream(ctxt);
+    if (input == NULL) {
+	xmlFreeParserInputBuffer(buf);
+	xmlFreeParserCtxt(ctxt);
+	return(NULL);
+    }
+
+    input->filename = NULL;
+    input->buf = buf;
+    xmlBufResetInput(input->buf->buffer, input);
+
+    inputPush(ctxt, input);
+    return(ctxt);
+}
+
+#ifdef LIBXML_SAX1_ENABLED
+/**
+ * xmlSAXParseMemoryWithData:
+ * @sax:  the SAX handler block
+ * @buffer:  an pointer to a char array
+ * @size:  the size of the array
+ * @recovery:  work in recovery mode, i.e. tries to read no Well Formed
+ *             documents
+ * @data:  the userdata
+ *
+ * parse an XML in-memory block and use the given SAX function block
+ * to handle the parsing callback. If sax is NULL, fallback to the default
+ * DOM tree building routines.
+ *
+ * User data (void *) is stored within the parser context in the
+ * context's _private member, so it is available nearly everywhere in libxml
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr
+xmlSAXParseMemoryWithData(xmlSAXHandlerPtr sax, const char *buffer,
+	          int size, int recovery, void *data) {
+    xmlDocPtr ret;
+    xmlParserCtxtPtr ctxt;
+
+    xmlInitParser();
+
+    ctxt = xmlCreateMemoryParserCtxt(buffer, size);
+    if (ctxt == NULL) return(NULL);
+    if (sax != NULL) {
+	if (ctxt->sax != NULL)
+	    xmlFree(ctxt->sax);
+        ctxt->sax = sax;
+    }
+    xmlDetectSAX2(ctxt);
+    if (data!=NULL) {
+	ctxt->_private=data;
+    }
+
+    ctxt->recovery = recovery;
+
+    xmlParseDocument(ctxt);
+
+    if ((ctxt->wellFormed) || recovery) ret = ctxt->myDoc;
+    else {
+       ret = NULL;
+       xmlFreeDoc(ctxt->myDoc);
+       ctxt->myDoc = NULL;
+    }
+    if (sax != NULL)
+	ctxt->sax = NULL;
+    xmlFreeParserCtxt(ctxt);
+
+    return(ret);
+}
+
+/**
+ * xmlSAXParseMemory:
+ * @sax:  the SAX handler block
+ * @buffer:  an pointer to a char array
+ * @size:  the size of the array
+ * @recovery:  work in recovery mode, i.e. tries to read not Well Formed
+ *             documents
+ *
+ * parse an XML in-memory block and use the given SAX function block
+ * to handle the parsing callback. If sax is NULL, fallback to the default
+ * DOM tree building routines.
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlSAXParseMemory(xmlSAXHandlerPtr sax, const char *buffer,
+	          int size, int recovery) {
+    return xmlSAXParseMemoryWithData(sax, buffer, size, recovery, NULL);
+}
+
+/**
+ * xmlParseMemory:
+ * @buffer:  an pointer to a char array
+ * @size:  the size of the array
+ *
+ * parse an XML in-memory block and build a tree.
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr xmlParseMemory(const char *buffer, int size) {
+   return(xmlSAXParseMemory(NULL, buffer, size, 0));
+}
+
+/**
+ * xmlRecoverMemory:
+ * @buffer:  an pointer to a char array
+ * @size:  the size of the array
+ *
+ * parse an XML in-memory block and build a tree.
+ * In the case the document is not Well Formed, an attempt to
+ * build a tree is tried anyway
+ *
+ * Returns the resulting document tree or NULL in case of error
+ */
+
+xmlDocPtr xmlRecoverMemory(const char *buffer, int size) {
+   return(xmlSAXParseMemory(NULL, buffer, size, 1));
+}
+
+/**
+ * xmlSAXUserParseMemory:
+ * @sax:  a SAX handler
+ * @user_data:  The user data returned on SAX callbacks
+ * @buffer:  an in-memory XML document input
+ * @size:  the length of the XML document in bytes
+ *
+ * A better SAX parsing routine.
+ * parse an XML in-memory buffer and call the given SAX handler routines.
+ *
+ * Returns 0 in case of success or a error number otherwise
+ */
+int xmlSAXUserParseMemory(xmlSAXHandlerPtr sax, void *user_data,
+			  const char *buffer, int size) {
+    int ret = 0;
+    xmlParserCtxtPtr ctxt;
+
+    xmlInitParser();
+
+    ctxt = xmlCreateMemoryParserCtxt(buffer, size);
+    if (ctxt == NULL) return -1;
+    if (ctxt->sax != (xmlSAXHandlerPtr) &xmlDefaultSAXHandler)
+        xmlFree(ctxt->sax);
+    ctxt->sax = sax;
+    xmlDetectSAX2(ctxt);
+
+    if (user_data != NULL)
+	ctxt->userData = user_data;
+
+    xmlParseDocument(ctxt);
+
+    if (ctxt->wellFormed)
+	ret = 0;
+    else {
+        if (ctxt->errNo != 0)
+	    ret = ctxt->errNo;
+	else
+	    ret = -1;
+    }
+    if (sax != NULL)
+        ctxt->sax = NULL;
+    if (ctxt->myDoc != NULL) {
+        xmlFreeDoc(ctxt->myDoc);
+	ctxt->myDoc = NULL;
+    }
+    xmlFreeParserCtxt(ctxt);
+
+    return ret;
+}
+#endif /* LIBXML_SAX1_ENABLED */
+
+/**
+ * xmlCreateDocParserCtxt:
+ * @cur:  a pointer to an array of xmlChar
+ *
+ * Creates a parser context for an XML in-memory document.
+ *
+ * Returns the new parser context or NULL
+ */
+xmlParserCtxtPtr
+xmlCreateDocParserCtxt(const xmlChar *cur) {
+    int len;
+
+    if (cur == NULL)
+	return(NULL);
+    len = xmlStrlen(cur);
+    return(xmlCreateMemoryParserCtxt((const char *)cur, len));
+}
+
+#ifdef LIBXML_SAX1_ENABLED
+/**
+ * xmlSAXParseDoc:
+ * @sax:  the SAX handler block
+ * @cur:  a pointer to an array of xmlChar
+ * @recovery:  work in recovery mode, i.e. tries to read no Well Formed
+ *             documents
+ *
+ * parse an XML in-memory document and build a tree.
+ * It use the given SAX function block to handle the parsing callback.
+ * If sax is NULL, fallback to the default DOM tree building routines.
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr
+xmlSAXParseDoc(xmlSAXHandlerPtr sax, const xmlChar *cur, int recovery) {
+    xmlDocPtr ret;
+    xmlParserCtxtPtr ctxt;
+    xmlSAXHandlerPtr oldsax = NULL;
+
+    if (cur == NULL) return(NULL);
+
+
+    ctxt = xmlCreateDocParserCtxt(cur);
+    if (ctxt == NULL) return(NULL);
+    if (sax != NULL) {
+        oldsax = ctxt->sax;
+        ctxt->sax = sax;
+        ctxt->userData = NULL;
+    }
+    xmlDetectSAX2(ctxt);
+
+    xmlParseDocument(ctxt);
+    if ((ctxt->wellFormed) || recovery) ret = ctxt->myDoc;
+    else {
+       ret = NULL;
+       xmlFreeDoc(ctxt->myDoc);
+       ctxt->myDoc = NULL;
+    }
+    if (sax != NULL)
+	ctxt->sax = oldsax;
+    xmlFreeParserCtxt(ctxt);
+
+    return(ret);
+}
+
+/**
+ * xmlParseDoc:
+ * @cur:  a pointer to an array of xmlChar
+ *
+ * parse an XML in-memory document and build a tree.
+ *
+ * Returns the resulting document tree
+ */
+
+xmlDocPtr
+xmlParseDoc(const xmlChar *cur) {
+    return(xmlSAXParseDoc(NULL, cur, 0));
+}
+#endif /* LIBXML_SAX1_ENABLED */
+
+#ifdef LIBXML_LEGACY_ENABLED
+/************************************************************************
+ *									*
+ *	Specific function to keep track of entities references		*
+ *	and used by the XSLT debugger					*
+ *									*
+ ************************************************************************/
+
+static xmlEntityReferenceFunc xmlEntityRefFunc = NULL;
+
+/**
+ * xmlAddEntityReference:
+ * @ent : A valid entity
+ * @firstNode : A valid first node for children of entity
+ * @lastNode : A valid last node of children entity
+ *
+ * Notify of a reference to an entity of type XML_EXTERNAL_GENERAL_PARSED_ENTITY
+ */
+static void
+xmlAddEntityReference(xmlEntityPtr ent, xmlNodePtr firstNode,
+                      xmlNodePtr lastNode)
+{
+    if (xmlEntityRefFunc != NULL) {
+        (*xmlEntityRefFunc) (ent, firstNode, lastNode);
+    }
+}
+
+
+/**
+ * xmlSetEntityReferenceFunc:
+ * @func: A valid function
+ *
+ * Set the function to call call back when a xml reference has been made
+ */
+void
+xmlSetEntityReferenceFunc(xmlEntityReferenceFunc func)
+{
+    xmlEntityRefFunc = func;
+}
+#endif /* LIBXML_LEGACY_ENABLED */
+
+/************************************************************************
+ *									*
+ *				Miscellaneous				*
+ *									*
+ ************************************************************************/
+
+#ifdef LIBXML_XPATH_ENABLED
+#include <libxml/xpath.h>
+#endif
+
+extern void XMLCDECL xmlGenericErrorDefaultFunc(void *ctx, const char *msg, ...);
+static int xmlParserInitialized = 0;
+
+/**
+ * xmlInitParser:
+ *
+ * Initialization function for the XML parser.
+ * This is not reentrant. Call once before processing in case of
+ * use in multithreaded programs.
+ */
+
+void
+xmlInitParser(void) {
+    if (xmlParserInitialized != 0)
+	return;
+
+#if defined(_WIN32) && (!defined(LIBXML_STATIC) || defined(LIBXML_STATIC_FOR_DLL))
+    if (xmlFree == free)
+        atexit(xmlCleanupParser);
+#endif
+
+#ifdef LIBXML_THREAD_ENABLED
+    __xmlGlobalInitMutexLock();
+    if (xmlParserInitialized == 0) {
+#endif
+	xmlInitThreads();
+	xmlInitGlobals();
+	if ((xmlGenericError == xmlGenericErrorDefaultFunc) ||
+	    (xmlGenericError == NULL))
+	    initGenericErrorDefaultFunc(NULL);
+	xmlInitMemory();
+        xmlInitializeDict();
+	xmlInitCharEncodingHandlers();
+	xmlDefaultSAXHandlerInit();
+	xmlRegisterDefaultInputCallbacks();
+#ifdef LIBXML_OUTPUT_ENABLED
+	xmlRegisterDefaultOutputCallbacks();
+#endif /* LIBXML_OUTPUT_ENABLED */
+#ifdef LIBXML_HTML_ENABLED
+	htmlInitAutoClose();
+	htmlDefaultSAXHandlerInit();
+#endif
+#ifdef LIBXML_XPATH_ENABLED
+	xmlXPathInit();
+#endif
+	xmlParserInitialized = 1;
+#ifdef LIBXML_THREAD_ENABLED
+    }
+    __xmlGlobalInitMutexUnlock();
+#endif
+}
+
+/**
+ * xmlCleanupParser:
+ *
+ * This function name is somewhat misleading. It does not clean up
+ * parser state, it cleans up memory allocated by the library itself.
+ * It is a cleanup function for the XML library. It tries to reclaim all
+ * related global memory allocated for the library processing.
+ * It doesn't deallocate any document related memory. One should
+ * call xmlCleanupParser() only when the process has finished using
+ * the library and all XML/HTML documents built with it.
+ * See also xmlInitParser() which has the opposite function of preparing
+ * the library for operations.
+ *
+ * WARNING: if your application is multithreaded or has plugin support
+ *          calling this may crash the application if another thread or
+ *          a plugin is still using libxml2. It's sometimes very hard to
+ *          guess if libxml2 is in use in the application, some libraries
+ *          or plugins may use it without notice. In case of doubt abstain
+ *          from calling this function or do it just before calling exit()
+ *          to avoid leak reports from valgrind !
+ */
+
+void
+xmlCleanupParser(void) {
+    if (!xmlParserInitialized)
+	return;
+
+    xmlCleanupCharEncodingHandlers();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlCatalogCleanup();
+#endif
+    xmlDictCleanup();
+    xmlCleanupInputCallbacks();
+#ifdef LIBXML_OUTPUT_ENABLED
+    xmlCleanupOutputCallbacks();
+#endif
+#ifdef LIBXML_SCHEMAS_ENABLED
+    xmlSchemaCleanupTypes();
+    xmlRelaxNGCleanupTypes();
+#endif
+    xmlCleanupGlobals();
+    xmlCleanupThreads(); /* must be last if called not from the main thread */
+    xmlCleanupMemory();
+    xmlParserInitialized = 0;
+}
+
+#if defined(HAVE_ATTRIBUTE_DESTRUCTOR) && !defined(LIBXML_STATIC) && \
+    !defined(_WIN32)
+static void
+ATTRIBUTE_DESTRUCTOR
+xmlDestructor(void) {
+    /*
+     * Calling custom deallocation functions in a destructor can cause
+     * problems, for example with Nokogiri.
+     */
+    if (xmlFree == free)
+        xmlCleanupParser();
+}
+#endif
+
+/************************************************************************
+ *									*
+ *	New set (2.6.0) of simpler and more flexible APIs		*
+ *									*
+ ************************************************************************/
+
+/**
+ * DICT_FREE:
+ * @str:  a string
+ *
+ * Free a string if it is not owned by the "dict" dictionary in the
+ * current scope
+ */
+#define DICT_FREE(str)						\
+	if ((str) && ((!dict) ||				\
+	    (xmlDictOwns(dict, (const xmlChar *)(str)) == 0)))	\
+	    xmlFree((char *)(str));
+
+/**
+ * xmlCtxtReset:
+ * @ctxt: an XML parser context
+ *
+ * Reset a parser context
+ */
+void
+xmlCtxtReset(xmlParserCtxtPtr ctxt)
+{
+    xmlParserInputPtr input;
+    xmlDictPtr dict;
+
+    if (ctxt == NULL)
+        return;
+
+    dict = ctxt->dict;
+
+    while ((input = inputPop(ctxt)) != NULL) { /* Non consuming */
+        xmlFreeInputStream(input);
+    }
+    ctxt->inputNr = 0;
+    ctxt->input = NULL;
+
+    ctxt->spaceNr = 0;
+    if (ctxt->spaceTab != NULL) {
+	ctxt->spaceTab[0] = -1;
+	ctxt->space = &ctxt->spaceTab[0];
+    } else {
+        ctxt->space = NULL;
+    }
+
+
+    ctxt->nodeNr = 0;
+    ctxt->node = NULL;
+
+    ctxt->nameNr = 0;
+    ctxt->name = NULL;
+
+    DICT_FREE(ctxt->version);
+    ctxt->version = NULL;
+    DICT_FREE(ctxt->encoding);
+    ctxt->encoding = NULL;
+    DICT_FREE(ctxt->directory);
+    ctxt->directory = NULL;
+    DICT_FREE(ctxt->extSubURI);
+    ctxt->extSubURI = NULL;
+    DICT_FREE(ctxt->extSubSystem);
+    ctxt->extSubSystem = NULL;
+    if (ctxt->myDoc != NULL)
+        xmlFreeDoc(ctxt->myDoc);
+    ctxt->myDoc = NULL;
+
+    ctxt->standalone = -1;
+    ctxt->hasExternalSubset = 0;
+    ctxt->hasPErefs = 0;
+    ctxt->html = 0;
+    ctxt->external = 0;
+    ctxt->instate = XML_PARSER_START;
+    ctxt->token = 0;
+
+    ctxt->wellFormed = 1;
+    ctxt->nsWellFormed = 1;
+    ctxt->disableSAX = 0;
+    ctxt->valid = 1;
+#if 0
+    ctxt->vctxt.userData = ctxt;
+    ctxt->vctxt.error = xmlParserValidityError;
+    ctxt->vctxt.warning = xmlParserValidityWarning;
+#endif
+    ctxt->record_info = 0;
+    ctxt->checkIndex = 0;
+    ctxt->inSubset = 0;
+    ctxt->errNo = XML_ERR_OK;
+    ctxt->depth = 0;
+    ctxt->charset = XML_CHAR_ENCODING_UTF8;
+    ctxt->catalogs = NULL;
+    ctxt->nbentities = 0;
+    ctxt->sizeentities = 0;
+    ctxt->sizeentcopy = 0;
+    xmlInitNodeInfoSeq(&ctxt->node_seq);
+
+    if (ctxt->attsDefault != NULL) {
+        xmlHashFree(ctxt->attsDefault, xmlHashDefaultDeallocator);
+        ctxt->attsDefault = NULL;
+    }
+    if (ctxt->attsSpecial != NULL) {
+        xmlHashFree(ctxt->attsSpecial, NULL);
+        ctxt->attsSpecial = NULL;
+    }
+
+#ifdef LIBXML_CATALOG_ENABLED
+    if (ctxt->catalogs != NULL)
+	xmlCatalogFreeLocal(ctxt->catalogs);
+#endif
+    if (ctxt->lastError.code != XML_ERR_OK)
+        xmlResetError(&ctxt->lastError);
+}
+
+/**
+ * xmlCtxtResetPush:
+ * @ctxt: an XML parser context
+ * @chunk:  a pointer to an array of chars
+ * @size:  number of chars in the array
+ * @filename:  an optional file name or URI
+ * @encoding:  the document encoding, or NULL
+ *
+ * Reset a push parser context
+ *
+ * Returns 0 in case of success and 1 in case of error
+ */
+int
+xmlCtxtResetPush(xmlParserCtxtPtr ctxt, const char *chunk,
+                 int size, const char *filename, const char *encoding)
+{
+    xmlParserInputPtr inputStream;
+    xmlParserInputBufferPtr buf;
+    xmlCharEncoding enc = XML_CHAR_ENCODING_NONE;
+
+    if (ctxt == NULL)
+        return(1);
+
+    if ((encoding == NULL) && (chunk != NULL) && (size >= 4))
+        enc = xmlDetectCharEncoding((const xmlChar *) chunk, size);
+
+    buf = xmlAllocParserInputBuffer(enc);
+    if (buf == NULL)
+        return(1);
+
+    if (ctxt == NULL) {
+        xmlFreeParserInputBuffer(buf);
+        return(1);
+    }
+
+    xmlCtxtReset(ctxt);
+
+    if (filename == NULL) {
+        ctxt->directory = NULL;
+    } else {
+        ctxt->directory = xmlParserGetDirectory(filename);
+    }
+
+    inputStream = xmlNewInputStream(ctxt);
+    if (inputStream == NULL) {
+        xmlFreeParserInputBuffer(buf);
+        return(1);
+    }
+
+    if (filename == NULL)
+        inputStream->filename = NULL;
+    else
+        inputStream->filename = (char *)
+            xmlCanonicPath((const xmlChar *) filename);
+    inputStream->buf = buf;
+    xmlBufResetInput(buf->buffer, inputStream);
+
+    inputPush(ctxt, inputStream);
+
+    if ((size > 0) && (chunk != NULL) && (ctxt->input != NULL) &&
+        (ctxt->input->buf != NULL)) {
+	size_t base = xmlBufGetInputBase(ctxt->input->buf->buffer, ctxt->input);
+        size_t cur = ctxt->input->cur - ctxt->input->base;
+
+        xmlParserInputBufferPush(ctxt->input->buf, size, chunk);
+
+        xmlBufSetInputBaseCur(ctxt->input->buf->buffer, ctxt->input, base, cur);
+#ifdef DEBUG_PUSH
+        xmlGenericError(xmlGenericErrorContext, "PP: pushed %d\n", size);
+#endif
+    }
+
+    if (encoding != NULL) {
+        xmlCharEncodingHandlerPtr hdlr;
+
+        if (ctxt->encoding != NULL)
+	    xmlFree((xmlChar *) ctxt->encoding);
+        ctxt->encoding = xmlStrdup((const xmlChar *) encoding);
+
+        hdlr = xmlFindCharEncodingHandler(encoding);
+        if (hdlr != NULL) {
+            xmlSwitchToEncoding(ctxt, hdlr);
+	} else {
+	    xmlFatalErrMsgStr(ctxt, XML_ERR_UNSUPPORTED_ENCODING,
+			      "Unsupported encoding %s\n", BAD_CAST encoding);
+        }
+    } else if (enc != XML_CHAR_ENCODING_NONE) {
+        xmlSwitchEncoding(ctxt, enc);
+    }
+
+    return(0);
+}
+
+
+/**
+ * xmlCtxtUseOptionsInternal:
+ * @ctxt: an XML parser context
+ * @options:  a combination of xmlParserOption
+ * @encoding:  the user provided encoding to use
+ *
+ * Applies the options to the parser context
+ *
+ * Returns 0 in case of success, the set of unknown or unimplemented options
+ *         in case of error.
+ */
+static int
+xmlCtxtUseOptionsInternal(xmlParserCtxtPtr ctxt, int options, const char *encoding)
+{
+    if (ctxt == NULL)
+        return(-1);
+    if (encoding != NULL) {
+        if (ctxt->encoding != NULL)
+	    xmlFree((xmlChar *) ctxt->encoding);
+        ctxt->encoding = xmlStrdup((const xmlChar *) encoding);
+    }
+    if (options & XML_PARSE_RECOVER) {
+        ctxt->recovery = 1;
+        options -= XML_PARSE_RECOVER;
+	ctxt->options |= XML_PARSE_RECOVER;
+    } else
+        ctxt->recovery = 0;
+    if (options & XML_PARSE_DTDLOAD) {
+        ctxt->loadsubset = XML_DETECT_IDS;
+        options -= XML_PARSE_DTDLOAD;
+	ctxt->options |= XML_PARSE_DTDLOAD;
+    } else
+        ctxt->loadsubset = 0;
+    if (options & XML_PARSE_DTDATTR) {
+        ctxt->loadsubset |= XML_COMPLETE_ATTRS;
+        options -= XML_PARSE_DTDATTR;
+	ctxt->options |= XML_PARSE_DTDATTR;
+    }
+    if (options & XML_PARSE_NOENT) {
+        ctxt->replaceEntities = 1;
+        /* ctxt->loadsubset |= XML_DETECT_IDS; */
+        options -= XML_PARSE_NOENT;
+	ctxt->options |= XML_PARSE_NOENT;
+    } else
+        ctxt->replaceEntities = 0;
+    if (options & XML_PARSE_PEDANTIC) {
+        ctxt->pedantic = 1;
+        options -= XML_PARSE_PEDANTIC;
+	ctxt->options |= XML_PARSE_PEDANTIC;
+    } else
+        ctxt->pedantic = 0;
+    if (options & XML_PARSE_NOBLANKS) {
+        ctxt->keepBlanks = 0;
+        ctxt->sax->ignorableWhitespace = xmlSAX2IgnorableWhitespace;
+        options -= XML_PARSE_NOBLANKS;
+	ctxt->options |= XML_PARSE_NOBLANKS;
+    } else
+        ctxt->keepBlanks = 1;
+    if (options & XML_PARSE_DTDVALID) {
+        ctxt->validate = 1;
+        if (options & XML_PARSE_NOWARNING)
+            ctxt->vctxt.warning = NULL;
+        if (options & XML_PARSE_NOERROR)
+            ctxt->vctxt.error = NULL;
+        options -= XML_PARSE_DTDVALID;
+	ctxt->options |= XML_PARSE_DTDVALID;
+    } else
+        ctxt->validate = 0;
+    if (options & XML_PARSE_NOWARNING) {
+        ctxt->sax->warning = NULL;
+        options -= XML_PARSE_NOWARNING;
+    }
+    if (options & XML_PARSE_NOERROR) {
+        ctxt->sax->error = NULL;
+        ctxt->sax->fatalError = NULL;
+        options -= XML_PARSE_NOERROR;
+    }
+#ifdef LIBXML_SAX1_ENABLED
+    if (options & XML_PARSE_SAX1) {
+        ctxt->sax->startElement = xmlSAX2StartElement;
+        ctxt->sax->endElement = xmlSAX2EndElement;
+        ctxt->sax->startElementNs = NULL;
+        ctxt->sax->endElementNs = NULL;
+        ctxt->sax->initialized = 1;
+        options -= XML_PARSE_SAX1;
+	ctxt->options |= XML_PARSE_SAX1;
+    }
+#endif /* LIBXML_SAX1_ENABLED */
+    if (options & XML_PARSE_NODICT) {
+        ctxt->dictNames = 0;
+        options -= XML_PARSE_NODICT;
+	ctxt->options |= XML_PARSE_NODICT;
+    } else {
+        ctxt->dictNames = 1;
+    }
+    if (options & XML_PARSE_NOCDATA) {
+        ctxt->sax->cdataBlock = NULL;
+        options -= XML_PARSE_NOCDATA;
+	ctxt->options |= XML_PARSE_NOCDATA;
+    }
+    if (options & XML_PARSE_NSCLEAN) {
+	ctxt->options |= XML_PARSE_NSCLEAN;
+        options -= XML_PARSE_NSCLEAN;
+    }
+    if (options & XML_PARSE_NONET) {
+	ctxt->options |= XML_PARSE_NONET;
+        options -= XML_PARSE_NONET;
+    }
+    if (options & XML_PARSE_COMPACT) {
+	ctxt->options |= XML_PARSE_COMPACT;
+        options -= XML_PARSE_COMPACT;
+    }
+    if (options & XML_PARSE_OLD10) {
+	ctxt->options |= XML_PARSE_OLD10;
+        options -= XML_PARSE_OLD10;
+    }
+    if (options & XML_PARSE_NOBASEFIX) {
+	ctxt->options |= XML_PARSE_NOBASEFIX;
+        options -= XML_PARSE_NOBASEFIX;
+    }
+    if (options & XML_PARSE_HUGE) {
+	ctxt->options |= XML_PARSE_HUGE;
+        options -= XML_PARSE_HUGE;
+        if (ctxt->dict != NULL)
+            xmlDictSetLimit(ctxt->dict, 0);
+    }
+    if (options & XML_PARSE_OLDSAX) {
+	ctxt->options |= XML_PARSE_OLDSAX;
+        options -= XML_PARSE_OLDSAX;
+    }
+    if (options & XML_PARSE_IGNORE_ENC) {
+	ctxt->options |= XML_PARSE_IGNORE_ENC;
+        options -= XML_PARSE_IGNORE_ENC;
+    }
+    if (options & XML_PARSE_BIG_LINES) {
+	ctxt->options |= XML_PARSE_BIG_LINES;
+        options -= XML_PARSE_BIG_LINES;
+    }
+    ctxt->linenumbers = 1;
+    return (options);
+}
+
+/**
+ * xmlCtxtUseOptions:
+ * @ctxt: an XML parser context
+ * @options:  a combination of xmlParserOption
+ *
+ * Applies the options to the parser context
+ *
+ * Returns 0 in case of success, the set of unknown or unimplemented options
+ *         in case of error.
+ */
+int
+xmlCtxtUseOptions(xmlParserCtxtPtr ctxt, int options)
+{
+   return(xmlCtxtUseOptionsInternal(ctxt, options, NULL));
+}
+
+/**
+ * xmlDoRead:
+ * @ctxt:  an XML parser context
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ * @reuse:  keep the context for reuse
+ *
+ * Common front-end for the xmlRead functions
+ *
+ * Returns the resulting document tree or NULL
+ */
+static xmlDocPtr
+xmlDoRead(xmlParserCtxtPtr ctxt, const char *URL, const char *encoding,
+          int options, int reuse)
+{
+    xmlDocPtr ret;
+
+    xmlCtxtUseOptionsInternal(ctxt, options, encoding);
+    if (encoding != NULL) {
+        xmlCharEncodingHandlerPtr hdlr;
+
+	hdlr = xmlFindCharEncodingHandler(encoding);
+	if (hdlr != NULL)
+	    xmlSwitchToEncoding(ctxt, hdlr);
+    }
+    if ((URL != NULL) && (ctxt->input != NULL) &&
+        (ctxt->input->filename == NULL))
+        ctxt->input->filename = (char *) xmlStrdup((const xmlChar *) URL);
+    xmlParseDocument(ctxt);
+    if ((ctxt->wellFormed) || ctxt->recovery)
+        ret = ctxt->myDoc;
+    else {
+        ret = NULL;
+	if (ctxt->myDoc != NULL) {
+	    xmlFreeDoc(ctxt->myDoc);
+	}
+    }
+    ctxt->myDoc = NULL;
+    if (!reuse) {
+	xmlFreeParserCtxt(ctxt);
+    }
+
+    return (ret);
+}
+
+/**
+ * xmlReadDoc:
+ * @cur:  a pointer to a zero terminated string
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML in-memory document and build a tree.
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlReadDoc(const xmlChar * cur, const char *URL, const char *encoding, int options)
+{
+    xmlParserCtxtPtr ctxt;
+
+    if (cur == NULL)
+        return (NULL);
+    xmlInitParser();
+
+    ctxt = xmlCreateDocParserCtxt(cur);
+    if (ctxt == NULL)
+        return (NULL);
+    return (xmlDoRead(ctxt, URL, encoding, options, 0));
+}
+
+/**
+ * xmlReadFile:
+ * @filename:  a file or URL
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML file from the filesystem or the network.
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlReadFile(const char *filename, const char *encoding, int options)
+{
+    xmlParserCtxtPtr ctxt;
+
+    xmlInitParser();
+    ctxt = xmlCreateURLParserCtxt(filename, options);
+    if (ctxt == NULL)
+        return (NULL);
+    return (xmlDoRead(ctxt, NULL, encoding, options, 0));
+}
+
+/**
+ * xmlReadMemory:
+ * @buffer:  a pointer to a char array
+ * @size:  the size of the array
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML in-memory document and build a tree.
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlReadMemory(const char *buffer, int size, const char *URL, const char *encoding, int options)
+{
+    xmlParserCtxtPtr ctxt;
+
+    xmlInitParser();
+    ctxt = xmlCreateMemoryParserCtxt(buffer, size);
+    if (ctxt == NULL)
+        return (NULL);
+    return (xmlDoRead(ctxt, URL, encoding, options, 0));
+}
+
+/**
+ * xmlReadFd:
+ * @fd:  an open file descriptor
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML from a file descriptor and build a tree.
+ * NOTE that the file descriptor will not be closed when the
+ *      reader is closed or reset.
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlReadFd(int fd, const char *URL, const char *encoding, int options)
+{
+    xmlParserCtxtPtr ctxt;
+    xmlParserInputBufferPtr input;
+    xmlParserInputPtr stream;
+
+    if (fd < 0)
+        return (NULL);
+    xmlInitParser();
+
+    input = xmlParserInputBufferCreateFd(fd, XML_CHAR_ENCODING_NONE);
+    if (input == NULL)
+        return (NULL);
+    input->closecallback = NULL;
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL) {
+        xmlFreeParserInputBuffer(input);
+        return (NULL);
+    }
+    stream = xmlNewIOInputStream(ctxt, input, XML_CHAR_ENCODING_NONE);
+    if (stream == NULL) {
+        xmlFreeParserInputBuffer(input);
+	xmlFreeParserCtxt(ctxt);
+        return (NULL);
+    }
+    inputPush(ctxt, stream);
+    return (xmlDoRead(ctxt, URL, encoding, options, 0));
+}
+
+/**
+ * xmlReadIO:
+ * @ioread:  an I/O read function
+ * @ioclose:  an I/O close function
+ * @ioctx:  an I/O handler
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML document from I/O functions and source and build a tree.
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlReadIO(xmlInputReadCallback ioread, xmlInputCloseCallback ioclose,
+          void *ioctx, const char *URL, const char *encoding, int options)
+{
+    xmlParserCtxtPtr ctxt;
+    xmlParserInputBufferPtr input;
+    xmlParserInputPtr stream;
+
+    if (ioread == NULL)
+        return (NULL);
+    xmlInitParser();
+
+    input = xmlParserInputBufferCreateIO(ioread, ioclose, ioctx,
+                                         XML_CHAR_ENCODING_NONE);
+    if (input == NULL) {
+        if (ioclose != NULL)
+            ioclose(ioctx);
+        return (NULL);
+    }
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL) {
+        xmlFreeParserInputBuffer(input);
+        return (NULL);
+    }
+    stream = xmlNewIOInputStream(ctxt, input, XML_CHAR_ENCODING_NONE);
+    if (stream == NULL) {
+        xmlFreeParserInputBuffer(input);
+	xmlFreeParserCtxt(ctxt);
+        return (NULL);
+    }
+    inputPush(ctxt, stream);
+    return (xmlDoRead(ctxt, URL, encoding, options, 0));
+}
+
+/**
+ * xmlCtxtReadDoc:
+ * @ctxt:  an XML parser context
+ * @cur:  a pointer to a zero terminated string
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML in-memory document and build a tree.
+ * This reuses the existing @ctxt parser context
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlCtxtReadDoc(xmlParserCtxtPtr ctxt, const xmlChar * cur,
+               const char *URL, const char *encoding, int options)
+{
+    xmlParserInputPtr stream;
+
+    if (cur == NULL)
+        return (NULL);
+    if (ctxt == NULL)
+        return (NULL);
+    xmlInitParser();
+
+    xmlCtxtReset(ctxt);
+
+    stream = xmlNewStringInputStream(ctxt, cur);
+    if (stream == NULL) {
+        return (NULL);
+    }
+    inputPush(ctxt, stream);
+    return (xmlDoRead(ctxt, URL, encoding, options, 1));
+}
+
+/**
+ * xmlCtxtReadFile:
+ * @ctxt:  an XML parser context
+ * @filename:  a file or URL
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML file from the filesystem or the network.
+ * This reuses the existing @ctxt parser context
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlCtxtReadFile(xmlParserCtxtPtr ctxt, const char *filename,
+                const char *encoding, int options)
+{
+    xmlParserInputPtr stream;
+
+    if (filename == NULL)
+        return (NULL);
+    if (ctxt == NULL)
+        return (NULL);
+    xmlInitParser();
+
+    xmlCtxtReset(ctxt);
+
+    stream = xmlLoadExternalEntity(filename, NULL, ctxt);
+    if (stream == NULL) {
+        return (NULL);
+    }
+    inputPush(ctxt, stream);
+    return (xmlDoRead(ctxt, NULL, encoding, options, 1));
+}
+
+/**
+ * xmlCtxtReadMemory:
+ * @ctxt:  an XML parser context
+ * @buffer:  a pointer to a char array
+ * @size:  the size of the array
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML in-memory document and build a tree.
+ * This reuses the existing @ctxt parser context
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlCtxtReadMemory(xmlParserCtxtPtr ctxt, const char *buffer, int size,
+                  const char *URL, const char *encoding, int options)
+{
+    xmlParserInputBufferPtr input;
+    xmlParserInputPtr stream;
+
+    if (ctxt == NULL)
+        return (NULL);
+    if (buffer == NULL)
+        return (NULL);
+    xmlInitParser();
+
+    xmlCtxtReset(ctxt);
+
+    input = xmlParserInputBufferCreateMem(buffer, size, XML_CHAR_ENCODING_NONE);
+    if (input == NULL) {
+	return(NULL);
+    }
+
+    stream = xmlNewIOInputStream(ctxt, input, XML_CHAR_ENCODING_NONE);
+    if (stream == NULL) {
+	xmlFreeParserInputBuffer(input);
+	return(NULL);
+    }
+
+    inputPush(ctxt, stream);
+    return (xmlDoRead(ctxt, URL, encoding, options, 1));
+}
+
+/**
+ * xmlCtxtReadFd:
+ * @ctxt:  an XML parser context
+ * @fd:  an open file descriptor
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML from a file descriptor and build a tree.
+ * This reuses the existing @ctxt parser context
+ * NOTE that the file descriptor will not be closed when the
+ *      reader is closed or reset.
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlCtxtReadFd(xmlParserCtxtPtr ctxt, int fd,
+              const char *URL, const char *encoding, int options)
+{
+    xmlParserInputBufferPtr input;
+    xmlParserInputPtr stream;
+
+    if (fd < 0)
+        return (NULL);
+    if (ctxt == NULL)
+        return (NULL);
+    xmlInitParser();
+
+    xmlCtxtReset(ctxt);
+
+
+    input = xmlParserInputBufferCreateFd(fd, XML_CHAR_ENCODING_NONE);
+    if (input == NULL)
+        return (NULL);
+    input->closecallback = NULL;
+    stream = xmlNewIOInputStream(ctxt, input, XML_CHAR_ENCODING_NONE);
+    if (stream == NULL) {
+        xmlFreeParserInputBuffer(input);
+        return (NULL);
+    }
+    inputPush(ctxt, stream);
+    return (xmlDoRead(ctxt, URL, encoding, options, 1));
+}
+
+/**
+ * xmlCtxtReadIO:
+ * @ctxt:  an XML parser context
+ * @ioread:  an I/O read function
+ * @ioclose:  an I/O close function
+ * @ioctx:  an I/O handler
+ * @URL:  the base URL to use for the document
+ * @encoding:  the document encoding, or NULL
+ * @options:  a combination of xmlParserOption
+ *
+ * parse an XML document from I/O functions and source and build a tree.
+ * This reuses the existing @ctxt parser context
+ *
+ * Returns the resulting document tree
+ */
+xmlDocPtr
+xmlCtxtReadIO(xmlParserCtxtPtr ctxt, xmlInputReadCallback ioread,
+              xmlInputCloseCallback ioclose, void *ioctx,
+	      const char *URL,
+              const char *encoding, int options)
+{
+    xmlParserInputBufferPtr input;
+    xmlParserInputPtr stream;
+
+    if (ioread == NULL)
+        return (NULL);
+    if (ctxt == NULL)
+        return (NULL);
+    xmlInitParser();
+
+    xmlCtxtReset(ctxt);
+
+    input = xmlParserInputBufferCreateIO(ioread, ioclose, ioctx,
+                                         XML_CHAR_ENCODING_NONE);
+    if (input == NULL) {
+        if (ioclose != NULL)
+            ioclose(ioctx);
+        return (NULL);
+    }
+    stream = xmlNewIOInputStream(ctxt, input, XML_CHAR_ENCODING_NONE);
+    if (stream == NULL) {
+        xmlFreeParserInputBuffer(input);
+        return (NULL);
+    }
+    inputPush(ctxt, stream);
+    return (xmlDoRead(ctxt, URL, encoding, options, 1));
+}
+
