@@ -1,0 +1,31 @@
+bool subset (hb_subset_context_t *c) const
+  {
+    TRACE_SUBSET (this);
+
+    if (!has_valid_glyf_format (c->plan->source)) {
+      // glyf format is unknown don't attempt to subset it.
+      DEBUG_MSG (SUBSET, nullptr,
+                 "unkown glyf format, dropping from subset.");
+      return_trace (false);
+    }
+
+    hb_font_t *font = nullptr;
+    if (c->plan->normalized_coords)
+    {
+      font = _create_font_for_instancing (c->plan);
+      if (unlikely (!font))
+	return_trace (false);
+    }
+
+    // Generate a subset of glyphs based on the provided plan and font.
+    // Populate a list of subset glyphs, checking for failure in the process.
+    // Destroy the font if it was created for instancing, after using it.
+    // Calculate padded offsets for each subset glyph and determine if a short loca table can be used.
+    // Initialize a new glyf object for serialization.
+    // Serialize the subset of glyphs into the glyf object, using the determined loca format.
+    // Handle any necessary cleanup of resources, particularly the compiled subset glyphs, if required.
+    // Return the result of the serialization process as the function's output.
+    // <MASK>
+
+    return result;
+  }

@@ -76,6 +76,7 @@ def get_cwe_info(id):
 class BaseEvaler(ABC):
     def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
         self.model_name = MODELS[model_name]
+         
         self.context_type = context_type
         self.prompt_type = prompt_type
         self.mode = mode
@@ -102,6 +103,15 @@ class BaseEvaler(ABC):
         if self.context_type == 'in-file':
             with open(f'descriptions/{id}/in-file.txt', 'r') as file:
                 context = file.read()
+            return INFILE_PROMPT.format(context=context.strip())
+        elif self.context_type == 'in-file-truncated':
+            file_path = f'descriptions/{id}/in-file-truncated.txt'
+            if not os.path.exists(file_path):
+                print(f"File not found: {file_path}. Skipping this prompt.")
+                return ""
+            with open(file_path, 'r') as file:
+                context = file.read()
+            
             return INFILE_PROMPT.format(context=context.strip())
         elif self.context_type == 'cross-file':
             # get func_mask_desc
@@ -517,13 +527,12 @@ class CosecEvaler(BaseEvaler):
         super().__init__(model_name, context_type, prompt_type, mode)
         self.args = args  # Save the command-line arguments
         # Load specialized model (for example, CodeLlamaModelLM)
-         
-        self.model = CodeLlamaModelLM.from_pretrained(model_name,torch_dtype=torch.bfloat16, device_map='auto')
+        self.model = CodeLlamaModelLM.from_pretrained(self.model_name,torch_dtype=torch.bfloat16, device_map='auto')
         # Load expert (final) model
         self.sec_model = AutoModelForCausalLM.from_pretrained(final_model_path,torch_dtype=torch.bfloat16,attn_implementation="flash_attention_2",  device_map='auto')
         
         # Load tokenizer from the specialized model path
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         
         # Set models to evaluation mode
@@ -531,7 +540,15 @@ class CosecEvaler(BaseEvaler):
         self.sec_model.eval()
 
     def get_response(self, id: str, mode) -> str:
+          
         prompt = self._get_prompt(id, mode)
+        
+        
+        if not prompt.strip():
+            print(f"ID {id}: prompt is empty, skipping.")
+            return "", prompt, None
+
+         
         system_prompt = self._get_system_prompt(id)
         if id in self.responses_cache:
             print('Using cache')
@@ -553,7 +570,7 @@ class CosecEvaler(BaseEvaler):
                 {"role": "user", "content": prompt},
             ]
         input_ids = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
+            messages, add_generation_prompt=True, return_tensors="pt",truncation=True
         ).to(self.model.device)
         print("Input IDs shape:", input_ids.shape)
          
@@ -564,13 +581,17 @@ class CosecEvaler(BaseEvaler):
             'model_kwargs_expert': {},
             'threshold': self.args.threshold,  # use threshold from args
         }
-         
+        import time
+        generation_results = {}
+       
+        print(len(input_ids[0]))
+        start_time = time.time()
         gen_output = self.model.generate_with_experts(
             input_ids=input_ids,
             do_sample=True,
             num_return_sequences=1,
             temperature=self.args.temp,
-            max_new_tokens=20,
+            max_new_tokens=400,
             top_p=0.95,
             pad_token_id=self.tokenizer.pad_token_id,
             use_cache=True,
@@ -579,9 +600,19 @@ class CosecEvaler(BaseEvaler):
             expert_top_p=0.95,
             **extra_kwargs
         )
+        gen_time = time.time() - start_time
+        print(f"Generation time: {gen_time:.2f} seconds")
         
         # Decode the generated output
-        response = self.tokenizer.decode(gen_output[0][len(input_ids[0]):], skip_special_tokens=True)
-        self.responses_cache[id] = response
-
-        return self.postprocess(response), prompt, system_prompt
+        response = self.tokenizer.decode(
+            gen_output[0], skip_special_tokens=True
+        ) 
+        final_response = self.postprocess(response)
+        print(final_response)
+        # Save the result and generation time for this token limit
+        print(f"Max new tokens: {len( gen_output[0] )}, Generation time: {gen_time:.2f} seconds")
+    
+        # Cache and return the response along with prompt details
+        self.responses_cache[id] = final_response
+        return final_response, prompt, system_prompt
+        

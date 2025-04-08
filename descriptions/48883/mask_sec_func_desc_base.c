@@ -1,0 +1,109 @@
+void ndpi_search_tftp(struct ndpi_detection_module_struct
+		      *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  NDPI_LOG_DBG(ndpi_struct, "search TFTP\n");
+
+  if (packet->payload_packet_len < 4 /* min. header size */ ||
+      get_u_int8_t(packet->payload, 0) != 0x00)
+  {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  /* parse TFTP opcode */
+  switch (get_u_int8_t(packet->payload, 1))
+  {
+    case 0x01:
+        /* Read request (RRQ) */
+    case 0x02:
+        /* Write request (WWQ) */
+
+        if (packet->payload[packet->payload_packet_len - 1] != 0x00 /* last pdu element is a nul terminated string */)
+        {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+
+        {
+          char const * const possible_modes[] = { "netascii", "octet", "mail" };
+          uint8_t mode_found = 0, mode_idx;
+          size_t mode_len;
+
+          for(mode_idx = 0; mode_idx < NDPI_ARRAY_LENGTH(possible_modes); ++mode_idx)
+          {
+            mode_len = strlen(possible_modes[mode_idx]);
+
+            if (packet->payload_packet_len < mode_len + 1 /* mode is a nul terminated string */)
+            {
+              continue;
+            }
+            if (strncasecmp((char const *)&packet->payload[packet->payload_packet_len - 1 - mode_len],
+                            possible_modes[mode_idx], mode_len) == 0)
+            {
+              mode_found = 1;
+              break;
+            }
+          }
+
+          if (mode_found == 0)
+          {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+
+          // Extract the filename from the TFTP RRQ/WWQ packet.
+          // Determine the length of the filename.
+          // Verify the filename is present and consists of printable characters.
+          // If valid, copy the filename into the flow structure's TFTP filename field, ensuring null-termination.
+          // Log the detection of a TFTP RRQ/WWQ packet and add the connection to the flow.
+          // <MASK>
+        }
+        return;
+
+    case 0x03:
+        /* Data (DATA) */
+        if (packet->payload_packet_len > 4 /* DATA header size */ + 512 /* max. block size */)
+        {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+        break;
+
+    case 0x04:
+        /* Acknowledgment (ACK) */
+        if (packet->payload_packet_len != 4 /* ACK has a fixed packet size */)
+        {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+        break;
+
+    case 0x05:
+        /* Error (ERROR) */
+
+        if (packet->payload_packet_len < 5 ||
+            packet->payload[packet->payload_packet_len - 1] != 0x00 ||
+            packet->payload[2] != 0x00 || packet->payload[3] > 0x07)
+        {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+        break;
+
+    default:
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+  }
+
+  if (flow->l4.udp.tftp_stage < 3)
+  {
+    NDPI_LOG_DBG2(ndpi_struct, "maybe tftp. need next packet\n");
+    flow->l4.udp.tftp_stage++;
+    return;
+  }
+
+  NDPI_LOG_INFO(ndpi_struct, "found tftp\n");
+  ndpi_int_tftp_add_connection(ndpi_struct, flow);
+}

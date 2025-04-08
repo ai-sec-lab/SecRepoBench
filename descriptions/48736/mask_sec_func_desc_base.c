@@ -1,0 +1,20 @@
+static int
+json_parse_const(const unsigned char **ucp, const unsigned char *ue,
+    const char *str, size_t len, size_t lvl __file_debugused)
+{
+	const unsigned char *uc = *ucp;
+
+	DPRINTF("Parse const: ", uc, *ucp);
+	*ucp += --len - 1;
+	// This section of code is responsible for parsing a constant JSON value
+	// such as "true", "false", or "null" from the input data. It compares
+	// characters in the input stream pointed to by `uc` with the expected
+	// constant string `str`. The loop iterates over each character in the
+	// constant string and checks if it matches the corresponding character
+	// in the input. If a mismatch is found, the parsing is considered
+	// unsuccessful, and it logs a message indicating a "Bad const". If all
+	// characters match, the function will return success.
+	// <MASK>
+	DPRINTF("Good const: ", uc, *ucp);
+	return 1;
+}

@@ -14,9 +14,9 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
   int lenExp = 0;
 
   int FndArgs = 0;
-  int ndx0 = NULL_ADDRESS, firstArgIndex = NULL_ADDRESS, ndx2 = NULL_ADDRESS, ndx3 = NULL_ADDRESS;
+  int ndx0 = NULL_ADDRESS, ndx1 = NULL_ADDRESS, ndx2 = NULL_ADDRESS, ndx3 = NULL_ADDRESS;
 
-  MagickBooleanType coordQual = MagickFalse;
+  MagickBooleanType coordQual = isCoordQualifier;
   PixelChannel chQual = NO_CHAN_QUAL;
   ImgAttrE iaQual = aNull;
 
@@ -60,9 +60,9 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
       chLimit = ']';
       expChLimit = ']';
   } else {
-    if (!ExpectChar (pfx, '(')) return MagickFalse;
+    if (!ExpectChar (pfx, '(')) return isCoordQualifier;
   }
-  if (!PushOperatorStack (pfx, pushOp)) return MagickFalse;
+  if (!PushOperatorStack (pfx, pushOp)) return isCoordQualifier;
 
   pExpStart = pfx->pex;
   ndx0 = pfx->usedElements;
@@ -87,7 +87,7 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
         pfx->exception, GetMagickModule(), OptionError,
         "For function", "'%s' expected one of '%s' after expression but found '%c' at '%s'",
         funStr, strLimit, chLimit ? chLimit : ' ', SetShortExp(pfx));
-      return MagickFalse;
+      return isCoordQualifier;
     }
     if (FndOne) {
       FndArgs++;
@@ -116,7 +116,7 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
       pfx->exception, GetMagickModule(), OptionError,
       "For function", "'%s' expected '%c', found '%c' at '%s'",
       funStr, expChLimit, chLimit ? chLimit : ' ', SetShortExp(pfx));
-    return MagickFalse;
+    return isCoordQualifier;
   }
 
   if (fe == fP || fe == fS || fe == fU) {
@@ -131,19 +131,19 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
       pfx->exception, GetMagickModule(), OptionError,
       "For function", "'%s' expected %i arguments, found '%i' at '%s'",
       funStr, Functions[fe-FirstFunc].nArgs, FndArgs, SetShortExp(pfx));
-    return MagickFalse;
+    return isCoordQualifier;
   }
   if (FndArgs < Functions[fe-FirstFunc].nArgs) {
     (void) ThrowMagickException (
       pfx->exception, GetMagickModule(), OptionError,
       "For function", "'%s' expected %i arguments, found too few (%i) at '%s'",
       funStr, Functions[fe-FirstFunc].nArgs, FndArgs, SetShortExp(pfx));
-    return MagickFalse;
+    return isCoordQualifier;
   }
   if (fe != fS && fe != fV && FndArgs == 0 && Functions[fe-FirstFunc].nArgs == 0) {
     /* This is for "rand()" and similar. */
     chLimit = expChLimit;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
+    if (!ExpectChar (pfx, ')')) return isCoordQualifier;
   }
 
   if (chLimit != expChLimit) {
@@ -151,21 +151,21 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
       pfx->exception, GetMagickModule(), OptionError,
       "For function", "'%s', arguments don't end with '%c' at '%s'",
       funStr, expChLimit, SetShortExp(pfx));
-    return MagickFalse;
+    return isCoordQualifier;
   }
   if (!PopOprOpenParen (pfx, pushOp)) {
     (void) ThrowMagickException (
       pfx->exception, GetMagickModule(), OptionError,
       "Bug: For function", "'%s' tos not '%s' at '%s'",
       funStr, Operators[pushOp].str, SetShortExp(pfx));
-    return MagickFalse;
+    return isCoordQualifier;
   }
 
   if (IsQualifier (pfx)) {
 
     if (fe == fU || fe == fV || fe == fS) {
 
-      coordQual = (GetCoordQualifier (pfx, fe) == 1) ? MagickTrue : MagickFalse;
+      coordQual = (GetCoordQualifier (pfx, fe) == 1) ? MagickTrue : isCoordQualifier;
 
       if (coordQual) {
 
@@ -176,7 +176,7 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
             pfx->exception, GetMagickModule(), OptionError,
             "Bug: For function", "'%s' last element not 'p' at '%s'",
             funStr, SetShortExp(pfx));
-          return MagickFalse;
+          return isCoordQualifier;
         }
         chQual = pel->ChannelQual;
         expChLimit = (pel->IsRelative) ? ']' : '}';
@@ -207,21 +207,21 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
         pfx->exception, GetMagickModule(), OptionError,
         "For function", "'%s', can't have qualifiers 'p' and image attribute '%s' at '%s'",
         funStr, pfx->token, SetShortExp(pfx));
-      return MagickFalse;
+      return isCoordQualifier;
     }
     if (!coordQual && chQual == NO_CHAN_QUAL && iaQual == aNull) {
       (void) ThrowMagickException (
         pfx->exception, GetMagickModule(), OptionError,
         "For function", "'%s', bad qualifier '%s' at '%s'",
         funStr, pfx->token, SetShortExp(pfx));
-      return MagickFalse;
+      return isCoordQualifier;
     }
     if (!coordQual && chQual == CompositePixelChannel && iaQual == aNull) {
       (void) ThrowMagickException (
         pfx->exception, GetMagickModule(), OptionError,
         "For function", "'%s', bad composite qualifier '%s' at '%s'",
         funStr, pfx->token, SetShortExp(pfx));
-      return MagickFalse;
+      return isCoordQualifier;
     }
 
     if (chQual == HUE_CHANNEL || chQual == SAT_CHANNEL || chQual == LIGHT_CHANNEL) {
@@ -232,20 +232,20 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
           pfx->exception, GetMagickModule(), OptionError,
           "Can't have image attribute with HLS qualifier at", "'%s'",
           SetShortExp(pfx));
-        return MagickFalse;
+        return isCoordQualifier;
       }
     }
   }
 
   if (fe==fWhile) {
-    pfx->Elements[firstArgIndex].EleNdx = ndx2+1;
+    pfx->Elements[ndx1].EleNdx = ndx2+1;
   } else if (fe==fDo) {
-    pfx->Elements[ndx0].EleNdx = firstArgIndex+1;
-    pfx->Elements[firstArgIndex].EleNdx = ndx2+1;
+    pfx->Elements[ndx0].EleNdx = ndx1+1;
+    pfx->Elements[ndx1].EleNdx = ndx2+1;
   } else if (fe==fFor) {
     pfx->Elements[ndx2].EleNdx = ndx3;
   } else if (fe==fIf) {
-    pfx->Elements[firstArgIndex].EleNdx = ndx2 + 1;
+    pfx->Elements[ndx1].EleNdx = ndx2 + 1;
     pfx->Elements[ndx2].EleNdx = ndx3;
   } else {
     if (fe == fU && iaQual == aNull) {
@@ -260,7 +260,7 @@ static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
         fe == fV || fe == fVP || fe == fS || fe == fSP)
     {
       ElementT * pel = &pfx->Elements[pfx->usedElements-1];
-      pel->IsRelative = (expChLimit == ']' ? MagickTrue : MagickFalse);
+      pel->IsRelative = (expChLimit == ']' ? MagickTrue : isCoordQualifier);
       if (chQual >= 0) pel->ChannelQual = chQual;
       if (iaQual != aNull && (fe == fU || fe == fV || fe == fS)) {
         /* Note: we don't allow "p[2,3].mean" or "p.mean" etc. */
