@@ -1,65 +1,323 @@
-if (image->storage_class != PseudoClass)
+DitherImage(Image *image,CubeInfo *cube_info,
+  ExceptionInfo *exception)
+{
+  if (FloydSteinbergDither(image,cube_info,exception) == MagickFalse)
+    return(MagickFalse);
+  return(MagickTrue);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t C u b e I n f o                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetCubeInfo() allocates the CubeInfo structure.
+%
+%  The format of the GetCubeInfo method is:
+%
+%      CubeInfo *GetCubeInfo(const QuantizeInfo *quantize_info,
+%        const size_t colors,const size_t maximum_colors)
+%
+%  A description of each parameter follows:
+%
+%    o quantize_info: the quantize info.
+%
+%    o colors: the number of colors in the image.
+%
+%    o maximum_colors: the maximum number of colors to be used in the output
+%      image.
+%
+*/
+static CubeInfo *GetCubeInfo(const QuantizeInfo *quantize_info,
+  const size_t colors,const size_t maximum_colors)
+{
+  CubeInfo
+    *cube_info;
+
+  size_t
+    number_threads;
+
+  number_threads=(size_t) GetMagickResourceLimit(ThreadResource);
+  cube_info=(CubeInfo *) AcquireMagickMemory(sizeof(*cube_info));
+  if (cube_info == (CubeInfo *) NULL)
+    return((CubeInfo *) NULL);
+  cube_info->colors=colors;
+  cube_info->maximum_colors=maximum_colors;
+  cube_info->transparent_index=(-1);
+  cube_info->transparent_pixels=0;
+  cube_info->target.red=0.0;
+  cube_info->target.green=0.0;
+  cube_info->target.blue=0.0;
+  cube_info->target.alpha=0.0;
+  cube_info->distance=4.0*(QuantumRange+1.0)*(QuantumRange+1.0)+1.0;
+  cube_info->pruning_threshold=0.0;
+  cube_info->next_threshold=0.0;
+  cube_info->nodes=0;
+  cube_info->free_nodes=0;
+  cube_info->color_number=0;
+  cube_info->node_queue=NULL;
+  cube_info->memory_info=NULL;
+  cube_info->cache=NULL;
+  cube_info->quantize_info=CloneQuantizeInfo(quantize_info);
+  cube_info->associate_alpha=MagickFalse;
+  cube_info->depth=MaxTreeDepth;
+  cube_info->node_queue=(Nodes *) AcquireMagickMemory(sizeof(*cube_info->node_queue));
+  if (cube_info->node_queue == (Nodes *) NULL)
     {
-      (void) ResetMagickMemory(colormap_index,(-1),MaxColormapSize*
-        sizeof(*colormap_index));
-      if (AcquireImageColormap(image,MaxColormapSize,exception_info) == MagickFalse)
-        {
-          colormap_index=(ssize_t *) RelinquishMagickMemory(colormap_index);
-          ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
-            image->filename);
-        }
-      image->colors=0;
-      status=MagickTrue;
-      image_view=AcquireAuthenticCacheView(image,exception_info);
-#if defined(MAGICKCORE_OPENMP_SUPPORT)
-      #pragma omp parallel for schedule(static,4) shared(status) \
-        magick_number_threads(image,image,image->rows,1)
-#endif
-      for (y=0; y < (ssize_t) image->rows; y++)
-      {
-        register Quantum
-          *magick_restrict q;
-
-        register ssize_t
-          x;
-
-        if (status == MagickFalse)
-          continue;
-        q=GetCacheViewAuthenticPixels(image_view,0,y,image->columns,1,
-          exception_info);
-        if (q == (Quantum *) NULL)
-          {
-            status=MagickFalse;
-            continue;
-          }
-        for (x=0; x < (ssize_t) image->columns; x++)
-        {
-          register size_t
-            intensity;
-
-          intensity=ScaleQuantumToMap(GetPixelRed(image,q));
-          if (colormap_index[intensity] < 0)
-            {
-#if defined(MAGICKCORE_OPENMP_SUPPORT)
-              #pragma omp critical (MagickCore_SetGrayscaleImage)
-#endif
-              if (colormap_index[intensity] < 0)
-                {
-                  colormap_index[intensity]=(ssize_t) image->colors;
-                  image->colormap[image->colors].red=(double)
-                    GetPixelRed(image,q);
-                  image->colormap[image->colors].green=(double)
-                    GetPixelGreen(image,q);
-                  image->colormap[image->colors].blue=(double)
-                    GetPixelBlue(image,q);
-                  image->colors++;
-               }
-            }
-          SetPixelIndex(image,(Quantum) colormap_index[intensity],q);
-          q+=GetPixelChannels(image);
-        }
-        if (SyncCacheViewAuthenticPixels(image_view,exception_info) == MagickFalse)
-          status=MagickFalse;
-      }
-      image_view=DestroyCacheView(image_view);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
     }
+  cube_info->node_queue->nodes=(NodeInfo *) AcquireMagickMemory(
+    (MaxNodes+1)*sizeof(*cube_info->node_queue->nodes));
+  if (cube_info->node_queue->nodes == (NodeInfo *) NULL)
+    {
+      cube_info->node_queue=(Nodes *) RelinquishMagickMemory(
+        cube_info->node_queue);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  cube_info->node_queue->next=NULL;
+  cube_info->root=cube_info->node_queue->nodes;
+  cube_info->root->parent=NULL;
+  (void) ResetMagickMemory(cube_info->root,0,sizeof(*cube_info->root));
+  cube_info->free_nodes=MaxNodes;
+  cube_info->next_node=cube_info->root+1;
+  cube_info->memory_info=AcquireVirtualMemory(GetMagickResourceLimit(MemoryResource),
+    (MaxNodes+1)*sizeof(*cube_info->node_queue->nodes));
+  if (cube_info->memory_info == (MemoryInfo *) NULL)
+    {
+      cube_info->node_queue->nodes=(NodeInfo *) RelinquishMagickMemory(
+        cube_info->node_queue->nodes);
+      cube_info->node_queue=(Nodes *) RelinquishMagickMemory(
+        cube_info->node_queue);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  cube_info->cache=(ssize_t *) AcquireQuantumMemory(number_threads*
+    (1UL << (4*(MaxTreeDepth-1))),sizeof(*cube_info->cache));
+  if (cube_info->cache == (ssize_t *) NULL)
+    {
+      cube_info->memory_info=RelinquishVirtualMemory(cube_info->memory_info);
+      cube_info->node_queue->nodes=(NodeInfo *) RelinquishMagickMemory(
+        cube_info->node_queue->nodes);
+      cube_info->node_queue=(Nodes *) RelinquishMagickMemory(
+        cube_info->node_queue);
+      cube_info=(CubeInfo *) RelinquishMagickMemory(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  (void) ResetMagickMemory(cube_info->cache,0,number_threads*
+    (1UL << (4*(MaxTreeDepth-1)))*sizeof(*cube_info->cache));
+  return(cube_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t N o d e I n f o                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetNodeInfo() allocates the NodeInfo structure.
+%
+%  The format of the GetNodeInfo method is:
+%
+%      NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,
+%        const size_t level,NodeInfo *parent)
+%
+%  A description of each parameter follows:
+%
+%    o cube_info: the cube info.
+%
+%    o id: the node id.
+%
+%    o level: the node level.
+%
+%    o parent: the parent node.
+%
+*/
+static NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,
+  const size_t level,NodeInfo *parent)
+{
+  NodeInfo
+    *node_info;
+
+  if (cube_info->free_nodes == 0)
+    return((NodeInfo *) NULL);
+  node_info=cube_info->next_node++;
+  cube_info->free_nodes--;
+  node_info->id=id;
+  node_info->level=level;
+  node_info->parent=parent;
+  (void) ResetMagickMemory(node_info->child,0,sizeof(node_info->child));
+  node_info->number_unique=0;
+  node_info->total_color.red=0.0;
+  node_info->total_color.green=0.0;
+  node_info->total_color.blue=0.0;
+  node_info->total_color.alpha=0.0;
+  node_info->quantize_error=0.0;
+  return(node_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t Q u a n t i z e I n f o                                             %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetQuantizeInfo() initializes the QuantizeInfo structure.
+%
+%  The format of the GetQuantizeInfo method is:
+%
+%      void GetQuantizeInfo(QuantizeInfo *quantize_info)
+%
+%  A description of each parameter follows:
+%
+%    o quantize_info: the quantize info.
+%
+*/
+static void GetQuantizeInfo(QuantizeInfo *quantize_info)
+{
+  assert(quantize_info != (QuantizeInfo *) NULL);
+  quantize_info->number_colors=256;
+  quantize_info->tree_depth=MaxTreeDepth;
+  quantize_info->dither_method=RiemersmaDitherMethod;
+  quantize_info->colorspace=UndefinedColorspace;
+  quantize_info->measure_error=MagickFalse;
+  quantize_info->signature=MagickCoreSignature;
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t T r a n s p a r e n t I n d e x                                      %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetTransparentIndex() returns the index of the transparent color in the
+%  colormap.
+%
+%  The format of the GetTransparentIndex method is:
+%
+%      ssize_t GetTransparentIndex(const Image *image)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+*/
+static ssize_t GetTransparentIndex(const Image *image)
+{
+  register ssize_t
+    i;
+
+  for (i=0; i < (ssize_t) image->colors; i++)
+    if (image->colormap[i].alpha == OpaqueAlpha)
+      return(i);
+  return(-1);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t I m a g e Q u a n t i z e E r r o r                                %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetImageQuantizeError() computes the quantization error for the image.
+%
+%  The format of the GetImageQuantizeError method is:
+%
+%      MagickBooleanType GetImageQuantizeError(Image *image,
+%        ExceptionInfo *exception)
+%
+%  A description of each parameter follows:
+%
+%    o image: the image.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+static MagickBooleanType GetImageQuantizeError(Image *image,
+  ExceptionInfo *exception)
+{
+#define GetImageQuantizeErrorTag  "Get/Image/Quantize/Error"
+
+  CacheView
+    *image_view;
+
+  MagickBooleanType
+    status;
+
+  ssize_t
+    y;
+
+  status=MagickTrue;
+  image_view=AcquireAuthenticCacheView(image,exception);
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    register const Quantum
+      *magick_restrict q;
+
+    register ssize_t
+      x;
+
+    q=GetCacheViewAuthenticPixels(image_view,0,y,image->columns,1,exception);
+    if (q == (const Quantum *) NULL)
+      break;
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      register size_t
+        index;
+
+      register const NodeInfo
+        *node_info;
+
+      register DoublePixelPacket
+        pixel;
+
+      index=(size_t) GetPixelIndex(image,q);
+      node_info=image->colormap[index].color_cell;
+      AssociateAlphaPixel(image,node_info,&pixel);
+      if (image->colormap[index].alpha == OpaqueAlpha)
+        {
+          pixel.red=(double) GetPixelRed(image,q);
+          pixel.green=(double) GetPixelGreen(image,q);
+          pixel.blue=(double) GetPixelBlue(image,q);
+          pixel.alpha=(double) GetPixelAlpha(image,q);
+        }
+      else
+        {
+          double
+            alpha;
+
+          alpha=(double) (QuantumScale*GetPixelAlpha(image,q));
+          pixel.red=alpha*GetPixelRed(image,q);
+          pixel.green=alpha*GetPixelGreen(image,q);
+          pixel.blue=alpha*GetPixelBlue(image,q);
+          pixel.alpha=(double) GetPixelAlpha(image,q);
+        }
+      image->colormap[index].quantize_error+=sqrt(
+        (pixel.red-node_info->total_color.red)*(

@@ -1,133 +1,58 @@
-pixels=PushLongPixel(MSBEndian,pixels,&value);
-          break;
-        }
-        case 16:
+{
+      unsigned int
+        value;
+
+      value=(unsigned int) ClampToQuantum(pixel->red);
+      value=(value << 8) | (unsigned int) ClampToQuantum(pixel->green);
+      value=(value << 8) | (unsigned int) ClampToQuantum(pixel->blue);
+      *pixels++=(unsigned char) (value >> 24);
+      *pixels++=(unsigned char) (value >> 16);
+      *pixels++=(unsigned char) (value >> 8);
+      *pixels++=(unsigned char) value;
+      if (image->alpha_trait != UndefinedPixelTrait)
         {
-          value=(unsigned short) (value << (image->depth-MAGICKCORE_QUANTUM_DEPTH));
-          pixels=PushShortPixel(MSBEndian,pixels,&value);
-          break;
+          value=ScaleQuantumToLong(ClampToQuantum(pixel->alpha));
+          pixels=PushLongPixel(MSBEndian,value,pixels);
         }
-        case 8:
-        {
-          pixels=PushCharPixel(pixels,&value);
-          break;
-        }
-      }
-      length--;
-      return(pixels);
-    }
-  value=(unsigned int) ClampToQuantum(pixel->red);
-  switch (image->depth)
-  {
-    case 32:
-    default:
-    {
-      pixels=PushLongPixel(MSBEndian,pixels,&value);
       break;
     }
     case 16:
     {
-      value=(unsigned short) (value << (image->depth-MAGICKCORE_QUANTUM_DEPTH));
-      pixels=PushShortPixel(MSBEndian,pixels,&value);
+      unsigned short
+        value;
+
+      value=(unsigned short) ClampToQuantum(pixel->red);
+      value=(value << 16) | (unsigned short) ClampToQuantum(pixel->green);
+      value=(value << 16) | (unsigned short) ClampToQuantum(pixel->blue);
+      *pixels++=(unsigned char) (value >> 8);
+      *pixels++=(unsigned char) value;
+      if (image->alpha_trait != UndefinedPixelTrait)
+        {
+          value=ScaleQuantumToShort(ClampToQuantum(pixel->alpha));
+          pixels=PushShortPixel(MSBEndian,value,pixels);
+        }
       break;
     }
     case 8:
     {
-      pixels=PushCharPixel(pixels,&value);
+      unsigned char
+        value;
+
+      value=(unsigned char) ClampToQuantum(pixel->red);
+      *pixels++=value;
+      value=(unsigned char) ClampToQuantum(pixel->green);
+      *pixels++=value;
+      value=(unsigned char) ClampToQuantum(pixel->blue);
+      *pixels++=value;
+      if (image->alpha_trait != UndefinedPixelTrait)
+        {
+          value=(unsigned char) ScaleQuantumToChar(ClampToQuantum(pixel->alpha));
+          *pixels++=value;
+        }
       break;
     }
   }
-  value=(unsigned int) ClampToQuantum(pixel->green);
-  switch (image->depth)
-  {
-    case 32:
-    default:
-    {
-      pixels=PushLongPixel(MSBEndian,pixels,&value);
-      break;
-    }
-    case 16:
-    {
-      value=(unsigned short) (value << (image->depth-MAGICKCORE_QUANTUM_DEPTH));
-      pixels=PushShortPixel(MSBEndian,pixels,&value);
-      break;
-    }
-    case 8:
-    {
-      pixels=PushCharPixel(pixels,&value);
-      break;
-    }
-  }
-  value=(unsigned int) ClampToQuantum(pixel->blue);
-  switch (image->depth)
-  {
-    case 32:
-    default:
-    {
-      pixels=PushLongPixel(MSBEndian,pixels,&value);
-      break;
-    }
-    case 16:
-    {
-      value=(unsigned short) (value << (image->depth-MAGICKCORE_QUANTUM_DEPTH));
-      pixels=PushShortPixel(MSBEndian,pixels,&value);
-      break;
-    }
-    case 8:
-    {
-      pixels=PushCharPixel(pixels,&value);
-      break;
-    }
-  }
-  if (image->colorspace == CMYKColorspace)
-    {
-      value=(unsigned int) ClampToQuantum(pixel->black);
-      switch (image->depth)
-      {
-        case 32:
-        default:
-        {
-          pixels=PushLongPixel(MSBEndian,pixels,&value);
-          break;
-        }
-        case 16:
-        {
-          value=(unsigned short) (value << (image->depth-MAGICKCORE_QUANTUM_DEPTH));
-          pixels=PushShortPixel(MSBEndian,pixels,&value);
-          break;
-        }
-        case 8:
-        {
-          pixels=PushCharPixel(pixels,&value);
-          break;
-        }
-      }
-    }
-  if (image->alpha_trait != UndefinedPixelTrait)
-    {
-      value=(unsigned int) ClampToQuantum(pixel->alpha);
-      switch (image->depth)
-      {
-        case 32:
-        default:
-        {
-          pixels=PushLongPixel(MSBEndian,pixels,&value);
-          break;
-        }
-        case 16:
-        {
-          value=(unsigned short) (value << (image->depth-MAGICKCORE_QUANTUM_DEPTH));
-          pixels=PushShortPixel(MSBEndian,pixels,&value);
-          break;
-        }
-        case 8:
-        {
-          pixels=PushCharPixel(pixels,&value);
-          break;
-        }
-      }
-    }
-  length--;
+  *pixels++=(unsigned char) length;
   return(pixels);
 }
 
@@ -144,22 +69,25 @@ static MagickBooleanType WriteMIFFImage(const ImageInfo *image_info,
 #endif
 
   char
+    id[MagickPathExtent],
+    label[MagickPathExtent],
     *options;
 
   double
     version;
 
-  size_t
-    compress_extent,
-    extent,
-    length,
-    packet_size;
+  GeometryInfo
+    geometry_info;
 
-  ssize_t
-    y;
+  int
+    c;
+
+  LinkedListInfo
+    *profiles;
 
 #if defined(MAGICKCORE_LZMA_DELEGATE)
   lzma_stream
+    initialize_lzma = LZMA_STREAM_INIT,
     lzma_info = LZMA_STREAM_INIT;
 
   lzma_allocator
@@ -172,12 +100,39 @@ static MagickBooleanType WriteMIFFImage(const ImageInfo *image_info,
   PixelInfo
     pixel;
 
+  MagickStatusType
+    flags;
+
+  QuantumFormatType
+    quantum_format;
+
+  QuantumInfo
+    *quantum_info;
+
   QuantumType
     quantum_type;
+
+  ssize_t
+    i;
+
+  size_t
+    compress_extent,
+    extent,
+    length,
+    packet_size;
+
+  ssize_t
+    count;
 
   unsigned char
     *compress_pixels,
     *pixels;
+
+  size_t
+    colors;
+
+  ssize_t
+    y;
 
 #if defined(MAGICKCORE_ZLIB_DELEGATE)
   z_stream
@@ -189,120 +144,186 @@ static MagickBooleanType WriteMIFFImage(const ImageInfo *image_info,
   */
   assert(image_info != (const ImageInfo *) NULL);
   assert(image_info->signature == MagickCoreSignature);
-  assert(image != (Image *) NULL);
-  assert(image->signature == MagickCoreSignature);
   if (image_info->debug != MagickFalse)
     (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
       image_info->filename);
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
   assert(exception != (ExceptionInfo *) NULL);
   assert(exception->signature == MagickCoreSignature);
   status=OpenBlob(image_info,image,WriteBinaryBlobMode,exception);
   if (status == MagickFalse)
     return(status);
   /*
-    Initialize image structure.
+    Initialize image attributes.
   */
-  version=1.0;
+  *id='\0';
+  (void) strcpy(id,"id=ImageMagick");
+  compress_pixels=(unsigned char *) NULL;
+  quantum_info=(QuantumInfo *) NULL;
+  (void) memset(label,0,sizeof(label));
+  version=0.0;
   (void) version;
-  options=AcquireString((char *) NULL);
-  (void) strcpy(options,"id=ImageMagick");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
+  profiles=(LinkedListInfo *) NULL;
+  colors=0;
+  image->depth=8UL;
+  image->compression=NoCompression;
   /*
     Write image header;  header terminates one character beyond a ':'.
   */
-  (void) strcpy(options,"class=DirectClass");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"depth=8");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"colors=256");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"colormap=gray");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"alpha-trait=Undefined");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"endian=LSBEndian");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"matte=False");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"compression=RLECompression");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"resolution=1x1");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"geometry=0x0+0+0");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"ticks-per-second=100");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"delay=0");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"dispose=Undefined");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"orientation=Undefined");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"page=0x0+0+0");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"type=TrueColor");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"units=Undefined");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"rendering-intent=Undefined");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"gamma=0.0");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"colorspace=sRGB");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.red_primary.x=0.640000");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.red_primary.y=0.330000");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.green_primary.x=0.300000");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.green_primary.y=0.600000");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.blue_primary.x=0.150000");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.blue_primary.y=0.060000");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.white_point.x=0.312700");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"chromaticity.white_point.y=0.329000");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"quality=100");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"comment=This is a comment");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"profile=icc");
-  (void) WriteBlobString(image,options);
-  (void) WriteBlobByte(image,(int) '\n');
-  (void) strcpy(options,"profile=iptc");
-  (void
+  c=WriteBlobByte(image,'i');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'m');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'f');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'f');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'0');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'.');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'1');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'0');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,'0');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    ThrowWriterException(BlobWriteError,"WriteBlobByteFailed");
+  c=WriteBlobByte(image,' ');
+  if (c == EOF)
+    Throw

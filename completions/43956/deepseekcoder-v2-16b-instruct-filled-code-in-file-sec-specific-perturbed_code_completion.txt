@@ -1,19 +1,18 @@
-1 = colour.green / QuantumRange;
-          *v2 = colour.blue  / QuantumRange;
+sFunc, AllCompliance, &colour, dummy_exception) == MagickFalse) {
           dummy_exception = DestroyExceptionInfo (dummy_exception);
-          return (ssize_t) lenfun;
+          return -1;
         }
+        pfx->pex = q + 1;
       }
+      *v0 = QuantumScale * colour.red;
+      *v1 = QuantumScale * colour.green;
+      *v2 = QuantumScale * colour.blue;
+      dummy_exception = DestroyExceptionInfo (dummy_exception);
+      return ((ssize_t) pfx->lenToken);
     }
-    dummy_exception = DestroyExceptionInfo (dummy_exception);
-    return 0;
   }
-
-  *v0 = colour.red   / QuantumRange;
-  *v1 = colour.green / QuantumRange;
-  *v2 = colour.blue  / QuantumRange;
   dummy_exception = DestroyExceptionInfo (dummy_exception);
-  return (ssize_t) pfx->lenToken;
+  return 0;
 }
 
 static MagickBooleanType GetConstant (FxInfo * pfx, fxFltType *val)
@@ -22,16 +21,14 @@ static MagickBooleanType GetConstant (FxInfo * pfx, fxFltType *val)
   len = GetConstantColour (pfx, val, val+1, val+2);
   if (len == -1) return MagickFalse;
   if (len == 0) {
-    len = GetToken (pfx);
-    if (len == 0) {
+    *val = strtold (pfx->token, &pfx->pex);
+    if (pfx->pex == pfx->token) {
       (void) ThrowMagickException (
         pfx->exception, GetMagickModule(), OptionError,
-        "Expected constant at", "'%s'",
-        SetShortExp(pfx));
+        "Constant", "'%s' is not a number at '%s'",
+        pfx->token, SetShortExp(pfx));
       return MagickFalse;
     }
-    *val = strtold (pfx->token, (char **) NULL);
-    pfx->pex += len;
     return MagickTrue;
   }
   pfx->pex += len;
@@ -46,7 +43,7 @@ static MagickBooleanType GetSymbol (FxInfo * pfx, fxFltType *val)
   if (ndx == NULL_ADDRESS) {
     (void) ThrowMagickException (
       pfx->exception, GetMagickModule(), OptionError,
-      "Unknown symbol", "'%s' at '%s'",
+      "Symbol", "'%s' not found at '%s'",
       pfx->token, SetShortExp(pfx));
     return MagickFalse;
   }
@@ -58,179 +55,226 @@ static MagickBooleanType GetSymbol (FxInfo * pfx, fxFltType *val)
 static MagickBooleanType GetFunction (FxInfo * pfx, FunctionE fe)
 {
   int i;
-  if (fe < FirstFunc) return MagickFalse;
   if (PeekStr (pfx, "(")) {
-    pfx->pex += 1;
-    if (fe == fP || fe == fUP || fe == fVP || fe == fSP) {
-      if (!GetSymbol (pfx, &pfx->fxrts->UserSymVals[pfx->usedUserSymbols])) return MagickFalse;
-      if (!ExpectChar (pfx, ')')) return MagickFalse;
+    pfx->pex++;
+    SkipSpaces (pfx);
+    if (PeekChar (pfx) == ')') {
+      pfx->pex++;
+      if (fe == fU0) {
+        if (!AddElement (pfx, (fxFltType) 0, oU0)) return MagickFalse;
+      } else if (fe == fUP) {
+        if (!AddElement (pfx, (fxFltType) 0, oUP)) return MagickFalse;
+      } else if (fe == fVP) {
+        if (!AddElement (pfx, (fxFltType) 0, oVP)) return MagickFalse;
+      } else if (fe == fSP) {
+        if (!AddElement (pfx, (fxFltType) 0, oSP)) return MagickFalse;
+      }
       return MagickTrue;
     }
-    for (i=0; i < Functions[fe-FirstFunc].nArgs; i++) {
-      if (!GetExpression (pfx, &pfx->fxrts->UserSymVals[pfx->usedUserSymbols])) return MagickFalse;
-      if (i < Functions[fe-FirstFunc].nArgs-1) {
-        if (!ExpectChar (pfx, ',')) return MagickFalse;
+    for (i=0; Functions[i].func != fNull; i++) {
+      if (LocaleCompare (Functions[i].str, pfx->token)==0) {
+        if (Functions[i].nArgs != 0) {
+          if (!TranslateExpression (pfx, NULL, NULL, NULL)) return MagickFalse;
+        }
+        if (!AddElement (pfx, (fxFltType) 0, Functions[i].func)) return MagickFalse;
+        return MagickTrue;
       }
     }
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    return MagickTrue;
+    (void) ThrowMagickException (
+      pfx->exception, GetMagickModule(), OptionError,
+      "Function", "'%s' not found at '%s'",
+      pfx->token, SetShortExp(pfx));
+    return MagickFalse;
   }
   return MagickFalse;
 }
 
-static MagickBooleanType GetExpression (FxInfo * pfx, fxFltType *val)
+static MagickBooleanType GetImgAttr (FxInfo * pfx, fxFltType *val)
 {
-  MagickBooleanType
-    needPopAll;
-
-  if (PeekStr (pfx, "if(")) {
-    pfx->pex += 2;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ':')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
-            pfx->Elements[pfx->usedElements-2].val :
-            pfx->Elements[pfx->usedElements-1].val);
-    return MagickTrue;
-  }
-
-  if (PeekStr (pfx, "for(")) {
-    pfx->pex += 3;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ',')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ',')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    *val = pfx->Elements[pfx->usedElements-1].val;
-    return MagickTrue;
-  }
-
-  if (PeekStr (pfx, "while(")) {
-    pfx->pex += 5;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
-            pfx->Elements[pfx->usedElements-2].val :
-            pfx->Elements[pfx->usedElements-1].val);
-    return MagickTrue;
-  }
-
-  if (PeekStr (pfx, "do")) {
-    pfx->pex += 2;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, '{')) return MagickFalse;
-    while (!PeekStr (pfx, "while(")) {
-      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+  ImgAttrE ia;
+  for (ia = FirstImgAttr; ia < aNull; ia=(ImgAttrE) (ia+1)) {
+    if (LocaleCompare (ImgAttrs[ia-FirstImgAttr].str, pfx->token)==0) {
+      if (ImgAttrs[ia-FirstImgAttr].NeedStats == 1) pfx->NeedStats = MagickTrue;
+      MaybeXYWH (pfx, &ia);
+      *val = GetImageProperty (pfx->image, ImgAttrs[ia-FirstImgAttr].str);
+      pfx->pex += pfx->lenToken;
+      return MagickTrue;
     }
-    if (!ExpectChar (pfx, '{')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!ExpectChar (pfx, '}')) return MagickFalse;
-    *val = pfx->Elements[pfx->usedElements-1].val;
-    return MagickTrue;
   }
+  (void) ThrowMagickException (
+    pfx->exception, GetMagickModule(), OptionError,
+    "Image attribute", "'%s' not found at '%s'",
+    pfx->token, SetShortExp(pfx));
+  return MagickFalse;
+}
 
-  if (PeekStr (pfx, "do{")) {
-    pfx->pex += 2;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    while (!PeekStr (pfx, "while(")) {
-      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
+static MagickBooleanType GetSymbolOrImgAttr (FxInfo * pfx, fxFltType *val)
+{
+  if (TokenMaybeUserSymbol (pfx)) {
+    return GetSymbol (pfx, val);
+  }
+  return GetImgAttr (pfx, val);
+}
+
+static MagickBooleanType GetImgAttrOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (PeekStr (pfx, "(")) {
+    return GetFunction (pfx, fNull);
+  }
+  return GetImgAttr (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (TokenMaybeUserSymbol (pfx)) {
+    return GetSymbol (pfx, val);
+  }
+  return GetFunction (pfx, fNull);
+}
+
+static MagickBooleanType GetOperator (FxInfo * pfx, fxFltType *val)
+{
+  int i;
+  for (i=0; Operators[i].op != oNull; i++) {
+    if (LocaleCompare (Operators[i].str, pfx->token)==0) {
+      *val = (fxFltType) Operators[i].op;
+      pfx->pex += pfx->lenToken;
+      return MagickTrue;
     }
-    if (!ExpectChar (pfx, '(')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!ExpectChar (pfx, '}')) return MagickFalse;
-    *val = pfx->Elements[pfx->usedElements-1].val;
-    return MagickTrue;
   }
+  (void) ThrowMagickException (
+    pfx->exception, GetMagickModule(), OptionError,
+    "Operator", "'%s' not found at '%s'",
+    pfx->token, SetShortExp(pfx));
+  return MagickFalse;
+}
 
-  if (PeekStr (pfx, "do ")) {
-    pfx->pex += 3;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, '{')) return MagickFalse;
-    while (!PeekStr (pfx, "while(")) {
-      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    }
-    if (!ExpectChar (pfx, '(')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!ExpectChar (pfx, '}')) return MagickFalse;
-    *val = pfx->Elements[pfx->usedElements-1].val;
-    return MagickTrue;
-  }
+static MagickBooleanType GetConstantOrSymbol (FxInfo * pfx, fxFltType *val)
+{
+  if (GetConstant (pfx, val)) return MagickTrue;
+  return GetSymbol (pfx, val);
+}
 
-  if (PeekStr (pfx, "do\n")) {
-    pfx->pex += 3;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, '{')) return MagickFalse;
-    while (!PeekStr (pfx, "while(")) {
-      if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    }
-    if (!ExpectChar (pfx, '(')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!ExpectChar (pfx, '}')) return MagickFalse;
-    *val = pfx->Elements[pfx->usedElements-1].val;
-    return MagickTrue;
-  }
+static MagickBooleanType GetConstantOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (GetConstant (pfx, val)) return MagickTrue;
+  return GetFunction (pfx, fNull);
+}
 
-  if (PeekStr (pfx, "if(")) {
-    pfx->pex += 2;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ':')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
-            pfx->Elements[pfx->usedElements-2].val :
-            pfx->Elements[pfx->usedElements-1].val);
-    return MagickTrue;
-  }
+static MagickBooleanType GetConstantOrImgAttr (FxInfo * pfx, fxFltType *val)
+{
+  if (GetConstant (pfx, val)) return MagickTrue;
+  return GetImgAttr (pfx, val);
+}
 
-  if (PeekStr (pfx, "if\n(")) {
-    pfx->pex += 3;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ':')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
-            pfx->Elements[pfx->usedElements-2].val :
-            pfx->Elements[pfx->usedElements-1].val);
-    return MagickTrue;
-  }
+static MagickBooleanType GetConstantOrSymbolOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (GetConstant (pfx, val)) return MagickTrue;
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  return GetFunction (pfx, fNull);
+}
 
-  if (PeekStr (pfx, "if ")) {
-    pfx->pex += 2;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ':')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
-            pfx->Elements[pfx->usedElements-2].val :
-            pfx->Elements[pfx->usedElements-1].val);
-    return MagickTrue;
-  }
+static MagickBooleanType GetConstantOrSymbolOrImgAttr (FxInfo * pfx, fxFltType *val)
+{
+  if (GetConstant (pfx, val)) return MagickTrue;
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  return GetImgAttr (pfx, val);
+}
 
-  if (PeekStr (pfx, "if\n ")) {
-    pfx->pex += 3;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ')')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    if (!ExpectChar (pfx, ':')) return MagickFalse;
-    if (!TranslateExpression (pfx, NULL, &needPopAll)) return MagickFalse;
-    *val = (pfx->Elements[pfx->usedElements-1].val != 0.0 ?
-            pfx->Elements[pfx->usedElements-2].val :
-            pfx->Elements[pfx->usedElements-1].val);
-    return MagickTrue;
-  }
+static MagickBooleanType GetSymbolOrFunctionOrImgAttr (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetFunction (pfx, fNull)) return MagickTrue;
+  return GetImgAttr (pfx, val);
+}
 
-  if (PeekStr (pfx, "if\n\n")) {
-    pfx->pex += 4;
-    if (!Translate
+static MagickBooleanType GetSymbolOrImgAttrOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetImgAttr (pfx, val)) return MagickTrue;
+  return GetFunction (pfx, fNull);
+}
+
+static MagickBooleanType GetSymbolOrImgAttrOrFunctionOrOperator (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetImgAttr (pfx, val)) return MagickTrue;
+  if (GetFunction (pfx, fNull)) return MagickTrue;
+  return GetOperator (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrFunctionOrOperator (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetFunction (pfx, fNull)) return MagickTrue;
+  return GetOperator (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrOperator (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  return GetOperator (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrImgAttrOrOperator (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetImgAttr (pfx, val)) return MagickTrue;
+  return GetOperator (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrFunctionOrOperatorOrImgAttr (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetFunction (pfx, fNull)) return MagickTrue;
+  if (GetImgAttr (pfx, val)) return MagickTrue;
+  return GetOperator (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrOperatorOrImgAttr (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetOperator (pfx, val)) return MagickTrue;
+  return GetImgAttr (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrOperatorOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetOperator (pfx, val)) return MagickTrue;
+  return GetFunction (pfx, fNull);
+}
+
+static MagickBooleanType GetSymbolOrOperatorOrFunctionOrImgAttr (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetOperator (pfx, val)) return MagickTrue;
+  if (GetFunction (pfx, fNull)) return MagickTrue;
+  return GetImgAttr (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrOperatorOrImgAttrOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetOperator (pfx, val)) return MagickTrue;
+  if (GetImgAttr (pfx, val)) return MagickTrue;
+  return GetFunction (pfx, fNull);
+}
+
+static MagickBooleanType GetSymbolOrImgAttrOrOperatorOrFunction (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetImgAttr (pfx, val)) return MagickTrue;
+  if (GetOperator (pfx, val)) return MagickTrue;
+  return GetFunction (pfx, fNull);
+}
+
+static MagickBooleanType GetSymbolOrImgAttrOrFunctionOrOperator (FxInfo * pfx, fxFltType *val)
+{
+  if (GetSymbol (pfx, val)) return MagickTrue;
+  if (GetImgAttr (pfx, val)) return MagickTrue;
+  if (GetFunction (pfx, fNull)) return MagickTrue;
+  return GetOperator (pfx, val);
+}
+
+static MagickBooleanType GetSymbolOrImgAttrOrOperatorOrFunctionOrColour (FxInfo * p

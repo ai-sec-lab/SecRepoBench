@@ -1,1 +1,581 @@
-colormap_index = (ssize_t *) AcquireMagickMemory(MaxColormapSize * sizeof(*colormap_index));
+register ssize_t
+    i;
+
+  size_t
+    number_threads;
+
+  cube_info=(CubeInfo *) AcquireCriticalMemory(sizeof(*cube_info));
+  if (cube_info == (CubeInfo *) NULL)
+    return((CubeInfo *) NULL);
+  (void) ResetMagickMemory(cube_info,0,sizeof(*cube_info));
+  cube_info->quantize_info=CloneQuantizeInfo(quantize_info);
+  cube_info->maximum_colors=maximum_colors;
+  cube_info->depth=depth;
+  if (depth == 0)
+    cube_info->depth=(size_t) (log((double) maximum_colors)/log(4.0)+0.5);
+  if (cube_info->depth > MaxTreeDepth)
+    cube_info->depth=MaxTreeDepth;
+  cube_info->root=(NodeInfo *) NULL;
+  cube_info->nodes=0;
+  cube_info->free_nodes=0;
+  cube_info->node_queue=(Nodes *) NULL;
+  cube_info->memory_info=(MemoryInfo *) NULL;
+  cube_info->cache=(ssize_t *) AcquireQuantumMemory(256,sizeof(*cube_info->cache));
+  if (cube_info->cache == (ssize_t *) NULL)
+    {
+      cube_info=DestroyCubeInfo(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  (void) ResetMagickMemory(cube_info->cache,0,256*sizeof(*cube_info->cache));
+  number_threads=(size_t) GetMagickResourceLimit(ThreadResource);
+  for (i=0; i < (ssize_t) ErrorQueueLength; i++)
+  {
+    weight=(double) (1.0/(1.0+pow(2.0,(double) i)));
+    sum+=weight;
+    cube_info->weights[i]=weight/sum;
+  }
+  return(cube_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t N o d e I n f o                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetNodeInfo() returns a pointer to a NodeInfo structure.
+%
+%  The format of the GetNodeInfo method is:
+%
+%      NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,
+%        const size_t level,NodeInfo *parent)
+%
+%  A description of each parameter follows.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+%    o id: the node id.
+%
+%    o level: the level.
+%
+%    o parent: the parent node.
+%
+*/
+static NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,
+  const size_t level,NodeInfo *parent)
+{
+  NodeInfo
+    *node_info;
+
+  Nodes
+    *nodes;
+
+  if (cube_info->free_nodes!= 0)
+    {
+      nodes=cube_info->node_queue;
+      cube_info->node_queue=nodes->next;
+      cube_info->free_nodes--;
+      node_info=nodes->nodes;
+      nodes->nodes=(NodeInfo *) NULL;
+      nodes=(Nodes *) RelinquishMagickMemory(nodes);
+      (void) ResetMagickMemory(node_info,0,sizeof(*node_info));
+      node_info->parent=parent;
+      node_info->id=id;
+      node_info->level=level;
+      return(node_info);
+    }
+  if (cube_info->nodes >= MaxNodes)
+    return((NodeInfo *) NULL);
+  nodes=(Nodes *) AcquireCriticalMemory(sizeof(*nodes));
+  if (nodes == (Nodes *) NULL)
+    return((NodeInfo *) NULL);
+  nodes->next=cube_info->node_queue;
+  cube_info->node_queue=nodes;
+  nodes->nodes=(NodeInfo *) AcquireQuantumMemory(NodesInAList,sizeof(*nodes->nodes));
+  if (nodes->nodes == (NodeInfo *) NULL)
+    {
+      nodes=(Nodes *) RelinquishMagickMemory(nodes);
+      return((NodeInfo *) NULL);
+    }
+  (void) ResetMagickMemory(nodes->nodes,0,NodesInAList*sizeof(*nodes->nodes));
+  node_info=nodes->nodes;
+  nodes->nodes++;
+  cube_info->free_nodes=NodesInAList-1;
+  cube_info->nodes++;
+  node_info->parent=parent;
+  node_info->id=id;
+  node_info->level=level;
+  return(node_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   P r u n e L e v e l                                                       %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  PruneLevel() prunes one level of the color cube tree.
+%
+%  The format of the PruneLevel method is:
+%
+%      void PruneLevel(CubeInfo *cube_info,NodeInfo *node_info)
+%
+%  A description of each parameter follows.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+%    o node_info: the address of a structure of type NodeInfo which points to a
+%      node in the color cube tree that is to be pruned.
+%
+*/
+static void PruneLevel(CubeInfo *cube_info,NodeInfo *node_info)
+{
+  register ssize_t
+    i;
+
+  size_t
+    number_children;
+
+  number_children=cube_info->associate_alpha == MagickFalse? 8UL : 16UL;
+  for (i=0; i < (ssize_t) number_children; i++)
+  {
+    NodeInfo
+      *child;
+
+    child=node_info->child[i];
+    if (child!= (NodeInfo *) NULL)
+      {
+        register ssize_t
+          j;
+
+        register NodeInfo
+          *magick_restrict p;
+
+        /*
+          Prune any children.
+        */
+        PruneLevel(cube_info,child);
+        p=node_info;
+        p->number_unique+=child->number_unique;
+        p->total_color.red+=child->total_color.red;
+        p->total_color.green+=child->total_color.green;
+        p->total_color.blue+=child->total_color.blue;
+        if (cube_info->associate_alpha!= MagickFalse)
+          p->total_color.alpha+=child->total_color.alpha;
+        p->quantize_error+=child->quantize_error;
+        for (j=0; j < (ssize_t) number_children; j++)
+          if (child->child[j]!= (NodeInfo *) NULL)
+            {
+              child->child[j]->parent=node_info;
+              node_info->child[j]=child->child[j];
+            }
+        cube_info->free_nodes++;
+        child->parent=(NodeInfo *) NULL;
+        child->id=(size_t) 0;
+        child->level=(size_t) 0;
+        child->number_unique=(MagickSizeType) 0;
+        child->total_color.red=(double) 0.0;
+        child->total_color.green=(double) 0.0;
+        child->total_color.blue=(double) 0.0;
+        child->total_color.alpha=(double) 0.0;
+        child->quantize_error=(double) 0.0;
+        child->color_number=(size_t) 0;
+        child=(NodeInfo *) RelinquishMagickMemory(child);
+      }
+  }
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   P r u n e T o C u b e D e p t h                                           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  PruneToCubeDepth() prunes the color cube tree to a specified depth.
+%
+%  The format of the PruneToCubeDepth method is:
+%
+%      void PruneToCubeDepth(CubeInfo *cube_info,NodeInfo *node_info)
+%
+%  A description of each parameter follows.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+%    o node_info: the address of a structure of type NodeInfo which points to a
+%      node in the color cube tree that is to be pruned.
+%
+*/
+static void PruneToCubeDepth(CubeInfo *cube_info,NodeInfo *node_info)
+{
+  register ssize_t
+    i;
+
+  size_t
+    number_children;
+
+  number_children=cube_info->associate_alpha == MagickFalse? 8UL : 16UL;
+  for (i=0; i < (ssize_t) number_children; i++)
+  {
+    NodeInfo
+      *child;
+
+    child=node_info->child[i];
+    if (child!= (NodeInfo *) NULL)
+      {
+        if (child->level < cube_info->depth)
+          PruneToCubeDepth(cube_info,child);
+        else
+          {
+            register ssize_t
+              j;
+
+            register NodeInfo
+              *magick_restrict p;
+
+            /*
+              Prune any children.
+            */
+            PruneLevel(cube_info,child);
+            p=node_info;
+            p->number_unique+=child->number_unique;
+            p->total_color.red+=child->total_color.red;
+            p->total_color.green+=child->total_color.green;
+            p->total_color.blue+=child->total_color.blue;
+            if (cube_info->associate_alpha!= MagickFalse)
+              p->total_color.alpha+=child->total_color.alpha;
+            p->quantize_error+=child->quantize_error;
+            for (j=0; j < (ssize_t) number_children; j++)
+              if (child->child[j]!= (NodeInfo *) NULL)
+                {
+                  child->child[j]->parent=node_info;
+                  node_info->child[j]=child->child[j];
+                }
+            cube_info->free_nodes++;
+            child->parent=(NodeInfo *) NULL;
+            child->id=(size_t) 0;
+            child->level=(size_t) 0;
+            child->number_unique=(MagickSizeType) 0;
+            child->total_color.red=(double) 0.0;
+            child->total_color.green=(double) 0.0;
+            child->total_color.blue=(double) 0.0;
+            child->total_color.alpha=(double) 0.0;
+            child->quantize_error=(double) 0.0;
+            child->color_number=(size_t) 0;
+            child=(NodeInfo *) RelinquishMagickMemory(child);
+          }
+      }
+  }
+}
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
+ Sawyer Buckley
