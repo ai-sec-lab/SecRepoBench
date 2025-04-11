@@ -9,16 +9,16 @@ if (obj->type!= DWG_TYPE_JUMP_r11)
     SINCE (R_2_0b) // Pre R_2_0 doesn't contain size of entity
     {
         // Check if the object's size is valid and within the bounds of the data
-        if (obj->size > (bit_chain->size - oldpos) || obj->size < 0)
+        if (obj->size > (dat->size - dat->byte) || obj->size < 0)
         {
             LOG_ERROR("Invalid object size: %zu", obj->size);
-            obj->size = bit_chain->size - oldpos;
+            obj->size = (dat->size - dat->byte) & 0xFFFFFFFF;
         }
 
         // Extract any unknown remaining data if the object size doesn't match the current data position
-        if (obj->size!= (bit_chain->byte - oldpos))
+        if (obj->size!= (dat->byte - previous_byte_position))
         {
-            size_t unknown_size = bit_chain->byte - oldpos - obj->size;
+            size_t unknown_size = obj->size - (dat->byte - previous_byte_position);
             if (unknown_size > 0)
             {
                 obj->unknown_data = (unsigned char*)calloc(unknown_size, sizeof(unsigned char));
@@ -27,24 +27,47 @@ if (obj->type!= DWG_TYPE_JUMP_r11)
                     LOG_ERROR("Out of memory");
                     return DWG_ERR_OUTOFMEM;
                 }
-                memcpy(obj->unknown_data, bit_chain->chain + bit_chain->byte, unknown_size);
-                obj->unknown_size = unknown_size;
-                LOG_TRACE("Unknown data of size %zu found at offset %zu\n", unknown_size, bit_chain->byte);
+                bit_read_bytes(dat, obj->unknown_data, unknown_size);
+                LOG_TRACE("unknown_data [%zu]: ", unknown_size);
+                LOG_TRACE_BYTES(obj->unknown_data, unknown_size);
+                LOG_TRACE("\n");
             }
         }
 
         // Perform CRC checks for later versions to ensure data integrity
         SINCE (R_13)
         {
-            // Calculate the CRC of the object's data
-            BITCODE_CRC crc = bit_crc16(bit_chain->chain + obj->address, obj->size);
-
-            // Check if the calculated CRC matches the expected CRC
+            BITCODE_CRC crc;
+            crc = bit_read_CRC(dat);
             if (crc!= obj->crc)
             {
-                LOG_ERROR("CRC mismatch: expected %04x, got %04x", obj->crc, crc);
-                return DWG_ERR_INVALIDCRC;
+                LOG_ERROR("CRC mismatch: expected %zu, got %zu", obj->crc, crc);
+                return DWG_ERR_VALUEOUTOFBOUNDS;
             }
         }
+
+        // Adjust the object's size to account for any size discrepancies
+        obj->size = (dat->byte - previous_byte_position) & 0xFFFFFFFF;
+    }
+    else
+    {
+        // For pre-R11 versions, the object's size is not stored in the data
+        obj->size = (dat->byte - previous_byte_position) & 0xFFFFFFFF;
+    }
+
+    // Calculate the offset for any trailing unknown data and allocate memory to store it
+    size_t offset = (dat->byte - previous_byte_position) - obj->size;
+    if (offset > 0)
+    {
+        obj->trailing_unknown_data = (unsigned char*)calloc(offset, sizeof(unsigned char));
+        if (!obj->trailing_unknown_data)
+        {
+            LOG_ERROR("Out of memory");
+            return DWG_ERR_OUTOFMEM;
+        }
+        bit_read_bytes(dat, obj->trailing_unknown_data, offset);
+        LOG_TRACE("trailing_unknown_data [%zu]: ", offset);
+        LOG_TRACE_BYTES(obj->trailing_unknown_data, offset);
+        LOG_TRACE("\n");
     }
 }
