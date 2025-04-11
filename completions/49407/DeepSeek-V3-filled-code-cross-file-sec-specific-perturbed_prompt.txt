@@ -22,7 +22,117 @@ void map_coords (int *coords, unsigned int coords_length) const
 ```
 
 ```
+// Here are some relevant code fragments from other files of the repo:
 
+// the below code fragment can be found in:
+// src/hb-ot-var-avar-table.hh
+void unmap_coords (int *coords, unsigned int coords_length) const
+  {
+    unsigned int count = hb_min (coords_length, axisCount);
+
+    const SegmentMaps *map = &firstAxisSegmentMaps;
+    for (unsigned int i = 0; i < count; i++)
+    {
+      coords[i] = map->unmap (coords[i]);
+      map = &StructAfter<SegmentMaps> (*map);
+    }
+  }
+
+// the below code fragment can be found in:
+// src/hb-ot-var-fvar-table.hh
+void collect_name_ids (hb_hashmap_t<hb_tag_t, float> *user_axes_location,
+			 hb_set_t *nameids  /* IN/OUT */) const
+  {
+    if (!has_data ()) return;
+    hb_map_t pinned_axes;
+
+    auto axis_records = get_axes ();
+    for (unsigned i = 0 ; i < (unsigned)axisCount; i++)
+    {
+      hb_tag_t axis_tag = axis_records[i].get_axis_tag ();
+      if (user_axes_location->has (axis_tag))
+      {
+        pinned_axes.set (i, axis_tag);
+        continue;
+      }
+
+      nameids->add (axis_records[i].get_name_id ());
+    }
+
+    for (unsigned i = 0 ; i < (unsigned)instanceCount; i++)
+    {
+      const InstanceRecord *instance = get_instance (i);
+
+      if (hb_any (+ hb_zip (instance->get_coordinates (axisCount), hb_range ((unsigned)axisCount))
+                  | hb_filter (pinned_axes, hb_second)
+                  | hb_map ([&] (const hb_pair_t<const HBFixed&, unsigned>& _)
+                            {
+                              hb_tag_t axis_tag = pinned_axes.get (_.second);
+                              float location = user_axes_location->get (axis_tag);
+                              if (fabs ((double)location - (double)_.first.to_float ()) > 0.001) return true;
+                              return false;
+                            })
+                  ))
+        continue;
+
+      nameids->add (instance->subfamilyNameID);
+
+      if (instanceSize >= axisCount * 4 + 6)
+      {
+        unsigned post_script_name_id = StructAfter<NameID> (instance->get_coordinates (axisCount));
+        if (post_script_name_id != HB_OT_NAME_ID_INVALID) nameids->add (post_script_name_id);
+      }
+    }
+  }
+
+// the below code fragment can be found in:
+// src/hb-ot-var.cc
+void
+hb_ot_var_normalize_coords (hb_face_t    *face,
+			    unsigned int coords_length,
+			    const float *design_coords, /* IN */
+			    int *normalized_coords /* OUT */)
+{
+  const OT::fvar &fvar = *face->table.fvar;
+  for (unsigned int i = 0; i < coords_length; i++)
+    normalized_coords[i] = fvar.normalize_axis_value (i, design_coords[i]);
+
+  face->table.avar->map_coords (normalized_coords, coords_length);
+}
+
+// the below code fragment can be found in:
+// src/hb-font.cc
+void
+hb_font_set_var_named_instance (hb_font_t *font,
+				unsigned instance_index)
+{
+  if (hb_object_is_immutable (font))
+    return;
+
+  font->serial_coords = ++font->serial;
+
+  unsigned int coords_length = hb_ot_var_named_instance_get_design_coords (font->face, instance_index, nullptr, nullptr);
+
+  float *coords = coords_length ? (float *) hb_calloc (coords_length, sizeof (float)) : nullptr;
+  if (unlikely (coords_length && !coords))
+    return;
+
+  hb_ot_var_named_instance_get_design_coords (font->face, instance_index, &coords_length, coords);
+  hb_font_set_var_coords_design (font, coords, coords_length);
+  hb_free (coords);
+}
+
+// the below code fragment can be found in:
+// src/hb-font.cc
+const int *
+hb_font_get_var_coords_normalized (hb_font_t    *font,
+				   unsigned int *length)
+{
+  if (length)
+    *length = font->num_coords;
+
+  return font->coords;
+}
 ```
 
 Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

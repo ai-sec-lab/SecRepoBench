@@ -4,35 +4,53 @@
 // For later versions, additional CRC checks are performed to ensure data integrity, and adjustments are made to account for any size discrepancies.
 // If the object's address and size don't align with the data position, the code calculates the offset for any trailing unknown data and allocates memory to store it, logging appropriate messages.
 
-if (obj->size > (bit_chain->byte - obj->address))
+if (obj->size > (dat->size - dat->byte))
   {
-    obj->size = (bit_chain->byte - obj->address);
+    obj->size = (dat->size - dat->byte) & 0xFFFFFFFF;
     LOG_WARN ("Object size too large, adjusted to %d\n", obj->size);
   }
-else if (obj->size < (bit_chain->byte - obj->address))
+if (obj->size < 0)
   {
-    size_t offset = bit_chain->byte - (obj->address + obj->size);
-    if (offset)
+    LOG_ERROR ("Object size is negative: %d\n", obj->size);
+    return DWG_ERR_VALUEOUTOFBOUNDS;
+  }
+if (obj->size == 0)
+  {
+    LOG_TRACE ("Object size is zero\n");
+  }
+if (obj->size > 0)
+  {
+    size_t offset = (dat->byte - obj->address) & 0xFFFFFFFF;
+    if (offset > obj->size)
       {
-        LOG_TRACE ("Unknown data after object, offset %zu\n", offset);
-        obj->unknown_data = (unsigned char *)calloc (1, offset);
-        if (!obj->unknown_data)
+        LOG_ERROR ("Object address and size do not match data position\n");
+        return DWG_ERR_VALUEOUTOFBOUNDS;
+      }
+    if (offset < obj->size)
+      {
+        size_t unknown_size = obj->size - offset;
+        unsigned char *unknown_data = bit_read_B (dat, unknown_size);
+        if (!unknown_data)
           {
-            LOG_ERROR ("Out of memory\n");
+            LOG_ERROR ("Failed to allocate memory for unknown data\n");
             return DWG_ERR_OUTOFMEM;
           }
-        obj->unknown_data_size = offset;
-        memcpy (obj->unknown_data, bit_chain->chain + bit_chain->byte, offset);
-        bit_chain->byte += offset;
+        obj->unknown_data = unknown_data;
+        obj->unknown_size = unknown_size;
+        LOG_TRACE ("Unknown data of size %zu found\n", unknown_size);
       }
   }
-if (bit_chain->version >= R_13)
+SINCE (R_11)
   {
-    BITCODE_CRC crc;
-    crc = bit_read_CRC (bit_chain);
+    if (obj->size < 4)
+      {
+        LOG_ERROR ("Object size is too small for CRC check\n");
+        return DWG_ERR_VALUEOUTOFBOUNDS;
+      }
+    BITCODE_RC crc = bit_read_RC (dat);
     if (crc!= obj->crc)
       {
-        LOG_ERROR ("CRC mismatch, expected 0x%x, got 0x%x\n", obj->crc, crc);
+        LOG_ERROR ("CRC check failed\n");
         return DWG_ERR_VALUEOUTOFBOUNDS;
       }
   }

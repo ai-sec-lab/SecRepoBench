@@ -1,86 +1,47 @@
-size_t expected_end = obj->address + obj->size;
-size_t current_pos = bit_chain->byte;
-
-if (current_pos != expected_end)
-{
-    if (bit_chain->version < R_11)
-    {
-        if (current_pos > expected_end)
-        {
-            LOG_ERROR("Object size exceeds expected size, adjusting from " FORMAT_RL " to %zu",
-                      obj->size, current_pos - obj->address);
-            obj->size = (BITCODE_RL)(current_pos - obj->address);
-            expected_end = current_pos;
-        }
-        else
-        {
-            size_t unknown_size = expected_end - current_pos;
-            if (unknown_size > 0)
-            {
-                obj->unknown_data = (unsigned char*)malloc(unknown_size);
-                if (!obj->unknown_data)
+BITCODE_RL expected_size = obj->size;
+              BITCODE_RL actual_size = (BITCODE_RL)(dat->byte - obj->address);
+              if (actual_size != expected_size)
                 {
-                    LOG_ERROR("Out of memory");
-                    error |= DWG_ERR_OUTOFMEM;
+                  LOG_WARN ("Object size mismatch at 0x%zx: expected %d, actual %d",
+                            obj->address, expected_size, actual_size);
+                  obj->size = actual_size; // Adjust to prevent buffer overflows
                 }
-                else
-                {
-                    memcpy(obj->unknown_data, bit_chain->chain + current_pos, unknown_size);
-                    obj->unknown_size = unknown_size;
-                    LOG_TRACE("Extracted %zu bytes of unknown data for pre-R11 object", unknown_size);
-                    bit_chain->byte += unknown_size;
-                }
-            }
-        }
-    }
-    else
-    {
-        if (expected_end - current_pos == 1)
-        {
-            BITCODE_RC read_crc = bit_read_RC(bit_chain);
-            BITCODE_RC computed_crc = dwg_compute_crc8(bit_chain->chain + obj->address, obj->size - 1);
-            if (read_crc != computed_crc)
-            {
-                LOG_ERROR("CRC mismatch for object at 0x%zx: expected 0x%02x, got 0x%02x",
-                          obj->address, computed_crc, read_crc);
-                error |= DWG_ERR_CRC;
-            }
-            current_pos = bit_chain->byte;
-            if (current_pos != expected_end)
-            {
-                LOG_ERROR("Position after CRC read is 0x%zx, expected 0x%zx", current_pos, expected_end);
-                error |= DWG_ERR_INVALIDDWG;
-            }
-        }
-        else
-        {
-            LOG_ERROR("Size mismatch for R11+ object: expected end 0x%zx, current 0x%zx (difference %zd)",
-                      expected_end, current_pos, expected_end - current_pos);
-            error |= DWG_ERR_INVALIDDWG;
-        }
-    }
-}
 
-if (bit_chain->byte < expected_end)
-{
-    size_t unknown_size = expected_end - bit_chain->byte;
-    obj->unknown_data = (unsigned char*)malloc(unknown_size);
-    if (!obj->unknown_data)
-    {
-        LOG_ERROR("Out of memory");
-        error |= DWG_ERR_OUTOFMEM;
-    }
-    else
-    {
-        memcpy(obj->unknown_data, bit_chain->chain + bit_chain->byte, unknown_size);
-        obj->unknown_size = unknown_size;
-        LOG_TRACE("Extracted %zu bytes of trailing unknown data", unknown_size);
-        bit_chain->byte += unknown_size;
-    }
-}
-else if (bit_chain->byte > expected_end)
-{
-    LOG_ERROR("Buffer overflow: current position 0x%zx exceeds expected end 0x%zx",
-              bit_chain->byte, expected_end);
-    error |= DWG_ERR_INVALIDDWG;
-}
+              // Handle trailing unknown data
+              size_t expected_end = obj->address + obj->size;
+              if (dat->byte < expected_end)
+                {
+                  BITCODE_RL remaining = expected_end - dat->byte;
+                  obj->unknown_size = remaining;
+                  obj->unknown_data = (BITCODE_TF)calloc(remaining, 1);
+                  if (!obj->unknown_data)
+                    {
+                      LOG_ERROR("Out of memory for unknown data");
+                      return DWG_ERR_OUTOFMEM;
+                    }
+                  memcpy(obj->unknown_data, &dat->chain[dat->byte], remaining);
+                  LOG_TRACE("Stored %d bytes of unknown data at 0x%zx", remaining, dat->byte);
+                  dat->byte += remaining;
+                }
+
+              SINCE(R_11)
+              {
+                // Verify CRC for data integrity
+                BITCODE_RS stored_crc = bit_read_RS(dat);
+                BITCODE_RS calc_crc = calculate_crc16(&dat->chain[previous_byte_position], 
+                                                     dat->byte - previous_byte_position - 2);
+                if (stored_crc != calc_crc)
+                  {
+                    LOG_ERROR("CRC mismatch at 0x%zx: stored 0x%04X vs calculated 0x%04X",
+                             dat->byte - 2, stored_crc, calc_crc);
+                    dat->byte -= 2; // Rewind to CRC position for error recovery
+                    return DWG_ERR_INVALIDCRC;
+                  }
+              }
+
+              if (dat->byte > previous_byte_position + size)
+                {
+                  LOG_ERROR("Entity overflow: Read %zu bytes beyond expected size",
+                           dat->byte - (previous_byte_position + size));
+                  return DWG_ERR_INVALIDDWG;
+                }
