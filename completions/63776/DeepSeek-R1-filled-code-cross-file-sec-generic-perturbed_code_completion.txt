@@ -1,40 +1,47 @@
-size_t expected_end = oldpos + obj->size;
-if (bit_chain->byte != expected_end)
-{
-    if (bit_chain->byte > expected_end)
-    {
-        LOG_ERROR("Object %u overflow: read %zu bytes, expected %zu",
-                  num, bit_chain->byte - oldpos, obj->size);
-        error |= DWG_ERR_INVALIDDWG;
-        bit_chain->byte = expected_end;
-    }
-    else
-    {
-        size_t remaining = expected_end - bit_chain->byte;
-        if (remaining > 0)
-        {
-            if (bit_chain->byte + remaining > bit_chain->size)
-            {
-                LOG_ERROR("Object %u remaining data exceeds buffer", num);
-                error |= DWG_ERR_INVALIDDWG;
-                remaining = bit_chain->size - bit_chain->byte;
-            }
-            if (remaining > 0)
-            {
-                obj->unknown_bits = (BITCODE_TF)malloc(remaining);
-                if (!obj->unknown_bits)
+BITCODE_RL expected_size = obj->size;
+              BITCODE_RL actual_size = (BITCODE_RL)(dat->byte - obj->address);
+              if (actual_size != expected_size)
                 {
-                    LOG_ERROR("Out of memory for unknown data");
-                    error |= DWG_ERR_OUTOFMEM;
+                  LOG_WARN ("Object size mismatch at 0x%zx: expected %d, actual %d",
+                            obj->address, expected_size, actual_size);
+                  obj->size = actual_size; // Adjust to prevent buffer overflows
                 }
-                else
+
+              // Handle trailing unknown data
+              size_t expected_end = obj->address + obj->size;
+              if (dat->byte < expected_end)
                 {
-                    memcpy(obj->unknown_bits, bit_chain->chain + bit_chain->byte, remaining);
-                    bit_chain->byte += remaining;
-                    obj->unknown_size = remaining;
-                    LOG_TRACE("Stored %zu unknown bytes for object %u", remaining, num);
+                  BITCODE_RL remaining = expected_end - dat->byte;
+                  obj->unknown_size = remaining;
+                  obj->unknown_data = (BITCODE_TF)calloc(remaining, 1);
+                  if (!obj->unknown_data)
+                    {
+                      LOG_ERROR("Out of memory for unknown data");
+                      return DWG_ERR_OUTOFMEM;
+                    }
+                  memcpy(obj->unknown_data, &dat->chain[dat->byte], remaining);
+                  LOG_TRACE("Stored %d bytes of unknown data at 0x%zx", remaining, dat->byte);
+                  dat->byte += remaining;
                 }
-            }
-        }
-    }
-}
+
+              SINCE(R_11)
+              {
+                // Verify CRC for data integrity
+                BITCODE_RS stored_crc = bit_read_RS(dat);
+                BITCODE_RS calc_crc = calculate_crc16(&dat->chain[previous_byte_position], 
+                                                     dat->byte - previous_byte_position - 2);
+                if (stored_crc != calc_crc)
+                  {
+                    LOG_ERROR("CRC mismatch at 0x%zx: stored 0x%04X vs calculated 0x%04X",
+                             dat->byte - 2, stored_crc, calc_crc);
+                    dat->byte -= 2; // Rewind to CRC position for error recovery
+                    return DWG_ERR_INVALIDCRC;
+                  }
+              }
+
+              if (dat->byte > previous_byte_position + size)
+                {
+                  LOG_ERROR("Entity overflow: Read %zu bytes beyond expected size",
+                           dat->byte - (previous_byte_position + size));
+                  return DWG_ERR_INVALIDDWG;
+                }
