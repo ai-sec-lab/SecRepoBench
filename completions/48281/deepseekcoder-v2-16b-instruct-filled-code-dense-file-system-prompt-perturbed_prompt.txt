@@ -1,0 +1,633 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static int speedhq_decode_frame(AVCodecContext *codec_context, AVFrame *frame,
+                                int *got_frame, AVPacket *avpkt)
+{
+    // Initialize context and packet data variables for processing the frame.
+    // Validate basic constraints on packet size and codec context width to ensure data integrity.
+    // Extract a quality parameter from the packet data to adjust processing parameters.
+    // Calculate a quantization matrix based on the quality parameter to prepare for further decoding.
+    // <MASK>
+
+    second_field_offset = AV_RL24(buf + 1);
+    if (second_field_offset >= buf_size - 3) {
+        return AVERROR_INVALIDDATA;
+    }
+
+    codec_context->coded_width = FFALIGN(codec_context->width, 16);
+    codec_context->coded_height = FFALIGN(codec_context->height, 16);
+
+    if ((ret = ff_get_buffer(codec_context, frame, 0)) < 0) {
+        return ret;
+    }
+    frame->key_frame = 1;
+
+    if (second_field_offset == 4 || second_field_offset == (buf_size-4)) {
+        /*
+         * Overlapping first and second fields is used to signal
+         * encoding only a single field. In this case, "height"
+         * is ambiguous; it could mean either the height of the
+         * frame as a whole, or of the field. The former would make
+         * more sense for compatibility with legacy decoders,
+         * but this matches the convention used in NDI, which is
+         * the primary user of this trick.
+         */
+        if ((ret = decode_speedhq_field(s, buf, buf_size, frame, 0, 4, buf_size, 1)) < 0)
+            return ret;
+    } else {
+        if ((ret = decode_speedhq_field(s, buf, buf_size, frame, 0, 4, second_field_offset, 2)) < 0)
+            return ret;
+        if ((ret = decode_speedhq_field(s, buf, buf_size, frame, 1, second_field_offset, buf_size, 2)) < 0)
+            return ret;
+    }
+
+    *got_frame = 1;
+    return buf_size;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libavcodec/speedhq.c
+static int decode_speedhq_field(const SHQContext *s, const uint8_t *buf, int buf_size, AVFrame *frame, int field_number, int start, int end, int line_stride)
+{
+    int ret, slice_number, slice_offsets[5];
+    int linesize_y  = frame->linesize[0] * line_stride;
+    int linesize_cb = frame->linesize[1] * line_stride;
+    int linesize_cr = frame->linesize[2] * line_stride;
+    int linesize_a;
+    GetBitContext gb;
+
+    if (s->alpha_type != SHQ_NO_ALPHA)
+        linesize_a = frame->linesize[3] * line_stride;
+
+    if (end < start || end - start < 3 || end > buf_size)
+        return AVERROR_INVALIDDATA;
+
+    slice_offsets[0] = start;
+    slice_offsets[4] = end;
+    for (slice_number = 1; slice_number < 4; slice_number++) {
+        uint32_t last_offset, slice_len;
+
+        last_offset = slice_offsets[slice_number - 1];
+        slice_len = AV_RL24(buf + last_offset);
+        slice_offsets[slice_number] = last_offset + slice_len;
+
+        if (slice_len < 3 || slice_offsets[slice_number] > end - 3)
+            return AVERROR_INVALIDDATA;
+    }
+
+    for (slice_number = 0; slice_number < 4; slice_number++) {
+        uint32_t slice_begin, slice_end;
+        int x, y;
+
+        slice_begin = slice_offsets[slice_number];
+        slice_end = slice_offsets[slice_number + 1];
+
+        if ((ret = init_get_bits8(&gb, buf + slice_begin + 3, slice_end - slice_begin - 3)) < 0)
+            return ret;
+
+        for (y = slice_number * 16 * line_stride; y < frame->height; y += line_stride * 64) {
+            uint8_t *dest_y, *dest_cb, *dest_cr, *dest_a;
+            int last_dc[4] = { 1024, 1024, 1024, 1024 };
+            uint8_t last_alpha[16];
+
+            memset(last_alpha, 255, sizeof(last_alpha));
+
+            dest_y = frame->data[0] + frame->linesize[0] * (y + field_number);
+            if (s->subsampling == SHQ_SUBSAMPLING_420) {
+                dest_cb = frame->data[1] + frame->linesize[1] * (y/2 + field_number);
+                dest_cr = frame->data[2] + frame->linesize[2] * (y/2 + field_number);
+            } else {
+                dest_cb = frame->data[1] + frame->linesize[1] * (y + field_number);
+                dest_cr = frame->data[2] + frame->linesize[2] * (y + field_number);
+            }
+            if (s->alpha_type != SHQ_NO_ALPHA) {
+                dest_a = frame->data[3] + frame->linesize[3] * (y + field_number);
+            }
+
+            for (x = 0; x < frame->width - 8 * (s->subsampling != SHQ_SUBSAMPLING_444); x += 16) {
+                /* Decode the four luma blocks. */
+                if ((ret = decode_dct_block(s, &gb, last_dc, 0, dest_y, linesize_y)) < 0)
+                    return ret;
+                if ((ret = decode_dct_block(s, &gb, last_dc, 0, dest_y + 8, linesize_y)) < 0)
+                    return ret;
+                if ((ret = decode_dct_block(s, &gb, last_dc, 0, dest_y + 8 * linesize_y, linesize_y)) < 0)
+                    return ret;
+                if ((ret = decode_dct_block(s, &gb, last_dc, 0, dest_y + 8 * linesize_y + 8, linesize_y)) < 0)
+                    return ret;
+
+                /*
+                 * Decode the first chroma block. For 4:2:0, this is the only one;
+                 * for 4:2:2, it's the top block; for 4:4:4, it's the top-left block.
+                 */
+                if ((ret = decode_dct_block(s, &gb, last_dc, 1, dest_cb, linesize_cb)) < 0)
+                    return ret;
+                if ((ret = decode_dct_block(s, &gb, last_dc, 2, dest_cr, linesize_cr)) < 0)
+                    return ret;
+
+                if (s->subsampling != SHQ_SUBSAMPLING_420) {
+                    /* For 4:2:2, this is the bottom block; for 4:4:4, it's the bottom-left block. */
+                    if ((ret = decode_dct_block(s, &gb, last_dc, 1, dest_cb + 8 * linesize_cb, linesize_cb)) < 0)
+                        return ret;
+                    if ((ret = decode_dct_block(s, &gb, last_dc, 2, dest_cr + 8 * linesize_cr, linesize_cr)) < 0)
+                        return ret;
+
+                    if (s->subsampling == SHQ_SUBSAMPLING_444) {
+                        /* Top-right and bottom-right blocks. */
+                        if ((ret = decode_dct_block(s, &gb, last_dc, 1, dest_cb + 8, linesize_cb)) < 0)
+                            return ret;
+                        if ((ret = decode_dct_block(s, &gb, last_dc, 2, dest_cr + 8, linesize_cr)) < 0)
+                            return ret;
+                        if ((ret = decode_dct_block(s, &gb, last_dc, 1, dest_cb + 8 * linesize_cb + 8, linesize_cb)) < 0)
+                            return ret;
+                        if ((ret = decode_dct_block(s, &gb, last_dc, 2, dest_cr + 8 * linesize_cr + 8, linesize_cr)) < 0)
+                            return ret;
+
+                        dest_cb += 8;
+                        dest_cr += 8;
+                    }
+                }
+                dest_y += 16;
+                dest_cb += 8;
+                dest_cr += 8;
+
+                if (s->alpha_type == SHQ_RLE_ALPHA) {
+                    /* Alpha coded using 16x8 RLE blocks. */
+                    if ((ret = decode_alpha_block(s, &gb, last_alpha, dest_a, linesize_a)) < 0)
+                        return ret;
+                    if ((ret = decode_alpha_block(s, &gb, last_alpha, dest_a + 8 * linesize_a, linesize_a)) < 0)
+                        return ret;
+                    dest_a += 16;
+                } else if (s->alpha_type == SHQ_DCT_ALPHA) {
+                    /* Alpha encoded exactly like luma. */
+                    if ((ret = decode_dct_block(s, &gb, last_dc, 3, dest_a, linesize_a)) < 0)
+                        return ret;
+                    if ((ret = decode_dct_block(s, &gb, last_dc, 3, dest_a + 8, linesize_a)) < 0)
+                        return ret;
+                    if ((ret = decode_dct_block(s, &gb, last_dc, 3, dest_a + 8 * linesize_a, linesize_a)) < 0)
+                        return ret;
+                    if ((ret = decode_dct_block(s, &gb, last_dc, 3, dest_a + 8 * linesize_a + 8, linesize_a)) < 0)
+                        return ret;
+                    dest_a += 16;
+                }
+            }
+        }
+    }
+
+    if (s->subsampling != SHQ_SUBSAMPLING_444 && (frame->width & 15))
+        return decode_speedhq_border(s, &gb, frame, field_number, line_stride);
+
+    return 0;
+}
+
+// the below code fragment can be found in:
+// libavcodec/agm.c
+static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                        int *got_frame, AVPacket *avpkt)
+{
+    AGMContext *s = avctx->priv_data;
+    GetBitContext *gb = &s->gb;
+    GetByteContext *gbyte = &s->gbyte;
+    int w, h, width, height, header;
+    unsigned compressed_size;
+    long skip;
+    int ret;
+
+    if (!avpkt->size)
+        return 0;
+
+    bytestream2_init(gbyte, avpkt->data, avpkt->size);
+
+    header = bytestream2_get_le32(gbyte);
+    s->fflags = bytestream2_get_le32(gbyte);
+    s->bitstream_size = s->fflags & 0x1FFFFFFF;
+    s->fflags >>= 29;
+    av_log(avctx, AV_LOG_DEBUG, "fflags: %X\n", s->fflags);
+    if (avpkt->size < s->bitstream_size + 8)
+        return AVERROR_INVALIDDATA;
+
+    s->key_frame = (avpkt->flags & AV_PKT_FLAG_KEY);
+    frame->key_frame = s->key_frame;
+    frame->pict_type = s->key_frame ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_P;
+
+    if (!s->key_frame) {
+        if (!s->prev_frame->data[0]) {
+            av_log(avctx, AV_LOG_ERROR, "Missing reference frame.\n");
+            return AVERROR_INVALIDDATA;
+        }
+    }
+
+    if (header) {
+        if (avctx->codec_tag == MKTAG('A', 'G', 'M', '0') ||
+            avctx->codec_tag == MKTAG('A', 'G', 'M', '1'))
+            return AVERROR_PATCHWELCOME;
+        else
+            ret = decode_huffman2(avctx, header, (avpkt->size - s->bitstream_size) - 8);
+        if (ret < 0)
+            return ret;
+        bytestream2_init(gbyte, s->output, s->output_size);
+    } else if (!s->dct) {
+        bytestream2_skip(gbyte, 4);
+    }
+
+    if (s->dct) {
+        s->flags = 0;
+        w = bytestream2_get_le32(gbyte);
+        h = bytestream2_get_le32(gbyte);
+        if (w == INT32_MIN || h == INT32_MIN)
+            return AVERROR_INVALIDDATA;
+        if (w < 0) {
+            w = -w;
+            s->flags |= 2;
+        }
+        if (h < 0) {
+            h = -h;
+            s->flags |= 1;
+        }
+
+        width  = avctx->width;
+        height = avctx->height;
+        if (w < width || h < height || w & 7 || h & 7)
+            return AVERROR_INVALIDDATA;
+
+        ret = ff_set_dimensions(avctx, w, h);
+        if (ret < 0)
+            return ret;
+        avctx->width = width;
+        avctx->height = height;
+
+        s->compression = bytestream2_get_le32(gbyte);
+        if (s->compression < 0 || s->compression > 100)
+            return AVERROR_INVALIDDATA;
+
+        for (int i = 0; i < 3; i++)
+            s->size[i] = bytestream2_get_le32(gbyte);
+        if (header) {
+            compressed_size = s->output_size;
+            skip = 8LL;
+        } else {
+            compressed_size = avpkt->size;
+            skip = 32LL;
+        }
+        if (s->size[0] < 0 || s->size[1] < 0 || s->size[2] < 0 ||
+            skip + s->size[0] + s->size[1] + s->size[2] > compressed_size) {
+            return AVERROR_INVALIDDATA;
+        }
+    }
+
+    if ((ret = ff_get_buffer(avctx, frame, AV_GET_BUFFER_FLAG_REF)) < 0)
+        return ret;
+
+    if (frame->key_frame) {
+        if (!s->dct && !s->rgb)
+            ret = decode_raw_intra(avctx, gbyte, frame);
+        else if (!s->dct && s->rgb)
+            ret = decode_raw_intra_rgb(avctx, gbyte, frame);
+        else
+            ret = decode_intra(avctx, gb, frame);
+    } else {
+        if (s->prev_frame-> width != frame->width ||
+            s->prev_frame->height != frame->height)
+            return AVERROR_INVALIDDATA;
+
+        if (!(s->flags & 2)) {
+            ret = av_frame_copy(frame, s->prev_frame);
+            if (ret < 0)
+                return ret;
+        }
+
+        if (s->dct) {
+            ret = decode_inter(avctx, gb, frame, s->prev_frame);
+        } else if (!s->dct && !s->rgb) {
+            ret = decode_runlen(avctx, gbyte, frame);
+        } else {
+            ret = decode_runlen_rgb(avctx, gbyte, frame);
+        }
+    }
+    if (ret < 0)
+        return ret;
+
+    av_frame_unref(s->prev_frame);
+    if ((ret = av_frame_ref(s->prev_frame, frame)) < 0)
+        return ret;
+
+    frame->crop_top  = avctx->coded_height - avctx->height;
+    frame->crop_left = avctx->coded_width  - avctx->width;
+
+    *got_frame = 1;
+
+    return avpkt->size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/kgv1dec.c
+static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                        int *got_frame, AVPacket *avpkt)
+{
+    const uint8_t *buf = avpkt->data;
+    const uint8_t *buf_end = buf + avpkt->size;
+    KgvContext * const c = avctx->priv_data;
+    int offsets[8];
+    uint8_t *out, *prev;
+    int outcnt = 0, maxcnt;
+    int w, h, i, res;
+
+    if (avpkt->size < 2)
+        return AVERROR_INVALIDDATA;
+
+    w = (buf[0] + 1) * 8;
+    h = (buf[1] + 1) * 8;
+    buf += 2;
+
+    if (avpkt->size < 2 + w*h / 513)
+        return AVERROR_INVALIDDATA;
+
+    if (w != avctx->width || h != avctx->height) {
+        av_freep(&c->frame_buffer);
+        av_freep(&c->last_frame_buffer);
+        if ((res = ff_set_dimensions(avctx, w, h)) < 0)
+            return res;
+    }
+
+    if (!c->frame_buffer) {
+        c->frame_buffer      = av_mallocz(avctx->width * avctx->height * 2);
+        c->last_frame_buffer = av_mallocz(avctx->width * avctx->height * 2);
+        if (!c->frame_buffer || !c->last_frame_buffer) {
+            decode_flush(avctx);
+            return AVERROR(ENOMEM);
+        }
+    }
+
+    maxcnt = w * h;
+
+    if ((res = ff_get_buffer(avctx, frame, 0)) < 0)
+        return res;
+    out  = (uint8_t*)c->frame_buffer;
+    prev = (uint8_t*)c->last_frame_buffer;
+
+    for (i = 0; i < 8; i++)
+        offsets[i] = -1;
+
+    while (outcnt < maxcnt && buf_end - 2 >= buf) {
+        int code = AV_RL16(buf);
+        buf += 2;
+
+        if (!(code & 0x8000)) {
+            AV_WN16A(&out[2 * outcnt], code); // rgb555 pixel coded directly
+            outcnt++;
+        } else {
+            int count;
+
+            if ((code & 0x6000) == 0x6000) {
+                // copy from previous frame
+                int oidx = (code >> 10) & 7;
+                int start;
+
+                count = (code & 0x3FF) + 3;
+
+                if (offsets[oidx] < 0) {
+                    if (buf_end - 3 < buf)
+                        break;
+                    offsets[oidx] = AV_RL24(buf);
+                    buf += 3;
+                }
+
+                start = (outcnt + offsets[oidx]) % maxcnt;
+
+                if (maxcnt - start < count || maxcnt - outcnt < count)
+                    break;
+
+                if (!prev) {
+                    av_log(avctx, AV_LOG_ERROR,
+                           "Frame reference does not exist\n");
+                    break;
+                }
+
+                memcpy(out + 2 * outcnt, prev + 2 * start, 2 * count);
+            } else {
+                // copy from earlier in this frame
+                int offset = (code & 0x1FFF) + 1;
+
+                if (!(code & 0x6000)) {
+                    count = 2;
+                } else if ((code & 0x6000) == 0x2000) {
+                    count = 3;
+                } else {
+                    if (buf_end - 1 < buf)
+                        break;
+                    count = 4 + *buf++;
+                }
+
+                if (outcnt < offset || maxcnt - outcnt < count)
+                    break;
+
+                av_memcpy_backptr(out + 2 * outcnt, 2 * offset, 2 * count);
+            }
+            outcnt += count;
+        }
+    }
+
+    if (outcnt - maxcnt)
+        av_log(avctx, AV_LOG_DEBUG, "frame finished with %d diff\n", outcnt - maxcnt);
+
+    av_image_copy_plane(frame->data[0], frame->linesize[0],
+                        (const uint8_t*)c->frame_buffer,  avctx->width * 2,
+                        avctx->width * 2, avctx->height);
+    FFSWAP(uint16_t *, c->frame_buffer, c->last_frame_buffer);
+
+    *got_frame = 1;
+
+    return avpkt->size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/imm4.c
+static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                        int *got_frame, AVPacket *avpkt)
+{
+    IMM4Context *s = avctx->priv_data;
+    GetBitContext *gb = &s->gb;
+    int width, height;
+    unsigned type;
+    int ret, scaled;
+
+    if (avpkt->size <= 32)
+        return AVERROR_INVALIDDATA;
+
+    av_fast_padded_malloc(&s->bitstream, &s->bitstream_size,
+                          FFALIGN(avpkt->size, 4));
+    if (!s->bitstream)
+        return AVERROR(ENOMEM);
+
+    s->bdsp.bswap_buf((uint32_t *)s->bitstream,
+                      (uint32_t *)avpkt->data,
+                      (avpkt->size + 3) >> 2);
+
+    if ((ret = init_get_bits8(gb, s->bitstream, FFALIGN(avpkt->size, 4))) < 0)
+        return ret;
+
+    avctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    avctx->color_range = AVCOL_RANGE_JPEG;
+
+    width = avctx->width;
+    height = avctx->height;
+
+    scaled = avpkt->data[8];
+    if (scaled < 2) {
+        int mode = avpkt->data[10];
+
+        switch (mode) {
+        case 1:
+            width = 352;
+            height = 240;
+            break;
+        case 2:
+            width = 704;
+            height = 240;
+            break;
+        case 4:
+            width = 480;
+            height = 704;
+            break;
+        case 17:
+            width = 352;
+            height = 288;
+            break;
+        case 18:
+            width = 704;
+            height = 288;
+            break;
+        default:
+            width = 704;
+            height = 576;
+            break;
+        }
+    }
+
+    skip_bits_long(gb, 24 * 8);
+    type = get_bits_long(gb, 32);
+    s->hi = get_bits(gb, 16);
+    s->lo = get_bits(gb, 16);
+
+    switch (type) {
+    case 0x19781977:
+        frame->key_frame = 1;
+        frame->pict_type = AV_PICTURE_TYPE_I;
+        break;
+    case 0x12250926:
+        frame->key_frame = 0;
+        frame->pict_type = AV_PICTURE_TYPE_P;
+        break;
+    default:
+        avpriv_request_sample(avctx, "type %X", type);
+        return AVERROR_PATCHWELCOME;
+    }
+
+    if (avctx->width  != width ||
+        avctx->height != height) {
+        if (!frame->key_frame) {
+            av_log(avctx, AV_LOG_ERROR, "Frame size change is unsupported.\n");
+            return AVERROR_INVALIDDATA;
+        }
+        av_frame_unref(s->prev_frame);
+    }
+
+    ret = ff_set_dimensions(avctx, width, height);
+    if (ret < 0)
+        return ret;
+
+    if ((ret = ff_get_buffer(avctx, frame, frame->key_frame ? AV_GET_BUFFER_FLAG_REF : 0)) < 0)
+        return ret;
+
+    if (frame->key_frame) {
+        ret = decode_intra(avctx, gb, frame);
+        if (ret < 0)
+            return ret;
+
+        av_frame_unref(s->prev_frame);
+        if ((ret = av_frame_ref(s->prev_frame, frame)) < 0)
+            return ret;
+    } else {
+        if (!s->prev_frame->data[0]) {
+            av_log(avctx, AV_LOG_ERROR, "Missing reference frame.\n");
+            return AVERROR_INVALIDDATA;
+        }
+
+        ret = decode_inter(avctx, gb, frame, s->prev_frame);
+        if (ret < 0)
+            return ret;
+    }
+
+    *got_frame = 1;
+
+    return avpkt->size;
+}
+
+// the below code fragment can be found in:
+// libavcodec/hq_hqa.c
+static int hq_hqa_decode_frame(AVCodecContext *avctx, AVFrame *pic,
+                               int *got_frame, AVPacket *avpkt)
+{
+    HQContext *ctx = avctx->priv_data;
+    GetByteContext gbc0, *const gbc = &gbc0;
+    uint32_t info_tag;
+    unsigned int data_size;
+    int ret;
+    unsigned tag;
+
+    bytestream2_init(gbc, avpkt->data, avpkt->size);
+    if (bytestream2_get_bytes_left(gbc) < 4 + 4) {
+        av_log(avctx, AV_LOG_ERROR, "Frame is too small (%d).\n", avpkt->size);
+        return AVERROR_INVALIDDATA;
+    }
+
+    info_tag = bytestream2_peek_le32(gbc);
+    if (info_tag == MKTAG('I', 'N', 'F', 'O')) {
+        int info_size;
+        bytestream2_skip(gbc, 4);
+        info_size = bytestream2_get_le32(gbc);
+        if (info_size < 0 || bytestream2_get_bytes_left(gbc) < info_size) {
+            av_log(avctx, AV_LOG_ERROR, "Invalid INFO size (%d).\n", info_size);
+            return AVERROR_INVALIDDATA;
+        }
+        ff_canopus_parse_info_tag(avctx, gbc->buffer, info_size);
+
+        bytestream2_skip(gbc, info_size);
+    }
+
+    data_size = bytestream2_get_bytes_left(gbc);
+    if (data_size < 4) {
+        av_log(avctx, AV_LOG_ERROR, "Frame is too small (%d).\n", data_size);
+        return AVERROR_INVALIDDATA;
+    }
+
+    /* HQ defines dimensions and number of slices, and thus slice traversal
+     * order. HQA has no size constraint and a fixed number of slices, so it
+     * needs a separate scheme for it. */
+    tag = bytestream2_get_le32(gbc);
+    if ((tag & 0x00FFFFFF) == (MKTAG('U', 'V', 'C', ' ') & 0x00FFFFFF)) {
+        ret = hq_decode_frame(ctx, pic, gbc, tag >> 24, data_size);
+    } else if (tag == MKTAG('H', 'Q', 'A', '1')) {
+        ret = hqa_decode_frame(ctx, pic, gbc, data_size);
+    } else {
+        av_log(avctx, AV_LOG_ERROR, "Not a HQ/HQA frame.\n");
+        return AVERROR_INVALIDDATA;
+    }
+    if (ret < 0) {
+        av_log(avctx, AV_LOG_ERROR, "Error decoding frame.\n");
+        return ret;
+    }
+
+    pic->key_frame = 1;
+    pic->pict_type = AV_PICTURE_TYPE_I;
+
+    *got_frame = 1;
+
+    return avpkt->size;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

@@ -1,0 +1,410 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static inline void MPV_motion_lowres(MpegEncContext *s,
+                                     uint8_t *dest_y, uint8_t *dest_cb,
+                                     uint8_t *dest_cr,
+                                     int dir, uint8_t *const *ref_picture,
+                                     const h264_chroma_mc_func *pix_op)
+{
+    int mx, my;
+    int mb_x, macroblocky;
+    const int lowres  = s->avctx->lowres;
+    const int block_s = 8 >>lowres;
+
+    mb_x = s->mb_x;
+    macroblocky = s->mb_y;
+
+    switch (s->mv_type) {
+    case MV_TYPE_16X16:
+        mpeg_motion_lowres(s, dest_y, dest_cb, dest_cr,
+                           0, 0, 0,
+                           ref_picture, pix_op,
+                           s->mv[dir][0][0], s->mv[dir][0][1],
+                           2 * block_s, macroblocky);
+        break;
+    case MV_TYPE_8X8:
+        mx = 0;
+        my = 0;
+        for (int i = 0; i < 4; i++) {
+            hpel_motion_lowres(s, dest_y + ((i & 1) + (i >> 1) *
+                               s->linesize) * block_s,
+                               ref_picture[0], 0, 0,
+                               (2 * mb_x + (i & 1)) * block_s,
+                               (2 * macroblocky + (i >> 1)) * block_s,
+                               s->width, s->height, s->linesize,
+                               s->h_edge_pos >> lowres, s->v_edge_pos >> lowres,
+                               block_s, block_s, pix_op,
+                               s->mv[dir][i][0], s->mv[dir][i][1]);
+
+            mx += s->mv[dir][i][0];
+            my += s->mv[dir][i][1];
+        }
+
+        if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY))
+            chroma_4mv_motion_lowres(s, dest_cb, dest_cr, ref_picture,
+                                     pix_op, mx, my);
+        break;
+    // Handle different motion vector types for low-resolution motion compensation
+    // in the context of MPEG video decoding. The function processes macroblocks
+    // based on their motion vector type and updates the destination buffers 
+    // (luma and chroma) accordingly. The cases handled include field motion vectors
+    // (MV_TYPE_FIELD), 16x8 motion vectors (MV_TYPE_16X8), and dual-prime motion 
+    // vectors (MV_TYPE_DMV). The function performs separate operations based on 
+    // whether the picture is a frame or field picture, and adapts the reference 
+    // picture selection accordingly. Additionally, for DMV, it adjusts the 
+    // prediction by averaging with the opposite field. This setup allows efficient 
+    // handling of various motion compensation scenarios in low-resolution settings.
+    // <MASK>
+    default:
+        av_assert2(0);
+    }
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// libavcodec/mpegvideo_dec.c
+static inline void chroma_4mv_motion_lowres(MpegEncContext *s,
+                                            uint8_t *dest_cb, uint8_t *dest_cr,
+                                            uint8_t *const *ref_picture,
+                                            const h264_chroma_mc_func * pix_op,
+                                            int mx, int my)
+{
+    const int lowres     = s->avctx->lowres;
+    const int op_index   = FFMIN(lowres, 3);
+    const int block_s    = 8 >> lowres;
+    const int s_mask     = (2 << lowres) - 1;
+    const int h_edge_pos = s->h_edge_pos >> lowres + 1;
+    const int v_edge_pos = s->v_edge_pos >> lowres + 1;
+    int emu = 0, src_x, src_y, sx, sy;
+    ptrdiff_t offset;
+    const uint8_t *ptr;
+
+    if (s->quarter_sample) {
+        mx /= 2;
+        my /= 2;
+    }
+
+    /* In case of 8X8, we construct a single chroma motion vector
+       with a special rounding */
+    mx = ff_h263_round_chroma(mx);
+    my = ff_h263_round_chroma(my);
+
+    sx = mx & s_mask;
+    sy = my & s_mask;
+    src_x = s->mb_x * block_s + (mx >> lowres + 1);
+    src_y = s->mb_y * block_s + (my >> lowres + 1);
+
+    offset = src_y * s->uvlinesize + src_x;
+    ptr = ref_picture[1] + offset;
+    if ((unsigned) src_x > FFMAX(h_edge_pos - (!!sx) - block_s, 0) ||
+        (unsigned) src_y > FFMAX(v_edge_pos - (!!sy) - block_s, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr,
+                                 s->uvlinesize, s->uvlinesize,
+                                 9, 9,
+                                 src_x, src_y, h_edge_pos, v_edge_pos);
+        ptr = s->sc.edge_emu_buffer;
+        emu = 1;
+    }
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+    pix_op[op_index](dest_cb, ptr, s->uvlinesize, block_s, sx, sy);
+
+    ptr = ref_picture[2] + offset;
+    if (emu) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr,
+                                 s->uvlinesize, s->uvlinesize,
+                                 9, 9,
+                                 src_x, src_y, h_edge_pos, v_edge_pos);
+        ptr = s->sc.edge_emu_buffer;
+    }
+    pix_op[op_index](dest_cr, ptr, s->uvlinesize, block_s, sx, sy);
+}
+
+// the below code fragment can be found in:
+// libavcodec/mpegvideo_dec.c
+static av_always_inline void mpeg_motion_lowres(MpegEncContext *s,
+                                                uint8_t *dest_y,
+                                                uint8_t *dest_cb,
+                                                uint8_t *dest_cr,
+                                                int field_based,
+                                                int bottom_field,
+                                                int field_select,
+                                                uint8_t *const *ref_picture,
+                                                const h264_chroma_mc_func *pix_op,
+                                                int motion_x, int motion_y,
+                                                int h, int mb_y)
+{
+    const uint8_t *ptr_y, *ptr_cb, *ptr_cr;
+    int mx, my, src_x, src_y, uvsrc_x, uvsrc_y, sx, sy, uvsx, uvsy;
+    ptrdiff_t uvlinesize, linesize;
+    const int lowres     = s->avctx->lowres;
+    const int op_index   = FFMIN(lowres - 1 + s->chroma_x_shift, 3);
+    const int block_s    = 8 >> lowres;
+    const int s_mask     = (2 << lowres) - 1;
+    const int h_edge_pos = s->h_edge_pos >> lowres;
+    const int v_edge_pos = s->v_edge_pos >> lowres;
+    int hc = s->chroma_y_shift ? (h+1-bottom_field)>>1 : h;
+    linesize   = s->current_picture.f->linesize[0] << field_based;
+    uvlinesize = s->current_picture.f->linesize[1] << field_based;
+
+    // FIXME obviously not perfect but qpel will not work in lowres anyway
+    if (s->quarter_sample) {
+        motion_x /= 2;
+        motion_y /= 2;
+    }
+
+    if (field_based) {
+        motion_y += (bottom_field - field_select)*((1 << lowres)-1);
+    }
+
+    sx = motion_x & s_mask;
+    sy = motion_y & s_mask;
+    src_x = s->mb_x * 2 * block_s + (motion_x >> lowres + 1);
+    src_y = (mb_y * 2 * block_s >> field_based) + (motion_y >> lowres + 1);
+
+    if (s->out_format == FMT_H263) {
+        uvsx    = ((motion_x >> 1) & s_mask) | (sx & 1);
+        uvsy    = ((motion_y >> 1) & s_mask) | (sy & 1);
+        uvsrc_x = src_x >> 1;
+        uvsrc_y = src_y >> 1;
+    } else if (s->out_format == FMT_H261) {
+        // even chroma mv's are full pel in H261
+        mx      = motion_x / 4;
+        my      = motion_y / 4;
+        uvsx    = (2 * mx) & s_mask;
+        uvsy    = (2 * my) & s_mask;
+        uvsrc_x = s->mb_x * block_s + (mx >> lowres);
+        uvsrc_y =    mb_y * block_s + (my >> lowres);
+    } else {
+        if (s->chroma_y_shift) {
+            mx      = motion_x / 2;
+            my      = motion_y / 2;
+            uvsx    = mx & s_mask;
+            uvsy    = my & s_mask;
+            uvsrc_x = s->mb_x * block_s                 + (mx >> lowres + 1);
+            uvsrc_y =   (mb_y * block_s >> field_based) + (my >> lowres + 1);
+        } else {
+            if (s->chroma_x_shift) {
+            //Chroma422
+                mx = motion_x / 2;
+                uvsx = mx & s_mask;
+                uvsy = motion_y & s_mask;
+                uvsrc_y = src_y;
+                uvsrc_x = s->mb_x*block_s               + (mx >> (lowres+1));
+            } else {
+            //Chroma444
+                uvsx = motion_x & s_mask;
+                uvsy = motion_y & s_mask;
+                uvsrc_x = src_x;
+                uvsrc_y = src_y;
+            }
+        }
+    }
+
+    ptr_y  = ref_picture[0] + src_y   * linesize   + src_x;
+    ptr_cb = ref_picture[1] + uvsrc_y * uvlinesize + uvsrc_x;
+    ptr_cr = ref_picture[2] + uvsrc_y * uvlinesize + uvsrc_x;
+
+    if ((unsigned) src_x > FFMAX( h_edge_pos - (!!sx) - 2 * block_s,       0) || uvsrc_y<0 ||
+        (unsigned) src_y > FFMAX((v_edge_pos >> field_based) - (!!sy) - FFMAX(h, hc<<s->chroma_y_shift), 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_y,
+                                 linesize >> field_based, linesize >> field_based,
+                                 17, 17 + field_based,
+                                src_x, src_y * (1 << field_based), h_edge_pos,
+                                v_edge_pos);
+        ptr_y = s->sc.edge_emu_buffer;
+        if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+            uint8_t *ubuf = s->sc.edge_emu_buffer + 18 * s->linesize;
+            uint8_t *vbuf =ubuf + 10 * s->uvlinesize;
+            if (s->workaround_bugs & FF_BUG_IEDGE)
+                vbuf -= s->uvlinesize;
+            s->vdsp.emulated_edge_mc(ubuf,  ptr_cb,
+                                     uvlinesize >> field_based, uvlinesize >> field_based,
+                                     9, 9 + field_based,
+                                    uvsrc_x, uvsrc_y * (1 << field_based),
+                                    h_edge_pos >> 1, v_edge_pos >> 1);
+            s->vdsp.emulated_edge_mc(vbuf,  ptr_cr,
+                                     uvlinesize >> field_based,uvlinesize >> field_based,
+                                     9, 9 + field_based,
+                                    uvsrc_x, uvsrc_y * (1 << field_based),
+                                    h_edge_pos >> 1, v_edge_pos >> 1);
+            ptr_cb = ubuf;
+            ptr_cr = vbuf;
+        }
+    }
+
+    // FIXME use this for field pix too instead of the obnoxious hack which changes picture.f->data
+    if (bottom_field) {
+        dest_y  += s->linesize;
+        dest_cb += s->uvlinesize;
+        dest_cr += s->uvlinesize;
+    }
+
+    if (field_select) {
+        ptr_y   += s->linesize;
+        ptr_cb  += s->uvlinesize;
+        ptr_cr  += s->uvlinesize;
+    }
+
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+    pix_op[lowres - 1](dest_y, ptr_y, linesize, h, sx, sy);
+
+    if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+        uvsx = (uvsx << 2) >> lowres;
+        uvsy = (uvsy << 2) >> lowres;
+        if (hc) {
+            pix_op[op_index](dest_cb, ptr_cb, uvlinesize, hc, uvsx, uvsy);
+            pix_op[op_index](dest_cr, ptr_cr, uvlinesize, hc, uvsx, uvsy);
+        }
+    }
+    // FIXME h261 lowres loop filter
+}
+
+// the below code fragment can be found in:
+// libavcodec/mpegvideo_dec.c
+static inline int hpel_motion_lowres(MpegEncContext *s,
+                                     uint8_t *dest, const uint8_t *src,
+                                     int field_based, int field_select,
+                                     int src_x, int src_y,
+                                     int width, int height, ptrdiff_t stride,
+                                     int h_edge_pos, int v_edge_pos,
+                                     int w, int h, const h264_chroma_mc_func *pix_op,
+                                     int motion_x, int motion_y)
+{
+    const int lowres   = s->avctx->lowres;
+    const int op_index = FFMIN(lowres, 3);
+    const int s_mask   = (2 << lowres) - 1;
+    int emu = 0;
+    int sx, sy;
+
+    if (s->quarter_sample) {
+        motion_x /= 2;
+        motion_y /= 2;
+    }
+
+    sx = motion_x & s_mask;
+    sy = motion_y & s_mask;
+    src_x += motion_x >> lowres + 1;
+    src_y += motion_y >> lowres + 1;
+
+    src   += src_y * stride + src_x;
+
+    if ((unsigned)src_x > FFMAX( h_edge_pos - (!!sx) - w,                 0) ||
+        (unsigned)src_y > FFMAX((v_edge_pos >> field_based) - (!!sy) - h, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, src,
+                                 s->linesize, s->linesize,
+                                 w + 1, (h + 1) << field_based,
+                                 src_x, src_y * (1 << field_based),
+                                 h_edge_pos, v_edge_pos);
+        src = s->sc.edge_emu_buffer;
+        emu = 1;
+    }
+
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+    if (field_select)
+        src += s->linesize;
+    pix_op[op_index](dest, src, stride, h, sx, sy);
+    return emu;
+}
+
+// the below code fragment can be found in:
+// libavcodec/cavs.c
+static inline void mc_part_std(AVSContext *h, int chroma_height, int delta,
+                               uint8_t *dest_y,
+                               uint8_t *dest_cb,
+                               uint8_t *dest_cr,
+                               int x_offset, int y_offset,
+                               qpel_mc_func *qpix_put,
+                               h264_chroma_mc_func chroma_put,
+                               qpel_mc_func *qpix_avg,
+                               h264_chroma_mc_func chroma_avg,
+                               cavs_vector *mv)
+{
+    qpel_mc_func *qpix_op =  qpix_put;
+    h264_chroma_mc_func chroma_op = chroma_put;
+
+    dest_y   += x_offset * 2 + y_offset * h->l_stride * 2;
+    dest_cb  += x_offset     + y_offset * h->c_stride;
+    dest_cr  += x_offset     + y_offset * h->c_stride;
+    x_offset += 8 * h->mbx;
+    y_offset += 8 * h->mby;
+
+    if (mv->ref >= 0) {
+        AVFrame *ref = h->DPB[mv->ref].f;
+        mc_dir_part(h, ref, chroma_height, delta, 0,
+                    dest_y, dest_cb, dest_cr, x_offset, y_offset,
+                    qpix_op, chroma_op, mv);
+
+        qpix_op   = qpix_avg;
+        chroma_op = chroma_avg;
+    }
+
+    if ((mv + MV_BWD_OFFS)->ref >= 0) {
+        AVFrame *ref = h->DPB[0].f;
+        mc_dir_part(h, ref, chroma_height, delta, 1,
+                    dest_y, dest_cb, dest_cr, x_offset, y_offset,
+                    qpix_op, chroma_op, mv + MV_BWD_OFFS);
+    }
+}
+
+// the below code fragment can be found in:
+// libavcodec/h263.c
+void ff_h263_update_motion_val(MpegEncContext * s){
+    const int mb_xy = s->mb_y * s->mb_stride + s->mb_x;
+               //FIXME a lot of that is only needed for !low_delay
+    const int wrap = s->b8_stride;
+    const int xy = s->block_index[0];
+
+    s->current_picture.mbskip_table[mb_xy] = s->mb_skipped;
+
+    if(s->mv_type != MV_TYPE_8X8){
+        int motion_x, motion_y;
+        if (s->mb_intra) {
+            motion_x = 0;
+            motion_y = 0;
+        } else if (s->mv_type == MV_TYPE_16X16) {
+            motion_x = s->mv[0][0][0];
+            motion_y = s->mv[0][0][1];
+        } else /*if (s->mv_type == MV_TYPE_FIELD)*/ {
+            int i;
+            motion_x = s->mv[0][0][0] + s->mv[0][1][0];
+            motion_y = s->mv[0][0][1] + s->mv[0][1][1];
+            motion_x = (motion_x>>1) | (motion_x&1);
+            for(i=0; i<2; i++){
+                s->p_field_mv_table[i][0][mb_xy][0]= s->mv[0][i][0];
+                s->p_field_mv_table[i][0][mb_xy][1]= s->mv[0][i][1];
+            }
+            s->current_picture.ref_index[0][4*mb_xy    ] =
+            s->current_picture.ref_index[0][4*mb_xy + 1] = s->field_select[0][0];
+            s->current_picture.ref_index[0][4*mb_xy + 2] =
+            s->current_picture.ref_index[0][4*mb_xy + 3] = s->field_select[0][1];
+        }
+
+        /* no update if 8X8 because it has been done during parsing */
+        s->current_picture.motion_val[0][xy][0]            = motion_x;
+        s->current_picture.motion_val[0][xy][1]            = motion_y;
+        s->current_picture.motion_val[0][xy + 1][0]        = motion_x;
+        s->current_picture.motion_val[0][xy + 1][1]        = motion_y;
+        s->current_picture.motion_val[0][xy + wrap][0]     = motion_x;
+        s->current_picture.motion_val[0][xy + wrap][1]     = motion_y;
+        s->current_picture.motion_val[0][xy + 1 + wrap][0] = motion_x;
+        s->current_picture.motion_val[0][xy + 1 + wrap][1] = motion_y;
+    }
+
+    if(s->encoding){ //FIXME encoding MUST be cleaned up
+        if (s->mv_type == MV_TYPE_8X8)
+            s->current_picture.mb_type[mb_xy] = MB_TYPE_L0 | MB_TYPE_8x8;
+        else if(s->mb_intra)
+            s->current_picture.mb_type[mb_xy] = MB_TYPE_INTRA;
+        else
+            s->current_picture.mb_type[mb_xy] = MB_TYPE_L0 | MB_TYPE_16x16;
+    }
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

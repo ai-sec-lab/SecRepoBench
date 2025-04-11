@@ -1,0 +1,151 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static int dissect_softether_host_fqdn(struct ndpi_flow_struct *ndpiflow,
+                                       struct ndpi_packet_struct const *packet) {
+  u_int8_t const *payload = packet->payload;
+  u_int16_t payload_len = packet->payload_packet_len;
+  u_int32_t tuple_count;
+  // Initialize variables for processing and flags for hostname and FQDN detection.
+  // Check if the payload length is sufficient and retrieve the tuple count from the payload.
+  // Validate the tuple count and adjust the payload and its length accordingly.
+  // Extract the first value from the payload to determine if it contains a "host_name" identifier.
+  // Iterate over each tuple in the payload, extracting values and checking their types and identifiers.
+  // If a "host_name" is detected, prepare to store its value in the flow structure's hostname field.
+  // If a "ddns_fqdn" identifier is detected, prepare to store its value in the flow structure's fqdn field.
+  // Continue processing tuples, adjusting the payload and its length after each extraction.
+  // If any unprocessed data remains or tuple count is not exhausted, return an error code.
+  // <MASK>
+  return 0;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/softether.c
+static int dissect_softether_ip_port(struct ndpi_flow_struct *flow,
+                                     struct ndpi_packet_struct const *packet) {
+  char * ip_port_separator;
+  size_t ip_len, port_len;
+
+  if(packet->payload_packet_len < NDPI_STATICSTRING_LEN("IP=") +
+     NDPI_STATICSTRING_LEN(",PORT="))
+    return 1;    
+
+  if(strncmp((char *)&packet->payload[0], "IP=", NDPI_STATICSTRING_LEN("IP=")) != 0)    
+    return 1;    
+
+  ip_port_separator = ndpi_strnstr((char const *)packet->payload + NDPI_STATICSTRING_LEN("IP="),
+                                   ",PORT=",
+                                   packet->payload_packet_len - NDPI_STATICSTRING_LEN("IP="));
+  if(ip_port_separator == NULL)    
+    return 1;    
+
+  ip_len = ndpi_min(sizeof(flow->protos.softether.ip) - 1,
+                    ip_port_separator - (char const *)packet->payload -
+                    NDPI_STATICSTRING_LEN("IP="));
+
+  strncpy(flow->protos.softether.ip,
+	  (char const *)packet->payload + NDPI_STATICSTRING_LEN("IP="),
+          ip_len);
+  flow->protos.softether.ip[ip_len] = '\0';
+
+  if (packet->payload_packet_len < (ip_port_separator - (char const *)packet->payload) +
+                                   NDPI_STATICSTRING_LEN(",PORT="))
+    return 1;
+
+  port_len = ndpi_min(sizeof(flow->protos.softether.port) - 1,
+                      packet->payload_packet_len - (ip_port_separator - (char const *)packet->payload) -
+                      NDPI_STATICSTRING_LEN(",PORT="));
+  strncpy(flow->protos.softether.port, ip_port_separator + NDPI_STATICSTRING_LEN(",PORT="),
+          port_len);
+  
+  flow->protos.softether.port[port_len] = '\0';
+
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/softether.c
+static int ndpi_search_softether_again(struct ndpi_detection_module_struct *ndpi_struct,
+				       struct ndpi_flow_struct *flow) {
+  if((dissect_softether_ip_port(flow, &ndpi_struct->packet) == 0)
+     || (dissect_softether_host_fqdn(flow, &ndpi_struct->packet) == 0)) {
+    if((flow->protos.softether.ip[0] != '\0')
+       && (flow->protos.softether.port[0] != '\0')
+       && (flow->protos.softether.hostname[0] != '\0')
+       && (flow->protos.softether.fqdn[0] != '\0')) {
+      flow->extra_packets_func = NULL;
+
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/sd_rtn.c
+static int ndpi_int_sd_rtn_dissect_sni(struct ndpi_flow_struct * const flow,
+                                       u_int8_t const * const payload,
+                                       u_int32_t payload_len)
+{
+  u_int32_t sni_len = ntohs(get_u_int16_t(payload, 16));
+
+  if (sni_len + 19 > payload_len)
+  {
+    return -1;
+  }
+
+  if (payload[18] != 0x00)
+  {
+    return -1;
+  }
+
+  ndpi_hostname_sni_set(flow, &payload[19], sni_len);
+
+  return 0;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/collectd.c
+static int ndpi_int_collectd_dissect_hostname(struct ndpi_flow_struct * const flow,
+                                              struct ndpi_packet_struct const * const packet,
+                                              u_int16_t block_offset, u_int16_t block_length)
+{
+  return (ndpi_hostname_sni_set(flow, &packet->payload[4], block_length) == NULL);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/softether.c
+static size_t dissect_softether_tuples(u_int8_t const *payload, u_int16_t payload_len,
+                                       struct softether_value *first_value,
+                                       struct softether_value *second_value) {
+  enum softether_value_type first_tuple_type;
+  enum softether_value_type second_tuple_type;
+  size_t value_siz;
+  size_t const tuple_type_len = 8;
+
+  if(payload_len < tuple_type_len)
+    return 0;
+
+  if(softether_type_to_enum(ntohl(get_u_int32_t(payload, 0)), &first_tuple_type) != 0 ||
+     softether_type_to_enum(ntohl(get_u_int32_t(payload, 4)), &second_tuple_type) != 0)
+    return 0;
+
+  payload += tuple_type_len;
+  payload_len -= tuple_type_len;
+
+  value_siz = dissect_softether_type(first_tuple_type, first_value, payload, payload_len);
+
+  payload += value_siz;
+  payload_len -= value_siz;
+
+  value_siz += dissect_softether_type(second_tuple_type, second_value, payload, payload_len);
+
+  return value_siz + tuple_type_len;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

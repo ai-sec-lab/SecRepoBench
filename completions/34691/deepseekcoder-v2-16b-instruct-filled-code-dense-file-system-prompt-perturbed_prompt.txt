@@ -1,0 +1,232 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static mrb_value
+mrb_ary_shift_m(mrb_state *mrb, mrb_value self)
+{
+  struct RArray *ary = mrb_ary_ptr(self);
+  mrb_int len = ARY_LEN(ary);
+  mrb_int n;
+  mrb_value val;
+
+  if (mrb_get_args(mrb, "|i", &n) == 0) {
+    return mrb_ary_shift(mrb, self);
+  }
+  // This section implements the functionality for shifting elements from an array,
+  // either by removing a single element (default behavior) or a specified number
+  // of elements when provided with an integer argument.
+  // <MASK>
+  if (len > ARY_SHIFT_SHARED_MIN) {
+    ary_make_shared(mrb, ary);
+    goto L_SHIFT;
+  }
+  else if (len == n) {
+    ARY_SET_LEN(ary, 0);
+  }
+  else {
+    mrb_value *ptr = ARY_PTR(ary);
+    mrb_int size = len-n;
+
+    while (size--) {
+      *ptr = *(ptr+n);
+      ++ptr;
+    }
+    ARY_SET_LEN(ary, len-n);
+  }
+  return val;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/array.c
+MRB_API mrb_value
+mrb_ary_shift(mrb_state *mrb, mrb_value self)
+{
+  struct RArray *a = mrb_ary_ptr(self);
+  mrb_int len = ARY_LEN(a);
+  mrb_value val;
+
+  ary_modify_check(mrb, a);
+  if (len == 0) return mrb_nil_value();
+  if (ARY_SHARED_P(a)) {
+  L_SHIFT:
+    val = a->as.heap.ptr[0];
+    a->as.heap.ptr++;
+    a->as.heap.len--;
+    return val;
+  }
+  if (len > ARY_SHIFT_SHARED_MIN) {
+    ary_make_shared(mrb, a);
+    goto L_SHIFT;
+  }
+  else {
+    mrb_value *ptr = ARY_PTR(a);
+    mrb_int size = len;
+
+    val = *ptr;
+    while (--size) {
+      *ptr = *(ptr+1);
+      ++ptr;
+    }
+    ARY_SET_LEN(a, len-1);
+  }
+  return val;
+}
+
+// the below code fragment can be found in:
+// src/array.c
+static mrb_value
+mrb_ary_unshift_m(mrb_state *mrb, mrb_value self)
+{
+  struct RArray *a = mrb_ary_ptr(self);
+  const mrb_value *vals;
+  mrb_value *ptr;
+  mrb_int alen, len;
+
+  mrb_get_args(mrb, "*!", &vals, &alen);
+  if (alen == 0) {
+    ary_modify_check(mrb, a);
+    return self;
+  }
+  len = ARY_LEN(a);
+  if (alen > ARY_MAX_SIZE - len) {
+    mrb_raise(mrb, E_ARGUMENT_ERROR, "array size too big");
+  }
+  if (ARY_SHARED_P(a)
+      && a->as.heap.aux.shared->refcnt == 1 /* shared only referenced from this array */
+      && a->as.heap.ptr - a->as.heap.aux.shared->ptr >= alen) /* there's room for unshifted item */ {
+    ary_modify_check(mrb, a);
+    a->as.heap.ptr -= alen;
+    ptr = a->as.heap.ptr;
+  }
+  else {
+    mrb_bool same = vals == ARY_PTR(a);
+    ary_modify(mrb, a);
+    if (ARY_CAPA(a) < len + alen)
+      ary_expand_capa(mrb, a, len + alen);
+    ptr = ARY_PTR(a);
+    value_move(ptr + alen, ptr, len);
+    if (same) vals = ptr;
+  }
+  array_copy(ptr, vals, alen);
+  ARY_SET_LEN(a, len+alen);
+  while (alen--) {
+    mrb_field_write_barrier_value(mrb, (struct RBasic*)a, vals[alen]);
+  }
+
+  return self;
+}
+
+// the below code fragment can be found in:
+// src/array.c
+MRB_API mrb_value
+mrb_ary_unshift(mrb_state *mrb, mrb_value self, mrb_value item)
+{
+  struct RArray *a = mrb_ary_ptr(self);
+  mrb_int len = ARY_LEN(a);
+
+  if (ARY_SHARED_P(a)
+      && a->as.heap.aux.shared->refcnt == 1 /* shared only referenced from this array */
+      && a->as.heap.ptr - a->as.heap.aux.shared->ptr >= 1) /* there's room for unshifted item */ {
+    a->as.heap.ptr--;
+    a->as.heap.ptr[0] = item;
+  }
+  else {
+    mrb_value *ptr;
+
+    ary_modify(mrb, a);
+    if (ARY_CAPA(a) < len + 1)
+      ary_expand_capa(mrb, a, len + 1);
+    ptr = ARY_PTR(a);
+    value_move(ptr + 1, ptr, len);
+    ptr[0] = item;
+  }
+  ARY_SET_LEN(a, len+1);
+  mrb_field_write_barrier_value(mrb, (struct RBasic*)a, item);
+
+  return self;
+}
+
+// the below code fragment can be found in:
+// src/array.c
+static mrb_value
+ary_subseq(mrb_state *mrb, struct RArray *a, mrb_int beg, mrb_int len)
+{
+  struct RArray *b;
+
+  if (!ARY_SHARED_P(a) && len <= ARY_SHIFT_SHARED_MIN) {
+    return mrb_ary_new_from_values(mrb, len, ARY_PTR(a)+beg);
+  }
+  ary_make_shared(mrb, a);
+  b  = (struct RArray*)mrb_obj_alloc(mrb, MRB_TT_ARRAY, mrb->array_class);
+  b->as.heap.ptr = a->as.heap.ptr + beg;
+  b->as.heap.len = len;
+  b->as.heap.aux.shared = a->as.heap.aux.shared;
+  b->as.heap.aux.shared->refcnt++;
+  ARY_SET_SHARED_FLAG(b);
+
+  return mrb_obj_value(b);
+}
+
+// the below code fragment can be found in:
+// mrbgems/mruby-array-ext/src/array.c
+static mrb_value
+mrb_ary_slice_bang(mrb_state *mrb, mrb_value self)
+{
+  struct RArray *a = mrb_ary_ptr(self);
+  mrb_int i, j, k, len, alen;
+  mrb_value val;
+  mrb_value *ptr;
+  mrb_value ary;
+
+  mrb_ary_modify(mrb, a);
+
+  if (mrb_get_argc(mrb) == 1) {
+    mrb_value index = mrb_get_arg1(mrb);
+
+    switch (mrb_type(index)) {
+    case MRB_TT_RANGE:
+      if (mrb_range_beg_len(mrb, index, &i, &len, ARY_LEN(a), TRUE) == MRB_RANGE_OK) {
+        goto delete_pos_len;
+      }
+      else {
+        return mrb_nil_value();
+      }
+    case MRB_TT_INTEGER:
+      val = mrb_funcall_id(mrb, self, MRB_SYM(delete_at), 1, index);
+      return val;
+    default:
+      val = mrb_funcall_id(mrb, self, MRB_SYM(delete_at), 1, index);
+      return val;
+    }
+  }
+
+  mrb_get_args(mrb, "ii", &i, &len);
+ delete_pos_len:
+  alen = ARY_LEN(a);
+  if (i < 0) i += alen;
+  if (i < 0 || alen < i) return mrb_nil_value();
+  if (len < 0) return mrb_nil_value();
+  if (alen == i) return mrb_ary_new(mrb);
+  if (len > alen - i) len = alen - i;
+
+  ary = mrb_ary_new_capa(mrb, len);
+  ptr = ARY_PTR(a);
+  for (j = i, k = 0; k < len; ++j, ++k) {
+    mrb_ary_push(mrb, ary, ptr[j]);
+  }
+
+  ptr += i;
+  for (j = i; j < alen - len; ++j) {
+    *ptr = *(ptr+len);
+    ++ptr;
+  }
+
+  mrb_ary_resize(mrb, self, alen - len);
+  return ary;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

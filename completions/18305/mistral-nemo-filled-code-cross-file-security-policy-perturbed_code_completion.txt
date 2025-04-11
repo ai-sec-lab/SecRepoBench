@@ -1,13 +1,4 @@
-resolution.y > 0.0))
-          {
-            /*
-              Set vertical image position.
-            */
-            (void) TIFFSetField(tiff,TIFFTAG_YPOSITION,(float) image->page.y/
-              image->resolution.y);
-          }
-      }
-    if (image->orientation != TopLeftOrientation)
+orientation != TopLeftOrientation)
       (void) TIFFSetField(tiff,TIFFTAG_ORIENTATION,(uint16) image->orientation);
     if (image->chromaticity.white_point.x != 0.0)
       {
@@ -31,19 +22,26 @@ resolution.y > 0.0))
         primary[5]=image->chromaticity.blue_primary.y;
         (void) TIFFSetField(tiff,TIFFTAG_PRIMARYCHROMATICITIES,primary);
       }
-    if (image->alpha_trait != UndefinedPixelTrait)
+    if (image->colorspace == CMYKColorspace)
       {
-        (void) TIFFSetField(tiff,TIFFTAG_EXTRASAMPLES,1,&sample_info);
-        (void) TIFFSetField(tiff,TIFFTAG_SAMPLESPERPIXEL,samples_per_pixel+1);
+        (void) TIFFSetField(tiff,TIFFTAG_INKSET,INKSET_CMYK);
+        (void) TIFFSetField(tiff,TIFFTAG_PHOTOMETRIC,PHOTOMETRIC_SEPARATED);
+      }
+    if (image->colorspace == YCbCrColorspace)
+      {
+        (void) TIFFSetField(tiff,TIFFTAG_PHOTOMETRIC,PHOTOMETRIC_YCBCR);
+        (void) TIFFSetField(tiff,TIFFTAG_YCBCRSUBSAMPLING,1,1);
+      }
+    if (image->colorspace == LabColorspace)
+      {
+        (void) TIFFSetField(tiff,TIFFTAG_PHOTOMETRIC,PHOTOMETRIC_CIELAB);
+        EncodeLabImage(image,exception);
       }
     if (image->storage_class == PseudoClass)
       {
         size_t
           colors;
 
-        /*
-          Initialize colormap.
-        */
         colors=(size_t) GetQuantumRange(bits_per_sample)+1;
         if (AcquireImageColormap(image,colors,exception) == MagickFalse)
           {
@@ -51,442 +49,167 @@ resolution.y > 0.0))
             ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
           }
       }
-    if (image->storage_class == PseudoClass)
+    if (image->alpha_trait != UndefinedPixelTrait)
       {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,id);
-            TIFFFree(tiff_info);
-          }
+        (void) TIFFSetField(tiff,TIFFTAG_EXTRASAMPLES,1,&sample_info);
+        if (sample_info[0] == EXTRASAMPLE_ASSOCALPHA)
+          SetQuantumAlphaType(quantum_info,AssociatedQuantumAlpha);
       }
     if (image->storage_class == PseudoClass)
       {
         size_t
-          length;
+          range;
 
-        register const char
-          *id;
+        uint16
+          *blue_colormap,
+          *green_colormap,
+          *red_colormap;
 
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DOCUMENTNAMES,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
+        /*
+          Initialize colormap.
+        */
+        tiff_status=TIFFGetField(tiff,TIFFTAG_COLORMAP,&red_colormap,
+          &green_colormap,&blue_colormap);
+        if (tiff_status == 1)
           {
-            (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAMES,length,id);
-            TIFFFree(tiff_info);
+            if ((red_colormap != (uint16 *) NULL) &&
+                (green_colormap != (uint16 *) NULL) &&
+                (blue_colormap != (uint16 *) NULL))
+              {
+                range=255;  /* might be old style 8-bit colormap */
+                for (i=0; i < (ssize_t) image->colors; i++)
+                  if ((red_colormap[i] >= 256) || (green_colormap[i] >= 256) ||
+                      (blue_colormap[i] >= 256))
+                    {
+                      range=65535;
+                      break;
+                    }
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  image->colormap[i].red=ClampToQuantum(((double)
+                    QuantumRange*red_colormap[i])/range);
+                  image->colormap[i].green=ClampToQuantum(((double)
+                    QuantumRange*green_colormap[i])/range);
+                  image->colormap[i].blue=ClampToQuantum(((double)
+                    QuantumRange*blue_colormap[i])/range);
+                }
+              }
           }
       }
     if (image->storage_class == PseudoClass)
       {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DATETIME,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
+        (void) TIFFSetField(tiff,TIFFTAG_COLORMAP,image->colormap,
+          (uint16) image->colors);
+        (void) TIFFSetField(tiff,TIFFTAG_PHOTOMETRIC,PHOTOMETRIC_PALETTE);
+      }
+    if (image->storage_class == DirectClass)
+      {
+        (void) TIFFSetField(tiff,TIFFTAG_PHOTOMETRIC,photometric);
+        if (photometric == PHOTOMETRIC_PALETTE)
           {
-            (void) TIFFSetField(tiff,TIFFTAG_DATETIME,length,id);
-            TIFFFree(tiff_info);
+            (void) TIFFSetField(tiff,TIFFTAG_COLORMAP,image->colormap,
+              (uint16) image->colors);
+            (void) TIFFSetField(tiff,TIFFTAG_PALETTECOLOR,image->colormap,
+              (uint16) image->colors);
           }
       }
-    if (image->storage_class == PseudoClass)
+    if (image->storage_class == DirectClass)
       {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_ARTIST,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_ARTIST,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DOCUMENTNAMES,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAMES,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DATETIME,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DATETIME,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_ARTIST,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_ARTIST,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DOCUMENTNAMES,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAMES,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DATETIME,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DATETIME,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_ARTIST,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_ARTIST,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DOCUMENTNAMES,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAMES,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DATETIME,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DATETIME,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_ARTIST,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_ARTIST,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DOCUMENTNAMES,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAMES,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_DATETIME,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_DATETIME,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_ARTIST,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_ARTIST,length,id);
-            TIFFFree(tiff_info);
-          }
-      }
-    if (image->storage_class == PseudoClass)
-      {
-        size_t
-          length;
-
-        register const char
-          *id;
-
-        register ssize_t
-          i;
-
-        TIFFInfo
-          *tiff_info;
-
-        tiff_info=TIFFGetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,&id);
-        if (tiff_info != (TIFFInfo *) NULL)
-          {
-            (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,length,id);
-            TIFFFree(tiff
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_DATETIME,image->date);
+        (void) TIFFSetField(tiff,TIFFTAG_ARTIST,image->artist);
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->description,strlen(image->description)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTCOMPUTER,
+          (uint8 *) image->host_computer,strlen(image->host_computer)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTSOFTWARE,
+          (uint8 *) image->host_software,strlen(image->host_software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_OSOFTWARE,
+          (uint8 *) image->software,strlen(image->software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_PAGENAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+        (void) TIFFSetField(tiff,TIFFTAG_DATETIME,image->date);
+        (void) TIFFSetField(tiff,TIFFTAG_ARTIST,image->artist);
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->description,strlen(image->description)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTCOMPUTER,
+          (uint8 *) image->host_computer,strlen(image->host_computer)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTSOFTWARE,
+          (uint8 *) image->host_software,strlen(image->host_software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_OSOFTWARE,
+          (uint8 *) image->software,strlen(image->software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_PAGENAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+        (void) TIFFSetField(tiff,TIFFTAG_DATETIME,image->date);
+        (void) TIFFSetField(tiff,TIFFTAG_ARTIST,image->artist);
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->description,strlen(image->description)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTCOMPUTER,
+          (uint8 *) image->host_computer,strlen(image->host_computer)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTSOFTWARE,
+          (uint8 *) image->host_software,strlen(image->host_software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_OSOFTWARE,
+          (uint8 *) image->software,strlen(image->software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_PAGENAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+        (void) TIFFSetField(tiff,TIFFTAG_DATETIME,image->date);
+        (void) TIFFSetField(tiff,TIFFTAG_ARTIST,image->artist);
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->description,strlen(image->description)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTCOMPUTER,
+          (uint8 *) image->host_computer,strlen(image->host_computer)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTSOFTWARE,
+          (uint8 *) image->host_software,strlen(image->host_software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_OSOFTWARE,
+          (uint8 *) image->software,strlen(image->software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_PAGENAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+        (void) TIFFSetField(tiff,TIFFTAG_DATETIME,image->date);
+        (void) TIFFSetField(tiff,TIFFTAG_ARTIST,image->artist);
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->description,strlen(image->description)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTCOMPUTER,
+          (uint8 *) image->host_computer,strlen(image->host_computer)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTSOFTWARE,
+          (uint8 *) image->host_software,strlen(image->host_software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_OSOFTWARE,
+          (uint8 *) image->software,strlen(image->software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_PAGENAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+        (void) TIFFSetField(tiff,TIFFTAG_DATETIME,image->date);
+        (void) TIFFSetField(tiff,TIFFTAG_ARTIST,image->artist);
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->description,strlen(image->description)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTCOMPUTER,
+          (uint8 *) image->host_computer,strlen(image->host_computer)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTSOFTWARE,
+          (uint8 *) image->host_software,strlen(image->host_software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_OSOFTWARE,
+          (uint8 *) image->software,strlen(image->software)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_DOCUMENTNAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_PAGENAME,
+          (uint8 *) image->filename,strlen(image->filename)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+        (void) TIFFSetField(tiff,TIFFTAG_DATETIME,image->date);
+        (void) TIFFSetField(tiff,TIFFTAG_ARTIST,image->artist);
+        (void) TIFFSetField(tiff,TIFFTAG_IMAGEDESCRIPTION,
+          (uint8 *) image->description,strlen(image->description)+1);
+        (void) TIFFSetField(tiff,TIFFTAG_HOSTCOMPUTER,
+          (uint8 *) image->

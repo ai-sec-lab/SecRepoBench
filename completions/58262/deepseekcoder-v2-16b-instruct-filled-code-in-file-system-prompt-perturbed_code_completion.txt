@@ -1,4 +1,4 @@
-S_SELECT_SET, size_offset_dims, NULL, mdims, NULL);
+_id, H5S_SELECT_SET, size_offset_dims, NULL, mdims, NULL);
             mspace_id = H5Screate_simple(rank, mdims, NULL);
             err = Mat_H5WriteData(dset_id, h5_type, mspace_id, space_id, isComplex, data);
             H5Sclose(mspace_id);
@@ -20,9 +20,8 @@ Mat_VarWriteEmpty(hid_t id, matvar_t *matvar, const char *name, const char *clas
 {
     int err = MATIO_E_NO_ERROR;
     hid_t dset_id, space_id, type_id;
-    hsize_t dims[1];
+    hsize_t dims[1] = {0};
 
-    dims[0] = 0;
     type_id = H5Tcopy(H5T_C_S1);
     H5Tset_size(type_id, H5Tget_size(H5T_C_S1));
     dset_id = H5Dcreate(id, name, type_id, H5P_DEFAULT, H5P_DEFAULT);
@@ -30,18 +29,14 @@ Mat_VarWriteEmpty(hid_t id, matvar_t *matvar, const char *name, const char *clas
     if ( dset_id < 0 ) {
         return MATIO_E_GENERIC_WRITE_ERROR;
     }
+
+    type_id = H5Tcopy(H5T_C_S1);
+    H5Tset_size(type_id, H5Tget_size(H5T_C_S1));
     space_id = H5Screate_simple(1, dims, NULL);
-    if ( space_id < 0 ) {
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    if ( 0 > H5Dwrite(dset_id, H5T_NATIVE_CHAR, H5S_ALL, space_id, H5P_DEFAULT, class_name) ) {
-        H5Sclose(space_id);
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
+    H5Acreate(dset_id, "MATLAB_class", type_id, space_id, H5P_DEFAULT);
+    H5Awrite(H5Aopen(dset_id, "MATLAB_class", H5P_DEFAULT), type_id, class_name);
     H5Sclose(space_id);
-    H5Dclose(dset_id);
+    H5Tclose(type_id);
 
     return err;
 }
@@ -50,32 +45,48 @@ static int
 Mat_VarWriteCell73(hid_t id, matvar_t *matvar, const char *name, hid_t *refs_id, hsize_t *dims)
 {
     int err = MATIO_E_NO_ERROR;
+    hsize_t i;
     hid_t dset_id, space_id, type_id;
-    hsize_t i, nelems;
 
-    nelems = 1;
-    for ( i = 0; i < matvar->rank; i++ ) {
-        nelems *= dims[i];
-    }
-    dset_id = H5Dcreate(id, name, H5T_STD_REF_OBJ, H5P_DEFAULT, H5P_DEFAULT);
+    type_id = H5Tarray_create(H5T_STD_REF_OBJ, 1, 0);
+    dset_id = H5Dcreate(id, name, type_id, H5P_DEFAULT, H5P_DEFAULT);
+    H5Tclose(type_id);
     if ( dset_id < 0 ) {
         return MATIO_E_GENERIC_WRITE_ERROR;
     }
-    space_id = H5Screate_simple(1, &nelems, NULL);
-    if ( space_id < 0 ) {
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    if ( 0 > H5Dwrite(dset_id, H5T_STD_REF_OBJ, H5S_ALL, space_id, H5P_DEFAULT, *refs_id) ) {
-        H5Sclose(space_id);
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    H5Sclose(space_id);
-    *refs_id += nelems;
-    H5Dclose(dset_id);
 
-    return err;
+    type_id = H5Tarray_create(H5T_STD_REF_OBJ, 1, matvar->rank);
+    space_id = H5Screate_simple(matvar->rank, dims, NULL);
+    *refs_id = H5Dcreate(dset_id, ".", type_id, space_id, H5P_DEFAULT);
+    H5Sclose(space_id);
+    H5Tclose(type_id);
+    if ( *refs_id < 0 ) {
+        H5Dclose(dset_id);
+        return MATIO_E_GENERIC_WRITE_ERROR;
+    }
+
+    for ( i = 0; i < dims[0]; i++ ) {
+        if ( NULL != matvar->data && NULL != ((matvar_t **)matvar->data)[i] ) {
+            err = Mat_VarWriteRef(dset_id, ((matvar_t **)matvar->data)[i], MAT_COMPRESSION_NONE,
+                                  refs_id, NULL);
+            if ( err ) {
+                break;
+            }
+        } else {
+            err = Mat_VarWriteEmpty(dset_id, NULL, ".", "cell");
+            if ( err ) {
+                break;
+            }
+        }
+    }
+
+    if ( err ) {
+        H5Dclose(*refs_id);
+        H5Dclose(dset_id);
+        return err;
+    }
+
+    return MATIO_E_NO_ERROR;
 }
 
 static int
@@ -83,33 +94,29 @@ Mat_VarWriteChar73(hid_t id, matvar_t *matvar, const char *name, hsize_t *dims)
 {
     int err = MATIO_E_NO_ERROR;
     hid_t dset_id, space_id, type_id;
-    hsize_t nelems;
 
-    nelems = 1;
-    for ( int i = 0; i < matvar->rank; i++ ) {
-        nelems *= dims[i];
-    }
     type_id = H5Tcopy(H5T_C_S1);
     H5Tset_size(type_id, H5Tget_size(H5T_C_S1));
-    dset_id = H5Dcreate(id, name, type_id, H5P_DEFAULT, H5P_DEFAULT);
+    space_id = H5Screate_simple(1, dims, NULL);
+    dset_id = H5Dcreate(id, name, type_id, space_id, H5P_DEFAULT);
+    H5Sclose(space_id);
     H5Tclose(type_id);
     if ( dset_id < 0 ) {
         return MATIO_E_GENERIC_WRITE_ERROR;
     }
-    space_id = H5Screate_simple(1, &nelems, NULL);
-    if ( space_id < 0 ) {
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    if ( 0 > H5Dwrite(dset_id, H5T_NATIVE_CHAR, H5S_ALL, space_id, H5P_DEFAULT, matvar->data) ) {
-        H5Sclose(space_id);
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    H5Sclose(space_id);
-    H5Dclose(dset_id);
 
-    return err;
+    type_id = H5Tcopy(H5T_C_S1);
+    H5Tset_size(type_id, H5Tget_size(H5T_C_S1));
+    space_id = H5Screate_simple(1, dims, NULL);
+    err = H5Dwrite(dset_id, type_id, space_id, space_id, H5P_DEFAULT, matvar->data);
+    H5Sclose(space_id);
+    H5Tclose(type_id);
+    if ( err < 0 ) {
+        H5Dclose(dset_id);
+        return MATIO_E_GENERIC_WRITE_ERROR;
+    }
+
+    return MATIO_E_NO_ERROR;
 }
 
 static int
@@ -118,24 +125,17 @@ Mat_WriteEmptyVariable73(hid_t id, const char *name, hsize_t rank, size_t *dims)
     int err = MATIO_E_NO_ERROR;
     hid_t dset_id, space_id, type_id;
 
-    type_id = H5Tcopy(H5T_NATIVE_HSIZE);
-    dset_id = H5Dcreate(id, name, type_id, H5P_DEFAULT, H5P_DEFAULT);
+    type_id = SizeType2H5T();
+    if ( type_id < 0 ) {
+        return MATIO_E_UNKNOWN_ERROR;
+    }
+    space_id = H5Screate_simple(rank, dims, NULL);
+    dset_id = H5Dcreate(id, name, type_id, space_id, H5P_DEFAULT);
+    H5Sclose(space_id);
     H5Tclose(type_id);
     if ( dset_id < 0 ) {
         return MATIO_E_GENERIC_WRITE_ERROR;
     }
-    space_id = H5Screate_simple(1, &rank, NULL);
-    if ( space_id < 0 ) {
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    if ( 0 > H5Dwrite(dset_id, H5T_NATIVE_HSIZE, H5S_ALL, space_id, H5P_DEFAULT, dims) ) {
-        H5Sclose(space_id);
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    H5Sclose(space_id);
-    H5Dclose(dset_id);
 
     return err;
 }
@@ -145,33 +145,27 @@ Mat_VarWriteLogical73(hid_t id, matvar_t *matvar, const char *name, hsize_t *dim
 {
     int err = MATIO_E_NO_ERROR;
     hid_t dset_id, space_id, type_id;
-    hsize_t nelems;
 
-    nelems = 1;
-    for ( int i = 0; i < matvar->rank; i++ ) {
-        nelems *= dims[i];
-    }
     type_id = H5Tcopy(H5T_NATIVE_INT8);
-    H5Tset_size(type_id, H5Tget_size(H5T_NATIVE_INT8));
-    dset_id = H5Dcreate(id, name, type_id, H5P_DEFAULT, H5P_DEFAULT);
+    space_id = H5Screate_simple(1, dims, NULL);
+    dset_id = H5Dcreate(id, name, type_id, space_id, H5P_DEFAULT);
+    H5Sclose(space_id);
     H5Tclose(type_id);
     if ( dset_id < 0 ) {
         return MATIO_E_GENERIC_WRITE_ERROR;
     }
-    space_id = H5Screate_simple(1, &nelems, NULL);
-    if ( space_id < 0 ) {
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    if ( 0 > H5Dwrite(dset_id, H5T_NATIVE_INT8, H5S_ALL, space_id, H5P_DEFAULT, matvar->data) ) {
-        H5Sclose(space_id);
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    H5Sclose(space_id);
-    H5Dclose(dset_id);
 
-    return err;
+    type_id = H5Tcopy(H5T_NATIVE_INT8);
+    space_id = H5Screate_simple(1, dims, NULL);
+    err = H5Dwrite(dset_id, type_id, space_id, space_id, H5P_DEFAULT, matvar->data);
+    H5Sclose(space_id);
+    H5Tclose(type_id);
+    if ( err < 0 ) {
+        H5Dclose(dset_id);
+        return MATIO_E_GENERIC_WRITE_ERROR;
+    }
+
+    return MATIO_E_NO_ERROR;
 }
 
 static int
@@ -179,32 +173,34 @@ Mat_VarWriteNumeric73(hid_t id, matvar_t *matvar, const char *name, hsize_t *dim
 {
     int err = MATIO_E_NO_ERROR;
     hid_t dset_id, space_id, type_id;
-    hsize_t nelems;
+    hsize_t chunk_dims[MAX_RANK];
 
-    nelems = 1;
-    for ( int i = 0; i < matvar->rank; i++ ) {
-        nelems *= dims[i];
-    }
-    type_id = DataType2H5T(matvar->data_type);
+    type_id = DataType(ClassType2H5T(matvar->class_type), matvar->isComplex);
     if ( type_id < 0 ) {
-        return MATIO_E_BAD_ARGUMENT;
+        return MATIO_E_UNKNOWN_ERROR;
     }
-    dset_id = H5Dcreate(id, name, type_id, H5P_DEFAULT, H5P_DEFAULT);
+
+    Mat_H5GetChunkSize(matvar->rank, matvar->dims, chunk_dims);
+    space_id = H5Screate_simple(matvar->rank, dims, max_dims);
+    H5Sset_chunk(space_id, matvar->rank, chunk_dims);
+    dset_id = H5Dcreate(id, name, type_id, space_id, H5P_DEFAULT);
+    H5Sclose(space_id);
+    H5Tclose(type_id);
     if ( dset_id < 0 ) {
         return MATIO_E_GENERIC_WRITE_ERROR;
     }
-    space_id = H5Screate_simple(matvar->rank, dims, max_dims);
-    if ( space_id < 0 ) {
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
+
+    if ( matvar->compression != MAT_COMPRESSION_NONE ) {
+        hid_t plist_id = H5Pcreate(H5P_DATASET_CREATE);
+        H5Pset_deflate(plist_id, 9);
+        H5Dset_create_plist(dset_id, plist_id);
+        H5Pclose(plist_id);
     }
-    if ( 0 > H5Dwrite(dset_id, type_id, H5S_ALL, space_id, H5P_DEFAULT, matvar->data) ) {
-        H5Sclose(space_id);
+
+    err = Mat_H5WriteData(dset_id, type_id, H5S_ALL, H5S_ALL, matvar->isComplex, matvar->data);
+    if ( err ) {
         H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
     }
-    H5Sclose(space_id);
-    H5Dclose(dset_id);
 
     return err;
 }
@@ -214,35 +210,41 @@ Mat_VarWriteAppendNumeric73(hid_t id, matvar_t *matvar, const char *name, hsize_
 {
     int err = MATIO_E_NO_ERROR;
     hid_t dset_id, space_id, type_id;
-    hsize_t nelems;
+    hsize_t chunk_dims[MAX_RANK];
 
-    nelems = 1;
-    for ( int i = 0; i < matvar->rank; i++ ) {
-        nelems *= dims[i];
-    }
-    type_id = DataType2H5T(matvar->data_type);
+    type_id = DataType(ClassType2H5T(matvar->class_type), matvar->isComplex);
     if ( type_id < 0 ) {
-        return MATIO_E_BAD_ARGUMENT;
+        return MATIO_E_UNKNOWN_ERROR;
     }
+
+    Mat_H5GetChunkSize(matvar->rank, matvar->dims, chunk_dims);
+    space_id = H5Screate_simple(matvar->rank, dims, NULL);
+    H5Sset_extent_simple(space_id, matvar->rank, dims, NULL);
     dset_id = H5Dopen(id, name, H5P_DEFAULT);
     if ( dset_id < 0 ) {
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    space_id = H5Dget_space(dset_id);
-    if ( 0 > H5Sset_extent_simple(space_id, matvar->rank, dims, NULL) ) {
-        H5Dclose(dset_id);
-        return MATIO_E_GENERIC_WRITE_ERROR;
-    }
-    if ( 0 > H5Dwrite(dset_id, type_id, H5S_ALL, space_id, H5P_DEFAULT, matvar->data) ) {
         H5Sclose(space_id);
-        H5Dclose(dset_id);
+        H5Tclose(type_id);
         return MATIO_E_GENERIC_WRITE_ERROR;
     }
-    H5Sclose(space_id);
-    H5Dclose(dset_id);
+
+    if ( matvar->compression != MAT_COMPRESSION_NONE ) {
+        hid_t plist_id = H5Pcreate(H5P_DATASET_CREATE);
+        H5Pset_deflate(plist_id, 9);
+        H5Dset_create_plist(dset_id, plist_id);
+        H5Pclose(plist_id);
+    }
+
+    err = Mat_H5WriteAppendData(dset_id, type_id, matvar->rank, name, matvar->dims, dims, dim,
+                                matvar->isComplex, matvar->data);
+    if ( err ) {
+        H5Dclose(dset_id);
+    } else {
+        H5Sclose(space_id);
+        H5Tclose(type_id);
+    }
 
     return err;
 }
 
 static int
-Mat_VarWriteSparse73(hid_t id, matvar_t *matvar, const char *name
+Mat_VarWrite

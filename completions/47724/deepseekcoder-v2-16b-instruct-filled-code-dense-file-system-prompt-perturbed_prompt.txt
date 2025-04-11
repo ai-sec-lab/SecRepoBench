@@ -1,0 +1,166 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static void ndpi_check_http_header(struct ndpi_detection_module_struct *ndpi_struct,
+				   struct ndpi_flow_struct *ndpiflow) {
+  u_int32_t i;
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  for(i=0; (i < packet->parsed_lines)
+	&& (packet->line[i].ptr != NULL)
+	&& (packet->line[i].len > 0); i++) {
+    switch(packet->line[i].ptr[0]){
+    // Iterate through each character in the HTTP header line.
+    // For specific starting characters, check if the header is suspicious
+    // using predefined lists of suspicious header keys.
+    // If a suspicious header is found, format a message indicating the detected header.
+    // Set a risk flag in the flow structure with the formatted message.
+    // Exit the function after setting the risk for the first suspicious header found.
+    // <MASK>
+    }
+  }
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void check_http_payload(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow) {
+  /* Add here your payload code check */
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void ndpi_validate_http_content(struct ndpi_detection_module_struct *ndpi_struct,
+				       struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  const u_int8_t *double_ret = (const u_int8_t *)ndpi_strnstr((const char *)packet->payload, "\r\n\r\n", packet->payload_packet_len);
+
+  NDPI_LOG_DBG(ndpi_struct, "==>>> [len: %u] ", packet->payload_packet_len);
+  NDPI_LOG_DBG(ndpi_struct, "->> %.*s\n", packet->content_line.len, (const char *)packet->content_line.ptr);
+
+  if(double_ret) {
+    u_int len;
+
+    len = packet->payload_packet_len - (double_ret - packet->payload);
+
+    if(ndpi_strnstr((const char *)packet->content_line.ptr, "text/", packet->content_line.len)
+       || ndpi_strnstr((const char *)packet->content_line.ptr, "/json", packet->content_line.len)
+       || ndpi_strnstr((const char *)packet->content_line.ptr, "x-www-form-urlencoded", packet->content_line.len)
+       ) {
+      /* This is supposed to be a human-readeable text file */
+
+      packet->http_check_content = 1;
+
+      if(len >= 8 /* 4 chars for \r\n\r\n and at least 4 charts for content guess */) {
+	double_ret += 4;
+
+	ndpi_http_check_human_redeable_content(ndpi_struct, flow, double_ret, len);
+      }
+    }
+
+    /* Final checks */
+
+    if(ndpi_isset_risk(ndpi_struct, flow, NDPI_BINARY_APPLICATION_TRANSFER)
+       && flow->http.user_agent && flow->http.content_type) {
+      if(((strncmp((const char *)flow->http.user_agent, "Java/", 5) == 0))
+	 &&
+	 ((strcmp((const char *)flow->http.content_type, "application/java-vm") == 0))
+	 ) {
+	/*
+	  Java downloads Java: Log4J:
+	  https://corelight.com/blog/detecting-log4j-exploits-via-zeek-when-java-downloads-java
+	*/
+
+	ndpi_set_risk(ndpi_struct, flow, NDPI_POSSIBLE_EXPLOIT, "Suspicious Log4J");
+      }
+    }
+
+    NDPI_LOG_DBG(ndpi_struct, "\n");
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void ndpi_check_http_url(struct ndpi_detection_module_struct *ndpi_struct,
+				struct ndpi_flow_struct *flow,
+				char *url) {
+  /* Nothing to do */
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void ndpi_search_http_tcp(struct ndpi_detection_module_struct *ndpi_struct,
+				 struct ndpi_flow_struct *flow) {
+  /* Break after 20 packets. */
+  if(flow->packet_counter > 20) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    http_bitmask_exclude_other(flow);
+    return;
+  }
+
+  NDPI_LOG_DBG(ndpi_struct, "search HTTP\n");
+  ndpi_check_http_tcp(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/gtp.c
+static void ndpi_check_gtp(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int32_t payload_len = packet->payload_packet_len;
+
+  if((packet->udp != NULL) && (payload_len > sizeof(struct gtp_header_generic))) {
+    u_int32_t gtp_u  = ntohs(2152);
+    u_int32_t gtp_c  = ntohs(2123);
+    u_int32_t gtp_prime = ntohs(3386);
+
+    struct gtp_header_generic *gtp = (struct gtp_header_generic *)packet->payload;
+    u_int8_t version = (gtp->flags & 0xE0) >> 5;
+    u_int8_t pt = (gtp->flags & 0x10) >> 4;
+    u_int16_t message_len = ntohs(gtp->message_len);
+
+    if((packet->udp->source == gtp_u) || (packet->udp->dest == gtp_u)) {
+      if((version == 1) && (pt == 1) &&
+         (payload_len >= HEADER_LEN_GTP_U) &&
+         (message_len <= (payload_len - HEADER_LEN_GTP_U))) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-u\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_U, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+    if((packet->udp->source == gtp_c) || (packet->udp->dest == gtp_c)) {
+      if(((version == 1) &&
+          (payload_len >= HEADER_LEN_GTP_C_V1) &&
+          (message_len == (payload_len - HEADER_LEN_GTP_C_V1)) &&
+          (message_len >= 4 * (!!(gtp->flags & 0x07))) &&
+          (gtp->message_type > 0 && gtp->message_type <= 129)) || /* Loose check based on TS 29.060 7.1 */
+         ((version == 2) &&
+          /* payload_len is always valid, because HEADER_LEN_GTP_C_V2 == sizeof(struct gtp_header_generic) */
+          (message_len == (payload_len - HEADER_LEN_GTP_C_V2)))) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-c\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_C, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+    if((packet->udp->source == gtp_prime) || (packet->udp->dest == gtp_prime)) {
+      if((pt == 0) &&
+         ((gtp->flags & 0x0E) >> 1 == 0x7) && /* Spare bits */
+         (payload_len >= HEADER_LEN_GTP_PRIME) &&
+         (message_len <= (payload_len - HEADER_LEN_GTP_PRIME)) &&
+         ((gtp->message_type > 0 && gtp->message_type <= 7) || /* Check based on TS 32.295 6.2.1 */
+          gtp->message_type == 240 || gtp->message_type == 241)) {
+        NDPI_LOG_INFO(ndpi_struct, "found gtp-prime\n");
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_GTP_PRIME, NDPI_PROTOCOL_GTP, NDPI_CONFIDENCE_DPI);
+        return;
+      }
+    }
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  return;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

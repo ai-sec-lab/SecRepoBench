@@ -1,0 +1,586 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static
+_cmsTRANSFORM* AllocEmptyTransform(cmsContext ContextID, cmsPipeline* lut,
+                                               cmsUInt32Number Intent, cmsUInt32Number* InputFmt, cmsUInt32Number* OutputFormat, cmsUInt32Number* dwFlags)
+{
+     _cmsTransformPluginChunkType* ctx = ( _cmsTransformPluginChunkType*) _cmsContextGetClientChunk(ContextID, TransformPlugin);
+     _cmsTransformCollection* Plugin;
+
+       // Allocate needed memory
+       _cmsTRANSFORM* p = (_cmsTRANSFORM*)_cmsMallocZero(ContextID, sizeof(_cmsTRANSFORM));
+       if (!p) {
+              cmsPipelineFree(lut);
+              return NULL;
+       }
+
+       // Store the proposed pipeline
+       p->Lut = lut;
+
+       // Let's see if any plug-in want to do the transform by itself
+       if (p->Lut != NULL) {
+
+           if (!(*dwFlags & cmsFLAGS_NOOPTIMIZE))
+           {
+               for (Plugin = ctx->TransformCollection;
+                   Plugin != NULL;
+                   Plugin = Plugin->Next) {
+
+                   if (Plugin->Factory(&p->xform, &p->UserData, &p->FreeUserData, &p->Lut, InputFmt, OutputFormat, dwFlags)) {
+
+                       // Last plugin in the declaration order takes control. We just keep
+                       // the original parameters as a logging. 
+                       // Note that cmsFLAGS_CAN_CHANGE_FORMATTER is not set, so by default 
+                       // an optimized transform is not reusable. The plug-in can, however, change
+                       // the flags and make it suitable.
+
+                       p->ContextID = ContextID;
+                       p->InputFormat = *InputFmt;
+                       p->OutputFormat = *OutputFormat;
+                       p->dwOriginalFlags = *dwFlags;
+
+                       // Fill the formatters just in case the optimized routine is interested.
+                       // No error is thrown if the formatter doesn't exist. It is up to the optimization 
+                       // factory to decide what to do in those cases.
+                       p->FromInput = _cmsGetFormatter(ContextID, *InputFmt, cmsFormatterInput, CMS_PACK_FLAGS_16BITS).Fmt16;
+                       p->ToOutput = _cmsGetFormatter(ContextID, *OutputFormat, cmsFormatterOutput, CMS_PACK_FLAGS_16BITS).Fmt16;
+                       p->FromInputFloat = _cmsGetFormatter(ContextID, *InputFmt, cmsFormatterInput, CMS_PACK_FLAGS_FLOAT).FmtFloat;
+                       p->ToOutputFloat = _cmsGetFormatter(ContextID, *OutputFormat, cmsFormatterOutput, CMS_PACK_FLAGS_FLOAT).FmtFloat;
+
+                       // Save the day? (Ignore the warning)
+                       if (Plugin->OldXform) {
+                           p->OldXform = (_cmsTransformFn)(void*)p->xform;
+                           p->xform = _cmsTransform2toTransformAdaptor;
+                       }
+
+                       ParalellizeIfSuitable(p);
+                       return p;
+                   }
+               }
+           }
+
+           // Not suitable for the transform plug-in, let's check  the pipeline plug-in
+           _cmsOptimizePipeline(ContextID, &p->Lut, Intent, InputFmt, OutputFormat, dwFlags);
+       }
+
+    // Check whatever this is a true floating point transform
+    if (_cmsFormatterIsFloat(*OutputFormat)) {
+
+        // Get formatter function always return a valid union, but the contents of this union may be NULL.
+        p ->FromInputFloat = _cmsGetFormatter(ContextID, *InputFmt,  cmsFormatterInput, CMS_PACK_FLAGS_FLOAT).FmtFloat;
+        p ->ToOutputFloat  = _cmsGetFormatter(ContextID, *OutputFormat, cmsFormatterOutput, CMS_PACK_FLAGS_FLOAT).FmtFloat;
+        *dwFlags |= cmsFLAGS_CAN_CHANGE_FORMATTER;
+
+        if (p ->FromInputFloat == NULL || p ->ToOutputFloat == NULL) {
+
+            cmsSignalError(ContextID, cmsERROR_UNKNOWN_EXTENSION, "Unsupported raster format");
+            cmsDeleteTransform(p);
+            return NULL;
+        }
+
+        if (*dwFlags & cmsFLAGS_NULLTRANSFORM) {
+
+            p ->xform = NullFloatXFORM;
+        }
+        else {
+            // Float transforms don't use cache, always are non-NULL
+            p ->xform = FloatXFORM;
+        }
+
+    }
+    else {
+
+        // Formats are intended to be changed before use
+        if 
+        // Check if the input and output formats are uninitialized (set to zero).
+        // If uninitialized, set input and output processing functions to default
+        // and update flags to allow formatter change. Otherwise, obtain the
+        // appropriate formatters for both input and output based on current formats.
+        // If the formatters are unavailable, signal an error, delete the transformation,
+        // and terminate the function. Determine bytes per pixel for the input format,
+        // and if conditions are met, adjust flags to permit formatter changes.
+        // <MASK>
+
+        if (*dwFlags & cmsFLAGS_NULLTRANSFORM) {
+
+            p ->xform = NullXFORM;
+        }
+        else {
+            if (*dwFlags & cmsFLAGS_NOCACHE) {
+
+                if (*dwFlags & cmsFLAGS_GAMUTCHECK)
+                    p ->xform = PrecalculatedXFORMGamutCheck;  // Gamut check, no cache
+                else
+                    p ->xform = PrecalculatedXFORM;  // No cache, no gamut check
+            }
+            else {
+
+                if (*dwFlags & cmsFLAGS_GAMUTCHECK)
+                    p ->xform = CachedXFORMGamutCheck;    // Gamut check, cache
+                else
+                    p ->xform = CachedXFORM;  // No gamut check, cache
+
+            }
+        }
+    }
+
+    p ->InputFormat     = *InputFmt;
+    p ->OutputFormat    = *OutputFormat;
+    p ->dwOriginalFlags = *dwFlags;
+    p ->ContextID       = ContextID;
+    p ->UserData        = NULL;
+    ParalellizeIfSuitable(p);
+    return p;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/cmsxform.c
+cmsHTRANSFORM CMSEXPORT cmsCreateExtendedTransform(cmsContext ContextID,
+                                                   cmsUInt32Number nProfiles, cmsHPROFILE hProfiles[],
+                                                   cmsBool  BPC[],
+                                                   cmsUInt32Number Intents[],
+                                                   cmsFloat64Number AdaptationStates[],
+                                                   cmsHPROFILE hGamutProfile,
+                                                   cmsUInt32Number nGamutPCSposition,
+                                                   cmsUInt32Number InputFormat,
+                                                   cmsUInt32Number OutputFormat,
+                                                   cmsUInt32Number dwFlags)
+{
+    _cmsTRANSFORM* xform;    
+    cmsColorSpaceSignature EntryColorSpace;
+    cmsColorSpaceSignature ExitColorSpace;
+    cmsPipeline* Lut;
+    cmsUInt32Number LastIntent = Intents[nProfiles-1];
+
+    // If it is a fake transform
+    if (dwFlags & cmsFLAGS_NULLTRANSFORM)
+    {
+        return AllocEmptyTransform(ContextID, NULL, INTENT_PERCEPTUAL, &InputFormat, &OutputFormat, &dwFlags);
+    }
+
+    // If gamut check is requested, make sure we have a gamut profile
+    if (dwFlags & cmsFLAGS_GAMUTCHECK) {
+        if (hGamutProfile == NULL) dwFlags &= ~cmsFLAGS_GAMUTCHECK;
+    }
+
+    // On floating point transforms, inhibit cache
+    if (_cmsFormatterIsFloat(InputFormat) || _cmsFormatterIsFloat(OutputFormat))
+        dwFlags |= cmsFLAGS_NOCACHE;
+
+    // Mark entry/exit spaces
+    if (!GetXFormColorSpaces(nProfiles, hProfiles, &EntryColorSpace, &ExitColorSpace)) {
+        cmsSignalError(ContextID, cmsERROR_NULL, "NULL input profiles on transform");
+        return NULL;
+    }
+
+    // Check if proper colorspaces
+    if (!IsProperColorSpace(EntryColorSpace, InputFormat)) {
+        cmsSignalError(ContextID, cmsERROR_COLORSPACE_CHECK, "Wrong input color space on transform");
+        return NULL;
+    }
+
+    if (!IsProperColorSpace(ExitColorSpace, OutputFormat)) {
+        cmsSignalError(ContextID, cmsERROR_COLORSPACE_CHECK, "Wrong output color space on transform");
+        return NULL;
+    }
+
+    // Check whatever the transform is 16 bits and involves linear RGB in first profile. If so, disable optimizations
+    if (EntryColorSpace == cmsSigRgbData && T_BYTES(InputFormat) == 2 && !(dwFlags & cmsFLAGS_NOOPTIMIZE))
+    {
+        cmsFloat64Number gamma = cmsDetectRGBProfileGamma(hProfiles[0], 0.1);
+
+        if (gamma > 0 && gamma < 1.6)
+            dwFlags |= cmsFLAGS_NOOPTIMIZE;
+    }
+
+    // Create a pipeline with all transformations
+    Lut = _cmsLinkProfiles(ContextID, nProfiles, Intents, hProfiles, BPC, AdaptationStates, dwFlags);
+    if (Lut == NULL) {
+        cmsSignalError(ContextID, cmsERROR_NOT_SUITABLE, "Couldn't link the profiles");
+        return NULL;
+    }
+
+    // Check channel count
+    if ((cmsChannelsOfColorSpace(EntryColorSpace) != (cmsInt32Number) cmsPipelineInputChannels(Lut)) ||
+        (cmsChannelsOfColorSpace(ExitColorSpace)  != (cmsInt32Number) cmsPipelineOutputChannels(Lut))) {
+        cmsPipelineFree(Lut);
+        cmsSignalError(ContextID, cmsERROR_NOT_SUITABLE, "Channel count doesn't match. Profile is corrupted");
+        return NULL;
+    }
+
+
+    // All seems ok
+    xform = AllocEmptyTransform(ContextID, Lut, LastIntent, &InputFormat, &OutputFormat, &dwFlags);
+    if (xform == NULL) {
+        return NULL;
+    }
+
+    // Keep values
+    xform ->EntryColorSpace = EntryColorSpace;
+    xform ->ExitColorSpace  = ExitColorSpace;
+    xform ->RenderingIntent = Intents[nProfiles-1];
+
+    // Take white points
+    SetWhitePoint(&xform->EntryWhitePoint, (cmsCIEXYZ*) cmsReadTag(hProfiles[0], cmsSigMediaWhitePointTag));
+    SetWhitePoint(&xform->ExitWhitePoint,  (cmsCIEXYZ*) cmsReadTag(hProfiles[nProfiles-1], cmsSigMediaWhitePointTag));
+   
+
+    // Create a gamut check LUT if requested
+    if (hGamutProfile != NULL && (dwFlags & cmsFLAGS_GAMUTCHECK))
+        xform ->GamutCheck  = _cmsCreateGamutCheckPipeline(ContextID, hProfiles,
+                                                        BPC, Intents,
+                                                        AdaptationStates,
+                                                        nGamutPCSposition,
+                                                        hGamutProfile);
+
+
+    // Try to read input and output colorant table
+    if (cmsIsTag(hProfiles[0], cmsSigColorantTableTag)) {
+
+        // Input table can only come in this way.
+        xform ->InputColorant = cmsDupNamedColorList((cmsNAMEDCOLORLIST*) cmsReadTag(hProfiles[0], cmsSigColorantTableTag));
+    }
+
+    // Output is a little bit more complex.
+    if (cmsGetDeviceClass(hProfiles[nProfiles-1]) == cmsSigLinkClass) {
+
+        // This tag may exist only on devicelink profiles.
+        if (cmsIsTag(hProfiles[nProfiles-1], cmsSigColorantTableOutTag)) {
+
+            // It may be NULL if error
+            xform ->OutputColorant = cmsDupNamedColorList((cmsNAMEDCOLORLIST*) cmsReadTag(hProfiles[nProfiles-1], cmsSigColorantTableOutTag));
+        }
+
+    } else {
+
+        if (cmsIsTag(hProfiles[nProfiles-1], cmsSigColorantTableTag)) {
+
+            xform -> OutputColorant = cmsDupNamedColorList((cmsNAMEDCOLORLIST*) cmsReadTag(hProfiles[nProfiles-1], cmsSigColorantTableTag));
+        }
+    }
+
+    // Store the sequence of profiles
+    if (dwFlags & cmsFLAGS_KEEP_SEQUENCE) {
+        xform ->Sequence = _cmsCompileProfileSequence(ContextID, nProfiles, hProfiles);
+    }
+    else
+        xform ->Sequence = NULL;
+
+    // If this is a cached transform, init first value, which is zero (16 bits only)
+    if (!(dwFlags & cmsFLAGS_NOCACHE)) {
+
+        memset(&xform ->Cache.CacheIn, 0, sizeof(xform ->Cache.CacheIn));
+
+        if (xform ->GamutCheck != NULL) {
+            TransformOnePixelWithGamutCheck(xform, xform ->Cache.CacheIn, xform->Cache.CacheOut);
+        }
+        else {
+
+            xform ->Lut ->Eval16Fn(xform ->Cache.CacheIn, xform->Cache.CacheOut, xform -> Lut->Data);
+        }
+
+    }
+
+    return (cmsHTRANSFORM) xform;
+}
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_float_sup.c
+static
+cmsBool Floating_Point_Transforms_Dispatcher(_cmsTransform2Fn* TransformFn,
+                                  void** UserData,
+                                  _cmsFreeUserDataFn* FreeUserData,
+                                  cmsPipeline** Lut, 
+                                  cmsUInt32Number* InputFormat, 
+                                  cmsUInt32Number* OutputFormat, 
+                                  cmsUInt32Number* dwFlags) 
+{
+    // Softproofing & gamut check does not use plugin, both are activated via following flag.
+    if (*dwFlags & cmsFLAGS_SOFTPROOFING) return FALSE;
+
+    // Special flags for reversing are not supported
+    if (T_FLAVOR(*InputFormat) || T_FLAVOR(*OutputFormat)) return FALSE;
+
+    // Try to optimize as a set of curves plus a matrix plus a set of curves
+    if (OptimizeMatrixShaper15(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize by joining curves
+    if (Optimize8ByJoiningCurves(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+#ifndef CMS_DONT_USE_SSE2
+    // Try to use SSE2 to optimize as a set of curves plus a matrix plus a set of curves
+    if (Optimize8MatrixShaperSSE(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+#endif
+    // Try to optimize as a set of curves plus a matrix plus a set of curves
+    if (Optimize8MatrixShaper(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize by joining curves
+    if (OptimizeFloatByJoiningCurves(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize as a set of curves plus a matrix plus a set of curves
+    if (OptimizeFloatMatrixShaper(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize using prelinearization plus tetrahedral
+    if (Optimize8BitRGBTransform(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize using prelinearization plus tetrahedral
+    if (Optimize16BitRGBTransform(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize using prelinearization plus tetrahedral
+    if (OptimizeCLUTRGBTransform(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize using prelinearization plus tetrahedral
+    if (OptimizeCLUTCMYKTransform(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Try to optimize for Lab float as input
+    if (OptimizeCLUTLabTransform(TransformFn, UserData, FreeUserData, Lut, InputFormat, OutputFormat, dwFlags)) return TRUE;
+
+    // Cannot optimize, use lcms normal process 
+    return FALSE;
+}
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_16_tethra.c
+cmsBool Optimize16BitRGBTransform(_cmsTransform2Fn* TransformFn,
+                                  void** UserData,
+                                  _cmsFreeUserDataFn* FreeDataFn,
+                                  cmsPipeline** Lut, 
+                                  cmsUInt32Number* InputFormat, 
+                                  cmsUInt32Number* OutputFormat, 
+                                  cmsUInt32Number* dwFlags)      
+{
+    Performance16Data* p16;
+    cmsContext ContextID;
+    _cmsStageCLutData* data;
+    cmsUInt32Number newFlags;
+    cmsStage* OptimizedCLUTmpe;
+
+
+    // For empty transforms, do nothing
+    if (*Lut == NULL) return FALSE;
+
+    // This is a lossy optimization! does not apply in floating-point cases
+    if (T_FLOAT(*InputFormat) || T_FLOAT(*OutputFormat)) return FALSE;
+
+    // Only on 16-bit
+    if (T_BYTES(*InputFormat) != 2 || T_BYTES(*OutputFormat) != 2) return FALSE;
+
+    // Only real 16 bits
+    if (T_BIT15(*InputFormat) != 0 || T_BIT15(*OutputFormat) != 0) return FALSE;
+
+	// Swap endian is not supported
+    if (T_ENDIAN16(*InputFormat) != 0 || T_ENDIAN16(*OutputFormat) != 0) return FALSE;
+
+    // Only on input RGB
+    if (T_COLORSPACE(*InputFormat)  != PT_RGB) return FALSE;
+    
+
+    // If this is a matrix-shaper, the default does already a good job
+    if (cmsPipelineCheckAndRetreiveStages(*Lut, 4,
+        cmsSigCurveSetElemType, cmsSigMatrixElemType, cmsSigMatrixElemType, cmsSigCurveSetElemType,
+        NULL, NULL, NULL, NULL)) return FALSE;
+
+    if (cmsPipelineCheckAndRetreiveStages(*Lut, 2,
+        cmsSigCurveSetElemType, cmsSigCurveSetElemType,
+        NULL, NULL)) return FALSE;
+
+   
+    ContextID = cmsGetPipelineContextID(*Lut);
+    newFlags = *dwFlags | cmsFLAGS_FORCE_CLUT;
+
+    if (!_cmsOptimizePipeline(ContextID,
+                               Lut,
+                               INTENT_PERCEPTUAL,  // Dont care
+                               InputFormat,
+                               OutputFormat,
+                               &newFlags)) return FALSE;
+
+    OptimizedCLUTmpe = cmsPipelineGetPtrToFirstStage(*Lut);
+
+    // Set the evaluator   
+    data = (_cmsStageCLutData*)cmsStageData(OptimizedCLUTmpe);
+
+    p16 = Performance16alloc(ContextID, data->Params);
+    if (p16 == NULL) return FALSE;
+
+    *TransformFn = PerformanceEval16;
+    *UserData   = p16;
+    *FreeDataFn = Performance16free;
+    *InputFormat  |= 0x02000000;
+    *OutputFormat |= 0x02000000;
+    *dwFlags |= cmsFLAGS_CAN_CHANGE_FORMATTER;
+
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_float_tethra.c
+cmsBool OptimizeCLUTRGBTransform(_cmsTransform2Fn* TransformFn,
+                                  void** UserData,
+                                  _cmsFreeUserDataFn* FreeDataFn,
+                                  cmsPipeline** Lut, 
+                                  cmsUInt32Number* InputFormat, 
+                                  cmsUInt32Number* OutputFormat, 
+                                  cmsUInt32Number* dwFlags)      
+{
+    cmsPipeline* OriginalLut;
+    int nGridPoints;    
+    cmsPipeline* OptimizedLUT = NULL;    
+    cmsStage* OptimizedCLUTmpe;
+    FloatCLUTData* pfloat;
+    cmsContext ContextID;
+    _cmsStageCLutData* data;
+
+    // For empty transforms, do nothing
+    if (*Lut == NULL) return FALSE;
+
+    // Check for floating point only
+    if (!T_FLOAT(*InputFormat) || !T_FLOAT(*OutputFormat)) return FALSE;
+
+    // Only on floats
+    if (T_BYTES(*InputFormat) != sizeof(cmsFloat32Number) || 
+        T_BYTES(*OutputFormat) != sizeof(cmsFloat32Number)) return FALSE;
+
+    // Input has to be RGB, Output may be any but Lab
+    if (T_COLORSPACE(*InputFormat) != PT_RGB) return FALSE;
+    if (T_COLORSPACE(*OutputFormat) == PT_Lab) return FALSE;
+
+    OriginalLut = *Lut;
+   
+    ContextID        = cmsGetPipelineContextID(OriginalLut);
+    nGridPoints      = _cmsReasonableGridpointsByColorspace(cmsSigRgbData, *dwFlags);
+             
+    // Create the result LUT
+    OptimizedLUT = cmsPipelineAlloc(cmsGetPipelineContextID(OriginalLut), 3, cmsPipelineOutputChannels(OriginalLut));
+    if (OptimizedLUT == NULL) goto Error;
+    
+    // Allocate the CLUT for result
+    OptimizedCLUTmpe = cmsStageAllocCLutFloat(ContextID, nGridPoints, 3, cmsPipelineOutputChannels(OriginalLut), NULL);
+
+    // Add the CLUT to the destination LUT
+    cmsPipelineInsertStage(OptimizedLUT, cmsAT_BEGIN, OptimizedCLUTmpe);
+
+    // If output is CMYK, add a conversion stage to get %   
+    if (T_COLORSPACE(*OutputFormat) == PT_CMYK) {
+
+        static const cmsFloat64Number mat[] = { 100.0,   0,     0,     0,
+                                                  0,   100.0,   0,     0,
+                                                  0,     0,   100.0,   0,
+                                                  0,     0,     0,   100.0 };
+
+        cmsStage* percent = cmsStageAllocMatrix(ContextID, 4, 4, mat, NULL);
+        if (percent == NULL) goto Error;
+
+        cmsPipelineInsertStage(OriginalLut, cmsAT_END, percent);
+    }
+
+    // Resample the LUT
+    if (!cmsStageSampleCLutFloat(OptimizedCLUTmpe, XFormSampler, (void*)OriginalLut, 0)) goto Error;
+
+    
+    if (T_COLORSPACE(*OutputFormat) == PT_CMYK) {
+
+        cmsPipelineUnlinkStage(OriginalLut, cmsAT_END, NULL);
+    }
+
+    // Set the evaluator, copy parameters   
+    data = (_cmsStageCLutData*) cmsStageData(OptimizedCLUTmpe);
+
+    pfloat = FloatCLUTAlloc(ContextID, data ->Params);
+    if (pfloat == NULL) return FALSE;   
+
+    // And return the obtained LUT
+    cmsPipelineFree(OriginalLut);
+
+    *Lut = OptimizedLUT;
+    *TransformFn = FloatCLUTEval;
+    *UserData   = pfloat;
+    *FreeDataFn = _cmsFree;
+    *dwFlags &= ~cmsFLAGS_CAN_CHANGE_FORMATTER;
+    return TRUE;
+
+Error:
+      
+    if (OptimizedLUT != NULL) cmsPipelineFree(OptimizedLUT);
+
+    return FALSE;    
+}
+
+// the below code fragment can be found in:
+// plugins/fast_float/src/fast_float_cmyk.c
+cmsBool OptimizeCLUTCMYKTransform(_cmsTransform2Fn* TransformFn,
+                                  void** UserData,
+                                  _cmsFreeUserDataFn* FreeDataFn,
+                                  cmsPipeline** Lut, 
+                                  cmsUInt32Number* InputFormat, 
+                                  cmsUInt32Number* OutputFormat, 
+                                  cmsUInt32Number* dwFlags)      
+{
+    cmsPipeline* OriginalLut;
+    int nGridPoints;    
+    cmsPipeline* OptimizedLUT = NULL;    
+    cmsStage* OptimizedCLUTmpe;
+    FloatCMYKData* pcmyk;
+    cmsContext ContextID;
+    _cmsStageCLutData* data;
+
+    // For empty transforms, do nothing
+    if (*Lut == NULL) return FALSE;
+
+    // This is a lossy optimization! does not apply in floating-point cases
+    if (!T_FLOAT(*InputFormat) || !T_FLOAT(*OutputFormat)) return FALSE;
+
+    // Only on 8-bit
+    if (T_BYTES(*InputFormat) != 4 || T_BYTES(*OutputFormat) != 4) return FALSE;
+
+    // Only on CMYK
+    if (T_COLORSPACE(*InputFormat)  != PT_CMYK) return FALSE;
+   
+    OriginalLut = *Lut;
+   
+    ContextID = cmsGetPipelineContextID(OriginalLut);
+    nGridPoints = _cmsReasonableGridpointsByColorspace(cmsSigRgbData, *dwFlags);
+             
+    // Create the result LUT
+    OptimizedLUT = cmsPipelineAlloc(cmsGetPipelineContextID(OriginalLut), 4, cmsPipelineOutputChannels(OriginalLut));
+    if (OptimizedLUT == NULL) goto Error;
+
+    
+    // Allocate the CLUT for result
+    OptimizedCLUTmpe = cmsStageAllocCLutFloat(ContextID, nGridPoints, 4, cmsPipelineOutputChannels(OriginalLut), NULL);
+
+    // Add the CLUT to the destination LUT
+    cmsPipelineInsertStage(OptimizedLUT, cmsAT_BEGIN, OptimizedCLUTmpe);
+
+    // Resample the LUT
+    if (!cmsStageSampleCLutFloat(OptimizedCLUTmpe, XFormSampler, (void*)OriginalLut, 0)) goto Error;
+
+    // Set the evaluator, copy parameters   
+    data = (_cmsStageCLutData*) cmsStageData(OptimizedCLUTmpe);
+
+    pcmyk = FloatCMYKAlloc(ContextID, data ->Params);
+    if (pcmyk == NULL) return FALSE;   
+
+    // And return the obtained LUT
+    cmsPipelineFree(OriginalLut);
+
+    *Lut = OptimizedLUT;
+    *TransformFn = FloatCMYKCLUTEval;
+    *UserData   = pcmyk;
+    *FreeDataFn = _cmsFree;
+    *dwFlags &= ~cmsFLAGS_CAN_CHANGE_FORMATTER;
+    return TRUE;
+
+Error:
+      
+    if (OptimizedLUT != NULL) cmsPipelineFree(OptimizedLUT);
+
+    return FALSE;    
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

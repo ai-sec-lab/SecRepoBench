@@ -1,0 +1,87 @@
+/* Free the original message pack buffer if it differs from the output buffer. */
+    if (tmp_out_buf != *out_buf) {
+        flb_free(tmp_out_buf);
+    }
+
+    /* Check if time resolution is needed by examining the parser's time format. */
+    if (parser->time_fmt) {
+        /* Determine the time key to be used, defaulting to "time" if not specified. */
+        time_key = parser->time_key ? parser->time_key : "time";
+
+        /* Calculate the length of the time key string. */
+        time_key_len = strlen(time_key);
+
+        /* Iterate over the map's key-value pairs to find the time key. */
+        map_size = map.via.map.size;
+        for (i = 0; i < map_size; i++) {
+            k = &map.via.map.ptr[i].key;
+            if (k->type == MSGPACK_OBJECT_STR && k->via.str.size == time_key_len &&
+                !strncmp(k->via.str.ptr, time_key, time_key_len)) {
+                /* Compare each key's size and content to the desired time key. */
+                skip = i;
+                time_value = &map.via.map.ptr[i].val;
+                break;
+            }
+        }
+    }
+
+    /* No time_key field found */
+    if (i >= map_size || !k || !time_value) {
+        msgpack_unpacked_destroy(&result);
+        return *out_size;
+    }
+
+    /* Ensure we have an accurate type */
+    if (time_value->type != MSGPACK_OBJECT_STR) {
+        msgpack_unpacked_destroy(&result);
+        return *out_size;
+    }
+
+    /* Lookup time */
+    ret = flb_parser_time_lookup(time_value->via.str.ptr, time_value->via.str.size,
+                                 0, parser, &tm, &tmfrac);
+    if (ret == -1) {
+        len = time_value->via.str.size;
+        if (len > sizeof(tmp) - 1) {
+            len = sizeof(tmp) - 1;
+        }
+        memcpy(tmp, time_value->via.str.ptr, len);
+        tmp[len] = '\0';
+        flb_warn("[parser:%s] invalid time format %s for '%s'",
+                 parser->name, parser->time_fmt_full, tmp);
+        time_lookup = 0;
+    }
+    else {
+        time_lookup = flb_parser_tm2time(&tm);
+    }
+
+    /* Compose a new map without the time_key field */
+    msgpack_sbuffer_init(&mp_sbuf);
+    msgpack_packer_init(&mp_pck, &mp_sbuf, msgpack_sbuffer_write);
+
+    if (parser->time_keep == FLB_FALSE) {
+        msgpack_pack_map(&mp_pck, map_size - 1);
+    }
+    else {
+        msgpack_pack_map(&mp_pck, map_size);
+    }
+
+    for (i = 0; i < map_size; i++) {
+        if (i == skip) {
+            continue;
+        }
+        msgpack_pack_object(&mp_pck, map.via.map.ptr[i].key);
+        msgpack_pack_object(&mp_pck, map.via.map.ptr[i].val);
+    }
+
+    /* Export the proper buffer */
+    flb_free(tmp_out_buf);
+    *out_buf = mp_sbuf.data;
+    *out_size = mp_sbuf.size;
+
+    t = out_time;
+    t->tm.tv_sec  = time_lookup;
+    t->tm.tv_nsec = (tmfrac * 1000000000);
+
+    msgpack_unpacked_destroy(&result);
+    return *out_size;

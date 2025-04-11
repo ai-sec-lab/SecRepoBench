@@ -1,0 +1,385 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+Scope::Scope(Parser& parser,bool isTopLevel)
+{
+    if(!isTopLevel) {
+        TokenPtr t = parser.CurrentToken();
+        if (t->Type() != TokenType_OPEN_BRACKET) {
+            ParseError("expected open bracket",t);
+        }
+    }
+
+    StackAllocator &allocator = parser.GetAllocator();
+    TokenPtr n = parser.AdvanceToNextToken();
+    if (n == nullptr) {
+        ParseError("unexpected end of file");
+    }
+
+    // note: empty scopes are allowed
+    while(n->Type() != TokenType_CLOSE_BRACKET) {
+        if (n->Type() != TokenType_KEY) {
+            ParseError("unexpected token, expected TOK_KEY",n);
+        }
+
+        const std::string& str = n->StringContents();
+        if (str.empty()) {
+            ParseError("unexpected content: empty string.");
+        }
+
+        auto *element = new_Element(*n, parser);
+
+        // Element() should stop at the next Key token (or right after a Close token)
+        n = parser.CurrentToken();
+        if (n == nullptr) 
+        // This code block handles the insertion of an element into the element map in a parsing scope. 
+        // It checks if the scope is at the top level. If it is, it inserts the element and returns.
+        // If the scope is not top-level, it deletes the element and triggers a parsing error due to an unexpected end of file. 
+        // In the case where the token is not null, it inserts the element into the map.
+        // <MASK>
+    }
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// code/AssetLib/FBX/FBXParser.cpp
+Parser::~Parser()
+{
+    delete_Scope(root);
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/FBX/FBXParser.cpp
+Element::Element(const Token& key_token, Parser& parser) :
+    key_token(key_token), compound(nullptr)
+{
+    TokenPtr n = nullptr;
+    StackAllocator &allocator = parser.GetAllocator();
+    do {
+        n = parser.AdvanceToNextToken();
+        if(!n) {
+            ParseError("unexpected end of file, expected closing bracket",parser.LastToken());
+        }
+
+        if (n->Type() == TokenType_DATA) {
+            tokens.push_back(n);
+			TokenPtr prev = n;
+            n = parser.AdvanceToNextToken();
+            if(!n) {
+                ParseError("unexpected end of file, expected bracket, comma or key",parser.LastToken());
+            }
+
+			const TokenType ty = n->Type();
+
+			// some exporters are missing a comma on the next line
+			if (ty == TokenType_DATA && prev->Type() == TokenType_DATA && (n->Line() == prev->Line() + 1)) {
+				tokens.push_back(n);
+				continue;
+			}
+
+            if (ty != TokenType_OPEN_BRACKET && ty != TokenType_CLOSE_BRACKET && ty != TokenType_COMMA && ty != TokenType_KEY) {
+                ParseError("unexpected token; expected bracket, comma or key",n);
+            }
+        }
+
+        if (n->Type() == TokenType_OPEN_BRACKET) {
+            compound = new_Scope(parser);
+
+            // current token should be a TOK_CLOSE_BRACKET
+            n = parser.CurrentToken();
+            ai_assert(n);
+
+            if (n->Type() != TokenType_CLOSE_BRACKET) {
+                ParseError("expected closing bracket",n);
+            }
+
+            parser.AdvanceToNextToken();
+            return;
+        }
+    }
+    while(n->Type() != TokenType_KEY && n->Type() != TokenType_CLOSE_BRACKET);
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/FBX/FBXParser.h
+namespace FBX {
+
+class Scope;
+class Parser;
+class Element;
+
+// XXX should use C++11's unique_ptr - but assimp's need to keep working with 03
+using ScopeList = std::vector<Scope*>;
+using ElementMap = std::fbx_unordered_multimap< std::string, Element*>;
+using ElementCollection = std::pair<ElementMap::const_iterator,ElementMap::const_iterator>;
+
+#define new_Scope new (allocator.Allocate(sizeof(Scope))) Scope
+#define new_Element new (allocator.Allocate(sizeof(Element))) Element
+#define delete_Scope(_p) (_p)->~Scope()
+#define delete_Element(_p) (_p)->~Element()
+
+/** FBX data entity that consists of a key:value tuple.
+ *
+ *  Example:
+ *  @verbatim
+ *    AnimationCurve: 23, "AnimCurve::", "" {
+ *        [..]
+ *    }
+ *  @endverbatim
+ *
+ *  As can be seen in this sample, elements can contain nested #Scope
+ *  as their trailing member.  
+**/
+class Element
+{
+public:
+    Element(const Token& key_token, Parser& parser);
+    ~Element();
+
+    const Scope* Compound() const {
+        return compound;
+    }
+
+    const Token& KeyToken() const {
+        return key_token;
+    }
+
+    const TokenList& Tokens() const {
+        return tokens;
+    }
+
+private:
+    const Token& key_token;
+    TokenList tokens;
+    Scope* compound;
+};
+
+/** FBX data entity that consists of a 'scope', a collection
+ *  of not necessarily unique #Element instances.
+ *
+ *  Example:
+ *  @verbatim
+ *    GlobalSettings:  {
+ *        Version: 1000
+ *        Properties70:
+ *        [...]
+ *    }
+ *  @endverbatim  */
+class Scope
+{
+public:
+    Scope(Parser& parser, bool topLevel = false);
+    ~Scope();
+
+    const Element* operator[] (const std::string& index) const {
+        ElementMap::const_iterator it = elements.find(index);
+        return it == elements.end() ? nullptr : (*it).second;
+    }
+
+	const Element* FindElementCaseInsensitive(const std::string& elementName) const {
+		const char* elementNameCStr = elementName.c_str();
+		for (auto element = elements.begin(); element != elements.end(); ++element)
+		{
+			if (!ASSIMP_strincmp(element->first.c_str(), elementNameCStr, MAXLEN)) {
+				return element->second;
+			}
+		}
+        return nullptr;
+	}
+
+    ElementCollection GetCollection(const std::string& index) const {
+        return elements.equal_range(index);
+    }
+
+    const ElementMap& Elements() const  {
+        return elements;
+    }
+
+private:
+    ElementMap elements;
+};
+
+/** FBX parsing class, takes a list of input tokens and generates a hierarchy
+ *  of nested #Scope instances, representing the fbx DOM.*/
+class Parser
+{
+public:
+    /** Parse given a token list. Does not take ownership of the tokens -
+     *  the objects must persist during the entire parser lifetime */
+    Parser(const TokenList &tokens, StackAllocator &allocator, bool is_binary);
+    ~Parser();
+
+    const Scope& GetRootScope() const {
+        return *root;
+    }
+
+    bool IsBinary() const {
+        return is_binary;
+    }
+
+    StackAllocator &GetAllocator() {
+        return allocator;
+    }
+
+private:
+    friend class Scope;
+    friend class Element;
+
+    TokenPtr AdvanceToNextToken();
+    TokenPtr LastToken() const;
+    TokenPtr CurrentToken() const;
+
+private:
+    const TokenList& tokens;
+    StackAllocator &allocator;
+    TokenPtr last, current;
+    TokenList::const_iterator cursor;
+    Scope *root;
+
+    const bool is_binary;
+};
+
+
+/* token parsing - this happens when building the DOM out of the parse-tree*/
+uint64_t ParseTokenAsID(const Token& t, const char*& err_out);
+size_t ParseTokenAsDim(const Token& t, const char*& err_out);
+
+float ParseTokenAsFloat(const Token& t, const char*& err_out);
+int ParseTokenAsInt(const Token& t, const char*& err_out);
+int64_t ParseTokenAsInt64(const Token& t, const char*& err_out);
+std::string ParseTokenAsString(const Token& t, const char*& err_out);
+
+/* wrapper around ParseTokenAsXXX() with DOMError handling */
+uint64_t ParseTokenAsID(const Token& t);
+size_t ParseTokenAsDim(const Token& t);
+float ParseTokenAsFloat(const Token& t);
+int ParseTokenAsInt(const Token& t);
+int64_t ParseTokenAsInt64(const Token& t);
+std::string ParseTokenAsString(const Token& t);
+
+/* read data arrays */
+void ParseVectorDataArray(std::vector<aiVector3D>& out, const Element& el);
+void ParseVectorDataArray(std::vector<aiColor4D>& out, const Element& el);
+void ParseVectorDataArray(std::vector<aiVector2D>& out, const Element& el);
+void ParseVectorDataArray(std::vector<int>& out, const Element& el);
+void ParseVectorDataArray(std::vector<float>& out, const Element& el);
+void ParseVectorDataArray(std::vector<unsigned int>& out, const Element& el);
+void ParseVectorDataArray(std::vector<uint64_t>& out, const Element& e);
+void ParseVectorDataArray(std::vector<int64_t>& out, const Element& el);
+
+bool HasElement( const Scope& sc, const std::string& index );
+
+// extract a required element from a scope, abort if the element cannot be found
+const Element &GetRequiredElement(const Scope &sc, const std::string &index, const Element *element = nullptr);
+
+// extract required compound scope
+const Scope& GetRequiredScope(const Element& el);
+// get token at a particular index
+const Token& GetRequiredToken(const Element& el, unsigned int index);
+
+// read a 4x4 matrix from an array of 16 floats
+aiMatrix4x4 ReadMatrix(const Element& element);
+
+} // ! FBX
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/FBX/FBXBinaryTokenizer.cpp
+bool ReadScope(TokenList &output_tokens, StackAllocator &token_allocator, const char *input, const char *&cursor, const char *end, bool const is64bits) {
+    // the first word contains the offset at which this block ends
+	const uint64_t end_offset = is64bits ? ReadDoubleWord(input, cursor, end) : ReadWord(input, cursor, end);
+
+    // we may get 0 if reading reached the end of the file -
+    // fbx files have a mysterious extra footer which I don't know
+    // how to extract any information from, but at least it always
+    // starts with a 0.
+    if(!end_offset) {
+        return false;
+    }
+
+    if(end_offset > Offset(input, end)) {
+        TokenizeError("block offset is out of range",input, cursor);
+    }
+    else if(end_offset < Offset(input, cursor)) {
+        TokenizeError("block offset is negative out of range",input, cursor);
+    }
+
+    // the second data word contains the number of properties in the scope
+	const uint64_t prop_count = is64bits ? ReadDoubleWord(input, cursor, end) : ReadWord(input, cursor, end);
+
+    // the third data word contains the length of the property list
+	const uint64_t prop_length = is64bits ? ReadDoubleWord(input, cursor, end) : ReadWord(input, cursor, end);
+
+    // now comes the name of the scope/key
+    const char* sbeg, *send;
+    ReadString(sbeg, send, input, cursor, end);
+
+    output_tokens.push_back(new_Token(sbeg, send, TokenType_KEY, Offset(input, cursor) ));
+
+    // now come the individual properties
+    const char* begin_cursor = cursor;
+
+    if ((begin_cursor + prop_length) > end) {
+        TokenizeError("property length out of bounds reading length ", input, cursor);
+    }
+
+    for (unsigned int i = 0; i < prop_count; ++i) {
+        ReadData(sbeg, send, input, cursor, begin_cursor + prop_length);
+
+        output_tokens.push_back(new_Token(sbeg, send, TokenType_DATA, Offset(input, cursor) ));
+
+        if(i != prop_count-1) {
+            output_tokens.push_back(new_Token(cursor, cursor + 1, TokenType_COMMA, Offset(input, cursor) ));
+        }
+    }
+
+    if (Offset(begin_cursor, cursor) != prop_length) {
+        TokenizeError("property length not reached, something is wrong",input, cursor);
+    }
+
+    // at the end of each nested block, there is a NUL record to indicate
+    // that the sub-scope exists (i.e. to distinguish between P: and P : {})
+    // this NUL record is 13 bytes long on 32 bit version and 25 bytes long on 64 bit.
+	const size_t sentinel_block_length = is64bits ? (sizeof(uint64_t)* 3 + 1) : (sizeof(uint32_t)* 3 + 1);
+
+    if (Offset(input, cursor) < end_offset) {
+        if (end_offset - Offset(input, cursor) < sentinel_block_length) {
+            TokenizeError("insufficient padding bytes at block end",input, cursor);
+        }
+
+        output_tokens.push_back(new_Token(cursor, cursor + 1, TokenType_OPEN_BRACKET, Offset(input, cursor) ));
+
+        // XXX this is vulnerable to stack overflowing ..
+        while(Offset(input, cursor) < end_offset - sentinel_block_length) {
+            ReadScope(output_tokens, token_allocator, input, cursor, input + end_offset - sentinel_block_length, is64bits);
+        }
+        output_tokens.push_back(new_Token(cursor, cursor + 1, TokenType_CLOSE_BRACKET, Offset(input, cursor) ));
+
+        for (unsigned int i = 0; i < sentinel_block_length; ++i) {
+            if(cursor[i] != '\0') {
+                TokenizeError("failed to read nested block sentinel, expected all bytes to be 0",input, cursor);
+            }
+        }
+        cursor += sentinel_block_length;
+    }
+
+    if (Offset(input, cursor) != end_offset) {
+        TokenizeError("scope length not reached, something is wrong",input, cursor);
+    }
+
+    return true;
+}
+
+// the below code fragment can be found in:
+// code/AssetLib/FBX/FBXParser.cpp
+Parser::Parser(const TokenList &tokens, StackAllocator &allocator, bool is_binary) :
+        tokens(tokens), allocator(allocator), last(), current(), cursor(tokens.begin()), is_binary(is_binary)
+{
+    ASSIMP_LOG_DEBUG("Parsing FBX tokens");
+    root = new_Scope(*this, true);
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).
