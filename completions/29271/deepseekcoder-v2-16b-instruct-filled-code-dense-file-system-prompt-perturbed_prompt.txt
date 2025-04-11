@@ -1,0 +1,365 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+PHP_METHOD(SplObjectStorage, unserialize)
+{
+	spl_SplObjectStorage *intern = Z_SPLOBJSTORAGE_P(ZEND_THIS);
+
+	char *serialized_data_buffer;
+	size_t buf_len;
+	const unsigned char *p, *s;
+	php_unserialize_data_t var_hash;
+	// Parse the input parameters to retrieve the serialized buffer and its length.
+	// Initialize variables needed for unserialization, including a hash for variable tracking.
+	// Check for expected buffer format and unserialize the count of elements in the buffer.
+	// Iterate through the serialized elements, checking for the correct format of each entry.
+	// For each element, unserialize it and optionally its associated information if present.
+	// Validate the unserialized data, ensuring it is an object, and retrieve or create a storage element.
+	// Manage references and memory for the unserialized entries, facilitating cross-references.
+	// Attach the unserialized elements and their information to the internal storage structure.
+	// <MASK>
+
+	if (*p != ';') {
+		goto outexcept;
+	}
+	++p;
+
+	/* members */
+	if (*p!= 'm' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	pmembers = var_tmp_var(&var_hash);
+	if (!php_var_unserialize(pmembers, &p, s + buf_len, &var_hash) || Z_TYPE_P(pmembers) != IS_ARRAY) {
+		goto outexcept;
+	}
+
+	/* copy members */
+	object_properties_load(&intern->std, Z_ARRVAL_P(pmembers));
+
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	return;
+
+outexcept:
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	zend_throw_exception_ex(spl_ce_UnexpectedValueException, 0, "Error at offset %zd of %zd bytes", ((char*)p - serialized_data_buffer), buf_len);
+	RETURN_THROWS();
+
+} /* }}} */
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// ext/spl/spl_observer.c
+{
+	spl_SplObjectStorage *intern = Z_SPLOBJSTORAGE_P(ZEND_THIS);
+
+	spl_SplObjectStorageElement *element;
+	zval members, flags;
+	HashPosition      pos;
+	php_serialize_data_t var_hash;
+	smart_str buf = {0};
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	PHP_VAR_SERIALIZE_INIT(var_hash);
+
+	/* storage */
+	smart_str_appendl(&buf, "x:", 2);
+	ZVAL_LONG(&flags, zend_hash_num_elements(&intern->storage));
+	php_var_serialize(&buf, &flags, &var_hash);
+
+	zend_hash_internal_pointer_reset_ex(&intern->storage, &pos);
+
+	while (zend_hash_has_more_elements_ex(&intern->storage, &pos) == SUCCESS) {
+		zval obj;
+		if ((element = zend_hash_get_current_data_ptr_ex(&intern->storage, &pos)) == NULL) {
+			smart_str_free(&buf);
+			PHP_VAR_SERIALIZE_DESTROY(var_hash);
+			RETURN_NULL();
+		}
+		ZVAL_OBJ(&obj, element->obj);
+		php_var_serialize(&buf, &obj, &var_hash);
+		smart_str_appendc(&buf, ',');
+		php_var_serialize(&buf, &element->inf, &var_hash);
+		smart_str_appendc(&buf, ';');
+		zend_hash_move_forward_ex(&intern->storage, &pos);
+	}
+
+	/* members */
+	smart_str_appendl(&buf, "m:", 2);
+
+	ZVAL_ARR(&members, zend_array_dup(zend_std_get_properties(Z_OBJ_P(ZEND_THIS))));
+	php_var_serialize(&buf, &members, &var_hash); /* finishes the string */
+	zval_ptr_dtor(&members);
+
+	/* done */
+	PHP_VAR_SERIALIZE_DESTROY(var_hash);
+
+	RETURN_NEW_STR(buf.s);
+}
+
+// the below code fragment can be found in:
+// ext/spl/spl_array.c
+{
+	zval *object = ZEND_THIS;
+	spl_array_object *intern = Z_SPLARRAY_P(object);
+
+	char *buf;
+	size_t buf_len;
+	const unsigned char *p, *s;
+	php_unserialize_data_t var_hash;
+	zval *members, *zflags, *array;
+	zend_long flags;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &buf, &buf_len) == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	if (buf_len == 0) {
+		return;
+	}
+
+	if (intern->nApplyCount > 0) {
+		zend_throw_error(NULL, "Modification of ArrayObject during sorting is prohibited");
+		return;
+	}
+
+	/* storage */
+	s = p = (const unsigned char*)buf;
+	PHP_VAR_UNSERIALIZE_INIT(var_hash);
+
+	if (*p!= 'x' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	zflags = var_tmp_var(&var_hash);
+	if (!php_var_unserialize(zflags, &p, s + buf_len, &var_hash) || Z_TYPE_P(zflags) != IS_LONG) {
+		goto outexcept;
+	}
+
+	--p; /* for ';' */
+	flags = Z_LVAL_P(zflags);
+	/* flags needs to be verified and we also need to verify whether the next
+	 * thing we get is ';'. After that we require an 'm' or something else
+	 * where 'm' stands for members and anything else should be an array. If
+	 * neither 'a' or 'm' follows we have an error. */
+
+	if (*p != ';') {
+		goto outexcept;
+	}
+	++p;
+
+	if (flags & SPL_ARRAY_IS_SELF) {
+		/* If IS_SELF is used, the flags are not followed by an array/object */
+		intern->ar_flags &= ~SPL_ARRAY_CLONE_MASK;
+		intern->ar_flags |= flags & SPL_ARRAY_CLONE_MASK;
+		zval_ptr_dtor(&intern->array);
+		ZVAL_UNDEF(&intern->array);
+	} else {
+		if (*p!='a' && *p!='O' && *p!='C' && *p!='r') {
+			goto outexcept;
+		}
+
+		array = var_tmp_var(&var_hash);
+		if (!php_var_unserialize(array, &p, s + buf_len, &var_hash)
+				|| (Z_TYPE_P(array) != IS_ARRAY && Z_TYPE_P(array) != IS_OBJECT)) {
+			goto outexcept;
+		}
+
+		intern->ar_flags &= ~SPL_ARRAY_CLONE_MASK;
+		intern->ar_flags |= flags & SPL_ARRAY_CLONE_MASK;
+
+		if (Z_TYPE_P(array) == IS_ARRAY) {
+			zval_ptr_dtor(&intern->array);
+			ZVAL_COPY_VALUE(&intern->array, array);
+			ZVAL_NULL(array);
+			SEPARATE_ARRAY(&intern->array);
+		} else {
+			spl_array_set_array(object, intern, array, 0L, 1);
+		}
+
+		if (*p != ';') {
+			goto outexcept;
+		}
+        ++p;
+	}
+
+	/* members */
+	if (*p!= 'm' || *++p != ':') {
+		goto outexcept;
+	}
+	++p;
+
+	members = var_tmp_var(&var_hash);
+	if (!php_var_unserialize(members, &p, s + buf_len, &var_hash) || Z_TYPE_P(members) != IS_ARRAY) {
+		goto outexcept;
+	}
+
+	/* copy members */
+	object_properties_load(&intern->std, Z_ARRVAL_P(members));
+
+	/* done reading $serialized */
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	return;
+
+outexcept:
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	zend_throw_exception_ex(spl_ce_UnexpectedValueException, 0, "Error at offset " ZEND_LONG_FMT " of %zd bytes", (zend_long)((char*)p - buf), buf_len);
+	RETURN_THROWS();
+
+}
+
+// the below code fragment can be found in:
+// ext/spl/spl_observer.c
+{
+	spl_SplObjectStorage *intern = Z_SPLOBJSTORAGE_P(ZEND_THIS);
+	HashTable *data;
+	zval *storage_zv, *members_zv, *key, *val;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "h", &data) == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	storage_zv = zend_hash_index_find(data, 0);
+	members_zv = zend_hash_index_find(data, 1);
+	if (!storage_zv || !members_zv ||
+			Z_TYPE_P(storage_zv) != IS_ARRAY || Z_TYPE_P(members_zv) != IS_ARRAY) {
+		zend_throw_exception(spl_ce_UnexpectedValueException,
+			"Incomplete or ill-typed serialization data", 0);
+		RETURN_THROWS();
+	}
+
+	if (zend_hash_num_elements(Z_ARRVAL_P(storage_zv)) % 2 != 0) {
+		zend_throw_exception(spl_ce_UnexpectedValueException, "Odd number of elements", 0);
+		RETURN_THROWS();
+	}
+
+	key = NULL;
+	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(storage_zv), val) {
+		if (key) {
+			if (Z_TYPE_P(key) != IS_OBJECT) {
+				zend_throw_exception(spl_ce_UnexpectedValueException, "Non-object key", 0);
+				RETURN_THROWS();
+			}
+
+			spl_object_storage_attach(intern, Z_OBJ_P(key), val);
+			key = NULL;
+		} else {
+			key = val;
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	object_properties_load(&intern->std, Z_ARRVAL_P(members_zv));
+}
+
+// the below code fragment can be found in:
+// ext/spl/spl_array.c
+{
+	zval *object = ZEND_THIS;
+	spl_array_object *intern = Z_SPLARRAY_P(object);
+	zval members, flags;
+	php_serialize_data_t var_hash;
+	smart_str buf = {0};
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	PHP_VAR_SERIALIZE_INIT(var_hash);
+
+	ZVAL_LONG(&flags, (intern->ar_flags & SPL_ARRAY_CLONE_MASK));
+
+	/* storage */
+	smart_str_appendl(&buf, "x:", 2);
+	php_var_serialize(&buf, &flags, &var_hash);
+
+	if (!(intern->ar_flags & SPL_ARRAY_IS_SELF)) {
+		php_var_serialize(&buf, &intern->array, &var_hash);
+		smart_str_appendc(&buf, ';');
+	}
+
+	/* members */
+	smart_str_appendl(&buf, "m:", 2);
+	if (!intern->std.properties) {
+		rebuild_object_properties(&intern->std);
+	}
+
+	ZVAL_ARR(&members, intern->std.properties);
+
+	php_var_serialize(&buf, &members, &var_hash); /* finishes the string */
+
+	/* done */
+	PHP_VAR_SERIALIZE_DESTROY(var_hash);
+
+	RETURN_NEW_STR(buf.s);
+}
+
+// the below code fragment can be found in:
+// ext/spl/spl_dllist.c
+{
+	spl_dllist_object *intern = Z_SPLDLLIST_P(ZEND_THIS);
+	zval *flags, *elem;
+	char *buf;
+	size_t buf_len;
+	const unsigned char *p, *s;
+	php_unserialize_data_t var_hash;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &buf, &buf_len) == FAILURE) {
+		RETURN_THROWS();
+	}
+
+	if (buf_len == 0) {
+		return;
+	}
+
+	while (intern->llist->count > 0) {
+		zval tmp;
+		spl_ptr_llist_pop(intern->llist, &tmp);
+		zval_ptr_dtor(&tmp);
+	}
+
+	s = p = (const unsigned char*)buf;
+	PHP_VAR_UNSERIALIZE_INIT(var_hash);
+
+	/* flags */
+	flags = var_tmp_var(&var_hash);
+	if (!php_var_unserialize(flags, &p, s + buf_len, &var_hash) || Z_TYPE_P(flags) != IS_LONG) {
+		goto error;
+	}
+
+	intern->flags = (int)Z_LVAL_P(flags);
+
+	/* elements */
+	while(*p == ':') {
+		++p;
+		elem = var_tmp_var(&var_hash);
+		if (!php_var_unserialize(elem, &p, s + buf_len, &var_hash)) {
+			goto error;
+		}
+		var_push_dtor(&var_hash, elem);
+
+		spl_ptr_llist_push(intern->llist, elem);
+	}
+
+	if (*p != '\0') {
+		goto error;
+	}
+
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	return;
+
+error:
+	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+	zend_throw_exception_ex(spl_ce_UnexpectedValueException, 0, "Error at offset %zd of %zd bytes", ((char*)p - buf), buf_len);
+	RETURN_THROWS();
+
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

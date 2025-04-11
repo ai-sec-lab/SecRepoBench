@@ -1,0 +1,186 @@
+ndpi_packet_tunnel tunnel_type,
+						  const struct ndpi_ipv6hdr *iph6,
+						  u_int16_t ip_offset,
+						  u_int16_t ipsize,
+						  struct ndpi_tcphdr **tcph,
+						  struct ndpi_udphdr **udph,
+						  u_int16_t *sport, u_int16_t *dport,
+						  struct ndpi_id_struct **src,
+						  struct ndpi_id_struct **dst,
+						  u_int8_t *proto,
+						  u_int8_t **payload,
+						  u_int16_t *payload_len,
+						  u_int8_t *src_to_dst_direction,
+						  struct timeval when) {
+  u_int32_t idx, hashval;
+  struct ndpi_flow_info flow;
+  void *ret;
+  const u_int8_t *l4;
+  u_int32_t l4_data_len = 0XFEEDFACE;
+
+  if(ipsize < sizeof(struct ndpi_ipv6hdr))
+    return NULL;
+
+  if(ipsize < ip_offset + sizeof(struct ndpi_ipv6hdr))
+    return NULL;
+
+  l4 = &((const u_int8_t *)iph6)[ip_offset];
+
+  *proto = iph6->ip6_hdr.ip6_un1_nxt;
+
+  if(*proto == IPPROTO_TCP && ipsize >= ip_offset + sizeof(struct ndpi_tcphdr)) {
+    u_int tcp_len;
+
+    // TCP
+    workflow->stats.tcp_count++;
+    *tcph = (struct ndpi_tcphdr *)l4;
+    *sport = ntohs((*tcph)->source), *dport = ntohs((*tcph)->dest);
+    tcp_len = ndpi_min(4*(*tcph)->doff, ipsize - ip_offset);
+    *payload = (u_int8_t*)&l4[tcp_len];
+    *payload_len = ndpi_max(0, ipsize - ip_offset - 4*(*tcph)->doff - ip_offset);
+    l4_data_len = ipsize - ip_offset - sizeof(struct ndpi_tcphdr);
+  } else if(*proto == IPPROTO_UDP && ipsize >= ip_offset + sizeof(struct ndpi_udphdr)) {
+    // UDP
+    workflow->stats.udp_count++;
+    *udph = (struct ndpi_udphdr *)l4;
+    *sport = ntohs((*udph)->source), *dport = ntohs((*udph)->dest);
+    *payload = (u_int8_t*)&l4[sizeof(struct ndpi_udphdr)];
+    *payload_len = (ipsize > sizeof(struct ndpi_udphdr)) ? ipsize-sizeof(struct ndpi_udphdr) - ip_offset : 0;
+    l4_data_len = ipsize - ip_offset - sizeof(struct ndpi_udphdr);
+  } else if(*proto == IPPROTO_ICMPV6) {
+    *payload = (u_int8_t*)&l4[sizeof(struct ndpi_icmp6hdr)];
+    *payload_len = (ipsize > sizeof(struct ndpi_icmp6hdr)) ? ipsize-sizeof(struct ndpi_icmp6hdr) - ip_offset : 0;
+    l4_data_len = ipsize - ip_offset - sizeof(struct ndpi_icmp6hdr);
+    *sport = *dport = 0;
+  } else {
+    // non tcp/udp protocols
+    *sport = *dport = 0;
+    l4_data_len = 0;
+  }
+
+  flow.protocol = IPPROTO_IPV6, flow.vlan_id = vlan_id;
+  flow.src_ip = iph6->ip6_src, flow.dst_ip = iph6->ip6_dst;
+  flow.src_port = htons(*sport), flow.dst_port = htons(*dport);
+  flow.hashval = hashval = flow.protocol + flow.vlan_id + flow.src_ip + flow.dst_ip + flow.src_port + flow.dst_port;
+
+  idx = hashval % workflow->prefs.num_roots;
+  ret = ndpi_tfind(&flow, &workflow->ndpi_flows_root[idx], ndpi_workflow_node_cmp);
+
+  if(ret == NULL) {
+    u_int32_t orig_src_ip = flow.src_ip;
+    u_int16_t orig_src_port = flow.src_port;
+    u_int32_t orig_dst_ip = flow.dst_ip;
+    u_int16_t orig_dst_port = flow.dst_port;
+
+    flow.src_ip = orig_dst_ip;
+    flow.src_port = orig_dst_port;
+    flow.dst_ip = orig_src_ip;
+    flow.dst_port = orig_src_port;
+
+    ret = ndpi_tfind(&flow, &workflow->ndpi_flows_root[idx], ndpi_workflow_node_cmp);
+  }
+
+  if(ret == NULL) {
+    if(workflow->stats.ndpi_flow_count == workflow->prefs.max_ndpi_flows) {
+      NDPI_LOG(0, workflow->ndpi_struct, NDPI_LOG_ERROR,
+	       "maximum flow count (%u) has been exceeded\n",
+	       workflow->prefs.max_ndpi_flows);
+      exit(-1);
+    } else {
+      struct ndpi_flow_info *newflow = (struct ndpi_flow_info*)malloc(sizeof(struct ndpi_flow_info));
+
+      if(newflow == NULL) {
+	NDPI_LOG(0, workflow->ndpi_struct, NDPI_LOG_ERROR, "[NDPI] %s(1): not enough memory\n", __FUNCTION__);
+	return(NULL);
+      } else
+        workflow->num_allocated_flows++;
+
+      memset(newflow, 0, sizeof(struct ndpi_flow_info));
+      newflow->flow_id = flow_id++;
+      newflow->hashval = hashval;
+      newflow->tunnel_type = tunnel_type;
+      newflow->protocol = IPPROTO_IPV6, newflow->vlan_id = vlan_id;
+      newflow->src_ip = iph6->ip6_src, newflow->dst_ip = iph6->ip6_dst;
+      newflow->src_port = htons(*sport), newflow->dst_port = htons(*dport);
+      newflow->ip_version = IPVERSION;
+      newflow->iat_c_to_s = ndpi_alloc_data_analysis(DATA_ANALUYSIS_SLIDING_WINDOW),
+	newflow->iat_s_to_c =  ndpi_alloc_data_analysis(DATA_ANALUYSIS_SLIDING_WINDOW);
+      newflow->pktlen_c_to_s = ndpi_alloc_data_analysis(DATA_ANALUYSIS_SLIDING_WINDOW),
+	newflow->pktlen_s_to_c =  ndpi_alloc_data_analysis(DATA_ANALUYSIS_SLIDING_WINDOW);
+      newflow->iat_flow = ndpi_alloc_data_analysis(DATA_ANALUYSIS_SLIDING_WINDOW);
+
+      if((newflow->ndpi_flow = ndpi_flow_malloc(SIZEOF_FLOW_STRUCT)) == NULL) {
+	NDPI_LOG(0, workflow->ndpi_struct, NDPI_LOG_ERROR, "[NDPI] %s(2): not enough memory\n", __FUNCTION__);
+	free(newflow);
+	return(NULL);
+      } else
+	memset(newflow->ndpi_flow, 0, SIZEOF_FLOW_STRUCT);
+
+      if((newflow->src_id = ndpi_malloc(SIZEOF_ID_STRUCT)) == NULL) {
+	NDPI_LOG(0, workflow->ndpi_struct, NDPI_LOG_ERROR, "[NDPI] %s(3): not enough memory\n", __FUNCTION__);
+	free(newflow);
+	return(NULL);
+      } else
+	memset(newflow->src_id, 0, SIZEOF_ID_STRUCT);
+
+      if((newflow->dst_id = ndpi_malloc(SIZEOF_ID_STRUCT)) == NULL) {
+	NDPI_LOG(0, workflow->ndpi_struct, NDPI_LOG_ERROR, "[NDPI] %s(4): not enough memory\n", __FUNCTION__);
+	free(newflow);
+	return(NULL);
+      } else
+	memset(newflow->dst_id, 0, SIZEOF_ID_STRUCT);
+
+      ndpi_tsearch(newflow, &workflow->ndpi_flows_root[idx], ndpi_workflow_node_cmp); /* Add */
+      workflow->stats.ndpi_flow_count++;
+
+      *src = newflow->src_id, *dst = newflow->dst_id;
+      newflow->entropy.src2dst_pkt_len[newflow->entropy.src2dst_pkt_count] = l4_data_len;
+      newflow->entropy.src2dst_pkt_time[newflow->entropy.src2dst_pkt_count] = when;
+      if (newflow->entropy.src2dst_pkt_count == 0) {
+        newflow->entropy.src2dst_start = when;
+      }
+      newflow->entropy.src2dst_pkt_count++;
+      // Non zero app data.
+      if (l4_data_len != 0XFEEDFACE && l4_data_len != 0) {
+        newflow->entropy.src2dst_opackets++;
+        newflow->entropy.src2dst_l4_bytes += l4_data_len;
+      }
+      return newflow;
+    }
+  } else {
+    struct ndpi_flow_info *rflow = *(struct ndpi_flow_info**)ret;
+
+    if(orig_src_ip == rflow->src_ip
+       && orig_src_port == rflow->src_port
+       && orig_dst_ip == rflow->dst_ip
+       && orig_dst_port == rflow->dst_port)
+      *src = rflow->dst_id, *dst = rflow->src_id, *src_to_dst_direction = 0, rflow->bidirectional = 1;
+    else
+      *src = rflow->src_id, *dst = rflow->dst_id, *src_to_dst_direction = 1;
+
+    if (src_to_dst_direction) {
+      if (rflow->entropy.src2dst_pkt_count < max_num_packets_per_flow) {
+        rflow->entropy.src2dst_pkt_len[rflow->entropy.src2dst_pkt_count] = l4_data_len;
+        rflow->entropy.src2dst_pkt_time[rflow->entropy.src2dst_pkt_count] = when;
+        rflow->entropy.src2dst_l4_bytes += l4_data_len;
+        rflow->entropy.src2dst_pkt_count++;
+      }
+      // Non zero app data.
+      if (l4_data_len != 0XFEEDFACE && l4_data_len != 0) {
+        rflow->entropy.src2dst_opackets++;
+      }
+    } else {
+      if (rflow->entropy.dst2src_pkt_count < max_num_packets_per_flow) {
+        rflow->entropy.dst2src_pkt_len[rflow->entropy.dst2src_pkt_count] = l4_data_len;
+        rflow->entropy.dst2src_pkt_time[rflow->entropy.dst2src_pkt_count] = when;
+        if (rflow->entropy.dst2src_pkt_count == 0) {
+          rflow->entropy.dst2src_start = when;
+        }
+        rflow->entropy.dst2src_l4_bytes += l4_data_len;
+        rflow->entropy.dst2src_pkt_count++;
+      }
+      // Non zero app data.
+      if (l4_data_len != 0XFEEDFACE && l4_data_len != 0) {
+        rflow->entropy.dst2src_opackets++;
+      }
+    }
