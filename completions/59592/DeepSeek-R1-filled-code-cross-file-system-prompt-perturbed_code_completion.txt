@@ -1,24 +1,54 @@
-auto* subsetter = hb_subset_glyf_and_locacff_subset (context->plan, font);
-    if (!subsetter) {
-        if (font)
-            hb_font_destroy (font);
+hb_vector_t<SubsetGlyph*> subset_glyphs;
+    if (!subset_glyphs.alloc (context->plan->glyph_map.get_population ()))
+      return_trace (false);
+
+    for (auto _ : context->plan->glyph_map)
+    {
+      auto *subset_glyph = SubsetGlyph::create (context, font, _.second);
+      if (!subset_glyph || subset_glyphs.push (subset_glyph))
+      {
+        if (subset_glyph) SubsetGlyph::destroy (subset_glyph);
         return_trace (false);
+      }
     }
 
     if (font)
-        hb_font_destroy (font);
+      hb_font_destroy (font);
 
-    subsetter->setup_loca_and_offsets ();
-    bool use_short_loca = subsetter->use_short_loca ();
-
-    hb_serialize_context_t* serializer = context->serializer;
-    auto* out = serializer->start_serialize<glyf> ();
-    if (!out) {
-        subsetter->destroy ();
+    unsigned total = 0;
+    unsigned max_offset = 0;
+    for (unsigned i = 0; i < subset_glyphs.length; i++)
+    {
+      unsigned padded_size = subset_glyphs[i]->padded_size ();
+      if (padded_size > INT_MAX - total)
+      {
+        for (auto *subset_glyph : subset_glyphs)
+          SubsetGlyph::destroy (subset_glyph);
         return_trace (false);
+      }
+      total += padded_size;
+      max_offset = hb_max (max_offset, total);
     }
 
-    subsetter->serialize_subset (serializer, use_short_loca, context->plan->source);
-    subsetter->destroy ();
+    bool short_loca = (max_offset + 1) / 2 <= 0xFFFFu;
 
-    bool result = serializer->end_serialize ();
+    auto *glyf_prime = context->serializer->start_embed<glyf> ();
+    if (!glyf_prime)
+    {
+      for (auto *subset_glyph : subset_glyphs)
+        SubsetGlyph::destroy (subset_glyph);
+      return_trace (false);
+    }
+
+    bool result = true;
+    for (auto *subset_glyph : subset_glyphs)
+    {
+      result = subset_glyph->compile (context->serializer, short_loca, !(context->plan->flags & HB_SUBSET_FLAGS_NO_HINTING));
+      if (!result) break;
+    }
+
+    for (auto *subset_glyph : subset_glyphs)
+    {
+      subset_glyph->free_compiled_bytes ();
+      SubsetGlyph::destroy (subset_glyph);
+    }

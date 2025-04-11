@@ -1,37 +1,37 @@
 size_t expected_end = obj->address + obj->size;
-                if (bit_chain->byte > expected_end)
-                  {
-                    LOG_ERROR ("Object overflow: read %" PRIuSIZE " bytes, expected %u",
-                               bit_chain->byte - obj->address, obj->size);
+                if (expected_end > bit_chain->size) {
+                    LOG_ERROR("Object size exceeds buffer bounds: %zu > %zu",
+                              expected_end, bit_chain->size);
+                    obj->size = bit_chain->size - obj->address;
                     error |= DWG_ERR_INVALIDDWG;
-                  }
-                else
-                  {
-                    BITCODE_BL remaining = expected_end - bit_chain->byte;
-                    if (remaining > 0)
-                      {
-                        if (bit_chain->byte + remaining > bit_chain->size)
-                          {
-                            LOG_WARN ("Truncating unknown data from %u to %" PRIuSIZE " bytes",
-                                      remaining, bit_chain->size - bit_chain->byte);
-                            remaining = bit_chain->size - bit_chain->byte;
-                          }
-                        if (remaining > 0)
-                          {
-                            obj->unknown_data_size = remaining;
-                            obj->unknown_data = (BITCODE_TF)malloc (remaining);
-                            if (!obj->unknown_data)
-                              {
-                                LOG_ERROR ("Out of memory for unknown data");
-                                error |= DWG_ERR_OUTOFMEM;
-                              }
-                            else
-                              {
-                                memcpy (obj->unknown_data,
-                                        bit_chain->chain + bit_chain->byte, remaining);
-                                bit_chain->byte += remaining;
-                                LOG_TRACE ("Extracted %u bytes of unknown data", remaining);
-                              }
-                          }
-                      }
-                  }
+                }
+
+                if (bit_chain->byte != expected_end) {
+                    size_t unknown_bytes = expected_end - bit_chain->byte;
+                    if (unknown_bytes > 0 && unknown_bytes <= bit_chain->size - bit_chain->byte) {
+                        obj->unknown_data = (BITCODE_TF*)malloc(unknown_bytes);
+                        if (obj->unknown_data) {
+                            memcpy(obj->unknown_data, bit_chain->chain + bit_chain->byte, unknown_bytes);
+                            bit_chain->byte += unknown_bytes;
+                            LOG_TRACE("Extracted %zu unknown bytes at end of object", unknown_bytes);
+                        } else {
+                            LOG_ERROR("Failed to allocate %zu bytes for unknown data", unknown_bytes);
+                            error |= DWG_ERR_OUTOFMEM;
+                        }
+                    } else if (unknown_bytes > 0) {
+                        LOG_ERROR("Invalid unknown bytes calculation: %zu remaining", unknown_bytes);
+                        error |= DWG_ERR_INVALIDDWG;
+                    }
+                }
+
+                SINCE(R_11) {
+                    if (bit_chain->byte + 2 <= bit_chain->size) {
+                        BITCODE_RC crc[2];
+                        crc[0] = bit_read_RC(bit_chain);
+                        crc[1] = bit_read_RC(bit_chain);
+                        LOG_TRACE("CRC bytes: %02X%02X", crc[0], crc[1]);
+                    } else {
+                        LOG_ERROR("Missing CRC bytes at end of object");
+                        error |= DWG_ERR_INVALIDDWG;
+                    }
+                }
