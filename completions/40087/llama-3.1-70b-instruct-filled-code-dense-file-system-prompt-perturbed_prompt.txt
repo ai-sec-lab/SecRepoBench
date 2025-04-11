@@ -1,0 +1,528 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static uint8_t *decrypt_initial_packet(struct ndpi_detection_module_struct *ndpi_struct,
+				       struct ndpi_flow_struct *flow,
+				       const uint8_t *dest_conn_id, uint8_t dest_conn_id_len,
+				       uint8_t src_conn_id_len, uint32_t version,
+				       uint32_t *clear_payload_len)
+{
+  uint64_t token_length, payload_length, packet_number;
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  uint8_t first_byte;
+  uint32_t pkn32, pn_offset, pkn_len, offset;
+  quic_ciphers ciphers; /* Client initial ciphers */
+  quic_decrypt_result_t decryption = { 0, 0};
+  uint8_t client_secret[HASH_SHA2_256_LENGTH];
+
+  memset(&ciphers, '\0', sizeof(ciphers));
+  if(quic_derive_initial_secrets(version, dest_conn_id, dest_conn_id_len,
+				 client_secret) != 0) {
+    NDPI_LOG_DBG(ndpi_struct, "Error quic_derive_initial_secrets\n");
+    return NULL;
+  }
+
+  /* Packet numbers are protected with AES128-CTR,
+     Initial packets are protected with AEAD_AES_128_GCM. */
+  // Prepare the cipher context with the provided client secret and version.
+  // Calculate the packet number offset.
+  // Determine the length of the tokens and add it to the offset.
+  // Retrieve the payload length from the packet, updating the packet number offset.
+  // Log the calculated offsets and lengths for debugging purposes.
+  // <MASK>
+
+  if (pn_offset + payload_length > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Too short %d %d\n", pn_offset + payload_length,
+                 packet->payload_packet_len);
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  if(!quic_decrypt_header(&packet->payload[0], pn_offset, &ciphers.hp_cipher,
+			  GCRY_CIPHER_AES128, &first_byte, &pkn32, 0)) {
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  NDPI_LOG_DBG2(ndpi_struct, "first_byte 0x%x pkn32 0x%x\n", first_byte, pkn32);
+
+  pkn_len = (first_byte & 3) + 1;
+  /* TODO: is it always true in Initial Packets? */
+  packet_number = pkn32;
+
+  offset = pn_offset + pkn_len;
+  if (!(pn_offset + payload_length >= offset + 16)) {
+    NDPI_LOG_DBG(ndpi_struct, "No room for Auth Tag %d %d",
+                 pn_offset + payload_length, offset);
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  quic_decrypt_message(&ciphers.pp_cipher, &packet->payload[0], pn_offset + payload_length,
+		       offset, first_byte, pkn_len, packet_number, &decryption);
+
+  quic_ciphers_reset(&ciphers);
+
+  if(decryption.data_len) {
+    *clear_payload_len = decryption.data_len;
+    return decryption.data;
+  }
+  return NULL;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static uint8_t *get_clear_payload(struct ndpi_detection_module_struct *ndpi_struct,
+				  struct ndpi_flow_struct *flow,
+				  uint32_t version, uint32_t *clear_payload_len)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int8_t *clear_payload;
+  u_int8_t dest_conn_id_len;
+#ifdef HAVE_LIBGCRYPT
+  u_int8_t source_conn_id_len;
+#endif
+
+  if(is_gquic_ver_less_than(version, 43)) {
+    clear_payload = (uint8_t *)&packet->payload[26];
+    *clear_payload_len = packet->payload_packet_len - 26;
+    /* Skip Private-flag field for version for < Q34 */
+    if(is_gquic_ver_less_than(version, 33)) {
+      clear_payload += 1;
+      (*clear_payload_len) -= 1;
+    }
+  } else if(version == V_Q046) {
+    if(packet->payload[5] != 0x50) {
+      NDPI_LOG_DBG(ndpi_struct, "Q46 invalid conn id len 0x%x\n",
+		   packet->payload[5]);
+      return NULL;
+    }
+    clear_payload = (uint8_t *)&packet->payload[30];
+    *clear_payload_len = packet->payload_packet_len - 30;
+  } else {
+    /* Upper limit of CIDs length has been already validated. If dest_conn_id_len is 0,
+       this is probably the Initial Packet from the server */
+    dest_conn_id_len = packet->payload[5];
+    if(dest_conn_id_len == 0) {
+      NDPI_LOG_DBG(ndpi_struct, "Packet 0x%x with dest_conn_id_len %d\n",
+		   version, dest_conn_id_len);
+      return NULL;
+    }
+#ifdef HAVE_LIBGCRYPT
+    source_conn_id_len = packet->payload[6 + dest_conn_id_len];
+    const u_int8_t *dest_conn_id = &packet->payload[6];
+    clear_payload = decrypt_initial_packet(ndpi_struct, flow,
+					   dest_conn_id, dest_conn_id_len,
+					   source_conn_id_len, version,
+					   clear_payload_len);
+#else
+    clear_payload = NULL;
+#endif
+  }
+
+  return clear_payload;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static void quic_decrypt_message(quic_pp_cipher *pp_cipher, const uint8_t *packet_payload, uint32_t packet_payload_len,
+				 uint32_t header_length, uint8_t first_byte, uint32_t pkn_len,
+				 uint64_t packet_number, quic_decrypt_result_t *result)
+{
+  gcry_error_t err;
+  uint8_t *header;
+  uint8_t nonce[TLS13_AEAD_NONCE_LENGTH];
+  uint8_t *buffer;
+  uint8_t atag[16];
+  uint32_t buffer_length;
+#ifdef DEBUG_CRYPT
+  char buferr[128];
+#endif
+
+  if(!(pp_cipher != NULL) ||
+     !(pp_cipher->pp_cipher != NULL) ||
+     !(pkn_len < header_length) ||
+     !(1 <= pkn_len && pkn_len <= 4)) {
+#ifdef DEBUG_CRYPT
+    printf("Failed sanity checks\n");
+#endif
+    return;
+  }
+  /* Copy header, but replace encrypted first byte and PKN by plaintext. */
+  header = (uint8_t *)memdup(packet_payload, header_length);
+  if(!header)
+    return;
+  header[0] = first_byte;
+  for(uint32_t i = 0; i < pkn_len; i++) {
+    header[header_length - 1 - i] = (uint8_t)(packet_number >> (8 * i));
+  }
+
+  /* Input is "header || ciphertext (buffer) || auth tag (16 bytes)" */
+  buffer_length = packet_payload_len - (header_length + 16);
+  if(buffer_length == 0) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption not possible, ciphertext is too short\n");
+#endif
+    ndpi_free(header);
+    return;
+  }
+  buffer = (uint8_t *)memdup(packet_payload + header_length, buffer_length);
+  if(!buffer) {
+    ndpi_free(header);
+    return;
+  }
+  memcpy(atag, packet_payload + header_length + buffer_length, 16);
+
+  memcpy(nonce, pp_cipher->pp_iv, TLS13_AEAD_NONCE_LENGTH);
+  /* Packet number is left-padded with zeroes and XORed with write_iv */
+  phton64(nonce + sizeof(nonce) - 8, pntoh64(nonce + sizeof(nonce) - 8) ^ packet_number);
+
+  gcry_cipher_reset(pp_cipher->pp_cipher);
+  err = gcry_cipher_setiv(pp_cipher->pp_cipher, nonce, TLS13_AEAD_NONCE_LENGTH);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (setiv) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(header);
+    ndpi_free(buffer);
+    return;
+  }
+
+  /* associated data (A) is the contents of QUIC header */
+  err = gcry_cipher_authenticate(pp_cipher->pp_cipher, header, header_length);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (authenticate) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(header);
+    ndpi_free(buffer);
+    return;
+  }
+
+  ndpi_free(header);
+
+  /* Output ciphertext (C) */
+  err = gcry_cipher_decrypt(pp_cipher->pp_cipher, buffer, buffer_length, NULL, 0);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (decrypt) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(buffer);
+    return;
+  }
+
+  err = gcry_cipher_checktag(pp_cipher->pp_cipher, atag, 16);
+  if(err) {
+#ifdef DEBUG_CRYPT
+    printf("Decryption (checktag) failed: %s\n", __gcry_err(err, buferr, sizeof(buferr)));
+#endif
+    ndpi_free(buffer);
+    return;
+  }
+
+  result->data = buffer;
+  result->data_len = buffer_length;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static int may_be_initial_pkt(struct ndpi_detection_module_struct *ndpi_struct,
+			      struct ndpi_flow_struct *flow,
+			      uint32_t *version)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int8_t first_byte;
+  u_int8_t pub_bit1, pub_bit2, pub_bit3, pub_bit4, pub_bit5, pub_bit7, pub_bit8;
+  u_int8_t dest_conn_id_len, source_conn_id_len;
+
+  /* According to draft-ietf-quic-transport-29: "Clients MUST ensure that UDP
+     datagrams containing Initial packets have UDP payloads of at least 1200
+     bytes". Similar limit exists for previous versions */
+  if(packet->payload_packet_len < 1200) {
+    return 0;
+  }
+
+  first_byte = packet->payload[0];
+  pub_bit1 = ((first_byte & 0x80) != 0);
+  pub_bit2 = ((first_byte & 0x40) != 0);
+  pub_bit3 = ((first_byte & 0x20) != 0);
+  pub_bit4 = ((first_byte & 0x10) != 0);
+  pub_bit5 = ((first_byte & 0x08) != 0);
+  pub_bit7 = ((first_byte & 0x02) != 0);
+  pub_bit8 = ((first_byte & 0x01) != 0);
+
+  *version = 0;
+  if(pub_bit1) {
+    *version = ntohl(*((u_int32_t *)&packet->payload[1]));
+  } else if(pub_bit5 && !pub_bit2) {
+    if(!pub_bit8) {
+      NDPI_LOG_DBG2(ndpi_struct, "Packet without version\n")
+	} else {
+      *version = ntohl(*((u_int32_t *)&packet->payload[9]));
+    }
+  }
+  if(!is_version_valid(*version)) {
+    NDPI_LOG_DBG2(ndpi_struct, "Invalid version 0x%x\n", *version);
+    return 0;
+  }
+
+  if(is_gquic_ver_less_than(*version, 43) &&
+     (!pub_bit5 || pub_bit3 != 0 || pub_bit4 != 0)) {
+#ifdef QUIC_DEBUG
+    NDPI_LOG_ERR(ndpi_struct, "Version 0x%x invalid flags 0x%x\n", *version, first_byte);
+#endif
+    return 0;
+  }
+  if((*version == V_Q046) &&
+     (pub_bit7 != 1 || pub_bit8 != 1)) {
+#ifdef QUIC_DEBUG
+    NDPI_LOG_ERR(ndpi_struct, "Q46 invalid flag 0x%x\n", first_byte);
+#endif
+    return 0;
+  }
+  if((is_version_quic(*version) || (*version == V_Q046) || (*version == V_Q050)) &&
+     (pub_bit3 != 0 || pub_bit4 != 0)) {
+    NDPI_LOG_DBG2(ndpi_struct, "Version 0x%x not Initial Packet\n", *version);
+    return 0;
+  }
+
+  /* Forcing Version Negotiation packets are QUIC Initial Packets (i.e.
+     Long Header). It should also be quite rare that a client sends this kind
+     of traffic with the QUIC bit greased i.e. having a server token.
+     Accordind to https://tools.ietf.org/html/draft-thomson-quic-bit-grease-00#section-3.1
+     "A client MAY also clear the QUIC Bit in Initial packets that are sent
+      to establish a new connection.  A client can only clear the QUIC Bit
+      if the packet includes a token provided by the server in a NEW_TOKEN
+      frame on a connection where the server also included the
+      grease_quic_bit transport parameter." */
+  if((*version & 0x0F0F0F0F) == 0x0a0a0a0a &&
+     !(pub_bit1 == 1 && pub_bit2 == 1)) {
+    NDPI_LOG_DBG2(ndpi_struct, "Version 0x%x with first byte 0x%x\n", *version, first_byte);
+    return 0;
+  }
+
+  /* Check that CIDs lengths are valid: QUIC limits the CID length to 20 */
+  if(is_version_with_ietf_long_header(*version)) {
+    dest_conn_id_len = packet->payload[5];
+    source_conn_id_len = packet->payload[5 + 1 + dest_conn_id_len];
+    if (dest_conn_id_len > QUIC_MAX_CID_LENGTH ||
+        source_conn_id_len > QUIC_MAX_CID_LENGTH) {
+      NDPI_LOG_DBG2(ndpi_struct, "Version 0x%x invalid CIDs length %u %u",
+		     *version, dest_conn_id_len, source_conn_id_len);
+      return 0;
+    }
+  }
+
+  /* TODO: add some other checks to avoid false positives */
+
+  return 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static const uint8_t *get_crypto_data(struct ndpi_detection_module_struct *ndpi_struct,
+				      struct ndpi_flow_struct *flow,
+				      uint32_t version,
+				      u_int8_t *clear_payload, uint32_t clear_payload_len,
+				      uint64_t *crypto_data_len)
+{
+  const u_int8_t *crypto_data = NULL;
+  uint32_t counter;
+  uint8_t first_nonzero_payload_byte, offset_len;
+  uint64_t unused, frag_offset, frag_len;
+
+  counter = 0;
+  while(counter < clear_payload_len && clear_payload[counter] == 0)
+    counter += 1;
+  if(counter >= clear_payload_len)
+    return NULL;
+  first_nonzero_payload_byte = clear_payload[counter];
+  NDPI_LOG_DBG2(ndpi_struct, "first_nonzero_payload_byte 0x%x\n", first_nonzero_payload_byte);
+  if(is_gquic_ver_less_than(version, 46)) {
+    if(first_nonzero_payload_byte == 0x40 ||
+       first_nonzero_payload_byte == 0x60) {
+      /* Probably an ACK/NACK frame: this CHLO is not the first one but try
+         decoding it nonetheless */
+      counter += (first_nonzero_payload_byte == 0x40) ? 6 : 9;
+      if(counter >= clear_payload_len)
+        return NULL;
+      first_nonzero_payload_byte = clear_payload[counter];
+    }
+    if((first_nonzero_payload_byte != 0xA0) &&
+       (first_nonzero_payload_byte != 0xA4)) {
+      NDPI_LOG_DBG(ndpi_struct, "Unexpected frame 0x%x version 0x%x\n",\
+		   first_nonzero_payload_byte, version);
+      return NULL;
+    }
+    offset_len = (first_nonzero_payload_byte & 0x1C) >> 2;
+    if(offset_len > 0)
+      offset_len += 1;
+    if(counter + 2 + offset_len + 2 /*gquic_get_u16 reads 2 bytes */  > clear_payload_len)
+      return NULL;
+    if(clear_payload[counter + 1] != 0x01) {
+#ifdef QUIC_DEBUG
+      NDPI_LOG_ERR(ndpi_struct, "Unexpected stream ID version 0x%x\n", version);
+#endif
+      return NULL;
+    }
+    counter += 2 + offset_len;
+    *crypto_data_len = gquic_get_u16(&clear_payload[counter], version);
+    counter += 2;
+    if(*crypto_data_len + counter > clear_payload_len) {
+#ifdef QUIC_DEBUG
+      NDPI_LOG_ERR(ndpi_struct, "Invalid length %lu + %d > %d version 0x%x\n",
+		   (unsigned long)*crypto_data_len, counter, clear_payload_len, version);
+#endif
+      return NULL;
+    }
+    crypto_data = &clear_payload[counter];
+
+  } else if(version == V_Q050 || version == V_T050 || version == V_T051) {
+    if(first_nonzero_payload_byte == 0x40 ||
+       first_nonzero_payload_byte == 0x60) {
+      /* Probably an ACK/NACK frame: this CHLO is not the first one but try
+         decoding it nonetheless */
+      counter += (first_nonzero_payload_byte == 0x40) ? 6 : 9;
+      if(counter >= clear_payload_len)
+        return NULL;
+      first_nonzero_payload_byte = clear_payload[counter];
+    }
+    if(first_nonzero_payload_byte != 0x08) {
+      NDPI_LOG_DBG(ndpi_struct, "Unexpected frame 0x%x\n", first_nonzero_payload_byte);
+      return NULL;
+    }
+    counter += 1;
+    if(counter + 8 + 8 >= clear_payload_len) /* quic_len reads 8 bytes, at most */
+      return NULL;
+    counter += quic_len(&clear_payload[counter], &unused);
+    counter += quic_len(&clear_payload[counter], crypto_data_len);
+    if(*crypto_data_len + counter > clear_payload_len) {
+#ifdef QUIC_DEBUG
+      NDPI_LOG_ERR(ndpi_struct, "Invalid length %lu + %d > %d version 0x%x\n",
+		   (unsigned long)*crypto_data_len, counter, clear_payload_len, version);
+#endif
+      return NULL;
+    }
+    crypto_data = &clear_payload[counter];
+
+  } else {  /* All other versions */
+    while(counter < clear_payload_len) {
+      uint8_t frame_type = clear_payload[counter];
+      switch(frame_type) {
+      case 0x00:
+        NDPI_LOG_DBG2(ndpi_struct, "PADDING frame\n");
+        while(counter < clear_payload_len &&
+              clear_payload[counter] == 0)
+          counter += 1;
+        break;
+      case 0x01:
+        NDPI_LOG_DBG2(ndpi_struct, "PING frame\n");
+        counter += 1;
+        break;
+      case 0x06:
+        NDPI_LOG_DBG2(ndpi_struct, "CRYPTO frame\n");
+        counter += 1;
+        if(counter > clear_payload_len ||
+           counter + quic_len_buffer_still_required(clear_payload[counter]) > clear_payload_len)
+          return NULL;
+        counter += quic_len(&clear_payload[counter], &frag_offset);
+        if(counter > clear_payload_len ||
+           counter + quic_len_buffer_still_required(clear_payload[counter]) > clear_payload_len)
+          return NULL;
+        counter += quic_len(&clear_payload[counter], &frag_len);
+        if(frag_len + counter > clear_payload_len) {
+          NDPI_LOG_DBG(ndpi_struct, "Invalid crypto frag length %lu + %d > %d version 0x%x\n",
+                       (unsigned long)frag_len, counter, clear_payload_len, version);
+          return NULL;
+        }
+        crypto_data = get_reassembled_crypto_data(ndpi_struct, flow,
+                                                  &clear_payload[counter],
+                                                  frag_offset, frag_len,
+                                                  crypto_data_len);
+        if(crypto_data) {
+          return crypto_data;
+	}
+        NDPI_LOG_DBG(ndpi_struct, "Crypto reassembler pending\n");
+        counter += frag_len;
+        break;
+      case 0x1C: /* CC */
+      case 0x02: /* ACK */
+        NDPI_LOG_DBG2(ndpi_struct, "Unexpected CC/ACK frame\n");
+        return NULL;
+      default:
+        NDPI_LOG_DBG(ndpi_struct, "Unexpected frame 0x%x\n", frame_type);
+	return NULL;
+      }
+    }
+    if(counter > clear_payload_len) {
+      NDPI_LOG_DBG(ndpi_struct, "Error parsing frames %d %d\n", counter, clear_payload_len);
+      return NULL;
+    }
+  }
+  return crypto_data;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/quic.c
+static int quic_decrypt_header(const uint8_t *packet_payload,
+			       uint32_t pn_offset, quic_hp_cipher *hp_cipher,
+			       int hp_cipher_algo, uint8_t *first_byte, uint32_t *pn,
+			       int loss_bits_negotiated)
+{
+  if(!hp_cipher->hp_cipher) {
+    /* Need to know the cipher */
+    return 0;
+  }
+  gcry_cipher_hd_t h = hp_cipher->hp_cipher;
+
+  /* Sample is always 16 bytes and starts after PKN (assuming length 4).
+     https://tools.ietf.org/html/draft-ietf-quic-tls-22#section-5.4.2 */
+  uint8_t sample[16];
+  memcpy(sample, packet_payload + pn_offset + 4, 16);
+
+  uint8_t mask[5] = { 0 };
+  switch (hp_cipher_algo) {
+  case GCRY_CIPHER_AES128:
+  case GCRY_CIPHER_AES256:
+    /* Encrypt in-place with AES-ECB and extract the mask. */
+    if(gcry_cipher_encrypt(h, sample, sizeof(sample), NULL, 0)) {
+      return 0;
+    }
+    memcpy(mask, sample, sizeof(mask));
+    break;
+  default:
+    return 0;
+  }
+
+  /* https://tools.ietf.org/html/draft-ietf-quic-tls-22#section-5.4.1 */
+  uint8_t packet0 = packet_payload[0];
+  if((packet0 & 0x80) == 0x80) {
+    /* Long header: 4 bits masked */
+    packet0 ^= mask[0] & 0x0f;
+  } else {
+    /* Short header */
+    if(loss_bits_negotiated == 0) {
+      /* Standard mask: 5 bits masked */
+      packet0 ^= mask[0] & 0x1F;
+    } else {
+      /* https://tools.ietf.org/html/draft-ferrieuxhamchaoui-quic-lossbits-03#section-5.3 */
+      packet0 ^= mask[0] & 0x07;
+    }
+  }
+  uint32_t pkn_len = (packet0 & 0x03) + 1;
+  /* printf("packet0 0x%x pkn_len %d\n", packet0, pkn_len); */
+
+  uint8_t pkn_bytes[4];
+  memcpy(pkn_bytes, packet_payload + pn_offset, pkn_len);
+  uint32_t pkt_pkn = 0;
+  for(uint32_t i = 0; i < pkn_len; i++) {
+    pkt_pkn |= (uint32_t)(pkn_bytes[i] ^ mask[1 + i]) << (8 * (pkn_len - 1 - i));
+  }
+  *first_byte = packet0;
+  *pn = pkt_pkn;
+  return 1;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

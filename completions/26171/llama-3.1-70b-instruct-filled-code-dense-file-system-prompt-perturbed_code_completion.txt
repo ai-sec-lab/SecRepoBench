@@ -1,0 +1,67 @@
+// Calculate the number of streams and elements per block based on the context
+// and determine whether to split the compressed data into multiple streams.
+int32_t nstreams = 1;
+int32_t neblock = bsize;
+if (!leftoverblock &&!(context->header_flags & 0x10)) {
+  nstreams = (int32_t)context->typesize;
+  neblock = bsize / nstreams;
+}
+
+// Prepare destination buffer depending on whether filters are applied.
+int last_filter_index = last_filter(context->filters, 'c');
+if (last_filter_index >= 0) {
+  dest = tmp;
+}
+
+// Iterate over each stream and for each stream, read the compressed size and
+// decompress the data using the appropriate decompression format.
+int32_t j, cbytes, ctbytes = 0;
+int32_t ntbytes = 0;
+for (j = 0; j < nstreams; j++) {
+  if (compformat == 0) {
+    // Read the compressed size
+    cbytes = _sw32(src + src_offset + j * (neblock + sizeof(int32_t)));
+    src_offset += sizeof(int32_t);
+  } else {
+    cbytes = neblock;
+  }
+
+  // Handle cases of runs, uncompressed data, or compressed data based on the
+  // compressed byte size.
+  if (cbytes < 0) {
+    // A run.  Decode the repeated byte.
+    int32_t value = -cbytes;
+    memset(dest, value, (size_t)neblock);
+  } else if (cbytes == 0 || cbytes == neblock) {
+    // Uncompressed data.  Copy the data.
+    memcpy(dest, src + src_offset, (size_t)neblock);
+  } else {
+    // Compressed data.  Decompress the data using the appropriate decompression format.
+    int32_t maxout = neblock;
+    if (ntbytes + maxout > destinationoffset) {
+      maxout = destinationoffset - ntbytes;
+      if (maxout <= 0) {
+        return 0;  // Non-compressible data
+      }
+    }
+    if (context->compcode == BLOSC_BLOSCLZ) {
+      cbytes = blosclz_decompress(src + src_offset, cbytes, dest, maxout);
+    }
+    // Add more decompression formats as needed
+    else {
+      blosc_compcode_to_compname(context->compcode, (const char**)&compname);
+      fprintf(stderr, "Blosc has not been compiled with '%s' ", compname);
+      fprintf(stderr, "decompression support.  Please use one having it.");
+      return -5;  // Signals no decompression support
+    }
+    if (cbytes < 0) {
+      return cbytes;  // Error in decompression
+    }
+    src_offset += cbytes;
+  }
+
+  // Accumulate the total number of compressed and uncompressed bytes for the block.
+  dest += neblock;
+  ntbytes += neblock;
+  ctbytes += cbytes;
+}
