@@ -1,19 +1,42 @@
-# Running SecRepoBench
+# 🛡️ SecRepoBench
 
-## Run Inference
-The model names can be found in constants.py
-The prompt_types can be no-security-reminder, sec-generic, sec-specific, or security-policy
-The context_types can be BM25, dense-file, or in-file
+## 🚀 Running Inference
 
-```
-python run_inference.py --model_names [YOUR_MODEL_NAMES] --prompt_types [YOUR_PROMPT_TYPES] --context_types [YOUR_CONTEXT_TYPES] [--rerun]
-```
+To run inference using SecRepoBench:
 
-Code completions are saved in the completions directory.
-
-## Run Evaluation
-```
-python run_eval.py --model_names [YOUR_MODEL_NAMES] --prompt_types [YOUR_PROMPT_TYPES] --context_types [YOUR_CONTEXT_TYPES] [--rerun]
+```bash
+python run_inference.py \
+  --model_names [YOUR_MODEL_NAMES] \
+  --prompt_types [YOUR_PROMPT_TYPES] \
+  --context_types [YOUR_CONTEXT_TYPES] \
+  [--rerun]
 ```
 
-Results are saved in the eval_report directory.
+- **Model names**: Defined in `constants.py`
+- **Prompt types**:
+  - `no-security-reminder`
+  - `sec-generic`
+  - `sec-specific`
+  - `security-policy`
+- **Context types**:
+  - `BM25`
+  - `dense-file`
+  - `in-file`
+
+📁 *Code completions are saved in the `completions/` directory.*
+
+---
+
+## 📊 Running Evaluation
+
+To evaluate the model completions:
+
+```bash
+python run_eval.py \
+  --model_names [YOUR_MODEL_NAMES] \
+  --prompt_types [YOUR_PROMPT_TYPES] \
+  --context_types [YOUR_CONTEXT_TYPES] \
+  [--rerun]
+```
+
+📁 *Evaluation results are saved in the `eval_report/` directory.*
