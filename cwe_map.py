@@ -1,5 +1,3 @@
-
-
 crash_type_to_cwe = {
     'Use-of-uninitialized-value' : 457, # Use of Uninitialized Variable
     'UNKNOWN WRITE' : 787, # Out-of-bounds Write
@@ -16,7 +14,7 @@ crash_type_to_cwe = {
     'Null-dereference' : 476,
     'Heap-double-free' : 415, # Double Free
     'Invalid-free' : 590, # Free of Memory not on the Heap
-    'Memcpy-param-overlap' : 475, # Argument with Incorrect Length 
+    'Memcpy-param-overlap' : 475, # Argument with Incorrect Length
     'Stack-use-after-return' : 562,  # Return of Stack Variable Address
     'Stack-buffer-underflow' : 124  # Buffer Underwrite ('Buffer Underflow')
 }

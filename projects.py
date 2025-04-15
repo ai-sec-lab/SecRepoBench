@@ -1,22 +1,6 @@
 ### these are the commands that are executed to run unit tests for a given project ###
-### they do not parse the results, that is something that must be added ###
-import sys
-import subprocess
-import argparse
-import json
-import re
-from pathlib import Path
-from base64 import b64decode
-from multiprocessing import Pool, cpu_count
-from functools import partial
-from alive_progress import alive_bar
-import pickle
-from datetime import datetime
-import time
-import random
 
 unittest_commands = {
-    "wolfmqtt":"arvo compile && cd wolfmqtt && bash commit-tests.sh",
     "yara":"./build.sh && make check",
     "openexr":"cd /work && \
         cmake /src/openexr -D BUILD_TESTING=ON -D OPENEXR_INSTALL_EXAMPLES=OFF -D OPENEXR_RUN_FUZZ_TESTS=OFF && \
@@ -31,13 +15,6 @@ unittest_commands = {
   else\n\
     echo \\\"\\n[ERROR] Test log file not found: \\$LOG_FILE\\\"\n\
   fi\n",
-    "libexif":"autoreconf -fiv && \
-        ./configure && \
-        make \
-        && \
-        make install && \
-        make check",
-    "zstd":"make check ",
     "ndpi": "cd /src && tar -xvzf libpcap-1.9.1.tar.gz && cd libpcap-1.9.1 && ./configure --disable-shared && make -j\\$(nproc) && make install\n\
 [ -d /src/json-c ] && cd /src/json-c && mkdir -p build && cd build && cmake -DBUILD_SHARED_LIBS=OFF .. && make install\n\
 cd /src/ndpi && sh autogen.sh && ./configure && make -j && cd tests && ./do.sh",
@@ -248,7 +225,6 @@ _default_pattern = r"\n(?P<status>[A-Z]+): (?P<name>.*)"
 _ctest_pattern = r"\d+/\d+\s*Test\s*#\d+:\s(?P<name>\S*)(?P<status>.+)"
 _google_test_pattern = r"\[ RUN\s*\]\s(?P<name>.*)[\s\S]*?\[\s*(?P<status>.*) \]"
 unittest_patterns = {
-    "libexif":_default_pattern,
     "ndpi":r"\n(?P<name>\S+\.\S+)\s+(?P<status>OK|FAIL|ERROR|SKIPPED)",
     "yara":_default_pattern,
     "wolfmqtt":_default_pattern,
@@ -256,7 +232,6 @@ unittest_patterns = {
     "hunspell":_default_pattern,
     #"leptonica":_default_pattern,
     "opensc":_default_pattern,
-    "zstd":r"(?:\n(?P<total>test.*)|(?P<status>[eE]rror.*)):\s+(?P<name>.*)",
     "openexr":_ctest_pattern,
     "libxml2":r"(?:(?:Total(?::)?\s(?:\d+\sfunctions,\s)?(?P<total>\d+)\stests,\s(?:\d+|no)\serrors)|(?:(?P<name>\S+)\s(?P<status>failed)))",
     "gpac":r"\n(?P<name>[\S]*?):\s?(?P<status>.*?(Fail|OK))",
@@ -272,7 +247,7 @@ unittest_patterns = {
         r" {4}(?P<name>[\w\(\) \/]+ +: .*) : (?P<status>\w+)\n",
         r" {4}(?P<name>[\w\(\) \/]+ +: .*)\s+\.+\s+(?P<status>\w+)\n",
     ],
-    "file":r"Running test: (?P<name>\S+)\n.*\n(?P<status>(?i)error)?",  # passing tests have no output, so treat no status as default pass
+    "file":r"Running test: (?P<name>\S+)\n.*\n(?P<status>(?i:error))?",  # passing tests have no output, so treat no status as default pass
     "assimp":_google_test_pattern,
     "ots":r"\d\/\d\s(?P<name>\S*)\s+(?P<status>\S*)",
     "c-blosc2":_ctest_pattern,

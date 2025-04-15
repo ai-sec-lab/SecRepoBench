@@ -13,7 +13,7 @@ from constants import *
 from cwe_map import *
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
-from CustomizedGeneration import *
+
 
 def get_c_cpp_file(base_path: str):
     c_path = base_path + '.c'
@@ -53,12 +53,8 @@ safety_settings = [
     },
 ]
 
-def get_cwe_info(id):
-    with open(f'ARVO-Meta/meta/{id}.json', 'r') as f:
-        meta = json.load(f)
-    
-    crash_type = meta['crash_type']
 
+def get_cwe_info(crash_type):
     if crash_type == 'UNKNOWN WRITE':
         pass
     elif crash_type == 'UNKNOWN READ':
@@ -104,58 +100,47 @@ class BaseEvaler(ABC):
             with open(f'descriptions/{id}/in-file.txt', 'r') as file:
                 context = file.read()
             return INFILE_PROMPT.format(context=context.strip())
-        elif self.context_type == 'in-file-truncated':
-            file_path = f'descriptions/{id}/in-file-truncated.txt'
-            if not os.path.exists(file_path):
-                print(f"File not found: {file_path}. Skipping this prompt.")
-                return ""
-            with open(file_path, 'r') as file:
-                context = file.read()
-            
-            return INFILE_PROMPT.format(context=context.strip())
-        elif self.context_type == 'cross-file':
-            # get func_mask_desc
+
+        elif self.context_type == 'BM25':
             context1 = get_c_cpp_file(f'descriptions/{id}/mask_sec_func_desc_{mode}')
-            with open(f'descriptions/{id}/cross-file.txt', 'r') as file:
+            with open(f'descriptions/{id}/BM25.txt', 'r') as file:
                 context2 = file.read()
             return CROSS_FILE_PROMPT.format(context1=context1.strip(), context2=context2.strip())
+
         elif self.context_type == 'func':
-            mask_func_desc = f"descriptions/{id}/mask_sec_func_desc_{mode}"
-            if os.path.exists(mask_func_desc + '.c'):
-                path = mask_func_desc + '.c'
-            elif os.path.exists(mask_func_desc + '.cpp'):
-                path = mask_func_desc + '.cpp'
-            else:
-                print(f'ID {id}: mask_sec_func_desc_{mode} file not present')
-                return
-            with open(path, 'r') as f:
-                context = f.read()
-            return FUNC_PROMPT.format(context=context.strip())
+            mask_func_desc = get_c_cpp_file(f"descriptions/{id}/mask_sec_func_desc_{mode}")
+            return FUNC_PROMPT.format(context=mask_func_desc.strip())
+
         elif self.context_type == 'dense-file':
-            # get func_mask_desc
             context1 = get_c_cpp_file(f'descriptions/{id}/mask_sec_func_desc_{mode}')
-            with open(f'descriptions/{id}/dense-cross-file.txt', 'r') as file:
+            with open(f'descriptions/{id}/dense-file.txt', 'r') as file:
                 context2 = file.read()
             return CROSS_FILE_PROMPT.format(context1=context1.strip(), context2=context2.strip())
+
         else:
             raise ValueError(f"Invalid context type: {self.context_type}")
     
     def _get_system_prompt(self, id):
-        if self.prompt_type == 'sec-generic':
+        if self.prompt_type == 'no-security-reminder':
+            system_prompt = NO_SECURITY_REMINDER
+
+        elif self.prompt_type == 'sec-generic':
             system_prompt = SEC_GENERIC_PROMPT
-        elif self.prompt_type == 'sec-practice':
-            system_prompt = SEC_PRACTICE_PROMPT
+
         elif self.prompt_type == 'sec-specific':
-            cwe_id, cwe_description = get_cwe_info(id)
+            with open('sample_metadata.json', 'r') as f:
+                sample_metadata = json.load(f)
+            crash_type = sample_metadata[id]['crash_type']
+            cwe_id, cwe_description = get_cwe_info(crash_type)
             system_prompt = SEC_SPECIFIC_PROMPT.format(CWE_ID=cwe_id, CWE_description=cwe_description)
-        elif self.prompt_type == 'system-prompt':
-            system_prompt = SYSTEM_PROMPT
+
         elif self.prompt_type == 'security-policy':
-            with open(f'sec_code_plt/security_policy/{id}/security_policy.txt', 'r') as f:
+            with open(f'security_policy/{id}/security_policy.txt', 'r') as f:
                 security_policy = f.read()
             system_prompt = SECURITY_POLICY.format(security_policy=security_policy)
+
         else:
-            system_prompt = None
+            raise ValueError(f"Invalid prompt type: {self.prompt_type}")
 
         return system_prompt
 
@@ -238,9 +223,9 @@ class APIEvaler(BaseEvaler):
             return lambda response: [response.text]
         elif 'qwen-' in self.model_name:
             return lambda response: [choice.message.content for choice in response.choices]
-        elif 'DeepSeek' in self.model_name:
-            # Assume Together API returns a JSON with choices similar to OpenAI.
-            return lambda response: [response['choices'][0]['message']['content']]
+        # elif 'DeepSeek' in self.model_name:
+        #     # Assume Together API returns a JSON with choices similar to OpenAI.
+        #     return lambda response: [response['choices'][0]['message']['content']]
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
@@ -381,38 +366,21 @@ class APIEvaler(BaseEvaler):
                                          google.api_core.exceptions.InternalServerError,
                                          requests.exceptions.HTTPError,
                                          requests.exceptions.RequestException  ))
-    def get_response(self, id: str, mode) -> str:
+    def get_response(self, id: str, mode, rerun) -> str:
         prompt = self._get_prompt(id, mode)
         system_prompt = self._get_system_prompt(id)
         if 'gemini-' in self.model_name:
             self.client = self._initialize_client(system_prompt)
             self.create = self._get_create_function()
-        # if id in self.responses_cache:
-        #     print('Using cache')
-        #     return self.postprocess(self.responses_cache[id]), prompt, system_prompt
+        if id in self.responses_cache and not rerun:
+            # print('Using cache')
+            return self.postprocess(self.responses_cache[id]), prompt, system_prompt
 
-        if self.prompt_type != 'refine':
-            messages = self._create_messages(prompt, system_prompt)
-            kwargs = self._get_model_kwargs(messages, system_prompt)
-            
-            response = self.create(**kwargs)
-        else:
-            with open(self.base_cache_file, 'r') as f:
-                base_cache = json.load(f)
-            base_response = self.postprocess(base_cache[id])
-            with open(f'descriptions/{id}/new-in-file.txt', 'r') as file:
-                context1 = file.read()
-            with open(f'descriptions/{id}/cross-file.txt', 'r') as file:
-                context2 = file.read()
-            prompt1 = REFINE_PROMPT_FIRST.format(context1=context1.strip(), context2=context2.strip(), solution=base_response)
-            messages = self._create_messages(prompt1, system_prompt)
-            kwargs = self._get_model_kwargs(messages, system_prompt)
-            analysis = self.create(**kwargs)
-            analysis = self.get_content(analysis)[0]
-            prompt2 = REFINE_PROMPT_SECOND
-            messages = self._create_messages(prompt2, system_prompt, history=[("user", prompt1), ("assistant", analysis)])
-            kwargs = self._get_model_kwargs(messages, system_prompt)
-            response = self.create(**kwargs)
+        messages = self._create_messages(prompt, system_prompt)
+        kwargs = self._get_model_kwargs(messages, system_prompt)
+        
+        response = self.create(**kwargs)
+
         try:
             response = self.get_content(response)[0]
         except Exception as e:
@@ -438,11 +406,11 @@ class ChatEvaler(BaseEvaler):
         self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
         self.model.eval()
 
-    def get_response(self, id: str, mode) -> str:
+    def get_response(self, id: str, mode, rerun) -> str:
         prompt = self._get_prompt(id,mode)
         system_prompt = self._get_system_prompt(id)
-        if id in self.responses_cache:
-            print('Using cache')
+        if id in self.responses_cache and not rerun:
+            # print('Using cache')
             return self.postprocess(self.responses_cache[id]), prompt, system_prompt
         
         
@@ -520,99 +488,3 @@ class ChatEvaler(BaseEvaler):
         self.responses_cache[id] = response
 
         return self.postprocess(response), prompt, system_prompt
-
-
-class CosecEvaler(BaseEvaler):
-    def __init__(self, model_name: str, final_model_path: str, context_type: str, prompt_type: str, mode: str, args):
-        super().__init__(model_name, context_type, prompt_type, mode)
-        self.args = args  # Save the command-line arguments
-        # Load specialized model (for example, CodeLlamaModelLM)
-        self.model = CodeLlamaModelLM.from_pretrained(self.model_name,torch_dtype=torch.bfloat16, device_map='auto')
-        # Load expert (final) model
-        self.sec_model = AutoModelForCausalLM.from_pretrained(final_model_path,torch_dtype=torch.bfloat16,attn_implementation="flash_attention_2",  device_map='auto')
-        
-        # Load tokenizer from the specialized model path
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        
-        # Set models to evaluation mode
-        self.model.eval()
-        self.sec_model.eval()
-
-    def get_response(self, id: str, mode) -> str:
-          
-        prompt = self._get_prompt(id, mode)
-        
-        
-        if not prompt.strip():
-            print(f"ID {id}: prompt is empty, skipping.")
-            return "", prompt, None
-
-         
-        system_prompt = self._get_system_prompt(id)
-        if id in self.responses_cache:
-            print('Using cache')
-            return self.postprocess(self.responses_cache[id]), prompt, system_prompt
-        
-        terminators = [
-            self.tokenizer.eos_token_id,
-        ]
-        if 'llama' in self.model_name.lower():
-            terminators.append(self.tokenizer.convert_tokens_to_ids("<|eot_id|>"))
-        
-        if system_prompt is not None:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ]
-        else:
-            messages = [
-                {"role": "user", "content": prompt},
-            ]
-        input_ids = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt",truncation=True
-        ).to(self.model.device)
-        print("Input IDs shape:", input_ids.shape)
-         
-        # Create kwargs for expert generation using values from self.args
-        extra_kwargs = {
-            'expert': True,
-            'expert_lm': self.sec_model,
-            'model_kwargs_expert': {},
-            'threshold': self.args.threshold,  # use threshold from args
-        }
-        import time
-        generation_results = {}
-       
-        print(len(input_ids[0]))
-        start_time = time.time()
-        gen_output = self.model.generate_with_experts(
-            input_ids=input_ids,
-            do_sample=True,
-            num_return_sequences=1,
-            temperature=self.args.temp,
-            max_new_tokens=400,
-            top_p=0.95,
-            pad_token_id=self.tokenizer.pad_token_id,
-            use_cache=True,
-            expert_min_prob=0.0,
-            expert_temperature=0.4,
-            expert_top_p=0.95,
-            **extra_kwargs
-        )
-        gen_time = time.time() - start_time
-        print(f"Generation time: {gen_time:.2f} seconds")
-        
-        # Decode the generated output
-        response = self.tokenizer.decode(
-            gen_output[0], skip_special_tokens=True
-        ) 
-        final_response = self.postprocess(response)
-        print(final_response)
-        # Save the result and generation time for this token limit
-        print(f"Max new tokens: {len( gen_output[0] )}, Generation time: {gen_time:.2f} seconds")
-    
-        # Cache and return the response along with prompt details
-        self.responses_cache[id] = final_response
-        return final_response, prompt, system_prompt
-        

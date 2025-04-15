@@ -1,19 +1,14 @@
-import sys
 import subprocess
-import argparse
 import json
 import re
 from pathlib import Path
-from base64 import b64decode
-from multiprocessing import Pool, cpu_count
-from functools import partial
+from multiprocessing import Pool
 from alive_progress import alive_bar
 import pickle
 from datetime import datetime
 import time
 import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing
 import os
 from collections import defaultdict
 import selectors
@@ -36,7 +31,7 @@ def get_c_cpp_file(base_path: str):
     return content
 
 
-def make_mod_file(id, model_name, context_type, prompt_type, mode):
+def make_patched_file(id, model_name, context_type, prompt_type, mode):
     # get sec file base
     sec_mask_content = get_c_cpp_file(f'descriptions/{id}/mask_{mode}')
 
@@ -51,64 +46,7 @@ def make_mod_file(id, model_name, context_type, prompt_type, mode):
     return mod_file_content
 
 
-def load_txt(path):
-    """
-    load txt data and return as a dict
-    """
-    data = {}
-    with open(path, "r") as file:
-        for line in file.read().strip().split("\n"):
-            (
-                local_id, 
-                project_name, 
-                fixed_range,
-                fixing_commit, 
-                commit_message, 
-                changed_file, 
-                changed_function,
-                diff_json, 
-                source_code_before, 
-                source_code
-            ) = line.split("\t")
-            skip = False
-            if local_id in data.keys():
-                print(f"duplicate local_id {local_id} found in {path}")
-                skip = True
-            for new_local_id, entry in data.items():
-                if fixing_commit == entry["fixing_commit"]:
-                    print(f"duplicate fixing commit for {local_id}, {new_local_id} found in {path}")
-                    skip = True
-            if not skip:
-                try:
-                    data[local_id] = {
-                        "project_name":project_name,
-                        "fixed_range":fixed_range,
-                        "fixing_commit":fixing_commit, 
-                        "commit_message":eval(commit_message), 
-                        "changed_file":changed_file, 
-                        "changed_function":changed_function,
-                        "diff":json.loads(diff_json), 
-                        "source_code_before":b64decode(eval(source_code_before)).decode(),
-                        "source_code":b64decode(eval(source_code)).decode()
-                    }
-                except Exception as e:
-                    print(f"error with {local_id} {e}")
-
-    print(f"{len(data)} cases loaded from {path}")
-    return data
-
-
-def setup(id, project_name, changed_file, fixing_commit, model_name, context_type, prompt_type, mode):
-
-    mod_file_content = make_mod_file(id, model_name, context_type, prompt_type, mode)
-
-    directory = Path('/data/oss-fuzz-bench') / str(id)
-
-    testcase_file = directory / f"testcase_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.sh"
-    unittest_file = directory / f"unittest_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.sh"
-    patch_dir = directory / "patches"
-    patch_file_name = f"patch_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.txt"
-
+def get_docker_image(id):
     # only pull docker image if we don't already have it
     image_name = f"n132/arvo:{id}-fix"
 
@@ -127,6 +65,25 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         )
         if proc_pull.returncode != 0:
             return False
+    
+    return True
+
+
+def setup(id, project_name, changed_file, fixing_commit, model_name, context_type, prompt_type, mode):
+
+    mod_file_content = make_patched_file(id, model_name, context_type, prompt_type, mode)
+
+    base_dir = os.getcwd()
+
+    directory = Path(base_dir) / 'data' / str(id)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    patch_dir = directory / "patches"
+    patch_dir.mkdir(parents=True, exist_ok=True)
+
+    testcase_file = directory / f"testcase_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.sh"
+    unittest_file = directory / f"unittest_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.sh"
+    patch_file_name = f"patch_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.txt"
 
     # write testcase, unittest bash scripts
     testcase_content = (
@@ -135,7 +92,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         f"--name {id}_{model_name}_{context_type}_{prompt_type}_{mode}_testcase "
         "--cpus=2 "
         "-e MAKEFLAGS=\"-j3\" "
-        f"-v /data/oss-fuzz-bench/{id}/patches:/patches "
+        f"-v {base_dir}/data/{id}/patches:/patches "
         f"n132/arvo:{id}-fix /bin/sh -c \"\n"
         # limit num processes to 2 by changing nproc behavior
         "  echo '#!/bin/sh' > /tmp/nproc\n"
@@ -144,7 +101,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         "  export PATH=/tmp:\\$PATH\n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
-        "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
+        "  git -C \\$GIT_DIR config --global user.email \\\"anonymous@email.com\\\"\n"
         "  if [ -n \\\"\\$(git -C \\$GIT_DIR status --porcelain)\\\" ]; then\n"
         "    git -C \\$GIT_DIR stash save --include-untracked \\\"Saving my changes\\\"\n"
         "    CHANGES_STASHED=true\n"
@@ -155,7 +112,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         "  if [ \\\"\\$CHANGES_STASHED\\\" = true ]; then\n"
         "    git -C \\$GIT_DIR stash apply\n"
         "  fi\n"
-        # move patch file
+        # move patched file
         f"  cp -f /patches/{patch_file_name} \\$GIT_DIR/{changed_file}\n"
         # retry loop for arvo compile
         "  ATTEMPTS=0\n"
@@ -179,7 +136,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         "    echo \\\"arvo compile failed after \\$MAX_ATTEMPTS attempts. Exiting.\\\"\n"
         "    exit 1\n"
         "  fi\n"
-        # Note: arvo run can give inconsistent answers sometimes (crash sometimes, pass sometimes), not sure how to handle this
+        # run the security testcase
         "  arvo run\n"
         "  \""
     )
@@ -190,7 +147,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         f"--name {id}_{model_name}_{context_type}_{prompt_type}_{mode}_unittest "
         "--cpus=2 "
         "-e MAKEFLAGS=\"-j3\" "
-        f"-v /data/oss-fuzz-bench/{id}/patches:/patches "
+        f"-v {base_dir}/data/{id}/patches:/patches "
         f"n132/arvo:{id}-fix /bin/sh -c \"\n"
         # limit num processes to 2 by changing nproc behavior
         "  echo '#!/bin/sh' > /tmp/nproc\n"
@@ -199,7 +156,7 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         "  export PATH=/tmp:\\$PATH\n"
         # revert to fixing commit and stash changes as necessary
         f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
-        "  git -C \\$GIT_DIR config --global user.email \\\"cdilgren@umd.edu\\\"\n"
+        "  git -C \\$GIT_DIR config --global user.email \\\"anonymous@email.com\\\"\n"
         "  if [ -n \\\"\\$(git -C \\$GIT_DIR status --porcelain)\\\" ]; then\n"
         "    git -C \\$GIT_DIR stash save --include-untracked \\\"Saving my changes\\\"\n"
         "    CHANGES_STASHED=true\n"
@@ -210,8 +167,9 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
         "  if [ \\\"\\$CHANGES_STASHED\\\" = true ]; then\n"
         "    git -C \\$GIT_DIR stash apply\n"
         "  fi\n"
-        # move patch file
+        # move patched file
         f"  cp -f /patches/{patch_file_name} \\$GIT_DIR/{changed_file}\n"
+        # run unittests
         "  " + (unittest_commands[project_name.lower()] if project_name in unittest_commands else "  echo 'NO UNIT TESTS'") + "\n"
         "  \""
     )
@@ -228,27 +186,95 @@ def setup(id, project_name, changed_file, fixing_commit, model_name, context_typ
 
     return True
 
-def get_targets(local_id, model_names, context_types, prompt_types, test_types, modes, root="./"):
 
-    directory = Path(root) / str(local_id)
-
-    targets = []
-
-    for model_name in model_names:
-        for context_type in context_types:
+def eval_setup(ids, model_names, prompt_types, context_types, modes, num_workers):
+    # get any necessary docker images
+    print("Downloading any missing docker images")
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        future_to_stem = {
+            executor.submit(
+                get_docker_image,
+                id
+            ): id
+            for id in ids
+        }
+        with alive_bar(len(future_to_stem)) as bar:
+            for future in as_completed(future_to_stem):
+                id = future_to_stem[future]
+                result = future.result()
+                if result is not True:
+                    print(f'Could not download docker image n132/arvo:{id}-fix')
+                bar()
+    
+    # create LLM-patched files, and bash scripts to run security and correctness tests
+    print("Setting up patched files, and bash scripts to run security and correctness tests")
+    combs = []
+    for id in ids:
+        for model_name in model_names:
             for prompt_type in prompt_types:
-                for test_type in test_types:
+                for context_type in context_types:
                     for mode in modes:
-                        targets.append((local_id, model_name, context_type, prompt_type, test_type, mode, ["/bin/bash", (directory / f"{test_type}_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.sh").absolute()]))
+                        combs.append({
+                            'id': id, 
+                            'model_name': model_name, 
+                            'context_type': context_type, 
+                            'prompt_type': prompt_type,
+                            'mode': mode
+                        })
 
+    # load in sample_metadata.json
+    sample_metadata = json.load(open('sample_metadata.json', "r"))
+
+    num_workers = min(num_workers, len(combs))
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        future_to_stem = {
+            executor.submit(
+                setup,
+                comb['id'],
+                sample_metadata[comb['id']]["project_name"],
+                sample_metadata[comb['id']]["changed_file"],
+                sample_metadata[comb['id']]["fixing_commit"],
+                comb['model_name'],
+                comb['context_type'],
+                comb['prompt_type'],
+                comb['mode']
+            ): comb
+            for comb in combs
+        }
+        with alive_bar(len(future_to_stem)) as bar:
+            for future in as_completed(future_to_stem):
+                comb = future_to_stem[future]
+                try:
+                    result = future.result()
+                    if result is not True:
+                        print(f'error in processing {comb['id']}-{comb['model_name']}-{comb['context_type']}-{comb['prompt_type']}-{comb['mode']}; result is {result}')
+                except Exception as e:
+                    print(f'error in processing {comb['id']}-{comb['model_name']}-{comb['context_type']}-{comb['prompt_type']}-{comb['mode']}; exception: {e}')
+                bar()
+
+
+def get_targets(ids, model_names, context_types, prompt_types, tests, modes):
+    targets = []
+    for id in ids:
+        directory = Path('data') / str(id)
+        for model_name in model_names:
+            for context_type in context_types:
+                for prompt_type in prompt_types:
+                    for test_type in tests:
+                        for mode in modes:
+                            targets.append((id, model_name, context_type, prompt_type, test_type, mode, ["/bin/bash", (directory / f"{test_type}_{model_name}_filled_code_{context_type}_{prompt_type}_{mode}.sh").absolute()]))
     return targets
+
 
 class ParseException(Exception):
     pass
 
+
 def remove_ansi(text):
     ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
     return ansi_escape.sub('', text)
+
 
 def parse_testcase(output):
     local_id, patch, test_type, proc = output
@@ -291,6 +317,7 @@ def parse_testcase(output):
     else:
         raise ParseException(f"no matching regex case ({proc.returncode})")
 
+
 def parse_unittest_libxml2(stdout, result):
     # libxml2 is weird, doesn't contain a status for passing tests.
     # Failure is indicated by a list of failing tests after a "## {NAME}" line.
@@ -320,6 +347,7 @@ def parse_unittest_libxml2(stdout, result):
     result["fail"] = list(failing_tests)
     result["total"] = len(all_tests)
 
+
 def parse_unittest_htslib(stdout, result):
     result["total"] = 0
     pattern = unittest_patterns['htslib']
@@ -332,6 +360,7 @@ def parse_unittest_htslib(stdout, result):
             result["fail"].append(name)
         result["total"] += 1
     return result
+
 
 def parse_unittest(output, project_name):
     project_name = project_name.lower()
@@ -370,8 +399,6 @@ def parse_unittest(output, project_name):
 
     for pattern in patterns:
         for test in re.finditer(pattern, stdout):
-            if local_id == "66696" and test.group("name") == "sock-tcp-raw-raw": # this case causes errors between the two versions
-                continue
             for g in ["name", "total"]:
                 if g in list(test.re.groupindex.keys()) and test.group(g) != None:
                     if g == "total":
@@ -400,45 +427,30 @@ def parse_unittest(output, project_name):
         result["total"] = sum([len(result[s]) if isinstance(result[s], list) else result[s] for s in ["pass", "fail", "skip"]])
     return result
 
-def parse_output(output, project_name, report, root="./"):
-    local_id, model_name, context_type, prompt_type, test_type, mode, proc_data = output
+
+def parse_output(output, project_name, report):
+    id, model_name, context_type, prompt_type, test_type, mode, proc_data = output
     
     if test_type == "testcase":
         try:
-            result = parse_testcase((local_id, 'sec', test_type, type('Proc', (), proc_data)()))
+            result = parse_testcase((id, 'sec', test_type, type('Proc', (), proc_data)()))
         except ParseException as e:
             result = "error: " + str(e)
         
     elif test_type == "unittest":
         try:
-            result = parse_unittest((local_id, 'sec', test_type, type('Proc', (), proc_data)()), project_name)
+            result = parse_unittest((id, 'sec', test_type, type('Proc', (), proc_data)()), project_name)
         except ParseException as e:
             result = "error: " + str(e)
 
-    report[local_id][model_name][context_type][prompt_type][mode][test_type] = result
+    report[id][model_name][context_type][prompt_type][mode][test_type] = result
 
     return report
 
-def print_report(report):
-    for local_id, test_results in report.items():
-        print(local_id)
 
-        if 'testcase_sec' in test_results:
-            print(f'testcase_sec\t{test_results['testcase_sec']}')
-        if 'testcase_vul' in test_results:
-            print(f'testcase_vul\t{test_results['testcase_vul']}')
-        if 'unittest_sec' in test_results:
-            num_pass = len(test_results['unittest_sec']['pass'])
-            num_total = test_results['unittest_sec']['total']
-            print(f'unittest_sec\t{num_pass}/{num_total}')
-        if 'unittest_sec_print' in test_results:
-            num_pass = len(test_results['unittest_sec_print']['pass'])
-            num_total = test_results['unittest_sec_print']['total']
-            print(f'unittest_sec_print\t{num_pass}/{num_total}')
-
-def write_output(output, root="./"):
-    local_id, model_name, context_type, prompt_type, test_type, mode, proc = output
-    directory = Path(root) / str(local_id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
+def write_output(output):
+    id, model_name, context_type, prompt_type, test_type, mode, proc = output
+    directory = Path('data') / str(id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
     directory.mkdir(exist_ok=True, parents=True)
     (directory / "stdout.txt").open("wb").write(proc["stdout"])
     (directory / "stderr.txt").open("wb").write(proc["stderr"])
@@ -452,6 +464,7 @@ def write_output(output, root="./"):
             "returncode": proc["returncode"],
             "timestamp": datetime.now().isoformat()
         }, f)
+
 
 def read_limited_output(proc, timeout=3000):
     # 50 MB limit -- so that our disk space isn't filled up, 
@@ -518,13 +531,13 @@ def read_limited_output(proc, timeout=3000):
 
     return b''.join(stdout_chunks), b''.join(stderr_chunks), timed_out, filled_up
 
-def proc_runner(target_with_output_path_and_rerun):
-    target, output_path, rerun = target_with_output_path_and_rerun
-    local_id, model_name, context_type, prompt_type, test_type, mode, cmd = target
-    print(f"Running {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
+
+def proc_runner(target):
+    id, model_name, context_type, prompt_type, test_type, mode, cmd = target
+    print(f"Running {id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
 
     # get unique container id
-    container_id = f"{local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}"
+    container_id = f"{id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}"
 
     # If no cache, cached result was a rate limit error, or rerun is True, run the process with retry
     max_retries = 5
@@ -539,10 +552,10 @@ def proc_runner(target_with_output_path_and_rerun):
             return_code = -1
 
             if timed_out:
-                print(f"Timeout: {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
+                print(f"Timeout: {id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
                 stderr = b"Timeout\n" + stderr
             if filled_up:
-                print(f"Truncated: {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
+                print(f"Truncated: {id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
                 stderr = b"Truncated\n" + stderr
 
             stdout = stdout or b""
@@ -555,224 +568,113 @@ def proc_runner(target_with_output_path_and_rerun):
             print(f"Rate limit reached. Retrying in {delay:.2f} seconds...", flush=True)
             time.sleep(delay)
         else:
-            print(f"Failed to run {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type} after {max_retries} attempts", flush=True)
+            print(f"Failed to run {id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type} after {max_retries} attempts", flush=True)
 
     # Always attempt to remove the container, just to be sure it's gone
     subprocess.run(['docker', 'rm', '-f', container_id], 
                    stdout=subprocess.DEVNULL, 
                    stderr=subprocess.DEVNULL)
 
-    output = local_id, model_name, context_type, prompt_type, test_type, mode, {
+    output = id, model_name, context_type, prompt_type, test_type, mode, {
         "stdout": stdout,
         "stderr": stderr,
         "returncode": return_code
     }
 
     # write to output files
-    write_output(output, output_path)
+    write_output(output)
 
-    print(f"Finished {local_id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
+    print(f"Finished {id}_{model_name}_{context_type}_{prompt_type}_{mode}_{test_type}", flush=True)
     return output
+
 
 def get_remaining(targets, completed):
     return [target for target in targets if (target[0], target[1], target[2], target[3], target[4], target[5]) not in completed]
 
-def main():
-    cases_fname = "filter_logs/cases.json"
 
-    # Define the set of predefined actions
-    actions = ['load', 'setup', 'eval']
-    parser = argparse.ArgumentParser(description="A program that performs actions on targets.")
-    parser.add_argument('action', choices=actions, help="The action to perform. Must be one of: " + ", ".join(actions))
-    parser.add_argument('targets', nargs='+', help='Targets as one or more integers or the string "all".')
-    parser.add_argument("-p", "--path", type=str, help="", default="./")
-    parser.add_argument("-o", "--output", type=str, help="", default="./")
-    parser.add_argument("-f", "--filter-patches", nargs='+', help="enter 'sec', 'vul', and/or 'sec_print")
-    parser.add_argument("--rerun", action="store_true", help="Rerun targets even if they have cached results")
-    parser.add_argument("--tests", nargs='+', help="enter 'testcase' and/or 'unittest'")
-    parser.add_argument("--model_names", nargs='+', help="enter claude_3_haiku claude_3.5_sonnet gemini_1.5_flash gemini_1.5_pro gpt_4o_mini gpt_4o")
-    parser.add_argument("--context_types", nargs='+', help="enter cross_file")
-    parser.add_argument("--prompt_types", nargs='+', help="enter sec_generic sec_specific system_prompt")
-    parser.add_argument("--modes", nargs='+')
+def eval(ids, model_names, prompt_types, context_types, modes, rerun, num_workers):
+    # consider exposing
+    tests = ['testcase', 'unittest']
 
-    args = parser.parse_args()
+    # get targes
+    targets = get_targets(ids, model_names, context_types, prompt_types, tests, modes)
 
-    root = Path(args.path)
+    # Get completed runs from existing eval report
+    completed = set()
+    all_report_file = Path("report_eval.json")
+    if all_report_file.exists() and not rerun:
+        with open(all_report_file, 'r') as f:
+            all_report = json.load(f)
+        for id in all_report.keys():
+            for model in all_report[id].keys():
+                for context in all_report[id][model].keys():
+                    for prompt in all_report[id][model][context].keys():
+                        for mode in all_report[id][model][context][prompt].keys():
+                            for test in all_report[id][model][context][prompt][mode].keys():
+                                completed.add((id, model, context, prompt, test, mode))
+    # Remove non-relevant completed
+    targets_completed_format = {target[:6] for target in targets}
+    completed = completed.intersection(targets_completed_format)
+    remaining_targets = get_remaining(targets, completed) if not rerun else targets
 
-    if args.action == "load":
-        data = {}
-        for path in args.targets:
-            for local_id, entry in load_txt(Path(path)).items():
-                data[local_id] = entry
-        json.dump(data, open(cases_fname, "w"))
+    print(f"Found {len(completed)} cached results cases out of {len(targets)} total targets.")
+    if rerun:
+        print(f"Rerunning all {len(targets)} targets, including those with cached results.")
     else:
-        data = json.load(open(cases_fname, "r"))
+        print(f"Running {len(remaining_targets)} targets which do not have cached results.")
 
-        if 'all' in args.targets:
-            if len(args.targets) > 1:
-                parser.error('If "all" is used, it must be the only target.')
-            targets = list(data.keys())
-        else:
-            try:
-                targets = [str(int(t)) for t in args.targets]
-            except ValueError:
-                parser.error('Targets must be integers or "all".')
-
-        if args.action == "setup":
-
-            combs = []
-            for id in targets:
-                for model_name in args.model_names:
-                    for context_type in args.context_types:
-                        for prompt_type in args.prompt_types:
-                            for mode in args.modes:
-                                combs.append({
-                                    'id': id, 
-                                    'model_name': model_name, 
-                                    'context_type': context_type, 
-                                    'prompt_type': prompt_type,
-                                    'mode': mode})
-
-            num_workers = min(92, len(combs))
-
-            with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                future_to_stem = {
-                    executor.submit(
-                        setup,
-                        comb['id'],
-                        data[comb['id']]["project_name"],
-                        data[comb['id']]["changed_file"],
-                        data[comb['id']]["fixing_commit"],
-                        comb['model_name'],
-                        comb['context_type'],
-                        comb['prompt_type'],
-                        comb['mode']
-                    ): comb
-                    for comb in combs
-                }
-
-                with alive_bar(len(future_to_stem)) as bar:
-                    for future in as_completed(future_to_stem):
-                        comb = future_to_stem[future]
-
-                        try:
-                            result = future.result()
-                            if result is not True:
-                                print(f'error in processing {comb['id']}-{comb['model_name']}-{comb['context_type']}-{comb['prompt_type']}-{args.mode}; result is {result}')
-                        except Exception as e:
-                            print(f'error in processing {comb['id']}-{comb['model_name']}-{comb['context_type']}-{comb['prompt_type']}-{args.mode}; exception: {e}')
-
-                        bar()
-
-        if args.action == "eval":
-            targets = [c for id in targets for c in get_targets(id, args.model_names, args.context_types, args.prompt_types, args.tests, args.modes, root=root)]
-
-            # Get completed runs from existing eval report
-            completed = set()
-            all_report_file = Path(args.output) / f"report_eval.json"
-            if all_report_file.exists() and not args.rerun:
-                with open(all_report_file, 'r') as f:
-                    all_report = json.load(f)
-                for id in all_report.keys():
-                    for model in all_report[id].keys():
-                        for context in all_report[id][model].keys():
-                            for prompt in all_report[id][model][context].keys():
-                                for mode in all_report[id][model][context][prompt].keys():
-                                    for test in all_report[id][model][context][prompt][mode].keys():
-                                        completed.add((id, model, context, prompt, test, mode))
-            # Remove non-relevant completed
-            targets_comp_format = {target[:6] for target in targets}
-            completed = completed.intersection(targets_comp_format)
-
-            # # for now-- report not written, use files
-            # for target in targets:
-            #     id, model_name, context_type, prompt_type, test_type, mode, _ = target
-            #     test_patch = f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
-            #     cache_file = f'/data/oss-fuzz-bench/output/{id}/{test_patch}/cache.pkl'
-            #     if os.path.exists(cache_file):
-            #         completed.add((id, model_name, context_type, prompt_type, test_type, mode))
-
-            # # I don't want to alter what's rerun based on Timeout, Truncated, docker: , or Too Many Requests
-            # # Count cached results and identify rate-limited cases
-            # cached_count = 0
-            # rate_limited_count = 0
-            # time_out_count = 0
-            # for target in targets:
-            #     local_id, model_name, context_type, prompt_type, test_type, mode, _ = target
-            #     cache_file = Path(args.output) / str(local_id) / f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}" / "cache.pkl"
-            #     if cache_file.exists() and not args.rerun:
-            #         try:
-            #             with cache_file.open("rb") as f:
-            #                 cached_data = pickle.load(f)
-            #             stderr = cached_data.get('stderr', b'').decode(errors="ignore")
-            #             if "429 Too Many Requests" in stderr:
-            #                 rate_limited_count += 1
-            #                 # Remove from completed set to ensure it's rerun
-            #                 completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
-            #             elif stderr.startswith("Timeout") or stderr.startswith("Truncated") or stderr.startswith("docker: "):
-            #                 time_out_count += 1
-            #                 completed.discard((local_id, model_name, context_type, prompt_type, test_type, mode))
-            #             else:
-            #                 cached_count += 1
-            #         except:
-            #             pass
-
-            # print(f"Found {cached_count} valid cached results, {rate_limited_count} rate-limited cases, and {time_out_count} time out cases out of {len(targets)} total targets.")
-            # if args.rerun:
-            #     print("Rerunning all targets, including those with cached results.")
-
-            procs = []
-            pool_size = min(42, len(targets))
-            try:
-                remaining_targets = get_remaining(targets, completed) if not args.rerun else targets
-                targets_with_output = [(target, args.output, args.rerun) for target in remaining_targets]
-                with alive_bar(len(targets_with_output)) as bar, Pool(pool_size) as p:
-                    for proc in p.imap_unordered(proc_runner, targets_with_output):
-                        procs.append(proc)
-                        bar()
-
-            except KeyboardInterrupt:
-                print("Interrupted. Processing all results...")
-
-            # Process all targets, including cached ones
-            report = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format the current date and time
-            new_report_file = Path(args.output) / f"report_eval_{timestamp}.json"
-            
-            if not args.rerun:
-                # useful when parse_output has changed, and we already have the stdout and stderr
-                for complete in completed:
-                    local_id, model_name, context_type, prompt_type, test_type, mode = complete
-                    test_patch = f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
-
-                    cache_file = f'/data/oss-fuzz-bench/output/{local_id}/{test_patch}/cache.pkl'
-                    with open(cache_file, 'rb') as f:
-                        cache = pickle.load(f)
-
-                    stdout = cache['stdout']
-                    stderr = cache['stderr']
-                    returncode = cache['returncode']
-
-                    output = (local_id, model_name, context_type, prompt_type, test_type, mode, {
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "returncode": returncode
-                    })
-
-                    parse_output(output, data[str(local_id)]["project_name"], report=report)
-
-            with alive_bar(len(targets)) as bar:
-                for target in targets:
-                    local_id, model_name, context_type, prompt_type, test_type, mode, _ = target
-                    output = next((p for p in procs if p[:6] == (local_id, model_name, context_type, prompt_type, test_type, mode)), None)
-                    
-                    if output:
-                        parse_output(output, data[str(local_id)]["project_name"], report=report)
-
+    procs = []
+    pool_size = min(num_workers, len(remaining_targets))
+    if pool_size > 0:
+        try:
+            with alive_bar(len(remaining_targets)) as bar, Pool(pool_size) as p:
+                for proc in p.imap_unordered(proc_runner, remaining_targets):
+                    procs.append(proc)
                     bar()
+        except KeyboardInterrupt:
+            print("Interrupted. Processing all results...")
 
-            json.dump(report, new_report_file.open("w"), indent=4)
+    # Process all targets, including cached ones
+    report = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format the current date and time
+    new_report_file = f"report_eval_{timestamp}.json"
 
+    # load in sample_metadata.json
+    sample_metadata = json.load(open('sample_metadata.json', "r"))
+    
+    if not rerun:
+        # useful when parse_output has changed, and we already have the stdout and stderr
+        for complete in completed:
+            id, model_name, context_type, prompt_type, test_type, mode = complete
+            test_patch = f"{model_name}_{context_type}_{prompt_type}_{test_type}_{mode}"
 
-if __name__ == "__main__":
-    main()
+            cache_file = f'data/{id}/{test_patch}/cache.pkl'
+            with open(cache_file, 'rb') as f:
+                cache = pickle.load(f)
+
+            stdout = cache['stdout']
+            stderr = cache['stderr']
+            returncode = cache['returncode']
+
+            output = (id, model_name, context_type, prompt_type, test_type, mode, {
+                "stdout": stdout,
+                "stderr": stderr,
+                "returncode": returncode
+            })
+
+            parse_output(output, sample_metadata[str(id)]["project_name"], report=report)
+
+    with alive_bar(len(targets)) as bar:
+        for target in targets:
+            id, model_name, context_type, prompt_type, test_type, mode, _ = target
+            output = next((p for p in procs if p[:6] == (id, model_name, context_type, prompt_type, test_type, mode)), None)
+            
+            if output:
+                parse_output(output, sample_metadata[str(id)]["project_name"], report=report)
+
+            bar()
+
+    with open(new_report_file, 'w') as f:
+        json.dump(report, f, indent=4)
+
+    return new_report_file
