@@ -23,10 +23,9 @@ def main():
     # evaluate all ids in ids.txt
     with open('ids.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
-    ids = ['910']
 
     # setup files for eval
-    # eval_setup(ids, args.model_names, args.prompt_types, args.context_types, modes, num_workers)
+    eval_setup(ids, args.model_names, args.prompt_types, args.context_types, modes, num_workers)
 
     # run eval for all ids in ids.txt
     eval_report = eval(ids, args.model_names, args.prompt_types, args.context_types, modes, args.rerun, num_workers)
