@@ -1,0 +1,46 @@
+struct ndpi_iphdr iph;
+memset(&iph, 0, sizeof(iph));
+
+/* IPv6 addresses are 128 bits, but ndpi_iphdr expects 32-bit fields.
+   We'll store the first 32 bits of each address for flow identification. */
+iph.saddr = ntohl(((const uint32_t *)ipv6_header->saddr)[0]);
+iph.daddr = ntohl(((const uint32_t *)ipv6_header->daddr)[0]);
+
+/* Extract protocol and payload length */
+u_int8_t l4proto = ipv6_header->nexthdr;
+u_int16_t ip_len = ntohs(ipv6_header->payload_len);
+const u_int8_t *l4ptr = (const u_int8_t *)ipv6_header + sizeof(struct ndpi_ipv6hdr);
+
+/* Handle IPv6 extension headers */
+while(1) {
+  if((l4proto == 0)  || /* Hop-by-Hop Option */
+     (l4proto == 43) || /* Routing Header */
+     (l4proto == 44) || /* Fragment Header */
+     (l4proto == 60) || /* Destination Options */
+     (l4proto == 51) || /* Authentication Header */
+     (l4proto == 50))   /* Encapsulating Security Payload */
+  {
+    /* All extension headers have the same format for the first 2 bytes:
+       - 1st byte: next header
+       - 2nd byte: header length (in 8-octet units, not including first 8 octets) */
+    u_int8_t next_hdr = l4ptr[0];
+    u_int8_t hdr_len = l4ptr[1];
+    size_t ext_hdr_len = 0;
+
+    if(l4proto == 44) /* Fragment header is always 8 bytes */
+      ext_hdr_len = 8;
+    else if(l4proto == 51) /* AH: (hdr_len+2)*4 */
+      ext_hdr_len = (hdr_len + 2) * 4;
+    else /* All others: (hdr_len+1)*8 */
+      ext_hdr_len = (hdr_len + 1) * 8;
+
+    l4proto = next_hdr;
+    l4ptr += ext_hdr_len;
+    if(ip_len > ext_hdr_len)
+      ip_len -= ext_hdr_len;
+    else
+      break;
+  } else {
+    break;
+  }
+}

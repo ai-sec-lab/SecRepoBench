@@ -1,0 +1,217 @@
+switch (tag)
+		{
+			case ID_SCE:
+			case ID_LFE:
+			{
+				// mono or LFE element
+				elementInstanceTag = BitBufferReadSmall(bits, 4);
+
+				// read header
+				headerByte = BitBufferReadSmall(bits, 4);
+				partialFrame = (headerByte >> 3) & 0x1;
+				bytesShifted = (headerByte >> 1) & 0x3;
+				escapeFlag = headerByte & 0x1;
+
+				if (partialFrame)
+					numSamples = BitBufferRead(bits, 32);
+
+				chanBits = p->mBitDepth - (bytesShifted * 8);
+
+				if (escapeFlag)
+				{
+					// uncompressed frame
+					for (i = 0; i < numSamples; i++)
+					{
+						val = BitBufferRead(bits, chanBits);
+						if (chanBits < 32 && (val & (1 << (chanBits - 1))))
+							val |= ~((1 << chanBits) - 1);
+						sampleBuffer[channelIndex + i * numChannels] = val << (bytesShifted * 8);
+					}
+				}
+				else
+				{
+					// compressed frame
+					modeU = BitBufferReadSmall(bits, 4);
+					denShiftU = BitBufferReadSmall(bits, 4);
+					pbFactorU = BitBufferReadSmall(bits, 3);
+					numU = BitBufferReadSmall(bits, 5);
+					for (j = 0; j < numU; j++)
+						coefsU[j] = BitBufferRead(bits, 16);
+
+					// if shift active, read the shift buffer
+					if (bytesShifted != 0)
+					{
+						uint32_t bitShift = bytesShifted * 8;
+						for (i = 0; i < numSamples; i++)
+						{
+							val = BitBufferRead(bits, bitShift);
+							((uint8_t*)(&sampleBuffer[channelIndex + i * numChannels]))[0] = (val >> 0) & 0xFF;
+							if (bytesShifted > 1)
+								((uint8_t*)(&sampleBuffer[channelIndex + i * numChannels]))[1] = (val >> 8) & 0xFF;
+							if (bytesShifted > 2)
+								((uint8_t*)(&sampleBuffer[channelIndex + i * numChannels]))[2] = (val >> 16) & 0xFF;
+						}
+					}
+
+					set_ag_params(&agParams, MB0, (pbFactorU * PB0) / 4, KB0, numSamples, numSamples, MAX_RUN_DEFAULT);
+					status = dyn_decomp(&agParams, bits, sampleBuffer + channelIndex, numSamples, chanBits, &bits1);
+					if (status != ALAC_noErr)
+						goto Exit;
+
+					pc_block_decode(sampleBuffer + channelIndex, numSamples, coefsU, numU, chanBits, denShiftU);
+
+					// shift up if needed
+					if (bytesShifted != 0)
+					{
+						for (i = 0; i < numSamples; i++)
+							sampleBuffer[channelIndex + i * numChannels] <<= (bytesShifted * 8);
+					}
+				}
+
+				channelIndex++;
+				if (channelIndex >= numChannels)
+					goto NoMoreChannels;
+				break;
+			}
+
+			case ID_CPE:
+			{
+				// stereo channel pair
+				elementInstanceTag = BitBufferReadSmall(bits, 4);
+
+				if (channelIndex + 1 >= numChannels)
+				{
+					status = kALAC_ParamError;
+					goto Exit;
+				}
+
+				headerByte = BitBufferReadSmall(bits, 4);
+				partialFrame = (headerByte >> 3) & 0x1;
+				bytesShifted = (headerByte >> 1) & 0x3;
+				escapeFlag = headerByte & 0x1;
+
+				if (partialFrame)
+					numSamples = BitBufferRead(bits, 32);
+
+				chanBits = p->mBitDepth - (bytesShifted * 8) + 1;
+
+				if (escapeFlag)
+				{
+					// uncompressed frame
+					for (i = 0; i < numSamples; i++)
+					{
+						int32_t left, right;
+						left = BitBufferRead(bits, chanBits);
+						right = BitBufferRead(bits, chanBits);
+						if (chanBits < 32 && (left & (1 << (chanBits - 1))))
+							left |= ~((1 << chanBits) - 1);
+						if (chanBits < 32 && (right & (1 << (chanBits - 1))))
+							right |= ~((1 << chanBits) - 1);
+						sampleBuffer[channelIndex + i * numChannels] = left << (bytesShifted * 8);
+						sampleBuffer[channelIndex + 1 + i * numChannels] = right << (bytesShifted * 8);
+					}
+				}
+				else
+				{
+					mixBits = BitBufferRead(bits, 8);
+					mixResiduals = BitBufferRead(bits, 8);
+
+					modeU = BitBufferReadSmall(bits, 4);
+					denShiftU = BitBufferReadSmall(bits, 4);
+					pbFactorU = BitBufferReadSmall(bits, 3);
+					numU = BitBufferReadSmall(bits, 5);
+					for (j = 0; j < numU; j++)
+						coefsU[j] = BitBufferRead(bits, 16);
+
+					modeV = BitBufferReadSmall(bits, 4);
+					denShiftV = BitBufferReadSmall(bits, 4);
+					pbFactorV = BitBufferReadSmall(bits, 3);
+					numV = BitBufferReadSmall(bits, 5);
+					for (j = 0; j < numV; j++)
+						coefsV[j] = BitBufferRead(bits, 16);
+
+					// if shift active, read the interleaved shift buffer
+					if (bytesShifted != 0)
+					{
+						uint32_t bitShift = bytesShifted * 8;
+						for (i = 0; i < numSamples; i++)
+						{
+							uint32_t shiftedVal = BitBufferRead(bits, bitShift * 2);
+							((uint8_t*)(&sampleBuffer[channelIndex + i * numChannels]))[0] = (shiftedVal >> 0) & 0xFF;
+							if (bytesShifted > 1)
+								((uint8_t*)(&sampleBuffer[channelIndex + i * numChannels]))[1] = (shiftedVal >> 8) & 0xFF;
+							if (bytesShifted > 2)
+								((uint8_t*)(&sampleBuffer[channelIndex + i * numChannels]))[2] = (shiftedVal >> 16) & 0xFF;
+
+							((uint8_t*)(&sampleBuffer[channelIndex + 1 + i * numChannels]))[0] = (shiftedVal >> bitShift) & 0xFF;
+							if (bytesShifted > 1)
+								((uint8_t*)(&sampleBuffer[channelIndex + 1 + i * numChannels]))[1] = (shiftedVal >> (bitShift + 8)) & 0xFF;
+							if (bytesShifted > 2)
+								((uint8_t*)(&sampleBuffer[channelIndex + 1 + i * numChannels]))[2] = (shiftedVal >> (bitShift + 16)) & 0xFF;
+						}
+					}
+
+					// decompress U channel
+					set_ag_params(&agParams, MB0, (pbFactorU * PB0) / 4, KB0, numSamples, numSamples, MAX_RUN_DEFAULT);
+					status = dyn_decomp(&agParams, bits, sampleBuffer + channelIndex, numSamples, chanBits, &bits1);
+					if (status != ALAC_noErr)
+						goto Exit;
+
+					pc_block_decode(sampleBuffer + channelIndex, numSamples, coefsU, numU, chanBits, denShiftU);
+
+					// decompress V channel
+					set_ag_params(&agParams, MB0, (pbFactorV * PB0) / 4, KB0, numSamples, numSamples, MAX_RUN_DEFAULT);
+					status = dyn_decomp(&agParams, bits, sampleBuffer + channelIndex + 1, numSamples, chanBits, &bits2);
+					if (status != ALAC_noErr)
+						goto Exit;
+
+					pc_block_decode(sampleBuffer + channelIndex + 1, numSamples, coefsV, numV, chanBits, denShiftV);
+
+					// de-matrix
+					switch (p->mBitDepth)
+					{
+						case 16:
+							unmix16(sampleBuffer + channelIndex, numSamples, numChannels, mixBits, mixResiduals);
+							break;
+						case 20:
+							unmix20(sampleBuffer + channelIndex, numSamples, numChannels, mixBits, mixResiduals);
+							break;
+						case 24:
+							unmix24(sampleBuffer + channelIndex, numSamples, numChannels, mixBits, mixResiduals);
+							break;
+						case 32:
+							unmix32(sampleBuffer + channelIndex, numSamples, numChannels, mixBits, mixResiduals);
+							break;
+					}
+
+					// shift up if needed
+					if (bytesShifted != 0)
+					{
+						for (i = 0; i < numSamples; i++)
+						{
+							sampleBuffer[channelIndex + i * numChannels] <<= (bytesShifted * 8);
+							sampleBuffer[channelIndex + 1 + i * numChannels] <<= (bytesShifted * 8);
+						}
+					}
+				}
+
+				channelIndex += 2;
+				if (channelIndex >= numChannels)
+					goto NoMoreChannels;
+				break;
+			}
+
+			case ID_END:
+				goto NoMoreChannels;
+
+			case ID_FIL:
+				// ignore fill elements
+				break;
+
+			default:
+				status = kALAC_UnsupportedElement;
+				goto Exit;
+		}
+
+		// byte-align after each element
+		BitBufferByteAlign(bits, true);

@@ -1,0 +1,73 @@
+p = b;
+while (step > 0) {
+    struct file_info *file;
+    const unsigned char *name;
+
+    if (p[0] != 0x00 && p[0] != 0x01 && p[0] != 0x02) {
+        /* Invalid directory record */
+        archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+            "Invalid ISO9660 directory record");
+        return (ARCHIVE_FATAL);
+    }
+
+    if (p[0] == 0x02) {
+        /* End of directory record */
+        break;
+    }
+
+    file = (struct file_info *)malloc(sizeof(struct file_info));
+    if (file == NULL) {
+        archive_set_error(&archivereader->archive, ENOMEM,
+            "No memory for directory entry");
+        return (ARCHIVE_FATAL);
+    }
+    memset(file, 0, sizeof(struct file_info));
+
+    name = p + 1;
+    if (name[0] == '.' && name[1] == '.' && name[2] == 0) {
+        /* Skip '..' entry */
+        p += ISO9660_DIRECTORY_RECORD_LENGTH;
+        step -= ISO9660_DIRECTORY_RECORD_LENGTH;
+        free(file);
+        continue;
+    }
+    if (name[0] == '.' && name[1] == 0) {
+        /* Skip '.' entry */
+        p += ISO9660_DIRECTORY_RECORD_LENGTH;
+        step -= ISO9660_DIRECTORY_RECORD_LENGTH;
+        free(file);
+        continue;
+    }
+
+    file->parent = parent;
+    file->offset = ((uint64_t)LE32(p + 4) << 32) | LE32(p + 8);
+    file->size = ((uint64_t)LE32(p + 12) << 32) | LE32(p + 16);
+    file->mode = AE_IFREG;
+    file->uid = 0;
+    file->gid = 0;
+    file->nlinks = 1;
+    file->mtime = (uint64_t)LE32(p + 20) << 32 | LE32(p + 24);
+    file->ctime = file->mtime;
+    file->atime = file->mtime;
+    file->birthtime = file->mtime;
+    file->birthtime_is_set = 1;
+
+    if (p[0] == 0x01) {
+        /* Multi-extent file */
+        if (multi == NULL) {
+            multi = file;
+        } else {
+            file->contents.next = multi->contents.next;
+            multi->contents.next = file;
+        }
+    } else {
+        multi = NULL;
+    }
+
+    file->next = parent->subdirs;
+    parent->subdirs = file;
+    parent->subdirs_count++;
+
+    p += ISO9660_DIRECTORY_RECORD_LENGTH;
+    step -= ISO9660_DIRECTORY_RECORD_LENGTH;
+}

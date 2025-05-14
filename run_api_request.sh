@@ -1,11 +1,9 @@
 #!/bin/bash
 
-# Lists of parameters to test
-MODELS=("gpt-4o" "claude-3.5-sonnet" "gemini-1.5-flash" "gpt-4o-mini" "claude-3-haiku" "gemini-1.5-pro")
-CONTEXTS=("cross-file" "in-file")
-PROMPTS=("sec-generic" "sec-specific" "system-prompt")
+MODELS=("llama4")
+CONTEXTS=("cross-file") 
+PROMPTS=( "system-prompt")
 MODES=("perturbed")
-
 # Loop through all combinations
 for PROMPT in "${PROMPTS[@]}"; do
     for CONTEXT in "${CONTEXTS[@]}"; do

@@ -1,0 +1,76 @@
+// Verify input size is at least large enough for the header
+    if (iSize < headerSize)
+        return EXR_ERR_CORRUPT_CHUNK;
+
+    // Zero out the uncompressed data buffer
+    if (uncompressed_data && uncompressed_size > 0)
+        memset(uncompressed_data, 0, (size_t)uncompressed_size);
+
+    // Copy header into counters and convert from XDR to native
+    memcpy(counters, inPtr, headerSize);
+    for (int i = 0; i < NUM_SIZES_SINGLE; ++i)
+        counters[i] = one_from_xdr64(counters[i]);
+
+    // Extract header fields
+    version                  = counters[0];
+    unknownUncompressedSize  = counters[1];
+    unknownCompressedSize    = counters[2];
+    acCompressedSize         = counters[3];
+    totalAcUncompressedCount = counters[4];
+    dcCompressedBytes        = counters[5];
+    totalDcUncompressedCount = counters[6];
+    rleCompressedSize        = counters[7];
+    rleUncompressedSize      = counters[8];
+    rleRawSize               = counters[9];
+    acCompression            = counters[10];
+
+    // Calculate total compressed size
+    compressedSize = unknownCompressedSize + acCompressedSize + dcCompressedBytes + rleCompressedSize;
+
+    // Set data pointer to start of compressed data (after header)
+    dataPtr = inPtr + headerSize;
+    dataLeft = iSize - headerSize;
+
+    // Check for overflow
+    if (compressedSize > dataLeft)
+        return EXR_ERR_CORRUPT_CHUNK;
+
+    // If version >= 2, update channel rules from the chunk
+    if (version >= 2)
+    {
+        if (dataLeft < 2)
+            return EXR_ERR_CORRUPT_CHUNK;
+        uint16_t ruleSize = one_from_xdr16(*(const uint16_t*)dataPtr);
+        if (dataLeft < ruleSize)
+            return EXR_ERR_CORRUPT_CHUNK;
+        exr_result_t crv = DwaCompressor_readChannelRules(me, dataPtr, ruleSize);
+        if (crv != EXR_ERR_SUCCESS)
+            return crv;
+        dataPtr += ruleSize;
+        dataLeft -= ruleSize;
+    }
+
+    // Initialize buffers and allocate output buffer for uncompressed data
+    outBufferSize = (size_t)uncompressed_size;
+    if (uncompressed_data == NULL || outBufferSize == 0)
+        return EXR_ERR_INVALID_ARGUMENT;
+    outBufferEnd = (uint8_t*)uncompressed_data;
+
+    // Set up pointers for compressed data sections
+    const uint8_t* compressedUnknownBuf = dataPtr;
+    const uint8_t* compressedAcBuf      = compressedUnknownBuf + unknownCompressedSize;
+    const uint8_t* compressedDcBuf      = compressedAcBuf + acCompressedSize;
+    const uint8_t* compressedRleBuf     = compressedDcBuf + dcCompressedBytes;
+
+    // Set up buffer pointers for AC and DC data
+    packedAcBufferEnd = me->_packedAcBuffer;
+    packedDcBufferEnd = me->_packedDcBuffer;
+
+    // Set up planarUncBufferEnd for each channel
+    for (int c = 0; c < me->_numChannels; ++c)
+    {
+        ChannelData* cd = &(me->_channelData[c]);
+        cd->planarUncBufferEnd = cd->planarUncBuffer;
+        for (int byte = 0; byte < cd->chan->bytes_per_element; ++byte)
+            cd->planarUncRleEnd[byte] = cd->planarUncRle[byte];
+    }

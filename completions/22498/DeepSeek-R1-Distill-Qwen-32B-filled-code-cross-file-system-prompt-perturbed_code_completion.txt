@@ -1,0 +1,74 @@
+u_int32_t pos = 0;
+u_int32_t line_idx = 0;
+
+while(pos < packet->payload_packet_len && line_idx < MAX_PACKET_LINES) {
+  u_int32_t crlf_pos = pos;
+  u_int32_t crlf_count = 0;
+  
+  // Find "\r\n" sequence
+  while(crlf_pos < packet->payload_packet_len - 1) {
+    if(packet->payload[crlf_pos] == '\r' && packet->payload[crlf_pos + 1] == '\n') {
+      // Check for "\r\n\r\n" sequence
+      if(crlf_pos > pos && packet->payload[crlf_pos - 2] == '\r' && packet->payload[crlf_pos - 1] == '\n') {
+        // Store initial binary bytes
+        dataflow->initial_binary_bytes_len = packet->payload_packet_len - (crlf_pos + 2);
+        if(dataflow->initial_binary_bytes_len > 0) {
+          memcpy(dataflow->initial_binary_bytes, &packet->payload[crlf_pos + 2], dataflow->initial_binary_bytes_len);
+        }
+        break;
+      }
+      crlf_count++;
+      pos = crlf_pos + 2;
+      break;
+    }
+    crlf_pos++;
+  }
+
+  if(crlf_count == 0) {
+    break;
+  }
+
+  // Store line information
+  packet->line[line_idx].ptr = &packet->payload[packet->line[line_idx].len];
+  packet->line[line_idx].len = pos - packet->line[line_idx].len;
+
+  // Check for empty line
+  if(packet->line[line_idx].len == 0) {
+    packet->empty_line_pos = line_idx;
+  }
+
+  // Analyze first line for HTTP status code
+  if(line_idx == 0) {
+    // HTTP response line format: "HTTP/1.x xxyyy Message\r\n"
+    if(packet->line[line_idx].len >= 9 && packet->payload[packet->line[line_idx].ptr - packet->payload] == 'H' &&
+       packet->payload[packet->line[line_idx].ptr - packet->payload + 1] == 'T' &&
+       packet->payload[packet->line[line_idx].ptr - packet->payload + 2] == 'T' &&
+       packet->payload[packet->line[line_idx].ptr - packet->payload + 3] == 'P') {
+      // Extract status code
+      u_int32_t status_pos = packet->line[line_idx].ptr - packet->payload + 8;
+      if(status_pos + 3 <= packet->line[line_idx].ptr - packet->payload + packet->line[line_idx].len) {
+        packet->http_status_code = (packet->payload[status_pos] - '0') * 100 +
+                                  (packet->payload[status_pos + 1] - '0') * 10 +
+                                  (packet->payload[status_pos + 2] - '0');
+      }
+    }
+  }
+
+  // Extract headers
+  if(line_idx > 0 && packet->line[line_idx].len > 0) {
+    // Check for common headers
+    if(packet->line[line_idx].len >= 7 && memcmp(packet->line[line_idx].ptr, "Server:", 7) == 0) {
+      packet->server_header_pos = line_idx;
+      packet->server_header_len = packet->line[line_idx].len - 7;
+    } else if(packet->line[line_idx].len >= 6 && memcmp(packet->line[line_idx].ptr, "Host:", 5) == 0) {
+      packet->host_header_pos = line_idx;
+      packet->host_header_len = packet->line[line_idx].len - 6;
+    } else if(packet->line[line_idx].len >= 14 && memcmp(packet->line[line_idx].ptr, "Content-Type:", 12) == 0) {
+      packet->content_type_header_pos = line_idx;
+      packet->content_type_header_len = packet->line[line_idx].len - 12;
+    }
+    packet->header_count++;
+  }
+
+  line_idx++;
+}

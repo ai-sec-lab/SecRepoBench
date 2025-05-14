@@ -1,0 +1,109 @@
+int32_t ntbytes = 0;
+int32_t cbytes = 0;
+int32_t last_filter_index = -1;
+int32_t nstreams = 1;
+int32_t stream_size = bsize;
+int32_t stream_offset = 0;
+int32_t j;
+uint8_t* filters_meta = context->filters_meta;
+
+// Determine the number of streams and stream size
+if (context->splitmode == BLOSC_FORWARD_COMPAT_SPLIT && context->nstreams > 1) {
+  nstreams = context->nstreams;
+  stream_size = bsize / nstreams;
+  if (leftoverblock && (bsize % nstreams != 0) && (nstreams > 1)) {
+    // Last block may have a smaller last stream
+    // The last stream will get the remainder
+    // (handled in the loop below)
+  }
+}
+
+// Find the last filter index (if any)
+for (int i = BLOSC2_MAX_FILTERS - 1; i >= 0; i--) {
+  if (filters[i] != BLOSC_NOFILTER) {
+    last_filter_index = i;
+    break;
+  }
+}
+
+// Prepare destination buffer
+uint8_t* block_dest = dest + destinationoffset;
+uint8_t* block_tmp = tmp;
+uint8_t* block_tmp2 = tmp2;
+
+// Iterate over streams
+for (j = 0; j < nstreams; j++) {
+  int32_t this_stream_size = stream_size;
+  if (j == nstreams - 1) {
+    // Last stream may be larger if bsize is not divisible by nstreams
+    this_stream_size = bsize - stream_size * (nstreams - 1);
+  }
+
+  // Read compressed size for this stream
+  if (src_offset + 4 > srcsize) {
+    return -1;  // Not enough input
+  }
+  int32_t csize = sw32_(src + src_offset);
+  src_offset += 4;
+
+  if (csize == 0) {
+    // Run of zeros
+    memset(block_tmp, 0, (unsigned int)this_stream_size);
+    cbytes = this_stream_size;
+  }
+  else if (csize == this_stream_size) {
+    // Uncompressed
+    if (src_offset + csize > srcsize) {
+      return -1;  // Not enough input
+    }
+    memcpy(block_tmp, src + src_offset, (unsigned int)csize);
+    src_offset += csize;
+  }
+  else {
+    // Compressed
+    if (src_offset + csize > srcsize) {
+      return -1;  // Not enough input
+    }
+    int dsize = 0;
+    switch (compformat) {
+      case BLOSC_BLOSCLZ_FORMAT:
+        dsize = blosclz_decompress(src + src_offset, csize, block_tmp, this_stream_size);
+        break;
+      case BLOSC_LZ4_FORMAT:
+        dsize = lz4_decompress_safe(src + src_offset, csize, block_tmp, this_stream_size);
+        break;
+      case BLOSC_LZ4HC_FORMAT:
+        dsize = lz4_decompress_safe(src + src_offset, csize, block_tmp, this_stream_size);
+        break;
+      case BLOSC_ZLIB_FORMAT:
+        dsize = zlib_decompress(src + src_offset, csize, block_tmp, this_stream_size);
+        break;
+      case BLOSC_ZSTD_FORMAT:
+        dsize = zstd_decompress(src + src_offset, csize, block_tmp, this_stream_size);
+        break;
+      default:
+        return -1;  // Unknown format
+    }
+    if (dsize < 0 || dsize != this_stream_size) {
+      return -1;  // Decompression error
+    }
+    src_offset += csize;
+  }
+
+  // If filters are present, apply them after all streams are decompressed
+  if (last_filter_index < 0) {
+    // No filters, copy to destination
+    memcpy(block_dest + j * stream_size, block_tmp, (unsigned int)this_stream_size);
+  }
+  else {
+    // Store in tmp buffer for later filter pipeline
+    memcpy(block_tmp2 + j * stream_size, block_tmp, (unsigned int)this_stream_size);
+  }
+
+  ntbytes += this_stream_size;
+}
+/* If filters are present, the pipeline will be run after all streams */
+if (last_filter_index >= 0) {
+  // block_tmp2 now contains the full block, to be filtered into dest+destinationoffset
+  memcpy(tmp, block_tmp2, (unsigned int)bsize);
+}

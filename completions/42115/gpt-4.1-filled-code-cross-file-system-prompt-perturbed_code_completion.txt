@@ -1,0 +1,62 @@
+memset(dNSName, 0, sizeof(dNSName));
+if(general_name_type == 0x87 && len == 4) {
+  // IPv4 address
+  snprintf(dNSName, sizeof(dNSName), "%u.%u.%u.%u",
+           packet->payload[i+2], packet->payload[i+3],
+           packet->payload[i+4], packet->payload[i+5]);
+} else if(general_name_type == 0x87 && len == 16) {
+  // IPv6 address
+  snprintf(dNSName, sizeof(dNSName),
+           "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+           packet->payload[i+2], packet->payload[i+3], packet->payload[i+4], packet->payload[i+5],
+           packet->payload[i+6], packet->payload[i+7], packet->payload[i+8], packet->payload[i+9],
+           packet->payload[i+10], packet->payload[i+11], packet->payload[i+12], packet->payload[i+13],
+           packet->payload[i+14], packet->payload[i+15], packet->payload[i+16], packet->payload[i+17]);
+} else {
+  // dNSName or rfc822Name
+  u_int8_t copy_len = len;
+  if(copy_len > sizeof(dNSName)-1) copy_len = sizeof(dNSName)-1;
+  memcpy(dNSName, &packet->payload[i+2], copy_len);
+  dNSName[copy_len] = '\0';
+  // Clean up: ensure printable
+  for(u_int8_t k=0; k<copy_len; k++) {
+    if(!isprint((unsigned char)dNSName[k])) dNSName[k] = '.';
+  }
+}
+
+if(general_name_type == 0x82) { // dNSName
+  if(connection->host_server_name[0] != '\0' &&
+     strcasecmp(connection->host_server_name, dNSName) == 0)
+    matched_name = 1;
+  // Add to server names list
+  if(connection->protos.tls_quic.server_names == NULL) {
+    connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+  } else {
+    size_t oldlen = strlen(connection->protos.tls_quic.server_names);
+    size_t newlen = oldlen + strlen(dNSName) + 2;
+    char *tmp = ndpi_malloc(newlen);
+    if(tmp) {
+      snprintf(tmp, newlen, "%s,%s", connection->protos.tls_quic.server_names, dNSName);
+      ndpi_free(connection->protos.tls_quic.server_names);
+      connection->protos.tls_quic.server_names = tmp;
+    }
+  }
+  // Try to detect subprotocol based on dNSName
+  u_int32_t val;
+  int rc = ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+                                  dNSName, strlen(dNSName), &val);
+  if(rc == 0) {
+    u_int16_t proto_id = (u_int16_t)val;
+    ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED};
+    connection->detected_protocol_stack[0] = proto_id;
+    connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+    connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+    ndpi_check_subprotocol_risk(ndpi_struct, connection, proto_id);
+    if(ndpi_struct->tls_cert_cache == NULL)
+      ndpi_struct->tls_cert_cache = ndpi_lru_cache_init(1024);
+    if(ndpi_struct->tls_cert_cache && packet->iph) {
+      u_int32_t key = packet->iph->saddr + packet->tcp->source;
+      ndpi_lru_add_to_cache(ndpi_struct->tls_cert_cache, key, proto_id);
+    }
+  }
+}
