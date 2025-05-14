@@ -1,0 +1,92 @@
+p = b;
+while (step > 0 && p < b + parent->size) {
+	size_t dr_len;
+	struct file_info *file;
+	int r;
+
+	dr_len = *p;
+	if (dr_len == 0) {
+		/* Skip to the next logical block. */
+		size_t pad = iso9660->logical_block_size -
+		    ((p - b) % iso9660->logical_block_size);
+		if (pad == 0 || pad > step)
+			break;
+		p += pad;
+		step -= pad;
+		continue;
+	}
+	if (dr_len > step || p + dr_len > b + step) {
+		archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+		    "Invalid length of directory record");
+		return (ARCHIVE_FATAL);
+	}
+
+	file = parse_file_info(archivereader, iso9660, parent, p, dr_len);
+	if (file == NULL) {
+		archive_set_error(&archivereader->archive, ENOMEM,
+		    "No memory for file entry");
+		return (ARCHIVE_FATAL);
+	}
+
+	/* Skip '.' and '..' entries. */
+	if (file->name.length == 1 &&
+	    (file->name.s[0] == '.' ||
+	     (file->name.s[0] == '.' && file->name.length == 2 && file->name.s[1] == '.'))) {
+		free_file_info(file);
+		p += dr_len;
+		step -= dr_len;
+		continue;
+	}
+	if (file->multi_extent) {
+		/* Multi-extent file: collect all extents. */
+		if (multi == NULL) {
+			multi = file;
+		} else {
+			/* Append to multi-extent list. */
+			struct file_content *content = malloc(sizeof(*content));
+			if (content == NULL) {
+				free_file_info(file);
+				archive_set_error(&archivereader->archive, ENOMEM,
+				    "No memory for multi-extent file");
+				return (ARCHIVE_FATAL);
+			}
+			content->offset = file->offset;
+			content->size = file->size;
+			content->next = NULL;
+			if (multi->contents.last)
+				*multi->contents.last = content;
+			else
+				multi->contents.first = content;
+			multi->contents.last = &content->next;
+			multi->size += file->size;
+			free_file_info(file);
+		}
+	} else {
+		/* If we have a multi-extent file collected, add it. */
+		if (multi != NULL) {
+			r = add_entry(iso9660, multi);
+			if (r != ARCHIVE_OK) {
+				free_file_info(multi);
+				return (r);
+			}
+			multi = NULL;
+		}
+		r = add_entry(iso9660, file);
+		if (r != ARCHIVE_OK) {
+			free_file_info(file);
+			return (r);
+		}
+	}
+	p += dr_len;
+	step -= dr_len;
+}
+/* If we have a multi-extent file left, add it. */
+if (multi != NULL) {
+	int r = add_entry(iso9660, multi);
+	if (r != ARCHIVE_OK) {
+		free_file_info(multi);
+		return (r);
+	}
+	multi = NULL;
+}
+skip_size = p - b;

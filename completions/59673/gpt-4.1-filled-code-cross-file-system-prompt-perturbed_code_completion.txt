@@ -1,0 +1,79 @@
+int emu = 0;
+    ptrdiff_t offset;
+    int src_x, src_y;
+    int uvsrc_x, uvsrc_y;
+    int sx, sy, uvsx, uvsy;
+    int mx0 = motion_x, my0 = motion_y;
+
+    linesize    = s->linesize;
+    uvlinesize  = s->uvlinesize;
+
+    if (s->quarter_sample) {
+        motion_x /= 2;
+        motion_y /= 2;
+    }
+
+    mx = motion_x;
+    my = motion_y;
+
+    sx = mx & s_mask;
+    sy = my & s_mask;
+
+    sourcex = s->mb_x * block_s + (mx >> lowres);
+    src_y   = mb_y    * block_s + (my >> lowres);
+
+    offset = src_y * linesize + sourcex;
+    ptr_y = ref_picture[0] + offset;
+
+    if ((unsigned)sourcex > FFMAX(h_edge_pos - (!!sx) - block_s, 0) ||
+        (unsigned)src_y   > FFMAX(v_edge_pos - (!!sy) - h, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_y, linesize, linesize,
+                                 block_s + 1, h + 1, sourcex, src_y, h_edge_pos, v_edge_pos);
+        ptr_y = s->sc.edge_emu_buffer;
+        emu = 1;
+    }
+
+    sx = (sx << 2) >> lowres;
+    sy = (sy << 2) >> lowres;
+
+    s->hdsp.put_pixels_tab[lowres - 1][(sy ? 2 : 0) | (sx ? 1 : 0)](dest_y, ptr_y, linesize, h, sx, sy);
+
+    if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+        // Chroma
+        if (s->quarter_sample) {
+            mx0 /= 2;
+            my0 /= 2;
+        }
+        mx0 = ff_h263_round_chroma(mx0);
+        my0 = ff_h263_round_chroma(my0);
+
+        uvsx = mx0 & s_mask;
+        uvsy = my0 & s_mask;
+
+        uvsrc_x = s->mb_x * block_s + (mx0 >> (lowres + 1 - s->chroma_x_shift));
+        uvsrc_y = mb_y    * block_s + (my0 >> (lowres + 1 - s->chroma_y_shift));
+
+        offset = uvsrc_y * uvlinesize + uvsrc_x;
+        ptr_cb = ref_picture[1] + offset;
+        ptr_cr = ref_picture[2] + offset;
+
+        if ((unsigned)uvsrc_x > FFMAX((s->h_edge_pos >> s->chroma_x_shift) - (!!uvsx) - block_s, 0) ||
+            (unsigned)uvsrc_y > FFMAX((s->v_edge_pos >> s->chroma_y_shift) - (!!uvsy) - block_s, 0)) {
+            s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cb, uvlinesize, uvlinesize,
+                                     block_s + 1, block_s + 1, uvsrc_x, uvsrc_y,
+                                     s->h_edge_pos >> s->chroma_x_shift, s->v_edge_pos >> s->chroma_y_shift);
+            ptr_cb = s->sc.edge_emu_buffer;
+        }
+        uvsx = (uvsx << 2) >> lowres;
+        uvsy = (uvsy << 2) >> lowres;
+        pix_op[op_index](dest_cb, ptr_cb, uvlinesize, block_s, uvsx, uvsy);
+
+        if ((unsigned)uvsrc_x > FFMAX((s->h_edge_pos >> s->chroma_x_shift) - (!!uvsx) - block_s, 0) ||
+            (unsigned)uvsrc_y > FFMAX((s->v_edge_pos >> s->chroma_y_shift) - (!!uvsy) - block_s, 0)) {
+            s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cr, uvlinesize, uvlinesize,
+                                     block_s + 1, block_s + 1, uvsrc_x, uvsrc_y,
+                                     s->h_edge_pos >> s->chroma_x_shift, s->v_edge_pos >> s->chroma_y_shift);
+            ptr_cr = s->sc.edge_emu_buffer;
+        }
+        pix_op[op_index](dest_cr, ptr_cr, uvlinesize, block_s, uvsx, uvsy);
+    }
