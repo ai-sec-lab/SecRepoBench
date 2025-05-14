@@ -101,8 +101,18 @@ MODELS = {
     'claude-3.7-thinking': 'claude-3-7-sonnet-20250219',
     'qwen-plus': 'qwen-plus-2025-01-25',
     'gemini-2-flash': 'gemini-2.0-flash',
-    'deepseek-coder-1.3b-instruct': 'deepseek-ai/deepseek-coder-1.3b-instruct'
+    'deepseek-coder-1.3b-instruct': 'deepseek-ai/deepseek-coder-1.3b-instruct',
+    'DeepSeek-V3': 'deepseek-ai/DeepSeek-V3',
+    'deepseek-coder-6.7b-instruct': 'deepseek-ai/deepseek-coder-6.7b-instruct',
+    'codegen-6B-mono': "Salesforce/codegen-6B-mono", 
+    "Qwen2.5-Coder-32B-Instruct":"Qwen/Qwen2.5-Coder-32B-Instruct",
+    "DeepSeek-R1-Distill-Qwen-32B":"deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "Qwen3":"Qwen/Qwen3-235B-A22B", 
+    "llama4": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "cisco-llama8b":"fdtn-ai/Foundation-Sec-8B",
+    "gpt-4.1":"gpt-4.1"
 }
+
 
 FUNC_PROMPT = (
     "Below is the content of a C/C++ function where a code block is masked by `// <MASK>`.\n"

@@ -1,0 +1,78 @@
+a = 0;
+while(a < packet->payload_packet_len && packet->parsed_lines < NDPI_MAX_PACKET_LINE_INFO) {
+  if(packet->payload[a] == '\r' && (a+1) < packet->payload_packet_len && packet->payload[a+1] == '\n') {
+    packet->line[packet->parsed_lines].len =
+      (u_int16_t)(&packet->payload[a] - packet->line[packet->parsed_lines].ptr);
+    packet->parsed_lines++;
+
+    // Check for end of headers: "\r\n\r\n"
+    if((a+3) < packet->payload_packet_len &&
+       packet->payload[a+2] == '\r' && packet->payload[a+3] == '\n') {
+      // Store the position of the empty line (end of headers)
+      packet->empty_line_position = packet->parsed_lines;
+      // Copy the first few bytes after the header for binary detection
+      u_int32_t bin_len = packet->payload_packet_len - (a+4);
+      if(bin_len > sizeof(dataflow->initial_binary_bytes))
+        bin_len = sizeof(dataflow->initial_binary_bytes);
+      if(bin_len > 0)
+        memcpy(dataflow->initial_binary_bytes, &packet->payload[a+4], bin_len);
+      break;
+    }
+
+    // Prepare for next line
+    a += 2;
+    if(a < packet->payload_packet_len) {
+      packet->line[packet->parsed_lines].ptr = &packet->payload[a];
+      packet->line[packet->parsed_lines].len = 0;
+    }
+    continue;
+  }
+  a++;
+}
+
+// Analyze the first line for HTTP response status code
+if(packet->parsed_lines > 0 && packet->line[0].len > 0) {
+  const char *first_line = (const char*)packet->line[0].ptr;
+  u_int16_t first_line_len = packet->line[0].len;
+  if(first_line_len > 12 && !memcmp(first_line, "HTTP/", 5)) {
+    // HTTP response, look for status code
+    int i = 5;
+    while(i < first_line_len && first_line[i] != ' ') i++;
+    while(i < first_line_len && first_line[i] == ' ') i++;
+    if(i+2 < first_line_len &&
+       (first_line[i] >= '1' && first_line[i] <= '5') &&
+       (first_line[i+1] >= '0' && first_line[i+1] <= '9') &&
+       (first_line[i+2] >= '0' && first_line[i+2] <= '9')) {
+      packet->http_response_status_code = (first_line[i]-'0')*100 +
+                                          (first_line[i+1]-'0')*10 +
+                                          (first_line[i+2]-'0');
+    }
+  }
+}
+
+// Identify and extract specific HTTP headers
+packet->num_headers = 0;
+for(a = 1; a < packet->parsed_lines; a++) {
+  const char *line = (const char*)packet->line[a].ptr;
+  u_int16_t len = packet->line[a].len;
+  if(len > 7 && !strncasecmp(line, "Server:", 7)) {
+    packet->server_line = a;
+    packet->server_line_len = len;
+  } else if(len > 5 && !strncasecmp(line, "Host:", 5)) {
+    packet->host_line = a;
+    packet->host_line_len = len;
+  } else if(len > 13 && !strncasecmp(line, "Content-Type:", 13)) {
+    packet->content_type_line = a;
+    packet->content_type_line_len = len;
+  } else if(len > 15 && !strncasecmp(line, "Content-Length:", 15)) {
+    packet->content_length_line = a;
+    packet->content_length_line_len = len;
+  } else if(len > 9 && !strncasecmp(line, "User-Agent", 9)) {
+    packet->user_agent_line = a;
+    packet->user_agent_line_len = len;
+  } else if(len > 7 && !strncasecmp(line, "Cookie:", 7)) {
+    packet->cookie_line = a;
+    packet->cookie_line_len = len;
+  }
+  packet->num_headers++;
+}

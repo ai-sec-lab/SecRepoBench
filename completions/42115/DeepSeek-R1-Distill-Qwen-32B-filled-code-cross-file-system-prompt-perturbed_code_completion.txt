@@ -1,0 +1,57 @@
+// Parse the payload to extract the DNS name or IP address from the subjectAltName extension
+u_int8_t len = packet->payload[i + 1];
+char dNSName[256];
+memset(dNSName, 0, sizeof(dNSName));
+
+if (general_name_type == 0x82) { // dNSName
+  strncpy(dNSName, (const char*)&packet->payload[i + 2], len);
+  dNSName[len] = '\0';
+} else if (general_name_type == 0x87) { // ipAddress
+  if (len == 4) { // IPv4
+    snprintf(dNSName, sizeof(dNSName), "%u.%u.%u.%u",
+             packet->payload[i + 2], packet->payload[i + 3],
+             packet->payload[i + 4], packet->payload[i + 5]);
+  } else if (len == 16) { // IPv6
+    char ipStr[40];
+    snprintf(ipStr, sizeof(ipStr),
+             "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+             packet->payload[i+2], packet->payload[i+3],
+             packet->payload[i+4], packet->payload[i+5],
+             packet->payload[i+6], packet->payload[i+7],
+             packet->payload[i+8], packet->payload[i+9],
+             packet->payload[i+10], packet->payload[i+11],
+             packet->payload[i+12], packet->payload[i+13],
+             packet->payload[i+14], packet->payload[i+15],
+             packet->payload[i+16], packet->payload[i+17]);
+    strncpy(dNSName, ipStr, sizeof(dNSName)-1);
+  }
+}
+
+// Clean up the extracted DNS name and ensure it is printable
+char cleanedName[256];
+memset(cleanedName, 0, sizeof(cleanedName));
+int cleanedLen = 0;
+for (int j = 0; j < len && j < sizeof(dNSName)-1; j++) {
+  if (isprint(dNSName[j])) {
+    cleanedName[cleanedLen++] = dNSName[j];
+  }
+}
+cleanedName[cleanedLen] = '\0';
+
+// Check if the extracted DNS name matches the host server name
+if (cleanedLen > 0 && strcmp(cleanedName, connection->host_server_name) == 0) {
+  matched_name = 1;
+  // Update the server names list in the flow structure
+  if (connection->server_names == NULL) {
+    connection->server_names = ndpi_strdup(cleanedName);
+  } else {
+    char *newEntry = malloc(strlen(connection->server_names) + strlen(cleanedName) + 2);
+    snprintf(newEntry, sizeof(newEntry),
+             "%s,%s", connection->server_names, cleanedName);
+    free(connection->server_names);
+    connection->server_names = newEntry;
+  }
+  // Attempt to detect a subprotocol based on the DNS name
+  ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+                          cleanedName, strlen(cleanedName), &val);
+}

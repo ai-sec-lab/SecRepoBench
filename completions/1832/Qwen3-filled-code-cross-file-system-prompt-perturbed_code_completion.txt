@@ -1,0 +1,143 @@
+<think>
+Okay, I need to fill in the masked region in the read_matrix_params function. Let me read through the code and the comments to understand what needs to be done.
+
+The function read_matrix_params is part of an MLP decoder. The masked section is supposed to handle reading and validating matrix parameters. The comment above the mask gives a detailed description of what needs to be done. Let me break down the steps.
+
+First, the code has already read s->num_primitive_matrices. The next step is to validate that this number doesn't exceed max_primitive_matrices. Then, for each primitive matrix, we need to read the output channel, fractional bits, and whether LSBs are bypassed. Also, if the output channel is too high or fractional bits over 14, log an error.
+
+Then, if the noise type isn't set, adjust the max channel. For each channel, read the coefficient, multiply by 2^fractional_bits. If noise type is set, read matrix noise shift, else set to zero. If any validation fails, clean up and return error.
+
+Looking at the variables involved, the SubStream structure probably has arrays for matrices. Let's see variables like matrix_noise_shift, matrix_output_channel, matrix_fbits, matrix_bypass_lsb, and matrix_coeff.
+
+So, steps:
+
+1. Check if s->num_primitive_matrices > max_primitive_matrices. If yes, error.
+2. For each matrix in 0 to s->num_primitive_matrices-1:
+   a. Read output channel (mat_out) using get_bits(gbp, 6) perhaps? Wait, need to check how many bits. The max matrix channel would be related to the codec. Maybe get_bits(gbp, 6) since MAX_CHANNELS is probably up to 63?
+   b. Check if mat_out exceeds max_matrix_channel. Also, if noise type not set, max_matrix_channel might be higher. Wait, the comment says "if the noise type is not set, adjust the max channel to account for additional noise channels." Hmm, but how is noise type determined here? Maybe there's a flag in the bitstream. Wait, perhaps the noise type is part of the data read elsewhere. Alternatively, maybe the presence of noise channels is determined by some other parameter. But in the generate_2_noise_channels function, it's adding two channels beyond max_matrix_channel. So, if noise is present, the allowed channels could be up to max_matrix_channel + 2 or something. But in the validation step, if the noise type is not set, then the max channel should be adjusted. Wait, the comment says "if the noise type is not set, adjust the max channel to account for additional noise channels." Wait, that might be a bit confusing. Maybe if the noise type is set (i.e., if the matrix uses noise), then the max channel is different. Or perhaps the presence of noise is determined by another parameter. Alternatively, perhaps the noise_shift is read here. Hmm.
+
+Wait, the code after processing each matrix needs to check if the noise type is set. Wait, the comment says: "If noise type is set, read and store the matrix noise shift value, otherwise set it to zero." So, perhaps there's a flag indicating if noise is used. But how is that flag read? Or maybe the noise_shift is read conditionally. Let me think.
+
+The code steps according to the comment:
+
+For each primitive matrix:
+
+- Read output channel, fractional bits, bypass LSB flag.
+
+- Check if output channel exceeds max_matrix_channel or fractional bits >14. Error if so.
+
+Then, "if the noise type is not set, adjust the max channel to account for additional noise channels." Hmm. Maybe the noise type is a separate flag. Or perhaps the presence of noise is determined by the output channel? Like if the output channel is beyond a certain value, noise is used. Alternatively, maybe the noise_shift is non-zero. Not sure. But perhaps the code in the mask needs to read some bits indicating whether noise is used here.
+
+Alternatively, perhaps the matrix_noise_shift is read only if some condition is met. Let's see the comment again: "If noise type is set, read and store the matrix noise shift value, otherwise set it to zero." So, there's a flag indicating noise type. So, perhaps in the bitstream, after the other data, there's a bit indicating if noise is used. Then, if that bit is set, read the noise shift. Otherwise, set to zero.
+
+But how to model this. Let's proceed step by step.
+
+First, validate the number of matrices. Then loop through each matrix:
+
+For (mat = 0; mat < s->num_primitive_matrices; mat++).
+
+In each iteration:
+
+Read channel (mat_out) = get_bits(gbp, ...). How many bits? Since the max possible channel depends on the codec. For MLP, MAX_CHANNELS is 6 (as in MLP, up to 5.1), but TrueHD may have more. Wait, looking at the code in the repo, perhaps in the MLPDecodeContext, there's a max_matrix_channel variable. The comment says "max matrix channel" which is probably stored in s->max_matrix_channel. So, when reading the output channel, we need to check against that.
+
+Wait, in the code fragment for generate_2_noise_channels, they use s->max_matrix_channel. So, perhaps the output channel must be <= max_matrix_channel. But the comment says that if noise type is not set, adjust the max to account for noise channels. Hmm. Maybe if the matrix does not use noise, then the output channel can't be in the noise channels. But perhaps the noise channels are beyond the max_matrix_channel. But this part is a bit unclear. Let's proceed.
+
+So, first step:
+
+if (s->num_primitive_matrices > max_primitive_matrices) {
+    av_log..., return error.
+}
+
+Then, loop through each matrix:
+
+for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+    read mat_out = get_bits(gbp, 6); // assuming 6 bits gives up to 63, but need to check.
+    if (mat_out > s->max_matrix_channel) {
+        error, invalid data.
+    }
+
+    fbits = get_bits(gbp, 4);
+    if (fbits > 14) {
+        error.
+    }
+
+    bypass_lsb = get_bits1(gbp);
+
+    // Then, read coefficients for each channel. Wait, the comment says "for each channel, read a coefficient value". Wait, each matrix has multiple channels? Or per matrix, one channel? The description says "primitive matrix" which might be per channel. Maybe each matrix entry is for a channel. Or perhaps each matrix is a set of coefficients for multiple channels. Not sure. Wait, the comment says "for each channel, read a coefficient value". Hmm, perhaps per matrix entry, there are multiple coefficients (per channel?), but that's unclear. Alternatively, perhaps each matrix is per channel, and the coefficients are for that channel. Or maybe the matrix is a mixing matrix, combining channels.
+
+Alternatively, perhaps the code is reading coefficients for each channel in the matrix. But perhaps the code in the mask is supposed to read for each matrix entry, a coefficient for the channel. Maybe the matrix is applied to channels, and each matrix has a coefficient for each input channel. But this is unclear. However, looking at the code structure, perhaps each matrix has a single coefficient. Or perhaps the code is reading a coefficient for each channel in the output. But the comment says "for each channel, read a coefficient value". Wait, perhaps the matrix has multiple channels, and each matrix's coefficient is read for each of those channels.
+
+Alternatively, perhaps the code is part of a decoding process where each matrix is associated with a channel, and the coefficient is read for that channel. But this is getting a bit stuck.
+
+Wait, looking at the comment again:
+
+"For each primitive matrix, read the output channel, fractional bits, and whether LSBs should be bypassed. If the output channel exceeds the max matrix channel or the fractional bits exceed 14, log an error. If the noise type is not set, adjust the max channel to account for additional noise channels. For each channel, read a coefficient value, multiplying it by a power of two based on the fractional bits. If noise type is set, read and store the matrix noise shift value, otherwise set it to zero."
+
+Wait, "for each channel" here might refer to the channels in the matrix. Or perhaps "each channel" refers to each input channel contributing to the matrix's output. Or perhaps the matrix is a mixing matrix where each entry is a coefficient for an input channel to output channel mapping. But perhaps the code is handling a single coefficient per matrix. But the wording is a bit ambiguous.
+
+Alternatively, perhaps "primitive matrix" refers to a single output channel's parameters, and each matrix has coefficients for each input channel. But that's unclear.
+
+Alternatively, perhaps each "primitive matrix" is a set of parameters for a single output channel. For example, each matrix entry in the code corresponds to an output channel, and the coefficients are the weights applied to input channels. But how many coefficients per matrix? That's unclear. However, given that the code is in the MLP decoder, which uses matrixing for channel mixing, perhaps each matrix entry in the bitstream represents a single output channel's coefficients. But how many input channels are there?
+
+But given that the code in the mask is supposed to read a coefficient for each channel, perhaps per matrix. But this is getting stuck. Let's look for variables in the code.
+
+The SubStream structure probably has variables like matrix_output_channel, matrix_fbits, matrix_bypass_lsb, matrix_coeff, matrix_noise_shift. So, for each matrix (primitive matrix), we need to store these values.
+
+So, for each matrix in 0 to s->num_primitive_matrices-1:
+
+s->matrix_output_channel[mat] = mat_out (after checking)
+s->matrix_fbits[mat] = fbits (after checking)
+s->matrix_bypass_lsb[mat] = bypass_lsb
+s->matrix_coeff[mat] = coefficient read multiplied by 2^fbits
+s->matrix_noise_shift[mat] = read if noise type set, else zero.
+
+But how is the noise type determined? The comment says "if noise type is set, read and store matrix noise shift". So, perhaps after reading the coefficient, there's a flag indicating noise type. Or maybe the noise type is determined by the coefficient's value. Not sure.
+
+Alternatively, perhaps the noise_shift is read per matrix. The comment says that if noise type is set, then read the noise shift. So, perhaps after the coefficient, a bit indicates if noise is used. For example:
+
+noise_type = get_bits1(gbp);
+if (noise_type) {
+    noise_shift = get_bits(gbp, 4);
+} else {
+    noise_shift = 0;
+}
+
+But how many bits for noise_shift? The generate_2_noise_channels function uses s->noise_shift, which is then multiplied by (1 << s->noise_shift). So, perhaps noise_shift is a value read from the bitstream.
+
+But the comment says "read and store the matrix noise shift value, otherwise set to zero". So, perhaps after reading the coefficient, a bit indicates if noise is present. Then, if set, read the noise shift.
+
+But how to model this. Let's proceed.
+
+Putting this together:
+
+After reading the output channel, fbits, bypass_lsb:
+
+Check if mat_out > s->max_matrix_channel (but wait, the comment says that if noise type is not set, adjust the max channel. Hmm. So perhaps if the noise type is set, the output channel can be in the noise channels. Or maybe the adjustment is done before checking. The comment says "if the noise type is not set, adjust the max channel to account for additional noise channels". Wait, perhaps the noise type refers to whether this matrix uses noise. If the matrix does not use noise (noise type not set), then the output channel must not be a noise channel, so the max channel is adjusted. Or perhaps the presence of noise in general affects the allowed output channels. Not sure.
+
+Alternatively, perhaps the adjustment to max channel is done before checking the output channel. Like, if noise is not used in this matrix, then the output channel can't be a noise channel, so the max allowed is s->max_matrix_channel. If noise is used, then maybe the output channel can be in the noise channels. But this is unclear.
+
+Alternatively, perhaps the adjustment refers to when noise is present in the stream. For example, if the noise type (some global flag) is not set, then the max channel should be adjusted. Wait, but the comment says "if the noise type is not set, adjust the max channel to account for additional noise channels." So, perhaps the noise type is a global flag indicating that noise is present. But how is that determined here. Alternatively, perhaps the adjustment is made when the matrix does not use noise. For example, if the matrix uses noise, then the output channel can be a noise channel, but if not, then the output channel must be within the max_matrix_channel. But how to know.
+
+This part is a bit confusing. Let's try to proceed.
+
+Assuming that the code must first check if the output channel is valid. So:
+
+mat_out = get_bits(gbp, 6); // example bits, but need to know how many bits to read.
+
+if (mat_out > s->max_matrix_channel) {
+    error.
+}
+
+But then, if noise type is not set, adjust the max. Hmm. Maybe the code should check against a variable adjusted_max_channel. Wait, perhaps the code should compute adjusted_max_channel as s->max_matrix_channel plus some noise channels if noise type is set. But how.
+
+Alternatively, if the matrix uses noise (noise type set), then the output channel can be in the noise channels. Otherwise, it can't. So, the code would have to read a noise_type flag first.
+
+But the comment says that after reading the matrix parameters, if noise type is set, read the noise shift, else set to zero.
+
+So, perhaps the steps per matrix are:
+
+Read mat_out (bits?), fbits, bypass_lsb.
+
+Check if mat_out exceeds max_matrix_channel adjusted for noise. Wait, the comment says "if the noise type is not set, adjust the max channel to account for additional noise channels." So, if the current matrix's noise type is not set, then the max allowed channel is adjusted. Or perhaps the adjustment is made when noise is not present in the stream. Not sure.
+
+Alternatively, perhaps the adjustment is made when the matrix does not use noise.
