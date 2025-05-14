@@ -77,5 +77,7 @@ MODELS = {
     'qwen-plus': 'qwen-plus-2025-01-25',
     'gemini-2-flash': 'gemini-2.0-flash',
     'deepseek-coder-1.3b-instruct': 'deepseek-ai/deepseek-coder-1.3b-instruct',
-    # 'DeepSeek-V3': 'deepseek-ai/DeepSeek-V3'
+    # 'DeepSeek-V3': 'deepseek-ai/DeepSeek-V3',
+    'gpt-4.1': 'gpt-4.1-2025-04-14',
+    'gpt-o3': 'o3-2025-04-16'
 }

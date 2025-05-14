@@ -18,7 +18,7 @@ def main():
     modes = ['perturbed']
 
     # consider exposing num_workers
-    num_workers = 16
+    num_workers = 42
 
     # evaluate all ids in ids.txt
     with open('ids.txt', 'r') as f:
