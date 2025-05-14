@@ -13,7 +13,6 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
 os.environ["OPENAI_API_KEY"] = ""
-
 class BaseEvaler(ABC):
     def __init__(self):
         self.model_name = 'gpt-4o-2024-08-06'
