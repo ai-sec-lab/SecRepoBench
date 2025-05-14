@@ -12,8 +12,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
-os.environ["OPENAI_API_KEY"] = "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"
-
+os.environ["OPENAI_API_KEY"] = ""
 class BaseEvaler(ABC):
     def __init__(self):
         self.model_name = 'gpt-4o-2024-08-06'
