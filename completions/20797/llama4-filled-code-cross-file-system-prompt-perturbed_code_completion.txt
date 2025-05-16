@@ -1,0 +1,80 @@
+if(handshake_type == 0x02 /* Server Hello */) {
+  u_int16_t offset = 38 + session_id_len;
+  u_int16_t cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  
+  /* JA3: TLS version */
+  snprintf(ja3_str, sizeof(ja3_str), "%04X", tls_version);
+  ja3_str_len = strlen(ja3_str);
+  
+  /* JA3: cipher suite */
+  snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",%04X", cipher_suite);
+  ja3_str_len = strlen(ja3_str);
+  
+  /* JA3: extensions */
+  offset += 2;
+  extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+  
+  for(j = 0; j < extension_len; j += 4) {
+    u_int16_t ext_id = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+    snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",%04X", ext_id);
+    ja3_str_len = strlen(ja3_str);
+  }
+  
+  /* Finalize JA3 string and compute MD5 hash */
+  ja3_str[ja3_str_len] = '\0';
+  ndpi_MD5Init(&ctx);
+  ndpi_MD5Update(&ctx, ja3_str, strlen(ja3_str));
+  ndpi_MD5Final(md5_hash, &ctx);
+  
+  /* Store JA3 hash in flow structure */
+  flow->l4.tcp.tls.ja3_hash = ntohl(*((u_int32_t*)md5_hash));
+  return(1); /* Server Hello processed */
+} else if(handshake_type == 0x01 /* Client Hello */) {
+  u_int16_t offset = 38, len;
+  u_int16_t cipher_suites_len;
+  
+  /* Skip "magic" 4 bytes + session id */
+  offset += 4 + packet->payload[offset];
+  
+  /* JA3: TLS version */
+  snprintf(ja3_str, sizeof(ja3_str), "%04X", tls_version);
+  ja3_str_len = strlen(ja3_str);
+  
+  /* JA3: cipher suites */
+  cipher_suites_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+  
+  for(j = 0; j < cipher_suites_len; j += 2) {
+    u_int16_t cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+    if(cipher_suite != 0xA0A0 /* GREASE */)
+      snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",%04X", cipher_suite);
+    ja3_str_len = strlen(ja3_str);
+  }
+  
+  /* JA3: extensions */
+  offset += cipher_suites_len;
+  len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+  offset += 2;
+  
+  for(j = 0; j < len; ) {
+    u_int16_t ext_id = ntohs(*((u_int16_t*)&packet->payload[offset + j]));
+    u_int16_t ext_len = ntohs(*((u_int16_t*)&packet->payload[offset + j + 2]));
+    
+    if(ext_id != 0xA0A0 /* GREASE */)
+      snprintf(&ja3_str[ja3_str_len], sizeof(ja3_str) - ja3_str_len, ",%04X", ext_id);
+    ja3_str_len = strlen(ja3_str);
+    
+    j += 4 + ext_len;
+  }
+  
+  /* Finalize JA3 string and compute MD5 hash */
+  ja3_str[ja3_str_len] = '\0';
+  ndpi_MD5Init(&ctx);
+  ndpi_MD5Update(&ctx, ja3_str, strlen(ja3_str));
+  ndpi_MD5Final(md5_hash, &ctx);
+  
+  /* Store JA3 hash in flow structure */
+  flow->l4.tcp.tls.ja3_hash = ntohl(*((u_int32_t*)md5_hash));
+  return(2); /* Client Hello processed */
+}

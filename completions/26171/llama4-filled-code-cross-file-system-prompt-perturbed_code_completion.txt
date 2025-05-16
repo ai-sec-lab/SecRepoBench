@@ -1,0 +1,56 @@
+int32_t nstreams, elem_size, nelems;
+int64_t ntbytes = 0, cbytes;
+uint8_t *s, *d;
+blosc2_context* context = thread_context->parent_context;
+uint8_t* filters = context->filters;
+int32_t compformat = (context->header_flags & 0xe0) >> 5;
+
+// Calculate the number of streams and elements per block
+nstreams = context->nstreams;
+elem_size = context->typesize;
+nelems = (int32_t)(bsize / elem_size);
+
+// Prepare destination buffer depending on whether filters are applied
+if (filters[0] != BLOSC_NOFILTER) {
+  d = tmp;
+} else {
+  d = dest + destinationoffset;
+}
+
+for (int j = 0; j < nstreams; j++) {
+  // Iterate over each stream and for each stream, read the compressed size
+  int32_t compressed_size = 0;
+  if (j < nstreams - 1) {
+    // Read the compressed size for all but the last stream
+    compressed_size = read_compressed_size(src, srcsize, src_offset);
+    src_offset += BLOSC_MIN_HEADER_SIZE;
+  } else {
+    // For the last stream, calculate the compressed size based on the remaining source size
+    compressed_size = srcsize - src_offset;
+  }
+
+  // Decompress the data using the appropriate decompression format
+  s = src + src_offset;
+  cbytes = decompress_block(context, compformat, s, compressed_size, d, nelems * elem_size);
+
+  if (cbytes < 0) {
+    // Handle decompression error
+    return cbytes;
+  }
+
+  // Accumulate the total number of compressed and uncompressed bytes for the block
+  ntbytes += cbytes;
+  src_offset += compressed_size;
+  d += cbytes;
+}
+
+// Apply filters if any
+if (filters[0] != BLOSC_NOFILTER) {
+  int errcode = pipeline_d(context, bsize, dest, destinationoffset, tmp, tmp2, tmp3, last_filter_index);
+  if (errcode < 0) {
+    return errcode;
+  }
+}
+
+// Return the number of uncompressed bytes
+return (int)ntbytes;

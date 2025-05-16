@@ -30,6 +30,27 @@ def get_c_cpp_file(base_path: str):
     return content
 
 
+import os
+from dotenv import load_dotenv, find_dotenv
+
+# automatically find & load the nearest .env file
+load_dotenv(find_dotenv())
+
+def get_c_cpp_file(base_path: str):
+    c_path = base_path + '.c'
+    cpp_path = base_path + '.cpp'
+    if os.path.exists(c_path):
+        path = c_path
+    elif os.path.exists(cpp_path):
+        path = cpp_path
+    else:
+        print(f'This file does not exist with a c or cpp extension: {base_path}')
+        return
+    with open(path, 'r') as f:
+        content = f.read()
+    return content
+
+
 safety_settings = [
     {
         "category": "HARM_CATEGORY_DANGEROUS",
@@ -175,6 +196,10 @@ class APIEvaler(BaseEvaler):
         self.get_content = self._get_content_function()
 
     def _initialize_client(self, system_prompt=None):
+<<<<<<< HEAD
+=======
+         
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
         if 'gpt-' in self.model_name or self.model_name in ['o3-mini-2025-01-31', 'o1-2024-12-17']:
             return openai.OpenAI()
         elif 'claude-' in self.model_name:
@@ -193,6 +218,16 @@ class APIEvaler(BaseEvaler):
                 base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
             )
         elif 'DeepSeek' in self.model_name:
+<<<<<<< HEAD
+=======
+             
+            together_api_key = os.environ.get("TOGETHER_API_KEY")
+            if not together_api_key:
+                raise ValueError("TOGETHER_API_KEY not set in environment")
+            # Return a simple dict; our create function will use this key.
+            return {"api_key": together_api_key}
+        elif self.model_name.startswith("meta-llama/Llama-4") or self.model_name.startswith("Qwen/Qwen3-235B-A22B-fp8-tput"):
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
             together_api_key = os.environ.get("TOGETHER_API_KEY")
             if not together_api_key:
                 raise ValueError("TOGETHER_API_KEY not set in environment")
@@ -212,7 +247,11 @@ class APIEvaler(BaseEvaler):
             return self.client.generate_content
         elif 'qwen-' in self.model_name:
             return self.client.chat.completions.create
+<<<<<<< HEAD
         elif 'DeepSeek' in self.model_name:
+=======
+        elif 'DeepSeek' in self.model_name or self.model_name.startswith("meta-llama/Llama-4") or self.model_name.startswith("Qwen/Qwen3-235B-A22B-fp8-tput"):
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
             # Define a function that calls the Together API endpoint.
             def together_create(**kwargs):
                 url = "https://api.together.xyz/v1/chat/completions"
@@ -241,6 +280,11 @@ class APIEvaler(BaseEvaler):
         elif 'DeepSeek' in self.model_name:
             # Assume Together API returns a JSON with choices similar to OpenAI.
             return lambda response: [response['choices'][0]['message']['content']]
+<<<<<<< HEAD
+=======
+        elif self.model_name.startswith("meta-llama/Llama-4") or self.model_name.startswith("Qwen/Qwen3-235B-A22B-fp8-tput"):
+            return lambda response: [response['choices'][0]['message']['content']]
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
@@ -282,6 +326,15 @@ class APIEvaler(BaseEvaler):
             messages = [{'role': 'system', 'content': system_prompt}] if system_prompt else []
             messages.extend([{'role': role, 'content': content} for role, content in history])
             messages.append({'role': 'user', 'content': prompt})
+<<<<<<< HEAD
+=======
+        elif self.model_name.startswith("meta-llama/Llama-4") or self.model_name.startswith("Qwen/Qwen3-235B-A22B-fp8-tput"):
+            # Together API uses the same message structure as OpenAI
+            messages = [{'role': 'system', 'content': system_prompt}] if system_prompt else []
+            messages.extend([{'role': role, 'content': content} for role, content in history])
+            messages.append({'role': 'user', 'content': prompt})
+
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
         
@@ -367,6 +420,18 @@ class APIEvaler(BaseEvaler):
                 'top_p': 1,
                 'n': 1,
             }
+<<<<<<< HEAD
+=======
+        elif self.model_name.startswith("meta-llama/Llama-4") or self.model_name.startswith("Qwen/Qwen3-235B-A22B-fp8-tput"):
+            return {
+                'model': self.model_name,
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': 8000+max_tokens,
+                'top_p': 1,
+                'n': 1,
+            }
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
         else:
             raise ValueError(f'Invalid model name: {self.model_name}')
 
@@ -387,9 +452,15 @@ class APIEvaler(BaseEvaler):
         if 'gemini-' in self.model_name:
             self.client = self._initialize_client(system_prompt)
             self.create = self._get_create_function()
+<<<<<<< HEAD
         # if id in self.responses_cache:
         #     print('Using cache')
         #     return self.postprocess(self.responses_cache[id]), prompt, system_prompt
+=======
+        if id in self.responses_cache:
+            print('Using cache')
+            return self.postprocess(self.responses_cache[id]), prompt, system_prompt
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
 
         if self.prompt_type != 'refine':
             messages = self._create_messages(prompt, system_prompt)
@@ -449,8 +520,8 @@ class ChatEvaler(BaseEvaler):
         terminators = [
             self.tokenizer.eos_token_id,
         ]
-        if 'llama' in self.model_name.lower():
-            terminators.append(self.tokenizer.convert_tokens_to_ids("<|eot_id|>"))
+        # if 'llama' in self.model_name.lower():
+        #     terminators.append(self.tokenizer.convert_tokens_to_ids("<|eot_id|>"))
 
         if self.prompt_type != 'refine':
             if system_prompt is not None:

@@ -1,0 +1,198 @@
+// Select the appropriate character map (encoding) for the font face based on
+// the provided encoding string. If an encoding is specified, determine the
+// corresponding FreeType encoding type using a series of string comparisons.
+// If the encoding type is successfully determined, apply it to the font face.
+// If the encoding type cannot be applied, handle the error by cleaning up
+// resources and throwing an exception.
+if (encoding != (const char *) NULL)
+{
+  if (LocaleCompare(encoding,"unicode-bmp") == 0)
+    encoding_type=FT_ENCODING_UNICODE;
+  else
+    if (LocaleCompare(encoding,"iso-10646") == 0)
+      encoding_type=FT_ENCODING_UNICODE;
+    else
+      if (LocaleCompare(encoding,"apple-roman") == 0)
+        encoding_type=FT_ENCODING_APPLE_ROMAN;
+      else
+        {
+          ft_status=FT_Select_Charmap(face,FT_ENCODING_NONE);
+          if (ft_status != 0)
+            {
+              (void) FT_Done_FreeType(library);
+              ThrowFreetypeErrorException("UnableToReadFont",ft_status,
+                args.pathname);
+              args.pathname=DestroyString(args.pathname);
+              return(MagickFalse);
+            }
+        }
+}
+else
+  encoding_type=FT_ENCODING_UNICODE;
+
+ft_status=FT_Set_Charmap(face,encoding_type);
+
+// Set the character size for the font face based on the point size and
+// resolution specified in the DrawInfo structure. Adjust the resolution
+// if a custom density is provided. If setting the character size fails,
+// handle the error by cleaning up resources and throwing an exception.
+resolution.x=DefaultResolution;
+resolution.y=DefaultResolution;
+if (draw_info->density != (char *) NULL)
+  {
+    const char
+      *p;
+
+    /*
+      Parse the density, e.g. 72x72.
+    */
+    for (p=draw_info->density; *p != '\0'; p++)
+      if ((*p == 'x') || (*p == ','))
+        {
+          resolution.x=atof(draw_info->density);
+          resolution.y=atof(p+1);
+          break;
+        }
+  }
+if (draw_info->pointsize > 0.0)
+  {
+    double
+      scale;
+
+    /*
+      Convert from typographic points to pixels.
+    */
+    scale=((double) resolution.x/72.0);
+    ft_status=FT_Set_Char_Size(face,(FT_F26Dot6) (draw_info->pointsize*
+      64.0),(FT_F26Dot6) (draw_info->pointsize*64.0),0,0);
+    if (ft_status != 0)
+      {
+        (void) FT_Done_FreeType(library);
+        ThrowFreetypeErrorException("UnableToReadFont",ft_status,
+          args.pathname);
+        args.pathname=DestroyString(args.pathname);
+        return(MagickFalse);
+      }
+  }
+else
+  {
+    /*
+      Set character size based on image resolution.
+    */
+    ft_status=FT_Set_Pixel_Sizes(face,(FT_UInt) resolution.x,(FT_UInt)
+      resolution.y);
+    if (ft_status != 0)
+      {
+        (void) FT_Done_FreeType(library);
+        ThrowFreetypeErrorException("UnableToReadFont",ft_status,
+          args.pathname);
+        args.pathname=DestroyString(args.pathname);
+        return(MagickFalse);
+      }
+  }
+
+// Initialize the TypeMetric structure with font size metrics such as ascent,
+// descent, width, height, and maximum advance. If necessary, sanitize any
+// incorrect ascender and descender values. Calculate underline position and
+// thickness based on the font's properties.
+metrics->ascent=(double) face->ascender/face->units_per_EM;
+metrics->descent=(double) face->descender/face->units_per_EM;
+metrics->width=(double) face->bbox.xMax/face->units_per_EM;
+metrics->height=(double) (face->bbox.yMax-face->bbox.yMin)/face->units_per_EM;
+metrics->max_advance=(double) face->max_advance/face->units_per_EM;
+if (fabs(metrics->ascent) < 0.001)
+  metrics->ascent=0.8;
+if (fabs(metrics->descent) < 0.001)
+  metrics->descent=0.2;
+
+// If there is no text to render, or no glyphs in the font, clean up resources
+// and return a successful status without proceeding further.
+if ((draw_info->text == (char *) NULL) || (strlen(draw_info->text) == 0))
+  {
+    (void) FT_Done_FreeType(library);
+    return(MagickTrue);
+  }
+
+// Configure rendering options such as anti-aliasing and hinting based on
+// the DrawInfo settings and image properties. Prepare structures for
+// rendering each glyph in the text string, transforming the glyphs according
+// to specified affine transformations.
+flags=FT_LOAD_NO_BITMAPS;
+if (draw_info->anti_alias != MagickFalse)
+  flags|=FT_LOAD_TARGET_NORMAL;
+else
+  flags|=FT_LOAD_MONOCHROME;
+if (draw_info->hinting != MagickFalse)
+  flags|=FT_LOAD_HINTING;
+else
+  flags|=FT_LOAD_NO_HINTING;
+
+// Loop through each character in the text, rendering glyphs, tracing outlines
+// if necessary, and rasterizing the glyphs onto the image. Adjust the
+// position and metrics of each rendered glyph, and update the bounding box
+// of the text as needed. Manage resources and synchronize image data
+// appropriately during the rendering process.
+grapheme=(GraphemeInfo *) NULL;
+length=strlen(draw_info->text);
+if (draw_info->complexity != MagickFalse)
+  {
+    size_t
+      extent;
+
+    extent=ComplexTextLayout(img,draw_info,draw_info->text,length,face,flags,
+      &grapheme,exception);
+    if (extent == 0)
+      {
+        (void) FT_Done_FreeType(library);
+        return(MagickFalse);
+      }
+  }
+else
+  {
+    ssize_t
+      i;
+
+    /*
+      Simple layout for left-to-right text.
+    */
+    length=0;
+    for (i=0; GetUTFCode(draw_info->text+i) != 0; i+=GetUTFOctets(
+      draw_info->text+i), length++)
+    {
+    }
+    grapheme=(GraphemeInfo *) AcquireQuantumMemory(length+1,sizeof(*grapheme));
+    if (grapheme == (GraphemeInfo *) NULL)
+      {
+        (void) FT_Done_FreeType(library);
+        return(MagickFalse);
+      }
+    for (i=0; i < (ssize_t) length; i++)
+    {
+      grapheme[i].index=(ssize_t) FT_Get_Char_Index(face,GetUTFCode(
+        draw_info->text+i));
+      grapheme[i].x_offset=0;
+      grapheme[i].y_offset=0;
+      (void) FT_Load_Glyph(face,(FT_UInt) grapheme[i].index,flags);
+      grapheme[i].x_advance=face->glyph->advance.x;
+      grapheme[i].cluster=i;
+    }
+  }
+
+// Finalize the font metrics by normalizing the bounding box coordinates and
+// width. Clean up any remaining resources and return the rendering status.
+metrics->bounds.x=(double) face->bbox.xMin/face->units_per_EM;
+metrics->bounds.y=(double) face->bbox.yMin/face->units_per_EM;
+metrics->bounds.width=(double) (face->bbox.xMax-face->bbox.xMin)/
+  face->units_per_EM;
+metrics->bounds.height=(double) (face->bbox.yMax-face->bbox.yMin)/
+  face->units_per_EM;
+metrics->underline_position=metrics->ascent;
+metrics->underline_thickness=1.0;
+if (face->underline_position != 0)
+  metrics->underline_position=(double) face->underline_position/
+    face->units_per_EM;
+if (face->underline_thickness != 0)
+  metrics->underline_thickness=(double) face->underline_thickness/
+    face->units_per_EM;
+(void) FT_Done_FreeType(library);
+return(MagickTrue);

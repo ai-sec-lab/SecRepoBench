@@ -107,10 +107,19 @@ MODELS = {
     'codegen-6B-mono': "Salesforce/codegen-6B-mono", 
     "Qwen2.5-Coder-32B-Instruct":"Qwen/Qwen2.5-Coder-32B-Instruct",
     "DeepSeek-R1-Distill-Qwen-32B":"deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+<<<<<<< HEAD
     "Qwen3":"Qwen/Qwen3-235B-A22B", 
     "llama4": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "cisco-llama8b":"fdtn-ai/Foundation-Sec-8B",
     "gpt-4.1":"gpt-4.1"
+=======
+    "Qwen3":"Qwen/Qwen3-235B-A22B-fp8-tput", 
+    "llama4": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "cisco-llama8b":"fdtn-ai/Foundation-Sec-8B",
+    "gpt-4.1":"gpt-4.1",
+    "llama-maverick":"meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+     
+>>>>>>> 6b1e84907de5435ac2befc1846e1f4c4e1ffc457
 }
 
 
