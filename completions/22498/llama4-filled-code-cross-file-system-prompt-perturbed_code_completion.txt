@@ -1,0 +1,54 @@
+u_int8_t *payload = packet->payload;
+  u_int16_t len = packet->payload_packet_len;
+  u_int16_t idx = 0, i;
+  u_int8_t crlf = 0;
+
+  while (idx < len) {
+    if (payload[idx] == '\r' && idx + 1 < len && payload[idx + 1] == '\n') {
+      crlf = 1;
+      packet->line[packet->parsed_lines].len = idx - packet->line[packet->parsed_lines].ptr;
+      packet->parsed_lines++;
+      if(packet->parsed_lines >= NDPI_MAX_PARSE_LINES) break;
+      packet->line[packet->parsed_lines].ptr = &payload[idx + 2];
+      packet->line[packet->parsed_lines].len = 0;
+      idx += 2;
+    } else {
+      idx++;
+    }
+  }
+
+  if(packet->parsed_lines >= 1) {
+    packet->line[packet->parsed_lines].len =
+      (u_int16_t)(((unsigned long) &packet->payload[packet->payload_packet_len]) -
+		  ((unsigned long) packet->line[packet->parsed_lines].ptr));
+    packet->parsed_lines++;
+  }
+
+  if (packet->parsed_lines > 1) {
+    u_int8_t *first_line = packet->line[0].ptr;
+    u_int16_t first_line_len = packet->line[0].len;
+
+    if (ndpi_is_http_like_reply(first_line, first_line_len)) {
+      ndpi_parse_http_response(ndpi_str, dataflow);
+    }
+  }
+
+  for (i = 0; i < packet->parsed_lines; i++) {
+    if (packet->line[i].len > 0) {
+      if (packet->line[i].len > 5 && strncasecmp((const char *)packet->line[i].ptr, "Server:", 7) == 0) {
+        ndpi_parse_http_server(ndpi_str, dataflow, &packet->line[i]);
+      } else if (packet->line[i].len > 5 && strncasecmp((const char *)packet->line[i].ptr, "Host:", 5) == 0) {
+        ndpi_parse_http_host(ndpi_str, dataflow, &packet->line[i]);
+      } else if (packet->line[i].len > 11 && strncasecmp((const char *)packet->line[i].ptr, "Content-Type:", 13) == 0) {
+        ndpi_parse_http_content_type(ndpi_str, dataflow, &packet->line[i]);
+      }
+    }
+  }
+
+  if(crlf == 1) {
+    u_int16_t binary_bytes_len = packet->payload_packet_len - packet->line[packet->parsed_lines-1].ptr - packet->line[packet->parsed_lines-1].len;
+    if(binary_bytes_len > 0) {
+      memcpy(dataflow->initial_binary_bytes, packet->line[packet->parsed_lines-1].ptr + packet->line[packet->parsed_lines-1].len, binary_bytes_len);
+      dataflow->initial_binary_bytes_len = binary_bytes_len;
+    }
+  }

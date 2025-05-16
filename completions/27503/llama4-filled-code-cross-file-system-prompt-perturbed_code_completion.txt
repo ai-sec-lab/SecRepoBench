@@ -1,0 +1,168 @@
+// Process the audio data based on the element tag
+		switch (tag)
+		{
+			case ID_SCE:	// mono
+			case ID_LFE:	// LFE channel (subwoofer)
+				// Read and process header parameters
+				headerByte = BitBufferRead (bits, 8) ;
+				partialFrame = headerByte & 0x08 ;
+				bytesShifted = (headerByte & 0x06) >> 1 ;
+				escapeFlag = headerByte & 0x01 ;
+
+				if (partialFrame)
+				{
+					chanBits = BitBufferRead (bits, 32) ;
+					*outNumSamples = chanBits ;
+				}
+				else
+				{
+					*outNumSamples = numSamples ;
+					chanBits = p->mBitDepth - (bytesShifted * 8) ;
+				}
+
+				if (escapeFlag)
+				{
+					// Read and discard the escape data
+					for (i = 0 ; i < (*outNumSamples * p->mBitDepth) ; i += p->mBitDepth)
+					{
+						val = BitBufferRead (bits, p->mBitDepth) ;
+					}
+				}
+				else
+				{
+					// Decompress data and apply prediction
+					pb = p->mConfig.pb ;
+					denShiftU = DENSHIFT_DEFAULT ;
+					pbFactorU = 4 ;
+					numU = 0 ;
+					modeU = 0 ;
+
+					// Read the coefs
+					coefsU [0] = BitBufferRead (bits, 16) ;
+
+					// Read the num coefs
+					numU = 1;
+
+					// Decode
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorU * pb) / 4, p->mConfig.kb, *outNumSamples, numSamples, MAX_RUN_DEFAULT) ;
+					status = dyn_decomp (&agParams, bits, &coefsU [0], numSamples, 32, &extraBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// Apply the prediction
+					pc_block (coefsU, p->mPredictorU, *outNumSamples, numU, chanBits, denShiftU) ;
+
+					// Write the result to the output buffer
+					out32 = sampleBuffer + channelIndex ;
+					for (i = 0 ; i < *outNumSamples ; i++)
+					{
+						out32 [i] = p->mPredictorU [i] ;
+					}
+				}
+
+				channelIndex++ ;
+				break ;
+
+			case ID_CPE:	// stereo channel pair
+				// Ensure channel limit is not exceeded
+				RequireAction (channelIndex < numChannels, status = kALAC_ParamError ; goto Exit ;) ;
+
+				// Read and process header parameters
+				headerByte = BitBufferRead (bits, 8) ;
+				partialFrame = headerByte & 0x08 ;
+				bytesShifted = (headerByte & 0x06) >> 1 ;
+				escapeFlag = headerByte & 0x01 ;
+
+				if (partialFrame)
+				{
+					chanBits = BitBufferRead (bits, 32) ;
+					*outNumSamples = chanBits ;
+				}
+				else
+				{
+					*outNumSamples = numSamples ;
+					chanBits = p->mBitDepth - (bytesShifted * 8) ;
+				}
+
+				if (escapeFlag)
+				{
+					// Read and discard the escape data
+					for (i = 0 ; i < (*outNumSamples * p->mBitDepth * 2) ; i += p->mBitDepth)
+					{
+						val = BitBufferRead (bits, p->mBitDepth) ;
+						val = BitBufferRead (bits, p->mBitDepth) ;
+					}
+				}
+				else
+				{
+					// Decompress data and apply prediction for left and right channels
+					pb = p->mConfig.pb ;
+					denShiftU = DENSHIFT_DEFAULT ;
+					pbFactorU = 4 ;
+					numU = 0 ;
+					modeU = 0 ;
+
+					// Read the coefs
+					coefsU [0] = BitBufferRead (bits, 16) ;
+
+					// Read the num coefs
+					numU = 1;
+
+					// Decode
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorU * pb) / 4, p->mConfig.kb, *outNumSamples, numSamples, MAX_RUN_DEFAULT) ;
+					status = dyn_decomp (&agParams, bits, &coefsU [0], numSamples, 32, &extraBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// Apply the prediction
+					pc_block (coefsU, p->mPredictorU, *outNumSamples, numU, chanBits, denShiftU) ;
+
+					// Write the result to the output buffer
+					out32 = sampleBuffer + channelIndex ;
+					for (i = 0 ; i < *outNumSamples ; i++)
+					{
+						out32 [i] = p->mPredictorU [i] ;
+					}
+
+					channelIndex++ ;
+
+					// Repeat for right channel
+					pb = p->mConfig.pb ;
+					denShiftV = DENSHIFT_DEFAULT ;
+					pbFactorV = 4 ;
+					numV = 0 ;
+					modeV = 0 ;
+
+					// Read the coefs
+					coefsV [0] = BitBufferRead (bits, 16) ;
+
+					// Read the num coefs
+					numV = 1;
+
+					// Decode
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorV * pb) / 4, p->mConfig.kb, *outNumSamples, numSamples, MAX_RUN_DEFAULT) ;
+					status = dyn_decomp (&agParams, bits, &coefsV [0], numSamples, 32, &extraBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// Apply the prediction
+					pc_block (coefsV, p->mPredictorV, *outNumSamples, numV, chanBits, denShiftV) ;
+
+					// Write the result to the output buffer
+					out32 = sampleBuffer + channelIndex ;
+					for (i = 0 ; i < *outNumSamples ; i++)
+					{
+						out32 [i] = p->mPredictorV [i] ;
+					}
+				}
+
+				channelIndex++ ;
+				break ;
+
+			case ID_END:
+				// Exit the loop
+				status = ALAC_noErr ;
+				goto Exit ;
+
+			default:
+				// Unsupported element
+				status = kALAC_ParamError ;
+				goto Exit ;
+		}

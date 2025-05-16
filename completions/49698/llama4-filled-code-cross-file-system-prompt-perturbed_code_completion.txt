@@ -1,0 +1,51 @@
+pctxt = decode->context;
+if (pctxt == NULL) return EXR_ERR_INVALID_ARGUMENT;
+
+// Check if the compressed data size is at least 20 bytes for a valid header.
+if (nCompressed < 20) return EXR_ERR_CORRUPT_CHUNK;
+
+// Retrieve im and iM from the compressed data
+im = *(uint32_t*) compressed;
+iM = *(uint32_t*) (compressed + 4);
+
+// Validate that 'im' and 'iM' are within acceptable limits.
+if (im >= HUF_ENCSIZE || iM >= HUF_ENCSIZE) return EXR_ERR_CORRUPT_CHUNK;
+
+// Ensure there is enough data in the buffer to perform decompression.
+ptr = compressed + 20;
+nBytes = *(uint32_t*) (compressed + 8);
+if (ptr + nBytes > compressed + nCompressed) return EXR_ERR_CORRUPT_CHUNK;
+
+// Check if fast Huffman decoding is enabled and applicable based on the data size.
+if (internal_exr_use_fast_huf_decoder () && nCompressed > 128 + 20) {
+    // If so, initialize and perform fast Huffman decoding.
+    nBits = *(uint32_t*) (compressed + 12);
+    uint64_t nBytesRemaining = (nBits + 7) / 8;
+    if (ptr + nBytesRemaining > compressed + nCompressed) return EXR_ERR_CORRUPT_CHUNK;
+
+    // Initialize fast Huffman decoder and decode
+    fast_huf_decoder_t fhd;
+    rv = fast_huf_decoder_init (&fhd, ptr, nCompressed - (ptr - compressed), im, iM, iM);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+
+    rv = fast_huf_decode (&fhd, raw, nRawSize);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+} else {
+    // If not, use a slower, standard Huffman decoding method.
+    uint64_t* freq = (uint64_t*) spare;
+    HufDec* hdec = (HufDec*) (freq + HUF_ENCSIZE);
+
+    // Clear and unpack the Huffman encoding table for use in decoding.
+    hufClearDecTable (hdec);
+    rv = hufUnpackEncTable (&ptr, nCompressed - (ptr - compressed), im, iM, freq);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+
+    // Build the Huffman decoding table based on frequency data.
+    rv = hufBuildDecTable (freq, im, iM, hdec);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+
+    // Execute the standard Huffman decoding function and return the result.
+    nBits = *(uint32_t*) (compressed + 12);
+    rv = hufDecode (freq, hdec, ptr, nBits, iM, nRawSize, raw);
+    if (rv != EXR_ERR_SUCCESS) return rv;
+}

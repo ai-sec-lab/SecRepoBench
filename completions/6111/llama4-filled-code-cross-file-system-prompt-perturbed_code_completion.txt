@@ -1,0 +1,147 @@
+// Initialize necessary variables and structures for processing Postscript images.
+  image=NewImageList();
+  read_info=CloneImageInfo(image_info);
+  (void) CopyMagickString(read_info->filename,input_filename,MagickPathExtent);
+  delegate_info=GetDelegateInfo("PostScript",Read,exception);
+  if (delegate_info == (const DelegateInfo *) NULL)
+    {
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  if (read_info->density == (char *) NULL)
+    {
+      if ((image_info->density != (char *) NULL) &&
+          (strlen(image_info->density) != 0))
+        read_info->density=ConstantString(image_info->density);
+      else
+        read_info->density=ConstantString("72x72");
+    }
+  if (image_info->page != (char *) NULL)
+    {
+      char
+        *page_geometry;
+
+      GeometryInfo
+        geometry_info;
+
+      page_geometry=GetPageGeometry(image_info->page);
+      (void) ParseGeometry(page_geometry,&geometry_info);
+      read_info->density=ConstantString(page_geometry);
+      page_geometry=DestroyString(page_geometry);
+    }
+  (void) SetImageInfo(read_info,0,exception);
+  // Open the input image file and create a symbolic link to it for processing.
+  filedescriptor=OpenTemporaryFile(&filename,exception);
+  if (filedescriptor == -1)
+    {
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  (void) CopyMagickString(postscript_filename,filename,MagickPathExtent);
+  (void) CloseFile(filedescriptor);
+  // Initialize an array to map hex characters to their integer values.
+  static const int hex_map[256]=
+  {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0,
+    0, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  };
+  // Set the page density for the image based on the provided resolution or default values.
+  density=read_info->density;
+  if ((density != (char *) NULL) && (strchr(density,'x') != (char *) NULL))
+    {
+      char
+        *p;
+
+      /*
+        Parse the density.
+      */
+      for (p=strchr(density,'x'); p != (char *) NULL; p=strchr(p+1,'x'))
+      {
+        *p='\0';
+        read_info->quality=(size_t) StringToLong(density);
+        density=p+1;
+      }
+      read_info->quality=(size_t) StringToLong(density);
+    }
+  // Determine the page geometry using the Postscript bounding box comments.
+  (void) memset(&geometry_info,0,sizeof(geometry_info));
+  (void) ParseGeometry(read_info->page,&geometry_info);
+  (void) ParsePageGeometry(read_info->page,&columns,&rows);
+  if (columns == 0)
+    columns=geometry_info.columns;
+  if (rows == 0)
+    rows=geometry_info.rows;
+  if ((columns == 0) || (rows == 0))
+    {
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  // Initialize various variables including color space, resolution, and page dimensions.
+  if (image_info->colorspace != UndefinedColorspace)
+    read_info->colorspace=image_info->colorspace;
+  else
+    read_info->colorspace=RGBColorspace;
+  if (image_info->quality != 0)
+    read_info->quality=image_info->quality;
+  read_info->interlace_scheme=NoInterlace;
+  read_info->depth=8;
+  read_info->orientation=TopLeftOrientation;
+  // Create a control file for Ghostscript to render the Postscript image.
+  (void) FormatMagickString(command,MagickPathExtent,"\"%s\" \"%s\"",
+    (const char *) delegate_info->command,(const char *) postscript_filename);
+  if (read_info->density != (char *) NULL)
+    (void) FormatMagickString(command+strlen(command),MagickPathExtent,
+      " -density %s",read_info->density);
+  if (read_info->colorspace == CMYKColorspace)
+    (void) FormatMagickString(command+strlen(command),MagickPathExtent,
+      " -colorspace CMYK");
+  (void) FormatMagickString(command+strlen(command),MagickPathExtent,
+    " -depth %d",(int) read_info->depth);
+  (void) FormatMagickString(command+strlen(command),MagickPathExtent,
+    " -trim");
+  if (image_info->page != (char *) NULL)
+    (void) FormatMagickString(command+strlen(command),MagickPathExtent,
+      " -page %s",image_info->page);
+  (void) FormatMagickString(command+strlen(command),MagickPathExtent,
+    " %s",(const char *) input_filename);
+  // Use the Ghostscript delegate to render the Postscript into a raster format.
+  status=SystemCommand(command,exception);
+  if (status != 0)
+    {
+      (void) RemoveFile(postscript_filename,exception);
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  // Read the rendered images and append them to the image list, handling profiles if necessary.
+  postscript_image=ReadImage(read_info,exception);
+  if (postscript_image == (Image *) NULL)
+    {
+      (void) RemoveFile(postscript_filename,exception);
+      read_info=DestroyImageInfo(read_info);
+      return((Image *) NULL);
+    }
+  (void) RemoveFile(postscript_filename,exception);
+  if (read_info->profiles != (void *) NULL)
+    {
+      char
+        *profile;
+
+      /*
+        Read the embedded ICC profile.
+      */
+      profile=ReadBinaryProfile("icc",postscript_image,exception);
+      if (profile != (char *) NULL)
+        {
+          (void) SetImageProfile(postscript_image,"icc",profile,strlen(profile),
+            exception);
+          profile=DestroyString(profile);
+        }
+    }
+  // Clean up and return the processed image list, handling any errors that occur.
+  read_info=DestroyImageInfo(read_info);

@@ -1,0 +1,55 @@
+// Parse the payload to extract the DNS name or IP address from the subjectAltName extension.
+u_int8_t len = packet->payload[i + 1];
+char dNSName[256];
+memset(dNSName, 0, sizeof(dNSName));
+strncpy(dNSName, (const char*)&packet->payload[i + 2], len);
+dNSName[len] = '\0';
+
+// Convert the extracted address to a string format for IPv4 and IPv6.
+if (inet_pton(AF_INET, dNSName, &(struct in_addr){0})) {
+  // IP address
+} else if (inet_pton(AF_INET6, dNSName, &(struct in6_addr){0})) {
+  // IP address
+} else {
+  // DNS name
+  ndpi_clean_dns_name(dNSName, len);
+}
+
+// Check if the extracted DNS name matches the host server name.
+if (strcasecmp(dNSName, connection->host_server_name) == 0) {
+  matched_name = 1;
+}
+
+// If a match is found, set the matched_name flag and update the server names list in the flow structure.
+if (matched_name) {
+  if (connection->protos.tls_quic.server_names == NULL) {
+    connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+  } else {
+    char* tmp = ndpi_malloc(strlen(connection->protos.tls_quic.server_names) + strlen(dNSName) + 2);
+    if (tmp) {
+      sprintf(tmp, "%s,%s", connection->protos.tls_quic.server_names, dNSName);
+      ndpi_free(connection->protos.tls_quic.server_names);
+      connection->protos.tls_quic.server_names = tmp;
+    }
+  }
+}
+
+// Attempt to detect a subprotocol based on the DNS name and update the flow structure accordingly.
+if (ndpi_struct->tls_cert_subject_automa.ac_automa != NULL) {
+  u_int32_t val;
+  int rc = ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+                                   dNSName, strlen(dNSName), &val);
+  if (rc == 0) {
+    // Match found
+    u_int16_t proto_id = (u_int16_t)val;
+    ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED};
+
+    if(connection->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+      connection->detected_protocol_stack[0] = proto_id,
+      connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+
+      connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+      ndpi_check_subprotocol_risk(ndpi_struct, connection, proto_id);
+    }
+  }
+}

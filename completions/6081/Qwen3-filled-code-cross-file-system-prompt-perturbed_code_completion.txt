@@ -1,0 +1,156 @@
+while (isspace((int) *xml)) xml++;
+if (*xml == '\0') {
+    xml = NULL;
+    continue;
+}
+if (*xml == ']') {
+    xml++;
+    while (isspace((int) *xml)) xml++;
+    if (*xml == '>') xml++;
+    xml = NULL;
+    continue;
+}
+if (strncmp(xml, "!ENTITY", 7) == 0) {
+    xml += 7;
+    while (isspace((int) *xml)) xml++;
+    MagickBooleanType parameter_entity = MagickFalse;
+    if (*xml == '%') {
+        parameter_entity = MagickTrue;
+        xml++;
+        while (isspace((int) *xml)) xml++;
+    }
+    n = xml;
+    while (isalnum((int) *xml) || *xml == '.' || *xml == '-') xml++;
+    size_t name_length = xml - n;
+    char *name = AcquireString(n);
+    name[name_length] = '\0';
+    while (isspace((int) *xml)) xml++;
+    if (*xml != '"' && *xml != '\'') {
+        name = DestroyString(name);
+        ThrowFatalException(SyntaxError, "InvalidEntityDeclaration");
+    }
+    q = *xml++;
+    v = xml;
+    while (*xml != q) {
+        if (*xml == '\0') {
+            name = DestroyString(name);
+            ThrowFatalException(SyntaxError, "UnmatchedQuoteInEntity");
+        }
+        xml++;
+    }
+    size_t value_length = xml - v;
+    char *value = AcquireString(v);
+    value[value_length] = '\0';
+    xml++;
+    for (i = 0; predefined_entitites[i] != NULL; i += 2) {
+        if (strcmp(name, predefined_entitites[i]) == 0) {
+            predefined_entitites[i + 1] = value;
+            break;
+        }
+    }
+    if (predefined_entitites[i] == NULL) {
+        size_t num_entities = 0;
+        while (root->entities[num_entities] != NULL) num_entities++;
+        root->entities = (char **) ResizeMagickMemory(root->entities, (num_entities + 2) * sizeof(char *));
+        if (root->entities == NULL)
+            ThrowFatalException(ResourceLimitError, "MemoryAllocationFailed");
+        root->entities[num_entities] = name;
+        root->entities[num_entities + 1] = value;
+        root->entities[num_entities + 2] = NULL;
+    }
+} else if (strncmp(xml, "!ATTLIST", 8) == 0) {
+    xml += 8;
+    while (isspace((int) *xml)) xml++;
+    char *element = xml;
+    while (!isspace((int) *xml) && *xml != '>') xml++;
+    size_t element_length = xml - element;
+    char *element_copy = AcquireString(element);
+    element_copy[element_length] = '\0';
+    while (isspace((int) *xml)) xml++;
+    char *attr_name = xml;
+    while (!isspace((int) *xml) && *xml != '>') xml++;
+    size_t attr_name_length = xml - attr_name;
+    char *attr_name_copy = AcquireString(attr_name);
+    attr_name_copy[attr_name_length] = '\0';
+    while (isspace((int) *xml)) xml++;
+    char *attr_type = xml;
+    while (!isspace((int) *xml) && *xml != '>') xml++;
+    size_t attr_type_length = xml - attr_type;
+    char *attr_type_copy = AcquireString(attr_type);
+    attr_type_copy[attr_type_length] = '\0';
+    while (isspace((int) *xml)) xml++;
+    char *default_value = NULL;
+    if (strncmp(xml, "#REQUIRED", 9) == 0) {
+        default_value = AcquireString("REQUIRED");
+        xml += 9;
+    } else if (strncmp(xml, "#IMPLIED", 8) == 0) {
+        default_value = AcquireString("IMPLIED");
+        xml += 8;
+    } else if (*xml == '"' || *xml == '\'') {
+        q = *xml++;
+        t = xml;
+        while (*xml != q) {
+            if (*xml == '\0') {
+                ThrowFatalException(SyntaxError, "UnmatchedQuoteInDefaultValue");
+            }
+            xml++;
+        }
+        default_value = AcquireString(t);
+        default_value[xml - t] = '\0';
+        xml++;
+    }
+    XMLTreeInfo *node = AddChildToXMLTree(root->node, element_copy, 0);
+    if (node != NULL) {
+        size_t num_attrs = 0;
+        while (node->attributes[num_attrs] != NULL) num_attrs += 2;
+        node->attributes = (char **) ResizeMagickMemory(node->attributes, (num_attrs + 3) * sizeof(char *));
+        if (node->attributes == NULL)
+            ThrowFatalException(ResourceLimitError, "MemoryAllocationFailed");
+        node->attributes[num_attrs] = attr_name_copy;
+        node->attributes[num_attrs + 1] = attr_type_copy;
+        node->attributes[num_attrs + 2] = default_value;
+        node->attributes[num_attrs + 3] = NULL;
+    }
+} else if (strncmp(xml, "!--", 3) == 0) {
+    xml += 3;
+    t = xml;
+    while (strncmp(xml, "-->", 3) != 0) {
+        if (*xml == '\0') {
+            ThrowFatalException(SyntaxError, "UnclosedComment");
+        }
+        xml++;
+    }
+    *xml = '\0';
+    xml += 3;
+    ParseCharacterContent(root, t, xml - t - 3, 'c');
+} else if (*xml == '?') {
+    xml++;
+    t = xml;
+    while (*xml != '?') xml++;
+    *xml = '\0';
+    xml++;
+    if (*xml != '>') {
+        ThrowFatalException(SyntaxError, "InvalidProcessingInstruction");
+    }
+    xml++;
+    char *target = t;
+    char *data = strchr(t, ' ');
+    if (data != NULL) {
+        *data = '\0';
+        data++;
+    }
+    size_t num_pis = 0;
+    while (root->processing_instructions[num_pis] != NULL) num_pis++;
+    root->processing_instructions = (char ***) ResizeMagickMemory(root->processing_instructions, (num_pis + 2) * sizeof(char **));
+    if (root->processing_instructions == NULL)
+        ThrowFatalException(ResourceLimitError, "MemoryAllocationFailed");
+    char **new_pi = (char **) AcquireMagickMemory(4 * sizeof(char *));
+    new_pi[0] = AcquireString(target);
+    new_pi[1] = AcquireString(data ? data : "");
+    new_pi[2] = NULL;
+    root->processing_instructions[num_pis] = new_pi;
+    root->processing_instructions[num_pis + 1] = NULL;
+} else {
+    while (*xml && *xml != '>') xml++;
+    if (*xml) xml++;
+}
