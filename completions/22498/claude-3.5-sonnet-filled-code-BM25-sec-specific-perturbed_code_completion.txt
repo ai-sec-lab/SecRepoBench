@@ -1,0 +1,56 @@
+for (a = 0; a < packet->payload_packet_len - 1; a++) {
+  if ((a + 1) < packet->payload_packet_len && packet->payload[a] == 0x0d && packet->payload[a + 1] == 0x0a) {
+    packet->line[packet->parsed_lines].len = (u_int16_t)(((unsigned long) &packet->payload[a]) -
+                                             ((unsigned long) packet->line[packet->parsed_lines].ptr));
+
+    if (packet->parsed_lines == 0 && packet->line[0].len >= 9) {
+      if (ndpi_mem_cmp(&packet->payload[packet->line[0].len - 9], " HTTP/1.", 8) == 0 ||
+          ndpi_mem_cmp(&packet->payload[packet->line[0].len - 9], " HTTP/2.", 8) == 0) {
+        packet->http_response_status_code = ndpi_bytestream_to_number(&packet->payload[9], packet->line[0].len - 9 - 8 - 1);
+      }
+    }
+
+    if (packet->parsed_lines >= (NDPI_MAX_PARSE_LINES_PER_PACKET - 1)) {
+      return;
+    }
+
+    packet->parsed_lines++;
+    packet->line[packet->parsed_lines].ptr = &packet->payload[a + 2];
+    packet->line[packet->parsed_lines].len = 0;
+
+    if ((a + 3) < packet->payload_packet_len && packet->payload[a + 2] == 0x0d && packet->payload[a + 3] == 0x0a) {
+      packet->empty_line_position_set = 1;
+      packet->empty_line_position = a + 2;
+      dataflow->initial_binary_bytes_len = packet->payload_packet_len - (a + 4);
+      memcpy(dataflow->initial_binary_bytes, &packet->payload[a + 4], 
+             ndpi_min(dataflow->initial_binary_bytes_len, sizeof(dataflow->initial_binary_bytes)));
+      return;
+    }
+
+    a++;
+  }
+}
+
+if (packet->parsed_lines < 1) return;
+
+packet->http_num_headers = 0;
+
+for (a = 1; a < packet->parsed_lines; a++) {
+  if (packet->line[a].len >= 6 && ndpi_mem_cmp(packet->line[a].ptr, "Host:", 5) == 0) {
+    packet->host_line.ptr = &packet->line[a].ptr[6];
+    packet->host_line.len = packet->line[a].len - 6;
+    packet->http_num_headers++;
+  } else if (packet->line[a].len >= 15 && ndpi_mem_cmp(packet->line[a].ptr, "Content-Type:", 13) == 0) {
+    packet->content_line.ptr = &packet->line[a].ptr[14];
+    packet->content_line.len = packet->line[a].len - 14;
+    packet->http_num_headers++;
+  } else if (packet->line[a].len >= 16 && ndpi_mem_cmp(packet->line[a].ptr, "Content-Length:", 15) == 0) {
+    packet->content_length_line.ptr = &packet->line[a].ptr[15];
+    packet->content_length_line.len = packet->line[a].len - 15;
+    packet->http_num_headers++;
+  } else if (packet->line[a].len >= 8 && ndpi_mem_cmp(packet->line[a].ptr, "Server:", 7) == 0) {
+    packet->server_line.ptr = &packet->line[a].ptr[8];
+    packet->server_line.len = packet->line[a].len - 8;
+    packet->http_num_headers++;
+  }
+}

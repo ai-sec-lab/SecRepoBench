@@ -1,0 +1,59 @@
+while (step) {
+    p = b;
+    while (p + DR_length_offset <= b + step) {
+        size_t reclen = p[DR_length_offset];
+        if (reclen < 34 || p + reclen > b + step) {
+            archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+                "Invalid length of directory record");
+            return (ARCHIVE_FATAL);
+        }
+        if (p[DR_name_len_offset] == 0 || p[DR_name_len_offset] > reclen - 33) {
+            archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+                "Invalid length of file identifier");
+            return (ARCHIVE_FATAL);
+        }
+        if (p[DR_flags_offset] & 0x02) {
+            // This is a directory entry
+            if (p[DR_name_len_offset] == 1 && p[DR_name_offset] == 0) {
+                // Skip "." directory
+            } else if (p[DR_name_len_offset] == 1 && p[DR_name_offset] == 1) {
+                // Skip ".." directory
+            } else {
+                // Parse the directory entry
+                struct file_info *child = parse_file_info(a, file, p, reclen);
+                if (child == NULL)
+                    return (ARCHIVE_FATAL);
+                if (add_entry(a, iso9660, child) != ARCHIVE_OK)
+                    return (ARCHIVE_FATAL);
+            }
+        } else {
+            // This is a regular file entry
+            struct file_info *child = parse_file_info(a, file, p, reclen);
+            if (child == NULL)
+                return (ARCHIVE_FATAL);
+            if (child->multi_extent) {
+                // Handle multi-extent files
+                struct content *content = malloc(sizeof(*content));
+                if (content == NULL) {
+                    archive_set_error(&a->archive, ENOMEM, "No memory");
+                    return (ARCHIVE_FATAL);
+                }
+                content->offset = child->offset;
+                content->size = child->size;
+                content->next = NULL;
+                if (file->contents.first == NULL)
+                    file->contents.first = content;
+                else
+                    *file->contents.last = content;
+                file->contents.last = &content->next;
+            } else {
+                // Add the file to the archive structure
+                if (add_entry(a, iso9660, child) != ARCHIVE_OK)
+                    return (ARCHIVE_FATAL);
+            }
+        }
+        p += reclen;
+    }
+    step -= (p - b);
+    skip_size = p - b;
+}

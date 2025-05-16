@@ -1,0 +1,438 @@
+the attribute declaration as an XML
+ * DTD definition
+ */
+void
+xmlDumpAttributeDecl(xmlBufferPtr buf, xmlAttributePtr attr) {
+    if ((buf == NULL) || (attr == NULL))
+        return;
+    xmlBufferWriteChar(buf, "<!ATTLIST ");
+    if (attr->elem != NULL) {
+	xmlBufferWriteCHAR(buf, attr->elem);
+	xmlBufferWriteChar(buf, " ");
+    }
+    if (attr->prefix != NULL) {
+	xmlBufferWriteCHAR(buf, attr->prefix);
+	xmlBufferWriteChar(buf, ":");
+    }
+    xmlBufferWriteCHAR(buf, attr->name);
+    xmlBufferWriteChar(buf, " ");
+    switch (attr->atype) {
+        case XML_ATTRIBUTE_CDATA:
+	    xmlBufferWriteChar(buf, "CDATA");
+	    break;
+        case XML_ATTRIBUTE_ID:
+	    xmlBufferWriteChar(buf, "ID");
+	    break;
+        case XML_ATTRIBUTE_IDREF:
+	    xmlBufferWriteChar(buf, "IDREF");
+	    break;
+        case XML_ATTRIBUTE_IDREFS:
+	    xmlBufferWriteChar(buf, "IDREFS");
+	    break;
+        case XML_ATTRIBUTE_ENTITY:
+	    xmlBufferWriteChar(buf, "ENTITY");
+	    break;
+        case XML_ATTRIBUTE_ENTITIES:
+	    xmlBufferWriteChar(buf, "ENTITIES");
+	    break;
+        case XML_ATTRIBUTE_NMTOKEN:
+	    xmlBufferWriteChar(buf, "NMTOKEN");
+	    break;
+        case XML_ATTRIBUTE_NMTOKENS:
+	    xmlBufferWriteChar(buf, "NMTOKENS");
+	    break;
+        case XML_ATTRIBUTE_ENUMERATION:
+	    xmlBufferWriteChar(buf, "(");
+	    xmlDumpEnumeration(buf, attr->tree);
+	    break;
+        case XML_ATTRIBUTE_NOTATION:
+	    xmlBufferWriteChar(buf, "NOTATION (");
+	    xmlDumpEnumeration(buf, attr->tree);
+	    break;
+	default:
+	    xmlErrValid(NULL, XML_ERR_INTERNAL_ERROR,
+		    "Internal: ATTRIBUTE struct corrupted invalid type\n",
+		    NULL);
+    }
+    switch (attr->def) {
+        case XML_ATTRIBUTE_NONE:
+	    break;
+        case XML_ATTRIBUTE_REQUIRED:
+	    xmlBufferWriteChar(buf, " #REQUIRED");
+	    break;
+        case XML_ATTRIBUTE_IMPLIED:
+	    xmlBufferWriteChar(buf, " #IMPLIED");
+	    break;
+        case XML_ATTRIBUTE_FIXED:
+	    xmlBufferWriteChar(buf, " #FIXED ");
+	    xmlBufferWriteQuotedString(buf, attr->defaultValue);
+	    break;
+	default:
+	    xmlErrValid(NULL, XML_ERR_INTERNAL_ERROR,
+		    "Internal: ATTRIBUTE struct corrupted invalid default\n",
+		    NULL);
+    }
+    xmlBufferWriteChar(buf, ">\n");
+}
+
+/**
+ * xmlDumpAttributeDeclScan:
+ * @attr:  An attribute declaration
+ * @buf:  the XML buffer output
+ *
+ * This routine is used by the hash scan function.  It just reverses
+ * the arguments.
+ */
+static void
+xmlDumpAttributeDeclScan(xmlAttributePtr attr, xmlBufferPtr buf) {
+    xmlDumpAttributeDecl(buf, attr);
+}
+
+/**
+ * xmlDumpAttributeTable:
+ * @buf:  the XML buffer output
+ * @table:  An attribute table
+ *
+ * This will dump the content of the attribute table as an XML DTD definition
+ */
+void
+xmlDumpAttributeTable(xmlBufferPtr buf, xmlAttributeTablePtr table) {
+    if ((buf == NULL) || (table == NULL))
+        return;
+    xmlHashScan(table, (xmlHashScanner) xmlDumpAttributeDeclScan, buf);
+}
+#endif /* LIBXML_OUTPUT_ENABLED */
+
+/**
+ * xmlFreeNotation:
+ * @notation:  A notation
+ *
+ * Deallocate the memory used by a notation definition
+ */
+static void
+xmlFreeNotation(xmlNotationPtr notation) {
+    if (notation == NULL) return;
+    xmlUnlinkNode((xmlNodePtr) notation);
+    if (notation->name != NULL)
+	xmlFree((xmlChar *) notation->name);
+    if (notation->PublicID != NULL)
+	xmlFree((xmlChar *) notation->PublicID);
+    if (notation->SystemID != NULL)
+	xmlFree((xmlChar *) notation->SystemID);
+    xmlFree(notation);
+}
+
+/**
+ * xmlAddNotationDecl:
+ * @ctxt:  the validation context
+ * @dtd:  pointer to the DTD
+ * @name:  the notation name
+ * @PublicID:  the Public ID
+ * @SystemID:  the System ID
+ *
+ * Register a new notation declaration
+ *
+ * Returns NULL if not, otherwise the notation decl
+ */
+xmlNotationPtr
+xmlAddNotationDecl(xmlValidCtxtPtr ctxt,
+                   xmlDtdPtr dtd, const xmlChar *name,
+		   const xmlChar *PublicID, const xmlChar *SystemID) {
+    xmlNotationPtr ret;
+    xmlNotationTablePtr table;
+    xmlDictPtr dict = NULL;
+
+    if (dtd == NULL) {
+	return(NULL);
+    }
+    if (name == NULL) {
+	return(NULL);
+    }
+    if (dtd->doc != NULL)
+	dict = dtd->doc->dict;
+
+    /*
+     * Check first that a notation defined in the external subset wasn't
+     * already defined in the internal subset
+     */
+    if ((dtd->doc != NULL) && (dtd->doc->extSubset == dtd) &&
+	(dtd->doc->intSubset != NULL) &&
+	(dtd->doc->intSubset->notations != NULL)) {
+        ret = xmlHashLookup2(dtd->doc->intSubset->notations, name, NULL);
+	if (ret != NULL) {
+	    return(NULL);
+	}
+    }
+
+    /*
+     * Create the Notation table if needed.
+     */
+    table = (xmlNotationTablePtr) dtd->notations;
+    if (table == NULL) {
+        table = xmlHashCreateDict(0, dict);
+	dtd->notations = (void *) table;
+    }
+    if (table == NULL) {
+	xmlVErrMemory(ctxt,
+            "xmlAddNotationDecl: Table creation failed!\n");
+        return(NULL);
+    }
+
+    /*
+     * The notation may already be present if one of its attribute
+     * was registered first
+     */
+    ret = xmlHashLookup2(table, name, NULL);
+    if (ret != NULL) {
+#ifdef LIBXML_VALID_ENABLED
+	/*
+	 * The notation is already defined in this DTD.
+	 */
+	xmlErrValidNode(ctxt, (xmlNodePtr) dtd, XML_DTD_NOTATION_REDEFINED,
+		 "Redefinition of notation %s\n",
+		 name, NULL, NULL);
+#endif /* LIBXML_VALID_ENABLED */
+	return(NULL);
+    } else {
+	ret = (xmlNotationPtr) xmlMalloc(sizeof(xmlNotation));
+	if (ret == NULL) {
+	    xmlVErrMemory(ctxt, "malloc failed");
+	    return(NULL);
+	}
+	memset(ret, 0, sizeof(xmlNotation));
+	ret->type = XML_NOTATION_DECL;
+
+	/*
+	 * fill the structure.
+	 */
+	ret->name = xmlStrdup(name);
+	if (ret->name == NULL) {
+	    xmlVErrMemory(ctxt, "malloc failed");
+	    xmlFree(ret);
+	    return(NULL);
+	}
+	if (PublicID != NULL) {
+	    ret->PublicID = xmlStrdup(PublicID);
+	    if (ret->PublicID == NULL) {
+		xmlVErrMemory(ctxt, "malloc failed");
+		xmlFree(ret->name);
+		xmlFree(ret);
+		return(NULL);
+	    }
+	}
+	if (SystemID != NULL) {
+	    ret->SystemID = xmlStrdup(SystemID);
+	    if (ret->SystemID == NULL) {
+		xmlVErrMemory(ctxt, "malloc failed");
+		if (ret->PublicID != NULL)
+		    xmlFree(ret->PublicID);
+		xmlFree(ret->name);
+		xmlFree(ret);
+		return(NULL);
+	    }
+	}
+
+	/*
+	 * Validity Check:
+	 * Insertion must not fail
+	 */
+	if (xmlHashAddEntry2(table, name, NULL, ret)) {
+#ifdef LIBXML_VALID_ENABLED
+	    /*
+	     * The notation is already defined in this DTD.
+	     */
+	    xmlErrValidNode(ctxt, (xmlNodePtr) dtd, XML_DTD_NOTATION_REDEFINED,
+	                    "Redefinition of notation %s\n",
+			    name, NULL, NULL);
+#endif /* LIBXML_VALID_ENABLED */
+	    xmlFreeNotation(ret);
+	    return(NULL);
+	}
+    }
+
+    /*
+     * Link it to the DTD
+     */
+    ret->parent = dtd;
+    ret->doc = dtd->doc;
+    if (dtd->last == NULL) {
+	dtd->children = dtd->last = (xmlNodePtr) ret;
+    } else {
+        dtd->last->next = (xmlNodePtr) ret;
+	ret->prev = dtd->last;
+	dtd->last = (xmlNodePtr) ret;
+    }
+    return(ret);
+}
+
+/**
+ * xmlFreeNotationTable:
+ * @table:  A notation table
+ *
+ * Deallocate the memory used by a notation hash table.
+ */
+void
+xmlFreeNotationTable(xmlNotationTablePtr table) {
+    xmlHashFree(table, (xmlHashDeallocator) xmlFreeNotation);
+}
+
+#ifdef LIBXML_TREE_ENABLED
+/**
+ * xmlCopyNotation:
+ * @notation:  A notation
+ *
+ * Build a copy of a notation.
+ *
+ * Returns the new xmlNotationPtr or NULL in case of error.
+ */
+static xmlNotationPtr
+xmlCopyNotation(xmlNotationPtr notation) {
+    xmlNotationPtr cur;
+
+    cur = (xmlNotationPtr) xmlMalloc(sizeof(xmlNotation));
+    if (cur == NULL) {
+	xmlVErrMemory(NULL, "malloc failed");
+	return(NULL);
+    }
+    memset(cur, 0, sizeof(xmlNotation));
+    cur->type = XML_NOTATION_DECL;
+    if (notation->name != NULL)
+	cur->name = xmlStrdup(notation->name);
+    if (notation->PublicID != NULL)
+	cur->PublicID = xmlStrdup(notation->PublicID);
+    if (notation->SystemID != NULL)
+	cur->SystemID = xmlStrdup(notation->SystemID);
+    return(cur);
+}
+
+/**
+ * xmlCopyNotationTable:
+ * @table:  A notation table
+ *
+ * Build a copy of a notation table.
+ *
+ * Returns the new xmlNotationTablePtr or NULL in case of error.
+ */
+xmlNotationTablePtr
+xmlCopyNotationTable(xmlNotationTablePtr table) {
+    return((xmlNotationTablePtr) xmlHashCopy(table,
+				    (xmlHashCopier) xmlCopyNotation));
+}
+#endif /* LIBXML_TREE_ENABLED */
+
+#ifdef LIBXML_OUTPUT_ENABLED
+/**
+ * xmlDumpNotationDecl:
+ * @buf:  the XML buffer output
+ * @notation:  A notation declaration
+ *
+ * This will dump the content of the notation declaration as an XML
+ * DTD definition
+ */
+void
+xmlDumpNotationDecl(xmlBufferPtr buf, xmlNotationPtr notation) {
+    if ((buf == NULL) || (notation == NULL))
+        return;
+    xmlBufferWriteChar(buf, "<!NOTATION ");
+    xmlBufferWriteCHAR(buf, notation->name);
+    if (notation->PublicID != NULL) {
+	xmlBufferWriteChar(buf, " PUBLIC \"");
+	xmlBufferWriteCHAR(buf, notation->PublicID);
+	xmlBufferWriteChar(buf, "\"");
+	if (notation->SystemID != NULL) {
+	    xmlBufferWriteChar(buf, " \"");
+	    xmlBufferWriteCHAR(buf, notation->SystemID);
+	    xmlBufferWriteChar(buf, "\"");
+	}
+    } else if (notation->SystemID != NULL) {
+	xmlBufferWriteChar(buf, " SYSTEM \"");
+	xmlBufferWriteCHAR(buf, notation->SystemID);
+	xmlBufferWriteChar(buf, "\"");
+    }
+    xmlBufferWriteChar(buf, ">\n");
+}
+
+/**
+ * xmlDumpNotationDeclScan:
+ * @notation:  A notation declaration
+ * @buf:  the XML buffer output
+ *
+ * This routine is used by the hash scan function.  It just reverses
+ * the arguments.
+ */
+static void
+xmlDumpNotationDeclScan(xmlNotationPtr notation, xmlBufferPtr buf) {
+    xmlDumpNotationDecl(buf, notation);
+}
+
+/**
+ * xmlDumpNotationTable:
+ * @buf:  the XML buffer output
+ * @table:  A notation table
+ *
+ * This will dump the content of the notation table as an XML DTD definition
+ */
+void
+xmlDumpNotationTable(xmlBufferPtr buf, xmlNotationTablePtr table) {
+    if ((buf == NULL) || (table == NULL))
+        return;
+    xmlHashScan(table, (xmlHashScanner) xmlDumpNotationDeclScan, buf);
+}
+#endif /* LIBXML_OUTPUT_ENABLED */
+
+/**
+ * xmlFreeEntity:
+ * @entity:  An entity
+ *
+ * Deallocate the memory used by an entity definition
+ */
+static void
+xmlFreeEntity(xmlEntityPtr entity) {
+    if (entity == NULL) return;
+    xmlUnlinkNode((xmlNodePtr) entity);
+    if (entity->name != NULL)
+	xmlFree((xmlChar *) entity->name);
+    if (entity->ExternalID != NULL)
+	xmlFree((xmlChar *) entity->ExternalID);
+    if (entity->SystemID != NULL)
+	xmlFree((xmlChar *) entity->SystemID);
+    if (entity->content != NULL)
+	xmlFree((xmlChar *) entity->content);
+    if (entity->orig != NULL)
+	xmlFree((xmlChar *) entity->orig);
+    if (entity->URI != NULL)
+	xmlFree((xmlChar *) entity->URI);
+    if (entity->owner != NULL)
+	xmlFree(entity->owner);
+    xmlFree(entity);
+}
+
+/**
+ * xmlAddDocEntity:
+ * @doc:  the document
+ * @name:  the entity name
+ * @type:  the entity type
+ * @ExternalID:  the external ID or NULL
+ * @SystemID:  the system ID or NULL
+ * @content:  the entity value or NULL
+ *
+ * Register a new entity declaration
+ *
+ * Returns NULL if not, otherwise the entity decl
+ */
+xmlEntityPtr
+xmlAddDocEntity(xmlDocPtr doc, const xmlChar *name, xmlEntityType type,
+                const xmlChar *ExternalID, const xmlChar *SystemID,
+		const xmlChar *content) {
+    xmlEntityPtr ret;
+    xmlEntityTablePtr table;
+    xmlDictPtr dict = NULL;
+
+    if (doc == NULL) {
+	return(NULL);
+    }
+    if (name == NULL) {
+	return(NULL);
+    }
+    if (doc->dict != NULL)
+	dict

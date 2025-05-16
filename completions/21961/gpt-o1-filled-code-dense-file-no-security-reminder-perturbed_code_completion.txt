@@ -1,0 +1,129 @@
+case ReadStripMethod:
+    {
+      /* Read TIFF image data strip by strip. */
+      tsize_t
+        strip_size;
+
+      uint32
+        strip_index = 0,
+        row_offset = 0,
+        number_strips;
+
+      /* Determine the number of strips in the image. */
+      number_strips = TIFFNumberOfStrips(tiff);
+      while ((row_offset < (uint32) image->rows) && (strip_index < number_strips))
+      {
+        /* Read the entire strip into our 'pixels' buffer. */
+        strip_size = TIFFReadEncodedStrip(tiff, strip_index, pixels, (tsize_t) -1);
+        if (strip_size < 0)
+          ThrowTIFFException(CorruptImageError,"UnableToReadImageData");
+
+        /* Compute how many rows are in this strip. */
+        {
+          uint32 rows_in_strip = (row_offset + rows_per_strip > (uint32) image->rows) ?
+            (uint32) image->rows - row_offset : rows_per_strip;
+          /* Import each row of data from 'pixels' into the image. */
+          for (i = 0; i < (ssize_t) rows_in_strip; i++)
+          {
+            register Quantum
+              *magick_restrict q;
+
+            ssize_t
+              x;
+
+            q = QueueAuthenticPixels(image,0,(ssize_t) (row_offset + i),
+              image->columns,1,exception);
+            if (q == (Quantum *) NULL)
+              break;
+
+            /* Copy one scanline from the strip buffer. */
+            {
+              unsigned char *p = pixels + i*(TIFFScanlineSize(tiff));
+              (void) ImportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+                quantum_type,p,exception);
+            }
+
+            if (SyncAuthenticPixels(image,exception) == MagickFalse)
+              break;
+
+            /* Progress monitor. */
+            if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,
+                (MagickOffsetType) (row_offset + i),image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+          }
+          row_offset += rows_in_strip;
+        }
+        strip_index++;
+      }
+      break;
+    }
+    case ReadTileMethod:
+    {
+      /* Read TIFF image data tile by tile. */
+      uint32
+        tile_width = 0,
+        tile_height = 0,
+        ty,
+        tx;
+
+      /* Query tile dimensions. */
+      (void) TIFFGetField(tiff,TIFFTAG_TILEWIDTH,&tile_width);
+      (void) TIFFGetField(tiff,TIFFTAG_TILELENGTH,&tile_height);
+
+      /* Iterate over tiles in the image. */
+      for (ty = 0; ty < (uint32) image->rows; ty += tile_height)
+      {
+        for (tx = 0; tx < (uint32) image->columns; tx += tile_width)
+        {
+          const tsize_t tile_size =
+            TIFFReadEncodedTile(tiff,TIFFComputeTile(tiff,tx,ty,0,0),
+              pixels,(tsize_t) -1);
+          if (tile_size < 0)
+            ThrowTIFFException(CorruptImageError,"UnableToReadImageData");
+
+          /* For each row in the tile, copy into the image pixel cache. */
+          {
+            uint32 row_limit = MagickMin((uint32) tile_height,(uint32) image->rows - ty);
+            uint32 col_limit = MagickMin((uint32) tile_width,(uint32) image->columns - tx);
+            for (i = 0; i < (ssize_t) row_limit; i++)
+            {
+              register Quantum
+                *magick_restrict q;
+
+              ssize_t
+                x;
+
+              q = QueueAuthenticPixels(image,(ssize_t) tx,
+                (ssize_t) (ty + i),col_limit,1,exception);
+              if (q == (Quantum *) NULL)
+                break;
+
+              /* Calculate where this row begins in the tile buffer. */
+              {
+                unsigned char *p = pixels + i*tile_width*
+                  ((bits_per_sample*samples_per_pixel+7)/8);
+                (void) ImportQuantumPixels(image,(CacheView *) NULL,
+                  quantum_info,quantum_type,p,exception);
+              }
+
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+
+              /* Progress monitor. */
+              if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,LoadImageTag,
+                  (MagickOffsetType) (ty + i),image->rows);
+                if (status == MagickFalse)
+                  break;
+              }
+            }
+          }
+        }
+      }
+      break;
+    }

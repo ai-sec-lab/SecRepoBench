@@ -1,0 +1,167 @@
+switch (tag)
+{
+    case ID_SCE:
+    case ID_LFE:
+        // mono or LFE element
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1u << elementInstanceTag);
+
+        // read parameters
+        BitBufferRead(bits, &unusedHeader, 12);
+        BitBufferRead(bits, &escapeFlag, 1);
+        BitBufferRead(bits, &bytesShifted, 3);
+
+        if (escapeFlag)
+        {
+            for (i = 0; i < numSamples; i++)
+            {
+                BitBufferRead(bits, &val, p->mBitDepth);
+                sampleBuffer[i * numChannels + channelIndex] = val;
+            }
+        }
+        else
+        {
+            if (bytesShifted > 0)
+            {
+                shift = bytesShifted * 8;
+                for (i = 0; i < numSamples; i++)
+                {
+                    BitBufferRead(bits, &val, shift);
+                    p->mShiftBuffer[i] = val;
+                }
+            }
+
+            BitBufferRead(bits, &modeU, 4);
+            BitBufferRead(bits, &denShiftU, 4);
+            BitBufferRead(bits, &pbFactorU, 3);
+            BitBufferRead(bits, &numU, 5);
+
+            for (i = 0; i < numU; i++)
+                BitBufferRead(bits, &coefsU[i], 16);
+
+            status = dyn_decomp(&agParams, bits, p->mPredictor, numSamples, p->mBitDepth, &chanBits);
+            RequireNoErr(status, goto Exit;);
+
+            if (bytesShifted > 0)
+            {
+                for (i = 0; i < numSamples; i++)
+                {
+                    val = p->mPredictor[i];
+                    val = (val << shift) | p->mShiftBuffer[i];
+                    sampleBuffer[i * numChannels + channelIndex] = val;
+                }
+            }
+            else
+            {
+                for (i = 0; i < numSamples; i++)
+                    sampleBuffer[i * numChannels + channelIndex] = p->mPredictor[i];
+            }
+        }
+
+        channelIndex++;
+        break;
+
+    case ID_CPE:
+        // stereo element
+        elementInstanceTag = BitBufferReadSmall(bits, 4);
+        p->mActiveElements |= (1u << elementInstanceTag);
+
+        RequireAction(channelIndex + 2 <= numChannels, status = kALAC_ChannelCountError; goto Exit;);
+
+        // read parameters
+        BitBufferRead(bits, &unusedHeader, 12);
+        BitBufferRead(bits, &escapeFlag, 1);
+        BitBufferRead(bits, &bytesShifted, 3);
+        BitBufferRead(bits, &mixBits, 8);
+        BitBufferRead(bits, &mixRes, 8);
+
+        if (escapeFlag)
+        {
+            for (i = 0; i < numSamples; i++)
+            {
+                BitBufferRead(bits, &val, p->mBitDepth);
+                sampleBuffer[i * numChannels + channelIndex] = val;
+                BitBufferRead(bits, &val, p->mBitDepth);
+                sampleBuffer[i * numChannels + channelIndex + 1] = val;
+            }
+        }
+        else
+        {
+            // Process left and right channels
+            for (j = 0; j < 2; j++)
+            {
+                if (bytesShifted > 0)
+                {
+                    shift = bytesShifted * 8;
+                    for (i = 0; i < numSamples; i++)
+                    {
+                        BitBufferRead(bits, &val, shift);
+                        p->mShiftBuffer[i] = val;
+                    }
+                }
+
+                BitBufferRead(bits, &modeU, 4);
+                BitBufferRead(bits, &denShiftU, 4);
+                BitBufferRead(bits, &pbFactorU, 3);
+                BitBufferRead(bits, &numU, 5);
+
+                for (i = 0; i < numU; i++)
+                    BitBufferRead(bits, &coefsU[i], 16);
+
+                status = dyn_decomp(&agParams, bits, p->mPredictor, numSamples, p->mBitDepth, &chanBits);
+                RequireNoErr(status, goto Exit;);
+
+                if (bytesShifted > 0)
+                {
+                    for (i = 0; i < numSamples; i++)
+                    {
+                        val = p->mPredictor[i];
+                        val = (val << shift) | p->mShiftBuffer[i];
+                        sampleBuffer[i * numChannels + channelIndex + j] = val;
+                    }
+                }
+                else
+                {
+                    for (i = 0; i < numSamples; i++)
+                        sampleBuffer[i * numChannels + channelIndex + j] = p->mPredictor[i];
+                }
+            }
+
+            // Apply mixing if needed
+            if (mixBits != 0)
+            {
+                int32_t *left = &sampleBuffer[channelIndex];
+                int32_t *right = &sampleBuffer[channelIndex + 1];
+                for (i = 0; i < numSamples; i++)
+                {
+                    int32_t leftSample = *left;
+                    int32_t rightSample = *right;
+                    int32_t diff = leftSample - rightSample;
+                    int32_t common = (diff * mixRes) >> mixBits;
+                    *left = leftSample - common;
+                    *right = rightSample + common;
+                    left += numChannels;
+                    right += numChannels;
+                }
+            }
+        }
+
+        channelIndex += 2;
+        break;
+
+    case ID_END:
+        goto NoMoreChannels;
+
+    case ID_FIL:
+    case ID_CCE:
+    case ID_PCE:
+    case ID_DSE:
+        status = kALAC_UnsupportedElement;
+        goto Exit;
+
+    default:
+        status = kALAC_ParamError;
+        goto Exit;
+}
+
+BitBufferByteAlign(bits);

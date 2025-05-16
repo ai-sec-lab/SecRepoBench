@@ -1,0 +1,104 @@
+if(extension_id == 43 /* supported versions */) {
+  u_int16_t s_offset = offset+extension_offset;
+  u_int8_t supported_versions_len = 0;
+
+  if(s_offset+1 < total_len) {
+    supported_versions_len = packet->payload[s_offset];
+    s_offset++;
+
+    if((s_offset+supported_versions_len) <= total_len) {
+      char supported_versions_str[MAX_JA3_STRLEN];
+      u_int8_t versions_str_len = 0;
+
+      supported_versions_str[0] = '\0';
+
+      for(i=0; i<supported_versions_len; i+=2) {
+        if((s_offset+i+1) < total_len) {
+          u_int16_t tls_version = ntohs(*((u_int16_t*)&packet->payload[s_offset+i]));
+          if(i == 0) {
+            flow->protos.tls_quic.tls_highest_version = tls_version;
+          }
+
+          if(versions_str_len > 0) {
+            versions_str_len += snprintf(&supported_versions_str[versions_str_len], 
+                                         MAX_JA3_STRLEN-versions_str_len, "-");
+          }
+          
+          versions_str_len += snprintf(&supported_versions_str[versions_str_len], 
+                                       MAX_JA3_STRLEN-versions_str_len, "%04X", tls_version);
+
+#ifdef DEBUG_TLS
+          printf("Client TLS [TLS version: 0x%04X]\n", tls_version);
+#endif
+        }
+      }
+      
+      if(versions_str_len > 0) {
+        snprintf(ja3.client.supported_versions, sizeof(ja3.client.supported_versions), "%s", supported_versions_str);
+#ifdef DEBUG_TLS
+        printf("Client TLS [Supported Versions: %s]\n", ja3.client.supported_versions);
+#endif
+      }
+    }
+  }
+} else if(extension_id == 65486 /* encrypted_server_name (ESNI) */) {
+  u_int16_t s_offset = offset+extension_offset;
+  flow->protos.tls_quic.encrypted_sni.esni = 1;
+
+#ifdef DEBUG_ENCRYPTED_SNI
+  printf("[TLS] Client Hello with Encrypted SNI [offset: %u][len: %u]\n", s_offset, extension_len);
+#endif
+
+  if(extension_len > 4 && s_offset+4 < total_len) {
+    flow->protos.tls_quic.encrypted_sni.esni_version = ntohs(*((u_int16_t*)&packet->payload[s_offset]));
+    flow->protos.tls_quic.encrypted_sni.esni_cipher = ntohs(*((u_int16_t*)&packet->payload[s_offset+2]));
+
+#ifdef DEBUG_ENCRYPTED_SNI
+    printf("[TLS] Encrypted SNI [version: 0x%04X][cipher: 0x%04X]\n",
+           flow->protos.tls_quic.encrypted_sni.esni_version,
+           flow->protos.tls_quic.encrypted_sni.esni_cipher);
+#endif
+  }
+} else if(extension_id == 65445 /* QUIC transport parameters */) {
+  if(quic_version && (extension_len > 0)) {
+    // Parse QUIC transport parameters for version >= IETF Draft 24
+    if(is_version_with_var_int_transport_params(quic_version)) {
+      u_int16_t s_offset = offset+extension_offset;
+      u_int16_t param_len;
+      
+      while((s_offset+4) <= total_len && (s_offset+4) <= (offset+extension_offset+extension_len)) {
+        u_int64_t param_type;
+        int param_type_len = quic_len(&packet->payload[s_offset], &param_type);
+        
+        if(param_type_len <= 0 || s_offset+param_type_len >= total_len)
+          break;
+          
+        s_offset += param_type_len;
+        
+        int param_len_len = quic_len(&packet->payload[s_offset], (u_int64_t*)&param_len);
+        
+        if(param_len_len <= 0 || s_offset+param_len_len+param_len > total_len)
+          break;
+          
+        s_offset += param_len_len;
+        
+        if(param_type == 0x0f /* initial_max_streams_uni */ && param_len == 8) {
+          // Extract user agent from initial_max_streams_uni param if present
+          if((s_offset+8) <= total_len) {
+            char ua[256];
+            u_int16_t ua_len = ndpi_min(sizeof(ua) - 1, extension_len - (s_offset - (offset+extension_offset)));
+            
+            strncpy(ua, (const char*)&packet->payload[s_offset], ua_len);
+            ua[ua_len] = '\0';
+            
+            if(ua_len > 6 /* user-agent length must be > "Mozilla" length */) {
+              http_process_user_agent(ndpi_struct, flow, (const u_int8_t*)ua, ua_len);
+            }
+          }
+        }
+        
+        s_offset += param_len;
+      }
+    }
+  }
+}

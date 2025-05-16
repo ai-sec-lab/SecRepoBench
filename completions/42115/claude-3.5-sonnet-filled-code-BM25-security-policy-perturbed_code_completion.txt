@@ -1,0 +1,48 @@
+if(len > sizeof(dNSName) - 1) len = sizeof(dNSName) - 1;
+memcpy(dNSName, &packet->payload[i + 2], len);
+dNSName[len] = '\0';
+
+if(general_name_type == 0x87) { /* IP address */
+  if(len == 4) { /* IPv4 */
+    snprintf(dNSName, sizeof(dNSName), "%u.%u.%u.%u",
+             dNSName[0], dNSName[1], dNSName[2], dNSName[3]);
+  } else if(len == 16) { /* IPv6 */
+    char tmp[40];
+    struct in6_addr addr;
+    memcpy(&addr, dNSName, 16);
+    inet_ntop(AF_INET6, &addr, tmp, sizeof(tmp));
+    snprintf(dNSName, sizeof(dNSName), "%s", tmp);
+  }
+} else {
+  u_int j;
+  for(j = 0; j < len; j++)
+    if(!ndpi_isprint(dNSName[j])) dNSName[j] = '.';
+}
+
+if(connection->host_server_name[0] != '\0') {
+  if(strcasecmp(dNSName, connection->host_server_name) == 0)
+    matched_name = 1;
+}
+
+if(connection->protos.tls_quic.server_names == NULL)
+  connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+else {
+  u_int len = strlen(connection->protos.tls_quic.server_names);
+  char *newstr = (char*)ndpi_realloc(connection->protos.tls_quic.server_names, len + strlen(dNSName) + 2);
+  if(newstr) {
+    connection->protos.tls_quic.server_names = newstr;
+    snprintf(&newstr[len], strlen(dNSName) + 2, ",%s", dNSName);
+  }
+}
+
+if(connection->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+  u_int16_t ret_value;
+  if((ret_value = ndpi_match_hostname_protocol(ndpi_struct, connection, dNSName, strlen(dNSName))) != NDPI_PROTOCOL_UNKNOWN) {
+    ndpi_protocol ret = { NDPI_PROTOCOL_TLS, ret_value, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED };
+
+    connection->detected_protocol_stack[0] = ret_value;
+    connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+    connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+    ndpi_check_subprotocol_risk(ndpi_struct, connection, ret_value);
+  }
+}

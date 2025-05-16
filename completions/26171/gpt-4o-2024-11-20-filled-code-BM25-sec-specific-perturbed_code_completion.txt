@@ -1,0 +1,73 @@
+int32_t ntbytes = 0;  // Total number of uncompressed bytes
+  int32_t cbytes;       // Compressed bytes for the current stream
+  int32_t nstreams = 1; // Default to one stream
+  int32_t last_filter_index = -1;
+
+  // Determine the number of streams
+  if (context->splitmode == BLOSC_FORWARD_COMPAT_SPLIT) {
+    nstreams = 1;
+  } else if (context->splitmode == BLOSC_AUTO_SPLIT) {
+    nstreams = (bsize / context->typesize) / BLOSC_MIN_BUFFERSIZE;
+    if (nstreams < 1) {
+      nstreams = 1;
+    }
+  }
+
+  // Iterate over each stream
+  for (int j = 0; j < nstreams; j++) {
+    int32_t stream_bsize = bsize / nstreams;
+    if (j == nstreams - 1) {
+      // Handle leftover bytes in the last stream
+      stream_bsize += bsize % nstreams;
+    }
+
+    // Read the compressed size for the current stream
+    if (src_offset + sizeof(int32_t) > srcsize) {
+      return -1; // Error: insufficient input
+    }
+    cbytes = sw32_(src + src_offset);
+    src_offset += sizeof(int32_t);
+
+    if (cbytes == 0) {
+      // Handle uncompressed data
+      if (src_offset + stream_bsize > srcsize) {
+        return -1; // Error: insufficient input
+      }
+      memcpy(dest + destinationoffset, src + src_offset, (unsigned int)stream_bsize);
+      src_offset += stream_bsize;
+      ntbytes += stream_bsize;
+    } else if (cbytes < 0) {
+      // Handle runs
+      if (src_offset + context->typesize > srcsize) {
+        return -1; // Error: insufficient input
+      }
+      uint8_t* run_value = (uint8_t*)(src + src_offset);
+      for (int k = 0; k < stream_bsize / context->typesize; k++) {
+        memcpy(dest + destinationoffset + k * context->typesize, run_value, context->typesize);
+      }
+      src_offset += context->typesize;
+      ntbytes += stream_bsize;
+    } else {
+      // Handle compressed data
+      if (src_offset + cbytes > srcsize) {
+        return -1; // Error: insufficient input
+      }
+      int decompressed = blosc_d(context, stream_bsize, leftoverblock, src, srcsize, src_offset,
+                                 dest, destinationoffset, tmp, tmp2);
+      if (decompressed < 0) {
+        return decompressed; // Error during decompression
+      }
+      src_offset += cbytes;
+      ntbytes += decompressed;
+    }
+
+    destinationoffset += stream_bsize;
+  }
+
+  // Determine the last filter index if filters are applied
+  for (int i = BLOSC2_MAX_FILTERS - 1; i >= 0; i--) {
+    if (filters[i] != BLOSC_NOFILTER) {
+      last_filter_index = i;
+      break;
+    }
+  }

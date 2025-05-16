@@ -1,0 +1,370 @@
+-bit version of strncmp.  This is not
+	 * optimized, and is not used in the current code.
+	 */
+	uint64_t v;
+
+	v = 0;
+	while (len-- > 0) {
+		if ((flags & STRING_IGNORE_LOWERCASE) && islower(*a)) {
+			if ((v = tolower(*b++) - *a++) != '\0')
+				break;
+		}
+		else if ((flags & STRING_IGNORE_UPPERCASE) && isupper(*a)) {
+			if ((v = toupper(*b++) - *a++) != '\0')
+				break;
+		}
+		else if ((flags & STRING_COMPACT_WHITESPACE) && isspace(*a)) {
+			a++;
+			if (isspace(*b++)) {
+				if (!isspace(*a))
+					while (b < (const char *)&b[len] &&
+					    isspace(*b))
+						b++;
+			}
+			else {
+				v = 1;
+				break;
+			}
+		}
+		else if ((flags & STRING_COMPACT_OPTIONAL_WHITESPACE) &&
+		    isspace(*a)) {
+			a++;
+			while (b < (const char *)&b[len] && isspace(*b))
+				b++;
+		}
+		else {
+			if ((v = *b++ - *a++) != '\0')
+				break;
+		}
+	}
+	return v;
+}
+
+private int
+file_regexec(file_regex_t *rx, const char *str, size_t len,
+    size_t start, size_t *end)
+{
+	int rv;
+	regmatch_t pmatch[1];
+
+	rv = regexec(rx->preg, str + start, 1, pmatch, 0);
+	if (rv == 0) {
+		if (end != NULL)
+			*end = start + pmatch[0].rm_eo;
+	}
+	return rv;
+}
+
+private int
+file_regcomp(file_regex_t *rx, const char *pattern, int cflags)
+{
+	int rv;
+
+	rx->preg = malloc(sizeof(regex_t));
+	if (rx->preg == NULL)
+		return -1;
+	rx->rm_len = 0;
+	rx->rm_start = 0;
+	rx->rm_end = 0;
+	rx->rm_so = 0;
+	rx->rm_eo = 0;
+	rx->rm_icase = (cflags & REG_ICASE) != 0;
+	rx->rm_extended = (cflags & REG_EXTENDED) == 0;
+	rx->rm_newline = (cflags & REG_NEWLINE) != 0;
+	rv = regcomp(rx->preg, pattern, cflags);
+	if (rv) {
+		rx->preg = NULL;
+		file_regerror(rx, rv, NULL);
+	}
+	return rv;
+}
+
+private void
+file_regfree(file_regex_t *rx)
+{
+	if (rx->preg != NULL) {
+		regfree(rx->preg);
+		rx->preg = NULL;
+	}
+}
+
+private void
+file_regerror(file_regex_t *rx, int errcode, FILE *fp)
+{
+	char errbuf[1024];
+	int len;
+
+	len = regerror(errcode, rx->preg, errbuf, sizeof(errbuf));
+	if (fp == NULL)
+		fp = stderr;
+	(void)fprintf(fp, "Regex compilation failed: %s\n", errbuf);
+}
+
+private int
+file_printf(struct magic_set *ms, const char *fmt, ...)
+{
+	va_list ap;
+	int rv;
+
+	va_start(ap, fmt);
+	rv = vfprintf(ms->fp, fmt, ap);
+	va_end(ap);
+	return rv;
+}
+
+private int
+file_showstr(FILE *fp, const char *str, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (isprint(str[i]))
+			(void)fputc(str[i], fp);
+		else
+			(void)fprintf(fp, "\\%03o", str[i]);
+	}
+	return 0;
+}
+
+private char *
+file_printable(char *buf, size_t buflen, const char *str)
+{
+	size_t i;
+
+	for (i = 0; i < buflen - 1 && str[i] != '\0'; i++) {
+		if (isprint(str[i]))
+			buf[i] = str[i];
+		else
+			buf[i] = '.';
+	}
+	buf[i] = '\0';
+	return buf;
+}
+
+private int
+file_pstring_length_size(const struct magic *m)
+{
+	if (m->flag & STRING_16BIT)
+		return 2;
+	if (m->flag & STRING_32BIT)
+		return 4;
+	return 1;
+}
+
+private int
+file_pstring_get_length(const struct magic *m, const char *str)
+{
+	if (m->flag & STRING_16BIT)
+		return (int)LE16(CAST(const uint16_t *, str));
+	if (m->flag & STRING_32BIT)
+		return (int)LE32(CAST(const uint32_t *, str));
+	return (int)str[0];
+}
+
+private int
+file_check_mem(struct magic_set *ms, unsigned int cont_level)
+{
+	if (ms->c.li[cont_level].got_match) {
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			fprintf(stderr, "memory exhausted at level %u\n",
+			    cont_level);
+		file_oomem(ms, 0);
+		return -1;
+	}
+	return 0;
+}
+
+private int
+file_oomem(struct magic_set *ms, size_t size)
+{
+	if ((ms->flags & MAGIC_DEBUG) != 0)
+		fprintf(stderr, "memory exhausted\n");
+	file_error(ms, 0, "memory exhausted");
+	return -1;
+}
+
+private int
+file_error(struct magic_set *ms, int errnum, const char *fmt, ...)
+{
+	va_list ap;
+	int rv;
+
+	if (ms->fp == NULL)
+		ms->fp = stderr;
+	va_start(ap, fmt);
+	rv = vfprintf(ms->fp, fmt, ap);
+	va_end(ap);
+	if (errnum)
+		(void)fprintf(ms->fp, ": %s", strerror(errnum));
+	(void)fputc('\n', ms->fp);
+	return rv;
+}
+
+private int
+file_magerror(struct magic_set *ms, const char *fmt, ...)
+{
+	va_list ap;
+	int rv;
+
+	if (ms->fp == NULL)
+		ms->fp = stderr;
+	va_start(ap, fmt);
+	rv = vfprintf(ms->fp, fmt, ap);
+	va_end(ap);
+	(void)fputc('\n', ms->fp);
+	return rv;
+}
+
+private int
+file_fmtcheck(struct magic_set *ms, const struct magic *m, const char *def,
+    const char *file, size_t line)
+{
+	const char *ptr = fmtcheck(m->desc, def);
+	if (ptr == def)
+		file_magerror(ms,
+		    "%s, %" SIZE_T_FORMAT "u: format `%s' does not match"
+		    " with `%s'", file, line, m->desc, def);
+	return ptr != def;
+}
+
+private int
+file_regcomp_ext(file_regex_t *rx, const char *pattern, int cflags)
+{
+	int rv;
+
+	rx->preg = malloc(sizeof(regex_t));
+	if (rx->preg == NULL)
+		return -1;
+	rx->rm_len = 0;
+	rx->rm_start = 0;
+	rx->rm_end = 0;
+	rx->rm_so = 0;
+	rx->rm_eo = 0;
+	rx->rm_icase = (cflags & REG_ICASE) != 0;
+	rx->rm_extended = (cflags & REG_EXTENDED) == 0;
+	rx->rm_newline = (cflags & REG_NEWLINE) != 0;
+	rv = regcomp(rx->preg, pattern, cflags);
+	if (rv) {
+		rx->preg = NULL;
+		file_regerror(rx, rv, NULL);
+	}
+	return rv;
+}
+
+private int
+file_regexec_ext(file_regex_t *rx, const char *str, size_t len,
+    size_t start, size_t *end)
+{
+	int rv;
+	regmatch_t pmatch[1];
+
+	rv = regexec(rx->preg, str + start, 1, pmatch, 0);
+	if (rv == 0) {
+		if (end != NULL)
+			*end = start + pmatch[0].rm_eo;
+	}
+	return rv;
+}
+
+private void
+file_regfree_ext(file_regex_t *rx)
+{
+	if (rx->preg != NULL) {
+		regfree(rx->preg);
+		rx->preg = NULL;
+	}
+}
+
+private int
+file_regerror_ext(file_regex_t *rx, int errcode, FILE *fp)
+{
+	char errbuf[1024];
+	int len;
+
+	len = regerror(errcode, rx->preg, errbuf, sizeof(errbuf));
+	if (fp == NULL)
+		fp = stderr;
+	(void)fprintf(fp, "Regex compilation failed: %s\n", errbuf);
+	return len;
+}
+
+private int
+file_printf_ext(struct magic_set *ms, const char *fmt, ...)
+{
+	va_list ap;
+	int rv;
+
+	va_start(ap, fmt);
+	rv = vfprintf(ms->fp, fmt, ap);
+	va_end(ap);
+	return rv;
+}
+
+private int
+file_showstr_ext(FILE *fp, const char *str, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (isprint(str[i]))
+			(void)fputc(str[i], fp);
+		else
+			(void)fprintf(fp, "\\%03o", str[i]);
+	}
+	return 0;
+}
+
+private char *
+file_printable_ext(char *buf, size_t buflen, const char *str)
+{
+	size_t i;
+
+	for (i = 0; i < buflen - 1 && str[i] != '\0'; i++) {
+		if (isprint(str[i]))
+			buf[i] = str[i];
+		else
+			buf[i] = '.';
+	}
+	buf[i] = '\0';
+	return buf;
+}
+
+private int
+file_pstring_length_size_ext(const struct magic *m)
+{
+	if (m->flag & STRING_16BIT)
+		return 2;
+	if (m->flag & STRING_32BIT)
+		return 4;
+	return 1;
+}
+
+private int
+file_pstring_get_length_ext(const struct magic *m, const char *str)
+{
+	if (m->flag & STRING_16BIT)
+		return (int)LE16(CAST(const uint16_t *, str));
+	if (m->flag & STRING_32BIT)
+		return (int)LE32(CAST(const uint32_t *, str));
+	return (int)str[0];
+}
+
+private int
+file_check_mem_ext(struct magic_set *ms, unsigned int cont_level)
+{
+	if (ms->c.li[cont_level].got_match) {
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			fprintf(stderr, "memory exhausted at level %u\n",
+			    cont_level);
+		file_oomem(ms, 0);
+		return -1;
+	}
+	return 0;
+}
+
+private int
+file_oomem_ext(struct magic_set *ms, size_t size)
+{
+	if ((ms->flags & MAGIC_DEBUG) != 0)
+		fprintf(stderr, "memory exhausted\n");
+	file_error(

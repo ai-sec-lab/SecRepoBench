@@ -1,0 +1,58 @@
+/* --- deal with bytes previously stored in header buffer (ctx->bytes_in_header) --- */
+		if (ctx->bytes_in_header) {
+			u32 orig_hdr_bytes = ctx->bytes_in_header;
+			u32 need = (orig_hdr_bytes < 5) ? (5 - orig_hdr_bytes) : 0;
+			u32 copied_from_pkt = 0;
+
+			/* copy just enough bytes from current packet to be able to
+			   decide whether we do have a valid start-code */
+			if (need && remain) {
+				if (need > (u32) remain) need = (u32) remain;
+				memcpy(ctx->hdr_store + orig_hdr_bytes, start, need);
+				copied_from_pkt = need;
+				ctx->bytes_in_header += need;
+				/* DO NOT move 'start' yet, we'll use hdr_offset when re-assigning the bitstream */
+			}
+
+			/* try to locate start-code inside the temporary buffer */
+			{
+				s32 sc_pos = mpgviddmx_next_start_code((u8 *) ctx->hdr_store, ctx->bytes_in_header);
+				if ((sc_pos >= 0) && ((ctx->bytes_in_header - sc_pos) >= 4)) {
+					/* a start-code is present in the store – keep it, indicate how many
+					   bytes come from the store and how many were just copied
+					   from the current packet (hdr_offset)                         */
+					bytes_from_store = ctx->bytes_in_header - sc_pos;
+					/* if some bytes were copied from current packet, remember that
+					   they must be skipped when parsing */
+					hdr_offset = copied_from_pkt;
+					forced_sc_type = (u8) ctx->hdr_store[sc_pos + 3];
+					sc_type_forced = GF_TRUE;
+
+					/* number of bytes before start-code to potentially flush */
+					current = sc_pos;
+					/* header bytes are now consumed */
+					ctx->bytes_in_header = 0;
+				} else {
+					/* still no valid start-code, forward stored bytes as regular data */
+					if (ctx->opid && orig_hdr_bytes) {
+						dst_pck = gf_filter_pck_new_alloc(ctx->opid, orig_hdr_bytes, &packet_data);
+						if (!dst_pck) return GF_OUT_OF_MEM;
+						if (ctx->src_pck) gf_filter_pck_merge_properties(ctx->src_pck, dst_pck);
+						memcpy(packet_data, ctx->hdr_store, orig_hdr_bytes);
+						gf_filter_pck_set_framing(dst_pck, GF_FALSE, GF_FALSE);
+						gf_filter_pck_set_cts(dst_pck, GF_FILTER_NO_TS);
+						gf_filter_pck_set_dts(dst_pck, GF_FILTER_NO_TS);
+						mpgviddmx_enqueue_or_dispatch(ctx, dst_pck, GF_FALSE, GF_FALSE);
+					}
+					/* reset header information and continue parsing packet normally */
+					ctx->bytes_in_header = 0;
+					/* the bytes copied from the packet (if any) were only used
+					   to try to complete the start-code, they must now be considered
+					   consumed */
+					if (copied_from_pkt) {
+						start += copied_from_pkt;
+						remain -= (s32) copied_from_pkt;
+					}
+				}
+			}
+		}

@@ -1,0 +1,71 @@
+case 'Z': case 'H': {
+            /* NUL terminated string */
+            char *str = aux + 3;
+            char *p   = str;
+
+            /* Find the terminating NUL */
+            while (p < aux_limit && *p)
+                p++;
+            if (p >= aux_limit)
+                goto err;          /* Unterminated string */
+
+            size_t len = p - str + 1;   /* include the NUL */
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                /* For BYTE_ARRAY_STOP codecs we just need an output block */
+                codec->out = tm->blk;
+            }
+
+            BLOCK_APPEND(tm->blk, str, len);
+
+            aux = p + 1;               /* advance past NUL */
+            break;
+        }
+
+        case 'B': {
+            /* Array: subtype (1 byte), count (4 bytes LE), then data */
+            if (aux_limit - aux < 3 + 1 + 4)
+                goto err;
+
+            if (!tm->blk) {
+                if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+                    goto err;
+                codec->out = tm->blk;
+                if (codec->u.e_byte_array_len.val_codec)
+                    codec->u.e_byte_array_len.val_codec->out = tm->blk;
+            }
+
+            char subtype = aux[3];
+            uint32_t count = ((uint32_t)(unsigned char)aux[4])       |
+                             ((uint32_t)(unsigned char)aux[5] << 8)  |
+                             ((uint32_t)(unsigned char)aux[6] << 16) |
+                             ((uint32_t)(unsigned char)aux[7] << 24);
+
+            int elem_size;
+            switch (subtype) {
+            case 'c': case 'C': case 'A': elem_size = 1; break;
+            case 's': case 'S':           elem_size = 2; break;
+            case 'i': case 'I': case 'f': elem_size = 4; break;
+            default:
+                hts_log_error("Unsupported sub-type '%c' for B aux field",
+                              subtype);
+                goto err;
+            }
+
+            size_t bytes = 1 + 4 + (size_t)elem_size * count;
+            if (aux_limit - aux < 3 + bytes)
+                goto err;
+
+            /* Encode using codec so that length information is stored */
+            if (codec && codec->encode) {
+                codec->encode(s, codec, aux + 3, bytes);
+            } else {
+                /* Fallback: write verbatim */
+                BLOCK_APPEND(tm->blk, aux + 3, bytes);
+            }
+
+            aux += 3 + bytes;
+            break;
+        }

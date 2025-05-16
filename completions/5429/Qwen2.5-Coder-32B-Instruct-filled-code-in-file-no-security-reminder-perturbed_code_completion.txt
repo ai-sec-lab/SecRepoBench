@@ -1,0 +1,415 @@
+_colors)
+{
+  CubeInfo
+    *cube_info;
+
+  size_t
+    tree_depth;
+
+  /*
+    Initialize color description tree.
+  */
+  cube_info=(CubeInfo *) AcquireCriticalMemory(sizeof(*cube_info));
+  (void) ResetMagickMemory(cube_info,0,sizeof(*cube_info));
+  cube_info->quantize_info=CloneQuantizeInfo(quantize_info);
+  cube_info->maximum_colors=maximum_colors;
+  tree_depth=depth;
+  if (tree_depth == 0)
+    tree_depth=(size_t) ceil(log((double) maximum_colors)/log(4.0));
+  if (tree_depth > MaxTreeDepth)
+    tree_depth=MaxTreeDepth;
+  cube_info->depth=tree_depth;
+  cube_info->root=GetNodeInfo(cube_info,0,0,(NodeInfo *) NULL);
+  if (cube_info->root == (NodeInfo *) NULL)
+    {
+      cube_info=DestroyCubeInfo(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  cube_info->node_queue=(Nodes *) AcquireCriticalMemory(sizeof(*(cube_info->node_queue)));
+  cube_info->node_queue->nodes=cube_info->root;
+  cube_info->node_queue->next=(Nodes *) NULL;
+  cube_info->free_nodes=NodesInAList;
+  cube_info->memory_info=AcquireVirtualMemory(NodesInAList,sizeof(*(cube_info->nodes)));
+  if (cube_info->memory_info == (MemoryInfo *) NULL)
+    {
+      cube_info=DestroyCubeInfo(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  cube_info->nodes=(NodeInfo *) GetVirtualMemoryBlob(cube_info->memory_info);
+  cube_info->next_node=cube_info->nodes;
+  cube_info->cache=(ssize_t *) AcquireQuantumMemory(MaxNodes,sizeof(*cube_info->cache));
+  if (cube_info->cache == (ssize_t *) NULL)
+    {
+      cube_info=DestroyCubeInfo(cube_info);
+      return((CubeInfo *) NULL);
+    }
+  (void) ResetMagickMemory(cube_info->cache,-1,MaxNodes*sizeof(*cube_info->cache));
+  return(cube_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   G e t N o d e I n f o                                                     %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  GetNodeInfo() allocates memory for a new node in the color description tree
+%  and presets all fields to zero.
+%
+%  The format of the GetNodeInfo method is:
+%
+%      NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,
+%        const size_t level,NodeInfo *parent)
+%
+%  A description of each parameter follows.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+%    o id: Specifies the child number of the node.
+%
+%    o level: Specifies the level in the color description tree (zero is the
+%      root).
+%
+%    o parent: A pointer to the node parent.
+%
+*/
+static NodeInfo *GetNodeInfo(CubeInfo *cube_info,const size_t id,const size_t level,
+  NodeInfo *parent)
+{
+  NodeInfo
+    *node_info;
+
+  register ssize_t
+    i;
+
+  size_t
+    number_children;
+
+  /*
+    Initialize the node.
+  */
+  if (cube_info->free_nodes == 0)
+    {
+      Nodes
+        *nodes;
+
+      /*
+        Allocate another list of nodes.
+      */
+      nodes=(Nodes *) AcquireCriticalMemory(sizeof(*nodes));
+      nodes->nodes=(NodeInfo *) AcquireQuantumMemory(NodesInAList,sizeof(*nodes->nodes));
+      if (nodes->nodes == (NodeInfo *) NULL)
+        {
+          nodes=(Nodes *) RelinquishMagickMemory(nodes);
+          return((NodeInfo *) NULL);
+        }
+      nodes->next=cube_info->node_queue;
+      cube_info->node_queue=nodes;
+      cube_info->free_nodes=NodesInAList;
+      cube_info->memory_info=ResizeVirtualMemory(cube_info->memory_info,
+        (size_t) (cube_info->nodes-cube_info->memory_info->blob),
+        NodesInAList*sizeof(*(cube_info->nodes)));
+      if (cube_info->memory_info == (MemoryInfo *) NULL)
+        {
+          cube_info->node_queue=(Nodes *) RelinquishMagickMemory(
+            cube_info->node_queue);
+          return((NodeInfo *) NULL);
+        }
+      cube_info->nodes=(NodeInfo *) GetVirtualMemoryBlob(cube_info->memory_info);
+      cube_info->next_node=cube_info->nodes;
+    }
+  node_info=cube_info->next_node++;
+  cube_info->free_nodes--;
+  (void) ResetMagickMemory(node_info,0,sizeof(*node_info));
+  node_info->id=id;
+  node_info->level=level;
+  node_info->parent=parent;
+  number_children=cube_info->associate_alpha == MagickFalse ? 8UL : 16UL;
+  for (i=0; i < (ssize_t) number_children; i++)
+    node_info->child[i]=(NodeInfo *) NULL;
+  cube_info->nodes++;
+  return(node_info);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   P r u n e L e v e l                                                       %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  PruneLevel() deletes any nodes that have fewer than two pixels.  We
+%  do this on the pretense that they don't make much of a visible
+%  difference after all.
+%
+%  The format of the PruneLevel method is:
+%
+%      void PruneLevel(CubeInfo *cube_info,const NodeInfo *node_info)
+%
+%  A description of each parameter follows.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+%    o node_info: the address of a structure of type NodeInfo which points to a
+%      node in the color cube tree that is to be pruned.
+%
+*/
+static void PruneLevel(CubeInfo *cube_info,const NodeInfo *node_info)
+{
+  register ssize_t
+    i;
+
+  size_t
+    number_children;
+
+  /*
+    Traverse any children.
+  */
+  number_children=cube_info->associate_alpha == MagickFalse ? 8UL : 16UL;
+  for (i=0; i < (ssize_t) number_children; i++)
+    if (node_info->child[i] != (NodeInfo *) NULL)
+      PruneLevel(cube_info,node_info->child[i]);
+  if (node_info->number_unique != 0)
+    return;
+  /*
+    Prune any leaves with one color.
+  */
+  for (i=0; i < (ssize_t) number_children; i++)
+    if ((node_info->child[i] != (NodeInfo *) NULL) &&
+        (node_info->child[i]->number_unique == 1))
+      {
+        register ssize_t
+          j;
+
+        for (j=0; j < (ssize_t) number_children; j++)
+          node_info->child[i]->child[j]=(NodeInfo *) NULL;
+        node_info->child[i]->parent=(NodeInfo *) NULL;
+        node_info->child[i]->number_unique=0;
+        node_info->child[i]->total_color.red=0.0;
+        node_info->child[i]->total_color.green=0.0;
+        node_info->child[i]->total_color.blue=0.0;
+        node_info->child[i]->total_color.alpha=0.0;
+        node_info->child[i]->quantize_error=0.0;
+        node_info->child[i]->color_number=0;
+        node_info->child[i]->id=0;
+        node_info->child[i]->level=0;
+        node_info->child[i]=(NodeInfo *) NULL;
+      }
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   P r u n e T o C u b e D e p t h                                           %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  PruneToCubeDepth() reduces the depth of the color tree while retaining
+%  the minimum number of colors required to represent the image.
+%
+%  The format of the PruneToCubeDepth method is:
+%
+%      void PruneToCubeDepth(CubeInfo *cube_info,const NodeInfo *node_info)
+%
+%  A description of each parameter follows.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+%    o node_info: the address of a structure of type NodeInfo which points to a
+%      node in the color cube tree that is to be pruned.
+%
+*/
+static void PruneToCubeDepth(CubeInfo *cube_info,const NodeInfo *node_info)
+{
+  register ssize_t
+    i;
+
+  size_t
+    number_children;
+
+  /*
+    Traverse any children.
+  */
+  number_children=cube_info->associate_alpha == MagickFalse ? 8UL : 16UL;
+  for (i=0; i < (ssize_t) number_children; i++)
+    if (node_info->child[i] != (NodeInfo *) NULL)
+      PruneToCubeDepth(cube_info,node_info->child[i]);
+  if (node_info->level == cube_info->depth)
+    return;
+  /*
+    Prune this node if it doesn't meet minimum color requirements.
+  */
+  if (node_info->number_unique != 0)
+    return;
+  for (i=0; i < (ssize_t) number_children; i++)
+    if (node_info->child[i] != (NodeInfo *) NULL)
+      {
+        register ssize_t
+          j;
+
+        for (j=0; j < (ssize_t) number_children; j++)
+          node_info->child[i]->child[j]=(NodeInfo *) NULL;
+        node_info->child[i]->parent=(NodeInfo *) NULL;
+        node_info->child[i]->number_unique=0;
+        node_info->child[i]->total_color.red=0.0;
+        node_info->child[i]->total_color.green=0.0;
+        node_info->child[i]->total_color.blue=0.0;
+        node_info->child[i]->total_color.alpha=0.0;
+        node_info->child[i]->quantize_error=0.0;
+        node_info->child[i]->color_number=0;
+        node_info->child[i]->id=0;
+        node_info->child[i]->level=0;
+        node_info->child[i]=(NodeInfo *) NULL;
+      }
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   Q u a n t i z e I m a g e                                                 %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  QuantizeImage() analyzes the colors within a reference image and chooses a
+%  fixed number of colors to represent the image.  The goal of the algorithm
+%  is to minimize the color difference between the input and output image
+%  while minimizing the processing time.
+%
+%  The format of the QuantizeImage method is:
+%
+%      MagickBooleanType QuantizeImage(const QuantizeInfo *quantize_info,
+%        Image *image,ExceptionInfo *exception)
+%
+%  A description of each parameter follows.
+%
+%    o quantize_info: Specifies a pointer to an QuantizeInfo structure.
+%
+%    o image: the image.
+%
+%    o exception: return any errors or warnings in this structure.
+%
+*/
+MagickExport MagickBooleanType QuantizeImage(const QuantizeInfo *quantize_info,
+  Image *image,ExceptionInfo *exception)
+{
+  CubeInfo
+    *cube_info;
+
+  MagickBooleanType
+    status;
+
+  /*
+    Initialize quantization attributes.
+  */
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  if (quantize_info->number_colors == 0)
+    return(MagickTrue);
+  if (quantize_info->number_colors == 1)
+    {
+      /*
+        Monochrome image.
+      */
+      status=SetGrayscaleImage(image,exception);
+      return(status);
+    }
+  cube_info=GetCubeInfo(quantize_info,quantize_info->tree_depth,
+    quantize_info->number_colors);
+  if (cube_info == (CubeInfo *) NULL)
+    ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+      image->filename);
+  /*
+    Classify the colors.
+  */
+  status=ClassifyImageColors(cube_info,image,exception);
+  if (status == MagickFalse)
+    {
+      cube_info=DestroyCubeInfo(cube_info);
+      return(MagickFalse);
+    }
+  /*
+    Reduce the colors.
+  */
+  ReduceImageColors(image,cube_info);
+  /*
+    Assign the colors.
+  */
+  status=AssignImageColors(image,cube_info,exception);
+  cube_info=DestroyCubeInfo(cube_info);
+  return(status);
+}
+
+/*
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                             %
+%                                                                             %
+%                                                                             %
++   R e d u c e I m a g e C o l o r s                                         %
+%                                                                             %
+%                                                                             %
+%                                                                             %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%  ReduceImageColors() reduces the number of unique colors in the image to
+%  the number specified by the MaxColors value.
+%
+%  The format of the ReduceImageColors method is:
+%
+%      void ReduceImageColors(const Image *image,CubeInfo *cube_info)
+%
+%  A description of each parameter follows.
+%
+%    o image: the image.
+%
+%    o cube_info: A pointer to the Cube structure.
+%
+*/
+static void ReduceImageColors(const Image *image,CubeInfo *cube_info)
+{
+  double
+    bisect,
+    distance,
+    half,
+    weight;
+
+  NodeInfo
+    *node_info;
+
+  register ssize_t
+    i;
+
+  size_t
+    index,
+    level;
+
+  /*
+    Reduce the number of colors.
+  */
+  cube_info->pruning_threshold=0.0;
+  cube_info->next_threshold=0.0;
+  while (cube_info->colors > cube_info->maximum_colors)
+  {
+    /*
+      Find the next threshold.
+    */
+    cube_info->pruning_threshold=cube_info->next_threshold;
+    cube_info->next_threshold=(double) (4.0*(QuantumRange+1.0

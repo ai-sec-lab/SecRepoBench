@@ -1,0 +1,67 @@
+p = b;
+while (step > 0) {
+    size_t length = p[0];
+    if (length == 0) {
+        p += iso9660->logical_block_size;
+        step -= iso9660->logical_block_size;
+        continue;
+    }
+
+    struct file_info *file = parse_file_info(iso9660, p, length, parent);
+    if (file == NULL) {
+        archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+            "Failed to parse directory entry");
+        return (ARCHIVE_FATAL);
+    }
+
+    if (file->name.s[0] == '\0' || strcmp(file->name.s, ".") == 0 ||
+        strcmp(file->name.s, "..") == 0) {
+        free(file);
+        p += length;
+        step -= length;
+        continue;
+    }
+
+    if (file->multi_extent) {
+        if (multi == NULL) {
+            multi = file;
+        } else {
+            if (file->offset == multi->contents.last->offset +
+                multi->contents.last->size) {
+                struct content *con = calloc(1, sizeof(*con));
+                if (con == NULL) {
+                    free(file);
+                    archive_set_error(&archivereader->archive, ENOMEM,
+                        "No memory for multi-extent file");
+                    return (ARCHIVE_FATAL);
+                }
+                con->offset = file->offset;
+                con->size = file->size;
+                con->next = NULL;
+                multi->contents.last->next = con;
+                multi->contents.last = con;
+                multi->size += file->size;
+                free(file);
+            } else {
+                archive_set_error(&archivereader->archive, ARCHIVE_ERRNO_MISC,
+                    "Invalid multi-extent file");
+                free(file);
+                return (ARCHIVE_FATAL);
+            }
+        }
+    } else {
+        if (multi != NULL) {
+            cache_add_entry(iso9660, multi);
+            multi = NULL;
+        }
+        cache_add_entry(iso9660, file);
+    }
+
+    p += length;
+    step -= length;
+}
+
+if (multi != NULL) {
+    cache_add_entry(iso9660, multi);
+    multi = NULL;
+}

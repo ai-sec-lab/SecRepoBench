@@ -1,0 +1,67 @@
+/* Compute where the value of the current tag starts */
+    const uint8_t *tag_val_start = &crypto_data[tag_offset_start + prev_offset];
+    uint32_t tag_val_len;
+
+    /* Determine the length of the tag value. For all tags except the last one
+     * we can look at the next tag offset, otherwise we use the remaining bytes
+     * in the buffer. */
+    if(i < (num_tags - 1)) {
+      uint32_t next_offset = le32toh(*((u_int32_t *)&crypto_data[8 + 8 * (i + 1) + 4]));
+      tag_val_len = next_offset - prev_offset;
+    } else {
+      if(tag_offset_start + prev_offset >= crypto_data_len)
+        tag_val_len = 0;
+      else
+        tag_val_len = crypto_data_len - (tag_offset_start + prev_offset);
+    }
+
+    /* Make len consistent with what we have just computed (keeps the original
+     * variable meaningful in case it is used later). */
+    len = tag_val_len;
+
+    /* Handle SNI ---------------------------------------------------------- */
+    if(!sni_found && memcmp(tag, "SNI\0", 4) == 0) {
+      sni_len = (len < sizeof(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name)-1)
+        ? len
+        : (sizeof(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name)-1);
+
+      memcpy(flow->protos.tls_quic_stun.tls_quic.client_requested_server_name,
+             tag_val_start, sni_len);
+      flow->protos.tls_quic_stun.tls_quic.client_requested_server_name[sni_len] = '\0';
+
+      NDPI_LOG_DBG(detectionmodule, "QUIC SNI: %s\n",
+                   flow->protos.tls_quic_stun.tls_quic.client_requested_server_name);
+
+      /* Match against known sub-protocols and check for DGA */
+      ret_match = ndpi_match_host_subprotocol(detectionmodule, flow,
+                                              flow->protos.tls_quic_stun.tls_quic.client_requested_server_name,
+                                              sni_len);
+      ndpi_check_for_dga(detectionmodule, flow,
+                         flow->protos.tls_quic_stun.tls_quic.client_requested_server_name,
+                         sni_len);
+
+      sni_found = 1;
+    }
+    /* Handle UAID --------------------------------------------------------- */
+    else if(!ua_found && memcmp(tag, "UAID", 4) == 0) {
+      uint32_t ua_len = (len < sizeof(flow->protos.tls_quic_stun.tls_quic.user_agent)-1)
+        ? len
+        : (sizeof(flow->protos.tls_quic_stun.tls_quic.user_agent)-1);
+
+      memcpy(flow->protos.tls_quic_stun.tls_quic.user_agent,
+             tag_val_start, ua_len);
+      flow->protos.tls_quic_stun.tls_quic.user_agent[ua_len] = '\0';
+
+      NDPI_LOG_DBG(detectionmodule, "QUIC UAID: %s\n",
+                   flow->protos.tls_quic_stun.tls_quic.user_agent);
+
+      ndpi_handle_http_user_agent(detectionmodule, flow,
+                                  flow->protos.tls_quic_stun.tls_quic.user_agent,
+                                  ua_len);
+
+      ua_found = 1;
+    }
+
+    /* If both SNI and UAID have been processed we can stop here */
+    if(sni_found && ua_found)
+      break;

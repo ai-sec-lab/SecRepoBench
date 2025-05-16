@@ -1,0 +1,52 @@
+/* **************************************************************
+       * Detect BitTorrent over UDP
+       * **************************************************************/
+
+      /* ----------------------------------------------------------------
+       * 1)  Look for clear-text BT-SEARCH or DHT messages
+       * ---------------------------------------------------------------- */
+      if(packet->payload_packet_len >= (u_int16_t)strlen(bt_search) &&
+	 ndpi_strnstr((const char *)packet->payload,
+		      bt_search, packet->payload_packet_len)) {
+	/* “BT-SEARCH * HTTP/1.1” message */
+	NDPI_LOG_INFO(detectionmodule, "found BT: BT-SEARCH over UDP\n");
+	ndpi_add_connection_as_bittorrent(detectionmodule, flow, -1, 0,
+					  NDPI_CONFIDENCE_DPI);
+	return;
+      }
+
+      if(packet->payload_packet_len >= (u_int16_t)strlen(bt_search1) &&
+	 ndpi_strnstr((const char *)packet->payload,
+		      bt_search1, packet->payload_packet_len)) {
+	/* DHT ping / find_node message */
+	NDPI_LOG_INFO(detectionmodule, "found BT: DHT message over UDP\n");
+	ndpi_add_connection_as_bittorrent(detectionmodule, flow, -1, 0,
+					  NDPI_CONFIDENCE_DPI);
+	return;
+      }
+
+      /* ----------------------------------------------------------------
+       * 2)  Heuristics for µTP (Micro Transport Protocol)
+       *     – https://www.bittorrent.org/beps/bep_0029.html
+       * ---------------------------------------------------------------- */
+      if(packet->payload_packet_len >= 20 /* minimum µTP header size */) {
+	u_int8_t first_byte = packet->payload[0];
+	u_int8_t pkt_type   = first_byte >> 4;   /* high nibble  : packet type  */
+	u_int8_t version    = first_byte & 0x0F; /* low  nibble  : µTP version */
+
+	/* We are interested in DATA packets (type 0) of version 0/1 */
+	if(pkt_type == 0 && (version == 0 || version == 1)) {
+	  const u_int16_t utp_hdr_len = 20; /* length of the fixed µTP header */
+
+	  if(packet->payload_packet_len > utp_hdr_len + 20 /* handshake size */) {
+	    bt_proto = ndpi_strnstr((const char *)&packet->payload[utp_hdr_len],
+				    BITTORRENT_PROTO_STRING,
+				    packet->payload_packet_len - utp_hdr_len);
+	    if(bt_proto != NULL) {
+	      /* BitTorrent handshake encapsulated in µTP */
+	      NDPI_LOG_INFO(detectionmodule, "found BT: µTP handshake\n");
+	      goto bittorrent_found;
+	    }
+	  }
+	}
+      }

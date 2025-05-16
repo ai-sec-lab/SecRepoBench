@@ -1,0 +1,73 @@
+{
+  /* if pattern is longer than the string, not found */
+  if (m > lengthy) return -1;
+  /* empty pattern matches at start */
+  if (m == 0) return 0;
+
+  /* we'll search for the first byte of xs in ys using a bit manipulation trick,
+     then compare the following bytes to confirm a full match */
+
+  /* build a repeated bit pattern of the first pattern byte */
+  bitint first = (bitint)(xs[0] & 0xff);
+#ifdef MRB_ENDIAN_BIG
+  /* for big-endian, shift left in a loop to fill "first" in each 8-bit chunk */
+  {
+    bitint tmp = 0;
+    for (size_t i = 0; i < sizeof(bitint); i++) {
+      tmp <<= 8;
+      tmp |= first;
+    }
+    first = tmp;
+  }
+#else
+  /* for little-endian, replicate the byte across each 8-bit position */
+  for (size_t i = 1; i < sizeof(bitint); i++) {
+    first |= (first << 8);
+  }
+#endif
+
+  const unsigned char *hay    = ys;
+  const unsigned char *hayend = ys + lengthy - m + 1; /* last possible match start */
+
+  /* process in chunks of 'sizeof(bitint)' */
+  while (hay + (mrb_int)sizeof(bitint) <= hayend) {
+    bitint chunk;
+    /* copy next sizeof(bitint) bytes */
+    memcpy(&chunk, hay, sizeof(chunk));
+    /* XOR with repeated pattern to see if any byte might match xs[0] */
+    chunk ^= first;
+    /* run the classical "v - 0x0101... & ~v & 0x7f7f..." trick */
+    bitint candidate = (chunk - MASK1) & ~chunk & MASK2;
+    /* if candidate != 0, at least one byte in chunk is xs[0] */
+    if (candidate) {
+      /* check each possible match within this chunk */
+      for (int i = 0; i < (int)sizeof(bitint); i++) {
+#if defined(MRB_ENDIAN_BIG)
+        /* high bit moves from left to right for big-endian */
+        if (candidate & (MASK4 >> i)) {
+#else
+        /* high bit moves from right to left for little-endian */
+        if (candidate & (MASK4 << (8 * i))) {
+#endif
+          /* verify the full substring match */
+          if (memcmp(hay + i, xs, m) == 0) {
+            return (mrb_int)((hay + i) - ys);
+          }
+        }
+      }
+    }
+    hay += sizeof(bitint);
+  }
+
+  /* check the tail (fewer than sizeof(bitint) bytes remain) */
+  while (hay < hayend) {
+    if (*hay == xs[0]) {
+      if (memcmp(hay, xs, m) == 0) {
+        return (mrb_int)(hay - ys);
+      }
+    }
+    hay++;
+  }
+
+  return -1;
+}

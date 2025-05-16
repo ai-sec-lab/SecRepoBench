@@ -1,0 +1,79 @@
+/* Closes j < nstreams */
+  for (int j = 0; j < context->nstreams; j++) {
+    int32_t cbytes = 0;
+    int32_t compformat = (context->header_flags & 0xe0) >> 5;
+    int32_t compsize = 0;
+    int32_t compbytes = 0;
+    int32_t ntbytes = 0;
+    int32_t src_offset = 0;
+    int32_t dest_offset = 0;
+    int32_t blocksize = context->blocksize;
+    int32_t leftoverblock = 0;
+    int32_t errcode = 0;
+    uint8_t* src = context->src;
+    uint8_t* dest = context->dest;
+    uint8_t* tmp = thread_context->tmp;
+    uint8_t* tmp2 = thread_context->tmp2;
+    uint8_t* tmp3 = thread_context->tmp4;
+
+    if ((j == context->nstreams - 1) && (context->leftover > 0)) {
+      blocksize = context->leftover;
+      leftoverblock = 1;
+    }
+
+    if (context->do_compress) {
+      if (context->header_flags & (uint8_t)BLOSC_MEMCPYED) {
+        /* We want to memcpy only */
+        memcpy(dest + BLOSC_MAX_OVERHEAD + j * blocksize,
+               src + j * blocksize,
+               (unsigned int)blocksize);
+        cbytes = (int32_t)blocksize;
+      }
+      else {
+        /* Regular compression */
+        cbytes = blosc_c(thread_context, blocksize, leftoverblock, ntbytes,
+                         context->destsize, src, j * blocksize,
+                         dest + ntbytes, tmp, tmp2);
+        if (cbytes == 0) {
+          ntbytes = 0;              /* uncompressible data */
+          break;
+        }
+      }
+    }
+    else {
+      if (context->header_flags & (uint8_t)BLOSC_MEMCPYED) {
+        // Check that sizes in header are compatible, otherwise there is a header corruption
+        int32_t csize = sw32_(src + 12);   /* compressed buffer size */
+        if (context->sourcesize + BLOSC_MAX_OVERHEAD!= csize) {
+          return -1;
+        }
+        if (context->srcsize < BLOSC_MAX_OVERHEAD + (j * blocksize) + blocksize) {
+          /* Not enough input to copy block */
+          return -1;
+        }
+        memcpy(dest + j * blocksize,
+               src + BLOSC_MAX_OVERHEAD + j * blocksize,
+               (unsigned int)blocksize);
+        cbytes = (int32_t)blocksize;
+      }
+      else {
+        /* Regular decompression */
+        src_offset = sw32_(context->bstarts + j);
+        dest_offset = j * blocksize;
+        compformat = (context->header_flags & 0xe0) >> 5;
+        compbytes = blosc_d(thread_context, blocksize, leftoverblock,
+                            src, context->srcsize, src_offset,
+                            dest, dest_offset, tmp, tmp2);
+        if (compbytes < 0) {
+          ntbytes = compbytes;         /* error in blosc_c or blosc_d */
+          break;
+        }
+        ntbytes += compbytes;
+      }
+    }
+
+    if (cbytes < 0) {
+      ntbytes = cbytes;         /* error in blosc_c or blosc_d */
+      break;
+    }
+  }

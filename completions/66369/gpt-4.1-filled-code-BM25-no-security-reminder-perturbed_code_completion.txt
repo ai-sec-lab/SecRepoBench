@@ -1,0 +1,106 @@
+// Extract tag name and type
+        char tag[3];
+        tag[0] = aux[0];
+        tag[1] = aux[1];
+        tag[2] = aux[2];
+        int tag_id = (tag[0]<<16) | (tag[1]<<8) | tag[2];
+
+        // RG:Z special handling
+        if (tag[0] == 'R' && tag[1] == 'G' && tag[2] == 'Z') {
+            // Find RG in header
+            const char *rg = bam_aux2Z(aux+3);
+            if (rg) {
+                brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, rg);
+                if (!brg) {
+                    hts_log_warning("Read group \"%s\" not found in header", rg);
+                }
+            }
+        }
+
+        // MD:Z and NM:i special handling for verbatim storage
+        if ((tag[0] == 'M' && tag[1] == 'D' && tag[2] == 'Z' && verbatim_MD) ||
+            (tag[0] == 'N' && tag[1] == 'M' && tag[2] == 'i' && verbatim_NM)) {
+            // Store verbatim, no auto-generation
+        } else if (tag[0] == 'M' && tag[1] == 'D' && tag[2] == 'Z' && MD && !verbatim_MD) {
+            // Skip MD:Z, will be auto-generated
+            aux += 3;
+            if (*aux == 'Z' || *aux == 'H') {
+                aux++;
+                while (aux < aux_end && *aux) aux++;
+                aux++;
+            } else if (*aux == 'B') {
+                aux++;
+                int type = *aux++;
+                int n = le_to_u32(aux); aux += 4;
+                int sz = (type == 'c' || type == 'C') ? 1 :
+                         (type == 's' || type == 'S') ? 2 :
+                         (type == 'i' || type == 'I' || type == 'f') ? 4 : 0;
+                aux += n * sz;
+            } else {
+                aux++;
+            }
+            continue;
+        } else if (tag[0] == 'N' && tag[1] == 'M' && tag[2] == 'i' && !verbatim_NM) {
+            // Skip NM:i, will be auto-generated
+            aux += 3;
+            if (*aux == 'i') {
+                aux++;
+                aux += 4;
+            } else {
+                aux++;
+            }
+            continue;
+        }
+
+        // Add tag to TD block (tag dictionary)
+        BLOCK_APPEND(td_b, tag, 3);
+
+        // Add to tag map if not present
+        cram_map *tm = map_find(c->comp_hdr->tag_encoding_map, tag, tag_id);
+        if (!tm) {
+            // New tag, add to map
+            tm = map_add(c->comp_hdr->tag_encoding_map, tag, tag_id);
+            if (!tm)
+                goto block_err;
+            tm->codec = cram_codec_create(tag[2], filedescriptor->version);
+            if (!tm->codec)
+                goto block_err;
+        }
+
+        // Encode value and append to slice aux block
+        int val_len = 0;
+        if (tag[2] == 'Z' || tag[2] == 'H') {
+            // Null-terminated string
+            const char *val = aux+3;
+            val_len = strlen(val) + 1;
+            BLOCK_APPEND(s->aux_blk, val, val_len);
+        } else if (tag[2] == 'B') {
+            // Array
+            char type = aux[3];
+            int n = le_to_u32(aux+4);
+            int sz = (type == 'c' || type == 'C') ? 1 :
+                     (type == 's' || type == 'S') ? 2 :
+                     (type == 'i' || type == 'I' || type == 'f') ? 4 : 0;
+            val_len = 1 + 4 + n * sz;
+            BLOCK_APPEND(s->aux_blk, aux+3, val_len);
+        } else {
+            // Single value
+            val_len = 1;
+            BLOCK_APPEND(s->aux_blk, aux+3, val_len);
+        }
+
+        // Advance aux pointer
+        aux += 3;
+        if (tag[2] == 'Z' || tag[2] == 'H') {
+            while (aux < aux_end && *aux) aux++;
+            aux++;
+        } else if (tag[2] == 'B') {
+            char type = *aux++;
+            int n = le_to_u32(aux); aux += 4;
+            int sz = (type == 'c' || type == 'C') ? 1 :
+                     (type == 's' || type == 'S') ? 2 :
+                     (type == 'i' || type == 'I' || type == 'f') ? 4 : 0;
+            aux += n * sz;
+        } else {
+            aux++;
+        }

@@ -1,0 +1,73 @@
+struct ndpi_udphdr *udph;
+if(header->caplen >= ip_offset + sizeof(struct ndpi_udphdr)) {
+  udph = (struct ndpi_udphdr *)&packet[ip_offset];
+  u_int16_t src_port = ntohs(udph->source);
+  u_int16_t dst_port = ntohs(udph->dest);
+
+  /* Check for GTP-U on UDP port 2152 */
+  if(src_port == 2152 || dst_port == 2152) {
+    /* Verify minimal GTP header size */
+    if(header->caplen >= (ip_offset + 8 + 8)) {
+      const u_char *gtp = &packet[ip_offset + 8];
+      /* GTPv1: first byte top 3 bits = 1, message type (2nd byte) = 0xFF for T-PDU */
+      if(((gtp[0] >> 5) == 1) && (gtp[1] == 0xFF)) {
+	tunnel_type = ndpi_gtp_tunnel;
+	ip_offset += 8 /* UDP */ + 8 /* GTP */;
+	type = ETH_P_IP;
+	goto iph_check;
+      }
+    }
+  }
+
+  /* Check for TZSP on UDP port 37008 */
+  if(src_port == 37008 || dst_port == 37008) {
+    /* Minimal TZSP header is 4 bytes */
+    if(header->caplen >= (ip_offset + 8 + 4)) {
+      const u_char *tzsp = &packet[ip_offset + 8];
+      /* Version 1 indicates TZSP */
+      if(tzsp[0] == 1) {
+	tunnel_type = ndpi_tzsp_tunnel;
+	u_int16_t offset = 4;
+	/* Process TZSP tags until end tag (type=1) */
+	while((offset + 2) < (header->caplen - (ip_offset + 8))) {
+	  u_int8_t tag_type = tzsp[offset];
+	  u_int8_t tag_len  = tzsp[offset+1];
+	  offset += 2;
+	  if(tag_type == 1) /* End */
+	    break;
+	  offset += tag_len;
+	  if(offset > 512) /* safeguard */
+	    break;
+	}
+	ip_offset += 8 + offset;
+	/* Next should be the encapsulated Ethernet header */
+	if(header->caplen >= (ip_offset + sizeof(struct ndpi_ethhdr))) {
+	  const struct ndpi_ethhdr *enc_eth = (struct ndpi_ethhdr *)&packet[ip_offset];
+	  u_int16_t enc_type = ntohs(enc_eth->h_proto);
+	  if(enc_type >= 1536) {
+	    type = enc_type;
+	  } else {
+	    type = ETH_P_IP; /* fallback */
+	  }
+	  ip_offset += sizeof(struct ndpi_ethhdr);
+	  goto ether_type_check;
+	}
+      }
+    }
+  }
+
+  /* Check for CAPWAP on UDP port 5247 */
+  if(src_port == 5247 || dst_port == 5247) {
+    /* Basic CAPWAP header is at least 8 bytes */
+    if(header->caplen >= (ip_offset + 8 + 8)) {
+      const u_char *capwap = &packet[ip_offset + 8];
+      /* Byte 1 contains message type; 3 indicates data packet */
+      if(capwap[1] == 3) {
+	tunnel_type = ndpi_capwap_tunnel;
+	ip_offset += 8 /* UDP */ + 8 /* CAPWAP */;
+	type = ETH_P_IP;
+	goto iph_check;
+      }
+    }
+  }
+}

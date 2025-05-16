@@ -1,0 +1,58 @@
+{
+  u_int16_t offset, server_cipher, extension_len;
+  u_int16_t ext_id, ext_data_len;
+  char ext_str[256];
+  ext_str[0] = '\0';
+
+  /* Adjust offset to account for the session ID length */
+  offset = base_offset + 1 + session_id_len;
+  if((offset + 2) > total_len) return(0);
+
+  /* Extract the server cipher suite */
+  server_cipher = (packet->payload[offset] << 8) | packet->payload[offset + 1];
+  offset += 2;
+
+  /* Skip compression method */
+  if((offset + 1) > total_len) return(0);
+  offset++;
+
+  /* Parse extensions */
+  if((offset + 2) > total_len) return(0);
+  extension_len = (packet->payload[offset] << 8) | packet->payload[offset + 1];
+  offset += 2;
+
+  while((extension_len >= 4) && ((offset + 4) <= total_len)) {
+    ext_id = (packet->payload[offset] << 8) | packet->payload[offset + 1];
+    ext_data_len = (packet->payload[offset + 2] << 8) | packet->payload[offset + 3];
+    offset += 4;
+    extension_len -= 4;
+
+    if((ext_data_len > extension_len) || ((offset + ext_data_len) > total_len)) break;
+
+    /* Skip GREASE values */
+    if((ext_id & 0x0F0F) != 0x0A0A) {
+      char tmp[16];
+      snprintf(tmp, sizeof(tmp), "%s%u", (ext_str[0] ? "-" : ""), ext_id);
+      strncat(ext_str, tmp, sizeof(ext_str) - strlen(ext_str) - 1);
+    }
+
+    offset += ext_data_len;
+    extension_len -= ext_data_len;
+  }
+
+  /* Build JA3 string: <tls_version>,<server_cipher>,<list_of_extensions> */
+  memset(ja3_str, 0, sizeof(ja3_str));
+  snprintf(ja3_str, sizeof(ja3_str), "%u,%u,%s",
+           tls_version, server_cipher, (ext_str[0] ? ext_str : ""));
+
+  /* Compute MD5 of the JA3 string */
+  ndpi_MD5_Init(&ctx);
+  ndpi_MD5_Update(&ctx, (unsigned char*)ja3_str, strlen(ja3_str));
+  ndpi_MD5_Final(md5_hash, &ctx);
+
+  /* Store MD5 hash in flow structure */
+  memcpy(flow->protos.stun_ssl.ssl.server_ja3_hash, md5_hash, sizeof(md5_hash));
+
+  /* Indicate successful parsing of a Server Hello */
+  return(2);
+}

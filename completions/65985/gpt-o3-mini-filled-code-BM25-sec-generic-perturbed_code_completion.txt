@@ -1,0 +1,54 @@
+if (ctx->bytes_in_header > 0) {
+    u32 total_size = ctx->bytes_in_header + remain;
+    char *combined = (char *) gf_malloc(total_size);
+    if (!combined)
+        return GF_OUT_OF_MEM;
+    memcpy(combined, ctx->hdr_store, ctx->bytes_in_header);
+    memcpy(combined + ctx->bytes_in_header, start, remain);
+    int combined_start = mpgviddmx_next_start_code((u8 *)combined, total_size);
+    if (combined_start >= 0) {
+        if ((u32)combined_start < ctx->bytes_in_header) {
+            /* Start code is found within the stored header.
+               Dispatch the bytes before the start code as continuation */
+            int dispatch_size = combined_start;
+            if (dispatch_size > 0) {
+                dst_pck = gf_filter_pck_new_alloc(ctx->opid, dispatch_size, &packet_data);
+                if (!dst_pck) {
+                    gf_free(combined);
+                    return GF_OUT_OF_MEM;
+                }
+                memcpy(packet_data, ctx->hdr_store, dispatch_size);
+                gf_filter_pck_set_framing(dst_pck, GF_FALSE, GF_FALSE);
+                gf_filter_pck_set_cts(dst_pck, GF_FILTER_NO_TS);
+                gf_filter_pck_set_dts(dst_pck, GF_FILTER_NO_TS);
+                mpgviddmx_enqueue_or_dispatch(ctx, dst_pck, GF_FALSE, GF_FALSE);
+            }
+            /* Remove dispatched bytes from header store */
+            u32 remaining = ctx->bytes_in_header - (u32)combined_start;
+            memmove(ctx->hdr_store, ctx->hdr_store + combined_start, remaining);
+            ctx->bytes_in_header = remaining;
+            current = 0;
+        } else {
+            /* Start code found in the appended part: skip the extra bytes */
+            u32 skip = combined_start - ctx->bytes_in_header;
+            start += skip;
+            remain -= skip;
+            current = 0;
+            ctx->bytes_in_header = 0;
+        }
+    } else {
+        /* No valid start code in combined data: dispatch stored header bytes */
+        dst_pck = gf_filter_pck_new_alloc(ctx->opid, ctx->bytes_in_header, &packet_data);
+        if (!dst_pck) {
+            gf_free(combined);
+            return GF_OUT_OF_MEM;
+        }
+        memcpy(packet_data, ctx->hdr_store, ctx->bytes_in_header);
+        gf_filter_pck_set_framing(dst_pck, GF_FALSE, GF_FALSE);
+        gf_filter_pck_set_cts(dst_pck, GF_FILTER_NO_TS);
+        gf_filter_pck_set_dts(dst_pck, GF_FILTER_NO_TS);
+        mpgviddmx_enqueue_or_dispatch(ctx, dst_pck, GF_FALSE, GF_FALSE);
+        ctx->bytes_in_header = 0;
+    }
+    gf_free(combined);
+}

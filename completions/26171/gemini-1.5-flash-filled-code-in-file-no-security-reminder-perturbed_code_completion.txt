@@ -1,0 +1,103 @@
+int32_t j, neblock, nstreams;
+  int32_t dbytes;                   /* number of decompressed bytes in split */
+  int32_t dtbytes = 0;              /* number of decompressed bytes in block */
+  int32_t typesize = context->typesize;
+  int last_filter_index = last_filter(filters, 'd');
+  int32_t* bstarts = context->bstarts;
+  uint8_t* _src = (uint8_t*)src + src_offset;
+  uint8_t *_tmp = tmp, *_tmp2 = tmp2;
+  uint8_t *_tmp3 = tmp3;
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+
+  /* Check whether we have to apply the filter pipeline */
+  if (last_filter_index >= 0) {
+    /* Apply the filter pipeline */
+    _tmp = pipeline_d(context, bsize, dest, destinationoffset, _src, _tmp, _tmp2, last_filter_index);
+    if (_tmp == NULL) {
+      return -9;  // signals a problem with the filter pipeline
+    }
+  }
+  else {
+    _tmp = (uint8_t*)dest + destinationoffset;
+  }
+
+  /* The number of decompressed data streams for this block */
+  if (!(context->header_flags & 0x10) && !leftoverblock) {
+    nstreams = (int32_t)typesize;
+  }
+  else {
+    nstreams = 1;
+  }
+  neblock = bsize / nstreams;
+  for (j = 0; j < nstreams; j++) {
+    int32_t cbytes;
+    cbytes = sw32_(_src + j * sizeof(int32_t));
+    _src += sizeof(int32_t);
+    if (cbytes < 0) {
+      /* A run.  Decode the repeated byte. */
+      memset(_tmp + j * neblock, -cbytes, (unsigned int)neblock);
+      dtbytes += neblock;
+      continue;
+    }
+    if (cbytes == 0 || cbytes == neblock) {
+      /* The compressor has been unable to compress data at all. */
+      memcpy(_tmp + j * neblock, _src + j * neblock, (unsigned int)neblock);
+      dtbytes += neblock;
+      _src += neblock;
+    }
+    else {
+      /* Decompress the data */
+      if (context->compcode == BLOSC_BLOSCLZ) {
+        dbytes = blosclz_decompress(_src + j * neblock, (int)cbytes, _tmp + j * neblock, (int)neblock);
+      }
+#if defined(HAVE_LZ4)
+      else if (context->compcode == BLOSC_LZ4) {
+        dbytes = lz4_wrap_decompress((char*)_src + j * neblock, (size_t)cbytes,
+                                     (char*)_tmp + j * neblock, (size_t)neblock);
+      }
+      else if (context->compcode == BLOSC_LZ4HC) {
+        dbytes = lz4_wrap_decompress((char*)_src + j * neblock, (size_t)cbytes,
+                                     (char*)_tmp + j * neblock, (size_t)neblock);
+      }
+#endif /* HAVE_LZ4 */
+#if defined(HAVE_LIZARD)
+      else if (context->compcode == BLOSC_LIZARD) {
+        dbytes = lizard_wrap_decompress((char*)_src + j * neblock, (size_t)cbytes,
+                                        (char*)_tmp + j * neblock, (size_t)neblock);
+      }
+#endif /* HAVE_LIZARD */
+#if defined(HAVE_SNAPPY)
+      else if (context->compcode == BLOSC_SNAPPY) {
+        dbytes = snappy_wrap_decompress((char*)_src + j * neblock, (size_t)cbytes,
+                                        (char*)_tmp + j * neblock, (size_t)neblock);
+      }
+#endif /* HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+      else if (context->compcode == BLOSC_ZLIB) {
+        dbytes = zlib_wrap_decompress((char*)_src + j * neblock, (size_t)cbytes,
+                                      (char*)_tmp + j * neblock, (size_t)neblock);
+      }
+#endif /* HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+      else if (context->compcode == BLOSC_ZSTD) {
+        dbytes = zstd_wrap_decompress(thread_context,
+                                      (char*)_src + j * neblock, (size_t)cbytes,
+                                      (char*)_tmp + j * neblock, (size_t)neblock);
+      }
+#endif /* HAVE_ZSTD */
+      else {
+        const char* compname;
+        blosc_compcode_to_compname(context->compcode, &compname);
+        fprintf(stderr, "Blosc has not been compiled with '%s' ", compname);
+        fprintf(stderr, "decompression support.  Please use one having it.");
+        return -5;    /* signals no compression support */
+      }
+      if (dbytes != neblock) {
+        /* Decompression failure */
+        return -1;
+      }
+      dtbytes += neblock;
+      _src += cbytes;
+    }
+  }
+  int ntbytes = dtbytes;

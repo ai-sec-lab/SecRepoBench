@@ -1,0 +1,77 @@
+/* Prepare cipher contexts with the derived client secret */
+  if(!quic_pp_cipher_init(&ciphers.pp_cipher, GCRY_MD_SHA256, 16, client_secret, version)) {
+    NDPI_LOG_DBG(ndpi_struct, "Failed to init packet protection cipher\n");
+    return NULL;
+  }
+  if(!quic_hp_cipher_init(&ciphers.hp_cipher, GCRY_MD_SHA256, 16, client_secret, version)) {
+    NDPI_LOG_DBG(ndpi_struct, "Failed to init header protection cipher\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  /* Securely determine pn_offset, token_length, and payload_length, ensuring no out-of-bounds reads. */
+  pn_offset = 0;
+
+  /* Skip first byte (flags) */
+  if(pn_offset + 1 > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short to read header flags\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  pn_offset++;
+
+  /* Skip Version */
+  if(pn_offset + 4 > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short to read version\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  pn_offset += 4;
+
+  /* Read DCID length and skip DCID */
+  if(pn_offset + 1 > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short to read DCID length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  uint8_t dcil = packet->payload[pn_offset++];
+  if(pn_offset + dcil > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short for DCID\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  pn_offset += dcil;
+
+  /* Read SCID length and skip SCID */
+  if(pn_offset + 1 > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short to read SCID length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  uint8_t scil = packet->payload[pn_offset++];
+  if(pn_offset + scil > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short for SCID\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  pn_offset += scil;
+
+  /* Read token length as a single or multi-byte varint */
+  token_length = quic_read_varint(packet->payload, packet->payload_packet_len, &pn_offset);
+  if(token_length == (uint64_t)-1 || (pn_offset + token_length) > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Invalid or too large token length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  pn_offset += token_length;
+
+  /* Read payload length as a single or multi-byte varint */
+  payload_length = quic_read_varint(packet->payload, packet->payload_packet_len, &pn_offset);
+  if(payload_length == (uint64_t)-1) {
+    NDPI_LOG_DBG(ndpi_struct, "Invalid payload length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  NDPI_LOG_DBG2(ndpi_struct, "Calculated offsets: pn_offset=%u token_length=%lu payload_length=%lu\n",
+                pn_offset, (unsigned long)token_length, (unsigned long)payload_length);

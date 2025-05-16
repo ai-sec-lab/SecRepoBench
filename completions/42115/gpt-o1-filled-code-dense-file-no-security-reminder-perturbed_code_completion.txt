@@ -1,0 +1,62 @@
+memset(dNSName, 0, sizeof(dNSName));
+
+if(general_name_type == 0x87) { /* ipAddress */
+  /* SubjectAltName ipAddress can be 4 bytes (IPv4) or 16 bytes (IPv6) */
+  if((len == 4) || (len == 16)) {
+    struct sockaddr_storage ip;
+    memset(&ip, 0, sizeof(ip));
+
+    if(len == 4) {
+      struct sockaddr_in *ipv4 = (struct sockaddr_in *)&ip;
+      ipv4->sin_family = AF_INET;
+      memcpy(&ipv4->sin_addr, &packet->payload[i+2], 4);
+
+      if(inet_ntop(AF_INET, &ipv4->sin_addr, dNSName, sizeof(dNSName)) == NULL)
+        dNSName[0] = '\0';
+    } else {
+      struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)&ip;
+      ipv6->sin6_family = AF_INET6;
+      memcpy(&ipv6->sin6_addr, &packet->payload[i+2], 16);
+
+      if(inet_ntop(AF_INET6, &ipv6->sin6_addr, dNSName, sizeof(dNSName)) == NULL)
+        dNSName[0] = '\0';
+    }
+  }
+} else {
+  /* dNSName or rfc822Name */
+  if(len < sizeof(dNSName)) {
+    memcpy(dNSName, &packet->payload[i+2], len);
+    dNSName[len] = '\0';
+    ndpi_string_trim(dNSName);
+    if(ndpi_is_printable_string(dNSName, strlen(dNSName)) == 0) {
+      ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+    }
+  }
+}
+
+/* If there's something to store, let's do it */
+if(dNSName[0] != '\0') {
+  /* Check if it matches the SNI/server name requested by the client */
+  if(!matched_name && (connection->host_server_name[0] != '\0')
+     && (ndpi_strcasecmp(connection->host_server_name, dNSName) == 0)) {
+    matched_name = 1;
+  }
+
+  /* Add to the server names list */
+  if(connection->protos.tls_quic.server_names == NULL) {
+    connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+  } else {
+    char *tmp = ndpi_malloc(strlen(connection->protos.tls_quic.server_names) + strlen(dNSName) + 2);
+    sprintf(tmp, "%s,%s", connection->protos.tls_quic.server_names, dNSName);
+    ndpi_free(connection->protos.tls_quic.server_names);
+    connection->protos.tls_quic.server_names = tmp;
+  }
+
+  /* Attempt subprotocol detection (e.g. for protocols that rely on TLS) */
+  if(!connection->protos.tls_quic.subprotocol_detected) {
+    if(ndpi_match_hostname_protocol(ndpi_struct, connection, NDPI_PROTOCOL_TLS,
+                                    dNSName, strlen(dNSName))) {
+      connection->protos.tls_quic.subprotocol_detected = 1;
+    }
+  }
+}

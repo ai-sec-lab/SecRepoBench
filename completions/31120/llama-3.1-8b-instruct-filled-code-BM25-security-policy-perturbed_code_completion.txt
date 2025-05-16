@@ -1,0 +1,70 @@
+int get_coffsets(blosc2_frame_s* frame, int32_t headerlength, int64_t cbytes, int32_t* coffsets_cbytes) {
+  // Get the current offsets and add one more
+  int32_t off_nbytes = (frame->nchunks + 1) * sizeof(int64_t);
+  int64_t* offsets = (int64_t *) malloc((size_t)off_nbytes);
+  if (frame->nchunks > 0) {
+    int32_t coffsets_cbytes = 0;
+    uint8_t *coffsets = get_coffset(frame, headerlength, cbytes, frame->nchunks, NULL);
+    if (coffsets == NULL) {
+      BLOSC_TRACE_ERROR("Cannot get the offsets for the frame.");
+      free(offsets);
+      return NULL;
+    }
+    if (coffsets_cbytes == 0) {
+      coffsets_cbytes = cbytes;
+    }
+
+    // Decompress offsets
+    blosc2_dparams off_dparams = BLOSC2_DPARAMS_DEFAULTS;
+    blosc2_context *dctx = blosc2_create_dctx(off_dparams);
+    int32_t prev_nbytes = blosc2_decompress_ctx(dctx, coffsets, coffsets_cbytes, offsets, frame->nchunks * sizeof(int64_t));
+    blosc2_free_ctx(dctx);
+    if (prev_nbytes < 0) {
+      free(offsets);
+      BLOSC_TRACE_ERROR("Cannot decompress the offsets chunk.");
+      return NULL;
+    }
+  }
+
+  // Add the new offset
+  int special_value = (frame->coffsets[0] & 0x30) >> 4;
+  uint64_t offset_value = ((uint64_t)1 << 63);
+  switch (special_value) {
+    case BLOSC2_ZERO_RUNLEN:
+      // Zero chunk.  Code it in a special way.
+      offset_value += (uint64_t)BLOSC2_ZERO_RUNLEN << (8 * 7);  // indicate a chunk of zeros
+      little_store(offsets + frame->nchunks, &offset_value, sizeof(uint64_t));
+      coffsets_cbytes = 0;   // we don't need to store the chunk
+      break;
+    case BLOSC2_NAN_RUNLEN:
+      // NaN chunk.  Code it in a special way.
+      offset_value += (uint64_t)BLOSC2_NAN_RUNLEN << (8 * 7);  // indicate a chunk of NANs
+      little_store(offsets + frame->nchunks, &offset_value, sizeof(uint64_t));
+      coffsets_cbytes = 0;   // we don't need to store the chunk
+      break;
+    default:
+      if (frame->sframe) {
+        offsets[frame->nchunks] = frame->nchunks;
+      }
+      else {
+        offsets[frame->nchunks] = cbytes;
+      }
+  }
+
+  // Re-compress the offsets again
+  blosc2_context* cctx = blosc2_create_cctx(BLOSC2_CPARAMS_DEFAULTS);
+  cctx->typesize = sizeof(int64_t);
+  void* off_chunk = malloc((size_t)off_nbytes + BLOSC_MAX_OVERHEAD);
+  int32_t new_off_cbytes = blosc2_compress_ctx(cctx, offsets, off_nbytes,
+                                               off_chunk, off_nbytes + BLOSC_MAX_OVERHEAD);
+  blosc2_free_ctx(cctx);
+
+  free(offsets);
+  if (new_off_cbytes < 0) {
+    free(off_chunk);
+    return NULL;
+  }
+
+  *coffsets_cbytes = new_off_cbytes;
+  return off_chunk;
+}

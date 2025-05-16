@@ -1,0 +1,92 @@
+if(ip_offset + sizeof(struct ndpi_udphdr) <= header->caplen) {
+  struct ndpi_udphdr *udp = (struct ndpi_udphdr *)&packet[ip_offset];
+  u_int16_t sport = ntohs(udp->source), dport = ntohs(udp->dest);
+
+  if((sport == GTP_U_V1_PORT) || (dport == GTP_U_V1_PORT)) {
+    /* Check if it's a GTP-U packet */
+    u_int offset = ip_offset + sizeof(struct ndpi_udphdr);
+    if(offset + 8 <= header->caplen) {  /* Minimum GTP-U header size */
+      u_int8_t flags = packet[offset];
+      u_int8_t message_type = packet[offset+1];
+      
+      /* Check GTP version 1 */
+      if((flags & 0xE0) == 0x20) {
+        u_int16_t message_len = ntohs(*((u_int16_t*)&packet[offset+2]));
+        u_int32_t header_len = 8; /* Default GTP-U header size */
+        
+        /* Check for extended header */
+        if(flags & 0x07) {
+          header_len = 12;
+        }
+        
+        if(offset + header_len <= header->caplen) {
+          ip_offset = offset + header_len;
+          tunnel_type = ndpi_gtp_tunnel;
+        }
+      }
+    }
+  } else if((sport == TZSP_PORT) || (dport == TZSP_PORT)) {
+    /* Check if it's a TZSP packet */
+    u_int offset = ip_offset + sizeof(struct ndpi_udphdr);
+    if(offset + 4 <= header->caplen) {
+      u_int8_t version = packet[offset];
+      u_int8_t type = packet[offset+1];
+      
+      if(version == 1 && type == 0 /* TZSP_TYPE_RECEIVED_TAG_LIST */) {
+        u_int16_t encap_proto = ntohs(*((u_int16_t*)&packet[offset+2]));
+        offset += 4;
+        
+        /* Navigate through TZSP tags */
+        while(offset < header->caplen) {
+          u_int8_t tag_type = packet[offset];
+          
+          if(tag_type == 1) { /* End tag */
+            offset++;
+            break;
+          }
+          
+          if(offset + 1 >= header->caplen)
+            break;
+          
+          u_int8_t tag_len = packet[offset+1];
+          
+          if(tag_len == 0) {
+            offset += 2;
+          } else {
+            if(offset + 2 + tag_len > header->caplen)
+              break;
+            
+            offset += 2 + tag_len;
+          }
+        }
+        
+        if(offset < header->caplen) {
+          ip_offset = offset;
+          tunnel_type = ndpi_tzsp_tunnel;
+          
+          /* Switch datalink type to Ethernet for further processing */
+          datalink_type = DLT_EN10MB;
+          goto datalink_check;
+        }
+      }
+    }
+  } else if((sport == NDPI_CAPWAP_DATA_PORT) || (dport == NDPI_CAPWAP_DATA_PORT)) {
+    /* Check if it's a CAPWAP data packet */
+    u_int offset = ip_offset + sizeof(struct ndpi_udphdr);
+    if(offset + 2 <= header->caplen) {
+      u_int8_t preamble = packet[offset];
+      
+      if((preamble & 0xF0) == 0x80 /* CAPWAP data packet */) {
+        if(offset + 2 <= header->caplen) {
+          u_int8_t hlen_bits = packet[offset+1];
+          u_int16_t hlen = ((hlen_bits & 0xF8) >> 1); /* Header length in 4-byte words */
+          
+          if(offset + hlen <= header->caplen) {
+            ip_offset = offset + hlen;
+            tunnel_type = ndpi_capwap_tunnel;
+          }
+        }
+      }
+    }
+  }
+}

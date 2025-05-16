@@ -1,0 +1,141 @@
+if (aux[0] == 'R' && aux[1] == 'G' && aux[2] == 'Z') {
+    char *val = aux+3;
+    char *end = memchr(val, 0, aux_end - val);
+    if (!end) goto err;
+    
+    // Look up RG tag in header if available
+    if (filedescriptor->header->hrecs) {
+        brg = sam_hrecs_find_rg(filedescriptor->header->hrecs, val);
+        if (!brg)
+            hts_log_warning("Read group '%s' not defined in header", val);
+    }
+    
+    // Store RG tag
+    BLOCK_APPEND(td_b, "RG", 2);
+    BLOCK_APPEND_CHAR(td_b, 'Z');
+} else if (aux[0] == 'M' && aux[1] == 'D' && aux[2] == 'Z') {
+    // MD:Z tag
+    if (!verbatim_MD) {
+        // Skip tag we'll compute later
+        char *val = aux+3;
+        char *end = memchr(val, 0, aux_end - val);
+        if (!end) goto err;
+        aux = end+1;
+        continue;
+    }
+    
+    // Store tag name
+    BLOCK_APPEND(td_b, "MD", 2);
+    BLOCK_APPEND_CHAR(td_b, 'Z');
+} else if (aux[0] == 'N' && aux[1] == 'M' && aux[2] == 'i') {
+    // NM:i tag
+    if (!verbatim_NM) {
+        // Skip tag we'll compute later
+        if (aux_end - aux < 7) goto err;
+        aux += 7;
+        continue;
+    }
+    
+    // Store tag name
+    BLOCK_APPEND(td_b, "NM", 2);
+    BLOCK_APPEND_CHAR(td_b, 'i');
+} else {
+    // Other tags
+    BLOCK_APPEND(td_b, aux, 3);
+}
+
+// Find or add tag in encoding map
+int key = (aux[0]<<16) | (aux[1]<<8) | aux[2];
+cram_map *m = map_find(c->comp_hdr->tag_encoding_map, aux, key);
+if (!m) {
+    m = map_add(c->comp_hdr->tag_encoding_map, aux, key);
+    if (!m) goto err;
+    
+    m->codec = cram_encoder_init(cram_data_type(aux[2]), NULL);
+    if (!m->codec) goto err;
+    
+    cram_tag_map *tm = calloc(1, sizeof(*tm));
+    if (!tm) goto err;
+    tm->blk = cram_new_block(EXTERNAL, key);
+    if (!tm->blk) {
+        free(tm);
+        goto err;
+    }
+    
+    m->data = tm;
+}
+
+cram_tag_map *tm = (cram_tag_map *)m->data;
+
+// Encode the tag data based on type
+switch (aux[2]) {
+case 'A': case 'c': case 'C':
+    if (aux_end - aux < 4) goto err;
+    r = m->codec->encode(s, m->codec, aux+3, 1);
+    if (r < 0) goto err;
+    aux += 4;
+    break;
+    
+case 's': case 'S':
+    if (aux_end - aux < 5) goto err;
+    r = m->codec->encode(s, m->codec, aux+3, 2);
+    if (r < 0) goto err;
+    aux += 5;
+    break;
+    
+case 'i': case 'I': case 'f':
+    if (aux_end - aux < 7) goto err;
+    r = m->codec->encode(s, m->codec, aux+3, 4);
+    if (r < 0) goto err;
+    aux += 7;
+    break;
+    
+case 'd':
+    if (aux_end - aux < 11) goto err;
+    r = m->codec->encode(s, m->codec, aux+3, 8);
+    if (r < 0) goto err;
+    aux += 11;
+    break;
+    
+case 'Z': case 'H':
+    {
+        char *val = aux+3;
+        char *end = memchr(val, 0, aux_end - val);
+        if (!end) goto err;
+        
+        r = m->codec->encode(s, m->codec, val, end-val+1);
+        if (r < 0) goto err;
+        
+        aux = end+1;
+    }
+    break;
+    
+case 'B':
+    {
+        if (aux_end - aux < 8) goto err;
+        int type = aux[3];
+        uint32_t count = le_to_u32(aux+4);
+        int size;
+        
+        switch (type) {
+        case 'c': case 'C': size = 1; break;
+        case 's': case 'S': size = 2; break;
+        case 'i': case 'I': case 'f': size = 4; break;
+        default:
+            hts_log_error("Unknown array type '%c'", type);
+            goto err;
+        }
+        
+        if (aux_end - aux < 8 + size*count) goto err;
+        
+        r = m->codec->encode(s, m->codec, aux+3, 5 + size*count);
+        if (r < 0) goto err;
+        
+        aux += 8 + size*count;
+    }
+    break;
+    
+default:
+    hts_log_error("Unknown tag type '%c'", aux[2]);
+    goto err;
+}

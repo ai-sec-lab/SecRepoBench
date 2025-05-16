@@ -1,0 +1,63 @@
+case 0x07: /* Open Connection Request 2 */
+    case 0x08: /* Open Connection Reply 2 */
+      {
+        /* Calculate the offset where the (client/server) IP address starts.
+         * For the reply packet there are two additional bytes (system index)
+         * in front of the address information. */
+        u_int8_t base_offset = 17;            /* 1 (ID) + 16 (magic)          */
+        if (op == 0x08)
+          base_offset += 2;                  /* system index for the reply   */
+
+        /* We need at least an IPv4 address (4) + port (2). */
+        if (packet->payload_packet_len < (size_t)(base_offset + 6)) {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+
+        /* Dissect the IP address (IPv4 / IPv6) and advance the cursor. */
+        ip_addr_offset = base_offset + raknet_dissect_ip(packet, base_offset);
+
+        if (ip_addr_offset >= packet->payload_packet_len) {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+
+        /* Remaining layout:
+         *   Request 2 : 2 bytes MTU
+         *   Reply 2   : 1 byte encryption flag + 2 bytes MTU
+         */
+        size_t remaining = packet->payload_packet_len - ip_addr_offset;
+
+        if (op == 0x07) { /* Open Connection Request 2 */
+          if (remaining != 2) {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+
+          u_int16_t mtu = ntohs(get_u_int16_t(packet->payload, ip_addr_offset));
+          if (mtu > 1500 /* sanity check */) {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+        } else {          /* Open Connection Reply 2 */
+          if (remaining != 3) {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+
+          /* Encryption flag must be 0x00 or 0x01 */
+          if (packet->payload[ip_addr_offset] > 0x01) {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+
+          u_int16_t mtu = ntohs(get_u_int16_t(packet->payload, ip_addr_offset + 1));
+          if (mtu > 1500) {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+        }
+
+        required_packets = 4;
+      }
+      break;

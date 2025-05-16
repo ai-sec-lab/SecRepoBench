@@ -1,0 +1,424 @@
+static ssize_t TIFFReadPixels(TIFF *tiff,const tsample_t sample,
+  const ssize_t row,tdata_t scanline)
+{
+  int
+    status;
+
+  status=TIFFReadScanline(tiff,scanline,(uint32) row,sample);
+  return(status);
+}
+
+static toff_t TIFFSeekBlob(thandle_t image,toff_t offset,int whence)
+{
+  return((toff_t) SeekBlob((Image *) image,(MagickOffsetType) offset,whence));
+}
+
+static void TIFFUnmapBlob(thandle_t image,tdata_t base,toff_t size)
+{
+  (void) image;
+  (void) base;
+  (void) size;
+}
+
+static void TIFFWarnings(const char *,const char *,va_list)
+  magick_attribute((__format__ (__printf__,2,0)));
+
+static void TIFFWarnings(const char *module,const char *format,va_list warning)
+{
+  char
+    message[MagickPathExtent];
+
+  ExceptionInfo
+    *exception;
+
+#if defined(MAGICKCORE_HAVE_VSNPRINTF)
+  (void) vsnprintf(message,MagickPathExtent-2,format,warning);
+#else
+  (void) vsprintf(message,format,warning);
+#endif
+  message[MagickPathExtent-2]='\0';
+  (void) ConcatenateMagickString(message,".",MagickPathExtent);
+  exception=(ExceptionInfo *) GetMagickThreadValue(tiff_exception);
+  if (exception!= (ExceptionInfo *) NULL)
+    (void) ThrowMagickException(exception,GetMagickModule(),CoderWarning,
+      message,"`%s'",module);
+}
+
+static tsize_t TIFFWriteBlob(thandle_t image,tdata_t data,tsize_t size)
+{
+  tsize_t
+    count;
+
+  count=(tsize_t) WriteBlob((Image *) image,(size_t) size,
+    (unsigned char *) data);
+  return(count);
+}
+
+static TIFFMethodType GetJPEGMethod(Image* image,TIFF *tiff,uint16 photometric,
+  uint16 bits_per_sample,uint16 samples_per_pixel)
+{
+#define BUFFER_SIZE 2048
+
+  MagickOffsetType
+    position,
+    offset;
+
+  size_t
+    i;
+
+  TIFFMethodType
+    method;
+
+#if defined(TIFF_VERSION_BIG)
+  uint64
+    *value = (uint64 *) NULL;
+#else
+  uint32
+    *value = (uint32 *) NULL;
+#endif
+
+  unsigned char
+    buffer[BUFFER_SIZE+32];
+
+  unsigned short
+    length;
+
+  /*
+    Only support 8 bit for now.
+  */
+  if ((photometric!= PHOTOMETRIC_SEPARATED) || (bits_per_sample!= 8) ||
+      (samples_per_pixel!= 4))
+    return(ReadGenericMethod);
+  /*
+    Search for Adobe APP14 JPEG marker.
+  */
+  if (!TIFFGetField(tiff,TIFFTAG_STRIPOFFSETS,&value) || (value == NULL))
+    return(ReadStripMethod);
+  position=TellBlob(image);
+  offset=(MagickOffsetType) (value[0]);
+  if (SeekBlob(image,offset,SEEK_SET)!= offset)
+    return(ReadStripMethod);
+  method=ReadStripMethod;
+  if (ReadBlob(image,BUFFER_SIZE,buffer) == BUFFER_SIZE)
+    {
+      for (i=0; i < BUFFER_SIZE; i++)
+      {
+        while (i < BUFFER_SIZE)
+        {
+          if (buffer[i++] == 255)
+           break;
+        }
+        while (i < BUFFER_SIZE)
+        {
+          if (buffer[++i]!= 255)
+           break;
+        }
+        if (buffer[i++] == 216) /* JPEG_MARKER_SOI */
+          continue;
+        length=(unsigned short) (((unsigned int) (buffer[i] << 8) |
+          (unsigned int) buffer[i+1]) & 0xffff);
+        if (i+(size_t) length >= BUFFER_SIZE)
+          break;
+        if (buffer[i-1] == 238) /* JPEG_MARKER_APP0+14 */
+          {
+            if (length!= 14)
+              break;
+            /* 0 == CMYK, 1 == YCbCr, 2 = YCCK */
+            if (buffer[i+13] == 2)
+              method=ReadYCCKMethod;
+            break;
+          }
+        i+=(size_t) length;
+      }
+    }
+  (void) SeekBlob(image,position,SEEK_SET);
+  return(method);
+}
+
+static ssize_t TIFFReadCustomStream(unsigned char *data,const size_t count,
+  void *user_data)
+{
+  PhotoshopProfile
+    *profile;
+
+  size_t
+    total;
+
+  MagickOffsetType
+    remaining;
+
+  if (count == 0)
+    return(0);
+  profile=(PhotoshopProfile *) user_data;
+  remaining=(MagickOffsetType) profile->length-profile->offset;
+  if (remaining <= 0)
+    return(-1);
+  total=MagickMin(count, (size_t) remaining);
+  (void) memcpy(data,profile->data->datum+profile->offset,total);
+  profile->offset+=total;
+  return(total);
+}
+
+static CustomStreamInfo *TIFFAcquireCustomStreamForReading(
+  PhotoshopProfile *profile,ExceptionInfo *exception)
+{
+  CustomStreamInfo
+    *custom_stream;
+
+  custom_stream=AcquireCustomStreamInfo(exception);
+  if (custom_stream == (CustomStreamInfo *) NULL)
+    return(custom_stream);
+  SetCustomStreamData(custom_stream,(void *) profile);
+  SetCustomStreamReader(custom_stream,TIFFReadCustomStream);
+  SetCustomStreamSeeker(custom_stream,TIFFSeekCustomStream);
+  SetCustomStreamTeller(custom_stream,TIFFTellCustomStream);
+  return(custom_stream);
+}
+
+static void TIFFReadPhotoshopLayers(const ImageInfo *image_info,Image *image,
+  ExceptionInfo *exception)
+{
+  const char
+    *option;
+
+  const StringInfo
+    *profile;
+
+  CustomStreamInfo
+    *custom_stream;
+
+  Image
+    *layers;
+
+  ImageInfo
+    *clone_info;
+
+  PhotoshopProfile
+    photoshop_profile;
+
+  PSDInfo
+    info;
+
+  ssize_t
+    i;
+
+  if (GetImageListLength(image)!= 1)
+    return;
+  if ((image_info->number_scenes == 1) && (image_info->scene == 0))
+    return;
+  option=GetImageOption(image_info,"tiff:ignore-layers");
+  if (option!= (const char * ) NULL)
+    return;
+  profile=GetImageProfile(image,"tiff:37724");
+  if (profile == (const StringInfo *) NULL)
+    return;
+  for (i=0; i < (ssize_t) profile->length-8; i++)
+  {
+    if (LocaleNCompare((const char *) (profile->datum+i),
+        image->endian == MSBEndian? "8BIM" : "MIB8",4)!= 0)
+      continue;
+    i+=4;
+    if ((LocaleNCompare((const char *) (profile->datum+i),
+         image->endian == MSBEndian? "Layr" : "ryaL",4) == 0) ||
+        (LocaleNCompare((const char *) (profile->datum+i),
+         image->endian == MSBEndian? "LMsk" : "ksML",4) == 0) ||
+        (LocaleNCompare((const char *) (profile->datum+i),
+         image->endian == MSBEndian? "Lr16" : "61rL",4) == 0) ||
+        (LocaleNCompare((const char *) (profile->datum+i),
+         image->endian == MSBEndian? "Lr32" : "23rL",4) == 0))
+      break;
+  }
+  i+=4;
+  if (i >= (ssize_t) (profile->length-8))
+    return;
+  photoshop_profile.data=(StringInfo *) profile;
+  photoshop_profile.length=profile->length;
+  custom_stream=TIFFAcquireCustomStreamForReading(&photoshop_profile,exception);
+  if (custom_stream == (CustomStreamInfo *) NULL)
+    return;
+  layers=CloneImage(image,0,0,MagickTrue,exception);
+  if (layers == (Image *) NULL)
+    {
+      custom_stream=DestroyCustomStreamInfo(custom_stream);
+      return;
+    }
+  (void) DeleteImageProfile(layers,"tiff:37724");
+  AttachCustomStream(layers->blob,custom_stream);
+  SeekBlob(layers,(MagickOffsetType) i,SEEK_SET);
+  InitPSDInfo(layers,&info);
+  clone_info=CloneImageInfo(image_info);
+  clone_info->number_scenes=0;
+  (void) ReadPSDLayers(layers,clone_info,&info,exception);
+  clone_info=DestroyImageInfo(clone_info);
+  DeleteImageFromList(&layers);
+  if (layers!= (Image *) NULL)
+    {
+      SetImageArtifact(image,"tiff:has-layers","true");
+      AppendImageToList(&image,layers);
+      while (layers!= (Image *) NULL)
+      {
+        SetImageArtifact(layers,"tiff:has-layers","true");
+        DetachBlob(layers->blob);
+        layers=GetNextImageInList(layers);
+      }
+    }
+  custom_stream=DestroyCustomStreamInfo(custom_stream);
+}
+
+static Image *ReadTIFFImage(const ImageInfo *image_info,
+  ExceptionInfo *exception)
+{
+#define ThrowTIFFException(severity,message) \
+{ \
+  if (pixel_info!= (MemoryInfo *) NULL) \
+    pixel_info=RelinquishVirtualMemory(pixel_info); \
+  if (quantum_info!= (QuantumInfo *) NULL) \
+    quantum_info=DestroyQuantumInfo(quantum_info); \
+  TIFFClose(tiff); \
+  ThrowReaderException(severity,message); \
+}
+
+  float
+    *chromaticity = (float *) NULL,
+    x_position,
+    y_position,
+    x_resolution,
+    y_resolution;
+
+  Image
+    *image;
+
+  int
+    tiff_status = 0;
+
+  MagickBooleanType
+    more_frames;
+
+  MagickSizeType
+    number_pixels;
+
+  MagickStatusType
+    status;
+
+  MemoryInfo
+    *pixel_info = (MemoryInfo *) NULL;
+
+  QuantumInfo
+    *quantum_info;
+
+  QuantumType
+    quantum_type;
+
+  ssize_t
+    i,
+    scanline_size,
+    y;
+
+  TIFF
+    *tiff;
+
+  TIFFMethodType
+    method;
+
+  uint16
+    compress_tag = 0,
+    bits_per_sample = 0,
+    endian = 0,
+    extra_samples = 0,
+    planar_configuration = 0,
+    max_sample_value = 0,
+    min_sample_value = 0,
+    orientation = 0,
+    pages = 0,
+    photometric = 0,
+    *sample_info = NULL,
+    sample_format = 0,
+    samples_per_pixel = 0,
+    units = 0,
+    value = 0;
+
+  uint32
+    height,
+    rows_per_strip,
+    width;
+
+  unsigned char
+    *pixels;
+
+  void
+    *sans[8] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+
+  /*
+    Open image.
+  */
+  assert(image_info!= (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  assert(exception!= (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  if (IsEventLogging()!= MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  (void) SetMagickThreadValue(tiff_exception,exception);
+  tiff=TIFFClientOpen(image->filename,"rb",(thandle_t) image,TIFFReadBlob,
+    TIFFWriteBlob,TIFFSeekBlob,TIFFCloseBlob,TIFFGetBlobSize,TIFFMapBlob,
+    TIFFUnmapBlob);
+  if (tiff == (TIFF *) NULL)
+    {
+      if (exception->severity == UndefinedException)
+        ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  if (exception->severity > ErrorException)
+    {
+      TIFFClose(tiff);
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  if (image_info->number_scenes!= 0)
+    {
+      /*
+        Generate blank images for subimage specification (e.g. image.tif[4].
+        We need to check the number of directores because it is possible that
+        the subimage(s) are stored in the photoshop profile.
+      */
+      if (image_info->scene < (size_t) TIFFNumberOfDirectories(tiff))
+        {
+          for (i=0; i < (ssize_t) image_info->scene; i++)
+          {
+            status=TIFFReadDirectory(tiff)!= 0? MagickTrue : MagickFalse;
+            if (status == MagickFalse)
+              {
+                TIFFClose(tiff);
+                image=DestroyImageList(image);
+                return((Image *) NULL);
+              }
+            AcquireNextImage(image_info,image,exception);
+            if (GetNextImageInList(image) == (Image *) NULL)
+              {
+                TIFFClose(tiff);
+                image=DestroyImageList(image);
+                return((Image *) NULL);
+              }
+            image=SyncNextImageInList(image);
+          }
+      }
+  }
+  more_frames=MagickTrue;
+  do
+  {
+    /* TIFFPrintDirectory(tiff,stdout,MagickFalse); */
+    photometric=PHOTOMETRIC_RGB;
+    if ((TIFFGetField(tiff,TIFFTAG_IMAGEWIDTH,&width)!= 1) ||
+        (TIFFGetField(tiff,TIFFTAG_IMAGELENGTH,&height)!= 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_PHOTOMETRIC,&photometric,sans)!= 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_COMPRESSION,&compress_tag,sans)!= 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_FILLORDER,&endian,sans)!= 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIF

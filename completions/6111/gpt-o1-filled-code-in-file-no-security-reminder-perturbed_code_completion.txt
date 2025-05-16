@@ -1,0 +1,173 @@
+/*
+    Initialize necessary variables and structures for processing Postscript
+    images.  We copy the input filename for later use, and determine if the
+    Postscript has already been rendered (e.g. when reading from a PDF or
+    similarly handled file).  If it is not rendered, we create a new ImageInfo
+    to invoke the Postscript delegate (Ghostscript or similar) to render the
+    Postscript into a raster format.  We then read that raster data.  If it is
+    already rendered, we simply read it directly.  Finally, we handle any
+    embedded profiles, merge in properties of the original image, and prepare
+    for returning the final image list.
+  */
+  {
+    MagickBooleanType
+      active = MagickFalse;
+
+    MagickStatusType
+      flags;
+
+    struct stat
+      file_info;
+
+    /*
+      Copy input filename and see if it's already a rendered file. We store
+      that filename in input_filename for further manipulation.
+    */
+    (void) CopyMagickString(input_filename,image->filename,MagickPathExtent);
+    if (LocaleCompare(input_filename,"-") == 0)
+      {
+        /*
+          Ghostscript cannot read from stdin directly for the input PS, so
+          create a temporary file for the Postscript content if our input is
+          stdin.
+        */
+        filedescriptor=AcquireUniqueFileResource(input_filename);
+        if (filedescriptor == -1)
+          ThrowReaderException(FileOpenError,"UnableToCreateTemporaryFile");
+        (void) CopyMagickString(filename,image->filename,MagickPathExtent);
+        for ( ; ; )
+        {
+          c=ReadBlobByte(image);
+          if (c == EOF)
+            break;
+          (void) WriteQuantumByte(filedescriptor,(unsigned char) c);
+        }
+        (void) close(filedescriptor);
+        (void) CopyMagickString(image->filename,input_filename,
+          MagickPathExtent);
+        (void) SeekBlob(image,(MagickOffsetType) 0,SEEK_SET);
+      }
+    /*
+      Check if the file is already a rendered file (e.g. PDF, PNG, etc.).
+    */
+    active=IsPostscriptRendered(input_filename);
+    /*
+      Create a clone of the input ImageInfo for reading the rendered data.
+    */
+    read_info=CloneImageInfo(image_info);
+    read_info->blob=(void *) NULL;
+    read_info->length=0;
+    (void) CopyMagickString(filename,input_filename,MagickPathExtent);
+
+    /*
+      Unless it's already rendered, invoke the Postscript delegate (ghostscript)
+      to rasterize the Postscript to another format we can read (likely PDF or
+      PBM/PNM). We generate a unique filename for the output, build the command,
+      and run it. If ghostscript succeeds, we read the result from that file.
+    */
+    if (active == MagickFalse)
+      {
+        delegate_info=GetDelegateInfo("ps:decode","PS",exception);
+        if (delegate_info == (const DelegateInfo *) NULL)
+          ThrowReaderException(DelegateError,"PostscriptDelegateFailed");
+        density=(char *) NULL;
+        option=GetImageOption(image_info,"density");
+        if (option != (const char *) NULL)
+          density=AcquireString(option);
+        else
+          if (image_info->density != (char *) NULL)
+            density=AcquireString(image_info->density);
+        if (density == (char *) NULL)
+          density=AcquireString("72x72");
+        /*
+          Create control file name and eventually the final raster output.
+        */
+        (void) AcquireUniqueFilename(postscript_filename);
+        (void) AcquireUniqueFilename(command);
+        options=AcquireString("");
+        /*
+          If the user specified any extra Ghostscript options, gather them for
+          inclusion in the command line.
+        */
+        option=GetImageOption(image_info,"ps:ghostscript-args");
+        if (option != (const char *) NULL)
+          {
+            options=(char *) ResizeQuantumMemory(options,strlen(option)+2,
+              sizeof(*options));
+            (void) FormatLocaleString(options,MagickPathExtent,"%s %s",options,
+              option);
+          }
+        /*
+          Build the command to invoke ghostscript (or a compatible delegate),
+          using the desired density, and produce an output with a known raster
+          format we can read next.
+        */
+        (void) FormatLocaleString(command,MagickPathExtent,
+          "\"%s\" -q -dQUIET -dSAFER -dBATCH -dNOPAUSE "
+          "-dUseCIEColor -sDEVICE=%s -g%dx%d -r%s "
+          "-sOutputFile=\"%s\" %s \"%s\" -c quit",
+          delegate_info->path != (char *) NULL ? delegate_info->path : "gs",
+          (LocaleCompare(image_info->magick,"PALM") == 0) ? "pbmraw" : "pnmraw",
+          612,792, density, postscript_filename, options, filename);
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),"invoke: %s",command);
+        *message='\0';
+        /*
+          Invoke ghostscript to perform the actual rendering of the Postscript.
+        */
+        if (InvokePostscriptDelegate(image_info->verbose != MagickFalse,
+            command,message,exception) == MagickFalse)
+          {
+            (void) RelinquishUniqueFileResource(postscript_filename);
+            (void) RelinquishUniqueFileResource(command);
+            options=DestroyString(options);
+            density=DestroyString(density);
+            ThrowReaderException(DelegateError,"PostscriptDelegateFailed");
+          }
+        /*
+          Now read the raster (PNM or similar) that ghostscript produced.
+        */
+        (void) CopyMagickString(read_info->filename,postscript_filename,
+          MagickPathExtent);
+        postscript_image=ReadImage(read_info,exception);
+        if (postscript_image == (Image *) NULL)
+          {
+            (void) RelinquishUniqueFileResource(postscript_filename);
+            (void) RelinquishUniqueFileResource(command);
+            options=DestroyString(options);
+            density=DestroyString(density);
+            ThrowReaderException(DelegateError,"PostscriptDelegateFailed");
+          }
+        /*
+          Clean up temporary files and strings.
+        */
+        (void) RelinquishUniqueFileResource(postscript_filename);
+        (void) RelinquishUniqueFileResource(command);
+        options=DestroyString(options);
+        density=DestroyString(density);
+      }
+    else
+      {
+        /*
+          If already rendered, just read it directly from the input file.
+        */
+        (void) CopyMagickString(read_info->filename,filename,MagickPathExtent);
+        postscript_image=ReadImage(read_info,exception);
+        if (postscript_image == (Image *) NULL)
+          ThrowReaderException(DelegateError,"PostscriptDelegateFailed");
+      }
+    /*
+      If there's no image or we can't read it, exit.  Otherwise, we have
+      successfully created a new image from the Postscript data.
+    */
+    read_info=DestroyImageInfo(read_info);
+    if (postscript_image == (Image *) NULL)
+      ThrowReaderException(DelegateError,"PostscriptDelegateFailed");
+  }
+
+  /*
+    Handle profiles (ICC, Photoshop, etc.) if present, and merge them into the
+    resulting images. We also copy any relevant image properties and set the
+    geometry if we gleaned it from the Postscript bounding box. Once done, we
+    append the newly created images into the final list or return them if
+    requested.
+  */

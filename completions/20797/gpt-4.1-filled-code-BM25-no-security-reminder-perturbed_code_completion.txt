@@ -1,0 +1,128 @@
+{
+      /* Server Hello */
+      offset = base_offset + 1 + session_id_len;
+      if(offset + 2 > total_len) return 0;
+      ja3.cipher = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+
+      if(offset + 1 > total_len) return 0;
+      ja3.compression = packet->payload[offset];
+      offset += 1;
+
+      if(offset + 2 > total_len) {
+        ja3.extensions_len = 0;
+      } else {
+        ja3.extensions_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+      }
+
+      if(ja3.extensions_len > 0 && (offset + ja3.extensions_len <= total_len)) {
+        u_int16_t ext_offset = offset, ext_end = offset + ja3.extensions_len;
+        u_int16_t ext_type, ext_len;
+        u_int16_t ext_str_len = 0;
+        char ext_str[JA3_EXT_STR_LEN] = {0};
+        int first = 1;
+
+        while(ext_offset + 4 <= ext_end) {
+          ext_type = ntohs(*((u_int16_t*)&packet->payload[ext_offset]));
+          ext_len = ntohs(*((u_int16_t*)&packet->payload[ext_offset+2]));
+          ext_offset += 4;
+
+          if(ext_offset + ext_len > ext_end) break;
+
+          // Skip GREASE values (RFC 8701)
+          if((ext_type & 0x0f0f) != 0x0a0a) {
+            if(!first) ext_str[ext_str_len++] = '-';
+            ext_str_len += snprintf(&ext_str[ext_str_len], sizeof(ext_str)-ext_str_len, "%u", ext_type);
+            first = 0;
+          }
+          ext_offset += ext_len;
+        }
+        ext_str[ext_str_len] = '\0';
+        snprintf(ja3_str, sizeof(ja3_str), "%u,%u,%u,%s", ja3.tls_handshake_version, ja3.cipher, ja3.compression, ext_str);
+      } else {
+        snprintf(ja3_str, sizeof(ja3_str), "%u,%u,%u", ja3.tls_handshake_version, ja3.cipher, ja3.compression);
+      }
+
+      ja3_str_len = strlen(ja3_str);
+      ndpi_MD5_Init(&ctx);
+      ndpi_MD5_Update(&ctx, (u_char*)ja3_str, ja3_str_len);
+      ndpi_MD5_Final(md5_hash, &ctx);
+
+      memcpy(flow->l4.tcp.tls.ja3s_md5, md5_hash, 16);
+      flow->l4.tcp.tls.ja3s_md5_set = 1;
+
+      return 2; /* Server Hello */
+    } else if(handshake_type == 0x01 /* Client Hello */) {
+      /* Client Hello */
+      offset = base_offset;
+      if(offset + 1 > total_len) return 0;
+      session_id_len = packet->payload[offset];
+      offset += 1 + session_id_len;
+
+      if(offset + 2 > total_len) return 0;
+      u_int16_t cipher_suites_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+
+      if(offset + cipher_suites_len > total_len) return 0;
+      u_int16_t cipher_offset = offset, cipher_end = offset + cipher_suites_len;
+      char cipher_str[JA3_CIPHER_STR_LEN] = {0};
+      int cipher_str_len = 0, first = 1;
+
+      while(cipher_offset + 2 <= cipher_end) {
+        u_int16_t cipher = ntohs(*((u_int16_t*)&packet->payload[cipher_offset]));
+        // Skip GREASE values (RFC 8701)
+        if((cipher & 0x0f0f) != 0x0a0a) {
+          if(!first) cipher_str[cipher_str_len++] = '-';
+          cipher_str_len += snprintf(&cipher_str[cipher_str_len], sizeof(cipher_str)-cipher_str_len, "%u", cipher);
+          first = 0;
+        }
+        cipher_offset += 2;
+      }
+      cipher_str[cipher_str_len] = '\0';
+      offset = cipher_end;
+
+      if(offset + 1 > total_len) return 0;
+      u_int8_t compression_methods_len = packet->payload[offset];
+      offset += 1 + compression_methods_len;
+
+      u_int16_t extensions_len = 0;
+      if(offset + 2 <= total_len) {
+        extensions_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+      }
+
+      char ext_str[JA3_EXT_STR_LEN] = {0};
+      int ext_str_len = 0, first_ext = 1;
+      u_int16_t ext_offset = offset, ext_end = offset + extensions_len;
+
+      while(ext_offset + 4 <= ext_end && ext_end <= total_len) {
+        u_int16_t ext_type = ntohs(*((u_int16_t*)&packet->payload[ext_offset]));
+        u_int16_t ext_len = ntohs(*((u_int16_t*)&packet->payload[ext_offset+2]));
+        ext_offset += 4;
+
+        if(ext_offset + ext_len > ext_end) break;
+
+        // Skip GREASE values (RFC 8701)
+        if((ext_type & 0x0f0f) != 0x0a0a) {
+          if(!first_ext) ext_str[ext_str_len++] = '-';
+          ext_str_len += snprintf(&ext_str[ext_str_len], sizeof(ext_str)-ext_str_len, "%u", ext_type);
+          first_ext = 0;
+        }
+        ext_offset += ext_len;
+      }
+      ext_str[ext_str_len] = '\0';
+
+      snprintf(ja3_str, sizeof(ja3_str), "%u,%s,%s", ja3.tls_handshake_version, cipher_str, ext_str);
+
+      ja3_str_len = strlen(ja3_str);
+      ndpi_MD5_Init(&ctx);
+      ndpi_MD5_Update(&ctx, (u_char*)ja3_str, ja3_str_len);
+      ndpi_MD5_Final(md5_hash, &ctx);
+
+      memcpy(flow->l4.tcp.tls.ja3_md5, md5_hash, 16);
+      flow->l4.tcp.tls.ja3_md5_set = 1;
+
+      return 1; /* Client Hello */
+    }
+}

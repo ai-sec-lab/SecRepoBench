@@ -1,0 +1,197 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static void ndpi_search_bittorrent(struct ndpi_detection_module_struct *detectionmodule,
+				   struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &detectionmodule->packet;
+  char *bt_proto = NULL;
+
+  NDPI_LOG_DBG(detectionmodule, "Search bittorrent\n");
+
+  /* This is broadcast */
+  if(packet->iph) {
+    if((packet->iph->saddr == 0xFFFFFFFF) || (packet->iph->daddr == 0xFFFFFFFF))
+      goto exclude_bt;
+
+    if(packet->udp) {
+      u_int16_t sport = ntohs(packet->udp->source), dport = ntohs(packet->udp->dest);
+
+      if(is_port(sport, dport, 3544) /* teredo */
+	 || is_port(sport, dport, 5246) || is_port(sport, dport, 5247) /* CAPWAP */) {
+      exclude_bt:
+	NDPI_EXCLUDE_PROTO(detectionmodule, flow);
+	return;
+      }
+    }
+  }
+
+  if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_BITTORRENT) {
+    if(packet->tcp != NULL) {
+      ndpi_int_search_bittorrent_tcp(detectionmodule, flow);
+    } else if(packet->udp != NULL) {
+      /* UDP */
+      const char *bt_search  = "BT-SEARCH * HTTP/1.1\r\n";
+      const char *bt_search1 = "d1:ad2:id20:";
+
+      if((ntohs(packet->udp->source) < 1024)
+	 || (ntohs(packet->udp->dest) < 1024) /* High ports only */) {
+	ndpi_skip_bittorrent(detectionmodule, flow, packet);
+	return;
+      }
+
+      /*
+	Check for uTP http://www.bittorrent.org/beps/bep_0029.html
+
+	wireshark/epan/dissectors/packet-bt-utp.c
+      */
+
+	// Check if the UDP packet payload indicates a BitTorrent connection by examining specific patterns.
+	// If the payload matches known BitTorrent search strings or protocol headers, mark the connection as BitTorrent.
+	// For protocol v0, analyze certain packet fields to determine if they fit the characteristics of BitTorrent.
+	// If the packet appears to be uTP (Micro Transport Protocol), check for the BitTorrent protocol string.
+	// Apply heuristics to further identify potential BitTorrent connections based on specific byte patterns.
+	// If a match is found, extract protocol details and update the connection state accordingly.
+	// <MASK>
+
+      flow->bittorrent_stage++;
+
+      if(flow->bittorrent_stage < 5) {
+	/* We have detected bittorrent but we need to wait until we get a hash */
+
+	if(packet->payload_packet_len > 19 /* min size */) {
+	  if(ndpi_strnstr((const char *)packet->payload, ":target20:", packet->payload_packet_len)
+	     || ndpi_strnstr((const char *)packet->payload, ":find_node1:", packet->payload_packet_len)
+	     || ndpi_strnstr((const char *)packet->payload, "d1:ad2:id20:", packet->payload_packet_len)
+	     || ndpi_strnstr((const char *)packet->payload, ":info_hash20:", packet->payload_packet_len)
+	     || ndpi_strnstr((const char *)packet->payload, ":filter64", packet->payload_packet_len)
+	     || ndpi_strnstr((const char *)packet->payload, "d1:rd2:id20:", packet->payload_packet_len)
+	     || (bt_proto = ndpi_strnstr((const char *)packet->payload, BITTORRENT_PROTO_STRING, packet->payload_packet_len))
+	     ) {
+	  bittorrent_found:
+	    if(bt_proto != NULL && ((u_int8_t *)&bt_proto[27] - packet->payload +
+				    sizeof(flow->protos.bittorrent.hash)) < packet->payload_packet_len) {
+	      memcpy(flow->protos.bittorrent.hash, &bt_proto[27], sizeof(flow->protos.bittorrent.hash));
+	      flow->extra_packets_func = NULL; /* Nothing else to do */
+	    }
+
+	    NDPI_LOG_INFO(detectionmodule, "found BT: plain\n");
+	    ndpi_add_connection_as_bittorrent(detectionmodule, flow, -1, 0, NDPI_CONFIDENCE_DPI);
+	    return;
+	  }
+	}
+
+	return;
+      }
+
+      ndpi_skip_bittorrent(detectionmodule, flow, packet);
+    }
+  }
+
+  if(flow->packet_counter > 8) {
+    ndpi_skip_bittorrent(detectionmodule, flow, packet);
+  }
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/skype.c
+void ndpi_search_skype(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  NDPI_LOG_DBG(ndpi_struct, "search skype\n");
+
+  /* skip marked packets */
+  if(flow->detected_protocol_stack[0] != NDPI_PROTOCOL_SKYPE_TEAMS)
+    ndpi_check_skype(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/telegram.c
+void init_telegram_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id)
+{
+  ndpi_set_bitmask_protocol_detection("Telegram", ndpi_struct, *id,
+				      NDPI_PROTOCOL_TELEGRAM,
+				      ndpi_search_telegram,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_OR_UDP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/h323.c
+void init_h323_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id)
+{
+  ndpi_set_bitmask_protocol_detection("H323", ndpi_struct, *id,
+				      NDPI_PROTOCOL_H323,
+				      ndpi_search_h323,
+				      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_OR_UDP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+				      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/bittorrent.c
+static void ndpi_add_connection_as_bittorrent(struct ndpi_detection_module_struct *ndpi_struct,
+					      struct ndpi_flow_struct *flow,
+					      int bt_offset, int check_hash,
+					      ndpi_confidence_t confidence) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  if(check_hash)
+    ndpi_search_bittorrent_hash(ndpi_struct, flow, bt_offset);
+
+  ndpi_set_detected_protocol_keeping_master(ndpi_struct, flow, NDPI_PROTOCOL_BITTORRENT,
+					    confidence);
+  
+  if(flow->protos.bittorrent.hash[0] == '\0') {
+    /* Don't use just 1 as in TCP DNS more packets could be returned (e.g. ACK). */
+    flow->max_extra_packets_to_check = 3;
+    flow->extra_packets_func = search_bittorrent_again;
+  }
+  
+  if(ndpi_struct->bittorrent_cache && packet->iph) {
+    u_int32_t key1, key2, i;
+
+    key1 = ndpi_ip_port_hash_funct(flow->c_address.v4, flow->c_port), key2 = ndpi_ip_port_hash_funct(flow->s_address.v4, flow->s_port);
+    
+    ndpi_lru_add_to_cache(ndpi_struct->bittorrent_cache, key1, NDPI_PROTOCOL_BITTORRENT, ndpi_get_current_time(flow));
+    ndpi_lru_add_to_cache(ndpi_struct->bittorrent_cache, key2, NDPI_PROTOCOL_BITTORRENT, ndpi_get_current_time(flow));
+
+    /* Now add hosts as twins */
+    ndpi_lru_add_to_cache(ndpi_struct->bittorrent_cache,
+			  flow->c_address.v4 + flow->s_address.v4,
+			  NDPI_PROTOCOL_BITTORRENT,
+			  ndpi_get_current_time(flow));
+    
+    /* Also add +2 ports of the sender in order to catch additional sockets open by the same client */
+    for(i=0; i<2; i++) {
+      key1 = ndpi_ip_port_hash_funct(flow->c_address.v4, htons(ntohs(flow->c_port)+1+i));
+
+      ndpi_lru_add_to_cache(ndpi_struct->bittorrent_cache, key1, NDPI_PROTOCOL_BITTORRENT, ndpi_get_current_time(flow));
+    }
+    
+#ifdef BITTORRENT_CACHE_DEBUG
+    printf("[BitTorrent] [%s] *** ADDED ports %u / %u [%u][%u]\n", flow->l4_proto == IPPROTO_TCP ? "TCP" : "UDP", ntohs(flow->c_port), ntohs(flow->s_port), key1, key2);
+#endif
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/dropbox.c
+void ndpi_search_dropbox(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  NDPI_LOG_DBG(ndpi_struct, "search dropbox\n");
+
+  /* skip marked packets */
+  if (flow->detected_protocol_stack[0] != NDPI_PROTOCOL_DROPBOX) {
+    ndpi_check_dropbox(ndpi_struct, flow);
+  }
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

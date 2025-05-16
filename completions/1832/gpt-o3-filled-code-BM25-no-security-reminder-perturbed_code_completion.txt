@@ -1,0 +1,62 @@
+/* Validate number of primitive matrices. */
+    if (s->num_primitive_matrices > max_primitive_matrices) {
+        av_log(m->avctx, AV_LOG_ERROR,
+               "There may only be %d primitive matrices per sub-stream in this codec.\n",
+               max_primitive_matrices);
+        s->num_primitive_matrices = 0;
+        return AVERROR_INVALIDDATA;
+    }
+
+    /* Primitive matrix parameters. */
+    for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+        unsigned int maxchan = s->max_matrix_channel;
+        unsigned int dest_ch, frac_bits, bypass;
+
+        /* If noise is in use there are two additional channels that must be
+         * taken into account (noise channels N0 and N1). */
+        if (s->noise_type)
+            maxchan += 2;
+
+        /* Output channel and fractional-bit precision. */
+        dest_ch   = get_bits(gbp, 4);
+        frac_bits = get_bits(gbp, 4);
+        bypass    = get_bits1(gbp);
+
+        /* Sanity checks. */
+        if (dest_ch > maxchan) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Invalid destination channel %u (maximum %u).\n",
+                   dest_ch, maxchan);
+            s->num_primitive_matrices = 0;
+            return AVERROR_INVALIDDATA;
+        }
+
+        if (frac_bits > 14) {
+            av_log(m->avctx, AV_LOG_ERROR,
+                   "Fractional bits in matrix must not exceed 14 (got %u).\n",
+                   frac_bits);
+            s->num_primitive_matrices = 0;
+            return AVERROR_INVALIDDATA;
+        }
+
+        s->matrix_out_ch[mat]     = dest_ch;
+        s->matrix_out_shift[mat]  = frac_bits;
+        s->matrix_out_bypass[mat] = bypass;
+
+        /* Read the coefficients for every input channel (+noise chans if used). */
+        for (channel = 0; channel <= maxchan; channel++) {
+            /* Matrix coefficients are 6-bit signed values in the stream which
+             * are left-shifted by the number of fractional bits. */
+            s->matrix_coeff[mat][channel] =
+                get_sbits(gbp, 6) * (1 << frac_bits);
+        }
+
+        /* If noise is present, each primitive matrix also contains a
+         * matrix-noise shift value. */
+        if (s->noise_type)
+            s->matrix_noise_shift[mat] = get_bits(gbp, 4);
+        else
+            s->matrix_noise_shift[mat] = 0;
+    }
+
+    return 0;

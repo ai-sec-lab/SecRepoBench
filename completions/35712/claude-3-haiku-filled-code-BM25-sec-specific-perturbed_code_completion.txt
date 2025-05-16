@@ -1,0 +1,261 @@
+CASE(OP_EXT1, Z) {
+  uint8_t ext_opcode;
+  FETCH_B(ext_opcode);
+  pc--;
+  switch (ext_opcode) {
+    case 0x00: // OP_EXT1_SEND
+      {
+        FETCH_BB(b, c);
+        mid = syms[b];
+        c = 1;
+        goto L_SEND_SYM;
+      }
+    case 0x01: // OP_EXT1_SENDB
+      {
+        FETCH_BB(b, c);
+        mid = syms[b];
+        goto L_SENDB_SYM;
+      }
+    case 0x02: // OP_EXT1_ENTER
+      {
+        FETCH_W(a);
+        CASE(OP_ENTER, W) {
+          mrb_int m1 = MRB_ASPEC_REQ(a);
+          mrb_int o  = MRB_ASPEC_OPT(a);
+          mrb_int r  = MRB_ASPEC_REST(a);
+          mrb_int m2 = MRB_ASPEC_POST(a);
+          mrb_int kd = (MRB_ASPEC_KEY(a) > 0 || MRB_ASPEC_KDICT(a))? 1 : 0;
+          /* unused
+          int b  = MRB_ASPEC_BLOCK(a);
+          */
+          mrb_int argc = mrb->c->ci->argc;
+          mrb_value *argv = regs+1;
+          mrb_value * const argv0 = argv;
+          mrb_int const len = m1 + o + r + m2;
+          mrb_int const blk_pos = len + kd + 1;
+          mrb_value *blk = &argv[argc < 0 ? 1 : argc];
+          mrb_value kdict = mrb_nil_value();
+          mrb_int kargs = kd;
+
+          /* arguments is passed with Array */
+          if (argc < 0) {
+            struct RArray *ary = mrb_ary_ptr(regs[1]);
+            argv = ARY_PTR(ary);
+            argc = (int)ARY_LEN(ary);
+            mrb_gc_protect(mrb, regs[1]);
+          }
+
+          /* strict argument check */
+          if (mrb->c->ci->proc && MRB_PROC_STRICT_P(mrb->c->ci->proc)) {
+            if (argc < m1 + m2 || (r == 0 && argc > len + kd)) {
+              argnum_error(mrb, m1+m2);
+              goto L_RAISE;
+            }
+          }
+          /* extract first argument array to arguments */
+          else if (len > 1 && argc == 1 && mrb_array_p(argv[0])) {
+            mrb_gc_protect(mrb, argv[0]);
+            argc = (int)RARRAY_LEN(argv[0]);
+            argv = RARRAY_PTR(argv[0]);
+          }
+
+          if (kd) {
+            /* check last arguments is hash if method takes keyword arguments */
+            if (argc == m1+m2) {
+              kdict = mrb_hash_new(mrb);
+              kargs = 0;
+            }
+            else {
+              if (argv && argc > 0 && mrb_hash_p(argv[argc-1])) {
+                kdict = argv[argc-1];
+                mrb_hash_check_kdict(mrb, kdict);
+              }
+              else if (r || argc <= m1+m2+o
+                       || !(mrb->c->ci->proc && MRB_PROC_STRICT_P(mrb->c->ci->proc))) {
+                kdict = mrb_hash_new(mrb);
+                kargs = 0;
+              }
+              else {
+                argnum_error(mrb, m1+m2);
+                goto L_RAISE;
+              }
+              if (MRB_ASPEC_KEY(a) > 0) {
+                kdict = mrb_hash_dup(mrb, kdict);
+              }
+            }
+          }
+
+          /* no rest arguments */
+          if (argc-kargs < len) {
+            mrb_int mlen = m2;
+            if (argc < m1+m2) {
+              mlen = m1 < argc ? argc - m1 : 0;
+            }
+            regs[blk_pos] = *blk; /* move block */
+            if (kd) regs[len + 1] = kdict;
+
+            /* copy mandatory and optional arguments */
+            if (argv0 != argv && argv) {
+              value_move(&regs[1], argv, argc-mlen); /* m1 + o */
+            }
+            if (argc < m1) {
+              stack_clear(&regs[argc+1], m1-argc);
+            }
+            /* copy post mandatory arguments */
+            if (mlen) {
+              value_move(&regs[len-m2+1], &argv[argc-mlen], mlen);
+            }
+            if (mlen < m2) {
+              stack_clear(&regs[len-m2+mlen+1], m2-mlen);
+            }
+            /* initialize rest arguments with empty Array */
+            if (r) {
+              regs[m1+o+1] = mrb_ary_new_capa(mrb, 0);
+            }
+            /* skip initializer of passed arguments */
+            if (o > 0 && argc-kargs > m1+m2)
+              pc += (argc - kargs - m1 - m2)*3;
+          }
+          else {
+            mrb_int rnum = 0;
+            if (argv0 != argv) {
+              regs[blk_pos] = *blk; /* move block */
+              if (kd) regs[len + 1] = kdict;
+              value_move(&regs[1], argv, m1+o);
+            }
+            if (r) {
+              mrb_value ary;
+
+              rnum = argc-m1-o-m2-kargs;
+              ary = mrb_ary_new_from_values(mrb, rnum, argv+m1+o);
+              regs[m1+o+1] = ary;
+            }
+            if (m2) {
+              if (argc-m2 > m1) {
+                value_move(&regs[m1+o+r+1], &argv[m1+o+rnum], m2);
+              }
+            }
+            if (argv0 == argv) {
+              regs[blk_pos] = *blk; /* move block */
+              if (kd) regs[len + 1] = kdict;
+            }
+            pc += o*3;
+          }
+
+          /* format arguments for generated code */
+          mrb->c->ci->argc = (int16_t)(len + kd);
+
+          /* clear local (but non-argument) variables */
+          if (irep->nlocals-blk_pos-1 > 0) {
+            stack_clear(&regs[blk_pos+1], irep->nlocals-blk_pos-1);
+          }
+          JUMP;
+        }
+      }
+    case 0x03: // OP_EXT1_LAMBDA
+      {
+        FETCH_BB(b, c);
+        c = OP_L_LAMBDA | (c & OP_L_CAPTURE);
+        goto L_MAKE_LAMBDA;
+      }
+    case 0x04: // OP_EXT1_BLOCK
+      {
+        FETCH_BB(b, c);
+        c = OP_L_BLOCK | (c & OP_L_CAPTURE);
+        goto L_MAKE_LAMBDA;
+      }
+    case 0x05: // OP_EXT1_METHOD
+      {
+        FETCH_BB(b, c);
+        c = OP_L_METHOD | (c & OP_L_CAPTURE);
+        goto L_MAKE_LAMBDA;
+      }
+    case 0x06: // OP_EXT1_SCLASS
+      {
+        FETCH_B(a);
+        regs[a] = mrb_singleton_class(mrb, regs[a]);
+        mrb_gc_arena_restore(mrb, ai);
+        NEXT;
+      }
+    case 0x07: // OP_EXT1_TCLASS
+      {
+        FETCH_B(a);
+        if (!check_target_class(mrb)) goto L_RAISE;
+        regs[a] = mrb_obj_value(mrb_vm_ci_target_class(mrb->c->ci));
+        NEXT;
+      }
+    case 0x08: // OP_EXT1_ALIAS
+      {
+        FETCH_BB(a, b);
+        struct RClass *target;
+
+        if (!check_target_class(mrb)) goto L_RAISE;
+        target = mrb_vm_ci_target_class(mrb->c->ci);
+        mrb_alias_method(mrb, target, syms[a], syms[b]);
+        mrb_method_added(mrb, target, syms[a]);
+        NEXT;
+      }
+    case 0x09: // OP_EXT1_UNDEF
+      {
+        FETCH_B(a);
+        struct RClass *target;
+
+        if (!check_target_class(mrb)) goto L_RAISE;
+        target = mrb_vm_ci_target_class(mrb->c->ci);
+        mrb_undef_method_id(mrb, target, syms[a]);
+        NEXT;
+      }
+    case 0x0A: // OP_EXT1_DEBUG
+      {
+        FETCH_BBB();
+#ifdef MRB_USE_DEBUG_HOOK
+        mrb->debug_op_hook(mrb, irep, pc, regs);
+#else
+#ifndef MRB_NO_STDIO
+        printf("OP_EXT1_DEBUG %d %d %d\n", a, b, c);
+#else
+        abort();
+#endif
+#endif
+        NEXT;
+      }
+    case 0x0B: // OP_EXT1_ERR
+      {
+        FETCH_B(a);
+        size_t len = pool[a].tt >> 2;
+        mrb_value exc;
+
+        mrb_assert((pool[a].tt&IREP_TT_NFLAG)==0);
+        exc = mrb_exc_new(mrb, E_LOCALJUMP_ERROR, pool[a].u.str, len);
+        mrb_exc_set(mrb, exc);
+        goto L_RAISE;
+      }
+    case 0x0C: // OP_EXT1_OCLASS
+      {
+        FETCH_B(a);
+        regs[a] = mrb_obj_value(mrb->object_class);
+        NEXT;
+      }
+    case 0x0D: // OP_EXT1_CLASS
+      {
+        FETCH_BB(a, b);
+        struct RClass *c = 0, *baseclass;
+        mrb_value base, super;
+        mrb_sym id = syms[b];
+
+        base = regs[a];
+        super = regs[a+1];
+        if (mrb_nil_p(base)) {
+          baseclass = MRB_PROC_TARGET_CLASS(mrb->c->ci->proc);
+          if (!baseclass) baseclass = mrb->object_class;
+          base = mrb_obj_value(baseclass);
+        }
+        c = mrb_vm_define_class(mrb, base, super, id);
+        regs[a] = mrb_obj_value(c);
+        mrb_gc_arena_restore(mrb, ai);
+        NEXT;
+      }
+    case 0x0E: // OP_EXT1_MODULE
+      {
+        FETCH_BB(a, b);
+        struct RClass *cl

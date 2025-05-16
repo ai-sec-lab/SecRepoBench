@@ -1,0 +1,47 @@
+/* TZSP: TaZmen Sniffer Protocol (RFC draft) for encapsulating the captured packets within UDP */
+u_int offset = ip_offset+ip_len+sizeof(struct ndpi_udphdr);
+
+if((offset + 4) <= header->caplen) { /* Make sure we have enough bytes for the TZSP header */
+  u_int8_t version = packet[offset];
+  u_int8_t type = packet[offset+1];
+  
+  if((version == 1) && (type == 0)) { /* TZSP_TYPE_RECEIVED_TAG_LIST */
+    u_int16_t encapsulation = ntohs(*((u_int16_t*)&packet[offset+2]));
+    
+    if(encapsulation == 1) { /* LINKTYPE_ETHERNET - the only one we handle */
+      offset += 4; /* Skip TZSP header */
+      
+      while(offset < header->caplen) {
+        u_int8_t tag_type = packet[offset];
+        
+        if(tag_type == 0) { /* TAG_END */
+          offset++; /* Move to next byte after TAG_END */
+          break;
+        } else if(tag_type == 1) { /* TAG_PADDING */
+          offset++;
+          continue;
+        } else {
+          /* Other tags - read length and skip */ 
+          if(offset + 1 < header->caplen) {
+            u_int8_t tag_len = packet[offset+1];
+            if(offset + 2 + tag_len <= header->caplen) {
+              offset += 2 + tag_len; /* tag type + tag length + tag data */
+            } else {
+              break; /* Invalid packet - not enough bytes for tag data */
+            }
+          } else {
+            break; /* Invalid packet - not enough bytes for tag length */
+          }
+        }
+      }
+      
+      if(offset < header->caplen) {
+        /* We have an encapsulated Ethernet packet */
+        eth_offset = offset;
+        datalink_type = DLT_EN10MB;
+        tunnel_type = ndpi_tzsp_tunnel;
+        goto datalink_check; /* Re-process from the beginning with the new offset */
+      }
+    }
+  }
+}

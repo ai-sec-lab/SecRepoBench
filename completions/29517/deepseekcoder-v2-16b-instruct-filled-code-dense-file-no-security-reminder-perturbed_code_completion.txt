@@ -1,0 +1,66 @@
+/* Check if the structure defines its fields using the "MATLAB_fields" attribute.
+     * If the attribute exists, read the field names and update the number of fields.
+     * If the attribute does not exist, retrieve the number of links in the dataset group.
+     * If there are links, iterate over them to count and collect field names.
+     * Store the field names in the matvar structure and update the total number of fields.
+     */
+    if ( H5Aexists_by_name(dset_id,".","MATLAB_fields",H5P_DEFAULT) ) {
+        err = Mat_H5ReadFieldNames(matvar, dset_id, &nfields);
+        if (err < 0) {
+            return err;
+        }
+    } else {
+        hid_t link_id;
+        hsize_t num_links;
+        herr_t status = H5Gget_num_objs(dset_id, &num_links);
+        if (status < 0) {
+            return MATIO_E_GENERIC_READ_ERROR;
+        }
+        nfields = num_links;
+
+        matvar->internal->num_fields = nfields;
+        matvar->internal->fieldnames = (char **)calloc(nfields, sizeof(char *));
+        if (matvar->internal->fieldnames == NULL) {
+            return MATIO_E_OUT_OF_MEMORY;
+        }
+
+        for (i = 0; i < nfields; i++) {
+            link_id = H5Lopen_by_idx(dset_id, ".", H5_INDEX_NAME, H5_ITER_NATIVE, i, H5P_DEFAULT);
+            if (link_id < 0) {
+                for (hsize_t j = 0; j < i; j++) {
+                    free(matvar->internal->fieldnames[j]);
+                }
+                free(matvar->internal->fieldnames);
+                return MATIO_E_GENERIC_READ_ERROR;
+            }
+            ssize_t name_len = H5Lget_name_by_idx(link_id, ".", H5_INDEX_NAME, H5_ITER_NATIVE, i, NULL, 0);
+            if (name_len < 0) {
+                H5Lclose(link_id);
+                for (hsize_t j = 0; j < i; j++) {
+                    free(matvar->internal->fieldnames[j]);
+                }
+                free(matvar->internal->fieldnames);
+                return MATIO_E_GENERIC_READ_ERROR;
+            }
+            matvar->internal->fieldnames[i] = (char *)malloc(name_len + 1);
+            if (matvar->internal->fieldnames[i] == NULL) {
+                H5Lclose(link_id);
+                for (hsize_t j = 0; j < i; j++) {
+                    free(matvar->internal->fieldnames[j]);
+                }
+                free(matvar->internal->fieldnames);
+                return MATIO_E_OUT_OF_MEMORY;
+            }
+            name_len = H5Lget_name_by_idx(link_id, ".", H5_INDEX_NAME, H5_ITER_NATIVE, i, matvar->internal->fieldnames[i], name_len + 1);
+            if (name_len < 0) {
+                free(matvar->internal->fieldnames[i]);
+                H5Lclose(link_id);
+                for (hsize_t j = 0; j < i; j++) {
+                    free(matvar->internal->fieldnames[j]);
+                }
+                free(matvar->internal->fieldnames);
+                return MATIO_E_GENERIC_READ_ERROR;
+            }
+            H5Lclose(link_id);
+        }
+    }

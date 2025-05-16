@@ -1,0 +1,248 @@
+if (draw_info->encoding != (char *) NULL)
+    {
+      if (LocaleCompare(draw_info->encoding,"UTF-8") == 0)
+        encoding_type=FT_ENCODING_UNICODE;
+      else
+        if (LocaleCompare(draw_info->encoding,"UNICODE") == 0)
+          encoding_type=FT_ENCODING_UNICODE;
+        else
+          if (LocaleCompare(draw_info->encoding,"ADOBE_STANDARD") == 0)
+            encoding_type=FT_ENCODING_ADOBE_STANDARD;
+          else
+            if (LocaleCompare(draw_info->encoding,"ADOBE_SYMBOL") == 0)
+              encoding_type=FT_ENCODING_ADOBE_SYMBOL;
+            else
+              if (LocaleCompare(draw_info->encoding,"ADOBE_ZAPF_DINGBATS") == 0)
+                encoding_type=FT_ENCODING_ADOBE_ZAPF_DINGBATS;
+              else
+                if (LocaleCompare(draw_info->encoding,"APPLE_ROMAN") == 0)
+                  encoding_type=FT_ENCODING_APPLE_ROMAN;
+                else
+                  encoding_type=FT_ENCODING_NONE;
+      ft_status=FT_Select_Charmap(face,encoding_type);
+      if (ft_status != 0)
+        {
+          (void) FT_Done_Face(face);
+          (void) FT_Done_FreeType(library);
+          ThrowFreetypeErrorException("UnableToSelectCodingSystem",ft_status,
+            draw_info->encoding);
+          return(MagickFalse);
+        }
+    }
+  /*
+    Set character size.
+  */
+  resolution.x=72.0;
+  resolution.y=72.0;
+  if (draw_info->density != (char *) NULL)
+    {
+      (void) ParseGeometry(draw_info->density,&point);
+      if (point.x > 0)
+        resolution.x=point.x;
+      if (point.y > 0)
+        resolution.y=point.y;
+      if (point.y == 0)
+        resolution.y=resolution.x;
+    }
+  ft_status=FT_Set_Char_Size(face,(FT_F26Dot6) (draw_info->pointsize*64.0),
+    (FT_F26Dot6) (draw_info->pointsize*64.0),(FT_UInt) resolution.x,
+    (FT_UInt) resolution.y);
+  if (ft_status != 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToSetFontSize",ft_status,
+        draw_info->font);
+      return(MagickFalse);
+    }
+  /*
+    Initialize font metrics.
+  */
+  metrics->ascent=(double) face->size->metrics.ascender/64.0;
+  metrics->descent=(double) face->size->metrics.descender/64.0;
+  metrics->width=(double) face->size->metrics.max_advance/64.0;
+  metrics->height=metrics->ascent-metrics->descent;
+  metrics->max_advance=(double) face->size->metrics.max_advance/64.0;
+  if (metrics->ascent < 0)
+    metrics->ascent=(double) face->bbox.yMax/64.0;
+  if (metrics->descent > 0)
+    metrics->descent=(double) face->bbox.yMin/64.0;
+  metrics->underline_position=(double)
+    face->underline_position/64.0;
+  metrics->underline_thickness=(double)
+    face->underline_thickness/64.0;
+  /*
+    Determine bounding box.
+  */
+  if ((encoding == (char *) NULL) || (*encoding == '\0'))
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  if (face->num_glyphs == 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  flags=FT_LOAD_DEFAULT;
+  if (draw_info->hinting == MagickFalse)
+    flags|=FT_LOAD_NO_HINTING;
+  if (image->antialias != MagickFalse)
+    flags|=FT_LOAD_TARGET_LIGHT;
+  else
+    flags|=FT_LOAD_TARGET_MONO;
+  if (image->colorspace == CMYKColorspace)
+    flags|=FT_LOAD_TARGET_MONO;
+  /*
+    Allocate grapheme info.
+  */
+  grapheme=(GraphemeInfo *) NULL;
+  length=ComplexTextLayout(image,draw_info,encoding,strlen(encoding),face,
+    flags,&grapheme,exception);
+  if (length == 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickFalse);
+    }
+  /*
+    Prepare rendering options.
+  */
+  affine.xx=(FT_Fixed) (draw_info->affine.sx*(1L << 16));
+  affine.xy=(FT_Fixed) (-draw_info->affine.rx*(1L << 16));
+  affine.yx=(FT_Fixed) (-draw_info->affine.ry*(1L << 16));
+  affine.yy=(FT_Fixed) (draw_info->affine.sy*(1L << 16));
+  ft_status=FT_Set_Transform(face,&affine,NULL);
+  if (ft_status != 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickFalse);
+    }
+  first_glyph_id=0;
+  last_glyph_id=0;
+  missing_glyph_id=0;
+  bounds.xMin = 32000;
+  bounds.yMin = 32000;
+  bounds.xMax = -32000;
+  bounds.yMax = -32000;
+  last_character=(-1);
+  origin.x=0;
+  origin.y=0;
+  utf8=(unsigned char *) encoding;
+  annotate_info=CloneDrawInfo(draw_info,NULL);
+  if (annotate_info->render == MagickFalse)
+    annotate_info->geometry=NULL;
+  /*
+    Render each glyph.
+  */
+  ResetMagickMemory(&glyph,0,sizeof(glyph));
+  for (i=0; i < (ssize_t) length; i++)
+  {
+    code=(ssize_t) utf8[i];
+    glyph.id=(FT_UInt) grapheme[i].index;
+    if (glyph.id == 0)
+      {
+        origin.x+=(face->glyph->advance.x >> 6);
+        continue;
+      }
+    ft_status=FT_Load_Glyph(face,glyph.id,flags);
+    if (ft_status != 0)
+      continue;
+    if (annotate_info->render != MagickFalse)
+      {
+        /*
+          Render the glyph.
+        */
+        glyph.origin.x=origin.x+grapheme[i].x_offset;
+        glyph.origin.y=origin.y+grapheme[i].y_offset;
+        ft_status=FT_Get_Glyph(face->glyph,&glyph.image);
+        if (ft_status != 0)
+          continue;
+        if (glyph.image->format == FT_GLYPH_FORMAT_OUTLINE)
+          {
+            FT_OutlineGlyph
+              outline_glyph;
+
+            /*
+              Trace the outline.
+            */
+            outline_glyph=(FT_OutlineGlyph) glyph.image;
+            if (draw_info->stroke_width != 0.0)
+              {
+                (void) FT_Outline_Decompose(&outline_glyph->outline,
+                  &OutlineMethods,(void *) annotate_info);
+                (void) PathStroke(image,annotate_info,exception);
+              }
+            /*
+              Rasterize the outline.
+            */
+            (void) FT_Outline_Get_BBox(&outline_glyph->outline,&bounds);
+          }
+        if (glyph.image->format == FT_GLYPH_FORMAT_BITMAP)
+          {
+            /*
+              Transfer bitmap glyph.
+            */
+            bitmap=(FT_BitmapGlyph) glyph.image;
+            point.x=(double) glyph.origin.x/64.0+offset->x;
+            point.y=(double) offset->y-(glyph.origin.y/64.0)-
+              (double) bitmap->bitmap.rows;
+            for (y=0; y < (ssize_t) bitmap->bitmap.rows; y++)
+            {
+              register const unsigned char
+                *p;
+
+              register ssize_t
+                x;
+
+              p=bitmap->bitmap.buffer+(ssize_t) bitmap->bitmap.pitch*y;
+              for (x=0; x < (ssize_t) bitmap->bitmap.width; x++)
+              {
+                if ((image->antialias == MagickFalse) ||
+                    (image->colorspace == CMYKColorspace))
+                  {
+                    if ((p[x >> 3] & (0x80 >> (x & 0x7))))
+                      (void) DrawImagePixel(image,(ssize_t) (point.x+x),
+                        (ssize_t) (point.y+y),annotate_info->fill_color);
+                    continue;
+                  }
+                if ((p[x >> 3] & (0x80 >> (x & 0x7))))
+                  (void) DrawImagePixel(image,(ssize_t) (point.x+x),
+                    (ssize_t) (point.y+y),annotate_info->fill_color);
+              }
+            }
+          }
+        FT_Done_Glyph(glyph.image);
+      }
+    origin.x+=(face->glyph->advance.x >> 6)+grapheme[i].x_advance;
+    if (first_glyph_id == 0)
+      first_glyph_id=glyph.id;
+    last_glyph_id=glyph.id;
+  }
+  annotate_info=DestroyDrawInfo(annotate_info);
+  /*
+    Finalize font metrics.
+  */
+  if (bounds.xMin == 32000)
+    {
+      bounds.xMin = 0;
+      bounds.yMin = 0;
+      bounds.xMax = 0;
+      bounds.yMax = 0;
+    }
+  metrics->bounds.x=bounds.xMin;
+  metrics->bounds.y=bounds.yMin;
+  metrics->bounds.width=bounds.xMax-bounds.xMin;
+  (void) MagickMax(metrics->width,(double) (bounds.xMax-bounds.xMin)/64.0);
+  /*
+    Free resources.
+  */
+  if (grapheme != (GraphemeInfo *) NULL)
+    grapheme=(GraphemeInfo *) RelinquishMagickMemory(grapheme);
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+  return(MagickTrue);
+}

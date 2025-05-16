@@ -1,0 +1,158 @@
+bool AffixMgr::parse_phonetable(const std::string& line, FileMgr* fileMgr) {
+  if (phone) {
+    HUNSPELL_WARNING(stderr, "error: line %d: multiple table definitions\n",
+                     fileMgr->getlinenum());
+    return false;
+  }
+  
+  int numphon = -1;
+  int i = 0;
+  int np = 0;
+  
+  std::string::const_iterator iter = line.begin();
+  std::string::const_iterator start_piece = mystrsep(line, iter);
+  while (start_piece != line.end()) {
+    switch (i) {
+      case 0: {
+        np++;
+        break;
+      }
+      case 1: {
+        numphon = atoi(std::string(start_piece, iter).c_str());
+        if (numphon < 1) {
+          HUNSPELL_WARNING(stderr, "error: line %d: bad entry number\n",
+                           fileMgr->getlinenum());
+          return false;
+        }
+        phone = new phonetable;
+        if (!phone)
+          return false;
+        phone->rules = (char**)malloc(sizeof(char*) * numphon);
+        if (!phone->rules) {
+          delete phone;
+          phone = NULL;
+          return false;
+        }
+        phone->rules_count = numphon;
+        phone->hash = NULL;
+        phone->hash_size = 0;
+        np++;
+        break;
+      }
+      default:
+        break;
+    }
+    ++i;
+    start_piece = mystrsep(line, iter);
+  }
+  
+  if (np != 2) {
+    HUNSPELL_WARNING(stderr, "error: line %d: missing data\n",
+                     fileMgr->getlinenum());
+    delete phone;
+    phone = NULL;
+    return false;
+  }
+
+  for (int j = 0; j < numphon; j++) {
+    std::string nl;
+    if (!fileMgr->getline(nl)) {
+      for (int k = 0; k < j; k++)
+        free(phone->rules[k]);
+      free(phone->rules);
+      delete phone;
+      phone = NULL;
+      return false;
+    }
+    mychomp(nl);
+    i = 0;
+    np = 0;
+    
+    std::string rule;
+    
+    iter = nl.begin();
+    start_piece = mystrsep(nl, iter);
+    while (start_piece != nl.end()) {
+      switch (i) {
+        case 0: {
+          np++;
+          if (nl.compare(start_piece - nl.begin(), 5, "PHONE", 5) != 0) {
+            HUNSPELL_WARNING(stderr, "error: line %d: table is corrupt\n",
+                           fileMgr->getlinenum());
+            for (int k = 0; k < j; k++)
+              free(phone->rules[k]);
+            free(phone->rules);
+            delete phone;
+            phone = NULL;
+            return false;
+          }
+          break;
+        }
+        case 1: {
+          rule.assign(start_piece, iter);
+          np++;
+          break;
+        }
+        default:
+          break;
+      }
+      ++i;
+      start_piece = mystrsep(nl, iter);
+    }
+    
+    if (np != 2) {
+      HUNSPELL_WARNING(stderr, "error: line %d: missing data\n",
+                     fileMgr->getlinenum());
+      for (int k = 0; k < j; k++)
+        free(phone->rules[k]);
+      free(phone->rules);
+      delete phone;
+      phone = NULL;
+      return false;
+    }
+    
+    // Remove underscore (variable-length replacement patterns)
+    size_t pos = 0;
+    while ((pos = rule.find('_', pos)) != std::string::npos) {
+      rule.erase(pos, 1);
+    }
+    
+    phone->rules[j] = mystrdup(rule.c_str());
+    if (!phone->rules[j]) {
+      for (int k = 0; k < j; k++)
+        free(phone->rules[k]);
+      free(phone->rules);
+      delete phone;
+      phone = NULL;
+      return false;
+    }
+  }
+  
+  // Initialize hash table for phonetic transformation
+  if (numphon) {
+    phone->hash_size = 256; // ASCII/Latin-1 size
+    phone->hash = (int*)malloc(sizeof(int) * phone->hash_size);
+    if (!phone->hash) {
+      for (int j = 0; j < numphon; j++)
+        free(phone->rules[j]);
+      free(phone->rules);
+      delete phone;
+      phone = NULL;
+      return false;
+    }
+    
+    // Initialize hash to -1 (no rule for this character)
+    for (int j = 0; j < phone->hash_size; j++)
+      phone->hash[j] = -1;
+    
+    // Fill in hash with indices to the rules
+    for (int j = 0; j < numphon; j++) {
+      unsigned char k = static_cast<unsigned char>(phone->rules[j][0]);
+      if (phone->hash[k] == -1) {
+        phone->hash[k] = j;
+      }
+    }
+  }
+  
+  return true;
+}

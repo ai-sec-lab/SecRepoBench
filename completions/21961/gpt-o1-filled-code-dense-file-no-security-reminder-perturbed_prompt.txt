@@ -1,0 +1,4890 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static Image *ReadTIFFImage(const ImageInfo *image_info,
+  ExceptionInfo *exception)
+{
+#define ThrowTIFFException(severity,message) \
+{ \
+  if (pixel_info != (MemoryInfo *) NULL) \
+    pixel_info=RelinquishVirtualMemory(pixel_info); \
+  if (quantum_info != (QuantumInfo *) NULL) \
+    quantum_info=DestroyQuantumInfo(quantum_info); \
+  TIFFClose(tiff); \
+  ThrowReaderException(severity,message); \
+}
+
+  const char
+    *option;
+
+  float
+    *chromaticity,
+    x_position,
+    y_position,
+    x_resolution,
+    y_resolution;
+
+  Image
+    *image;
+
+  int
+    tiff_status;
+
+  MagickBooleanType
+    more_frames,
+    status;
+
+  MagickSizeType
+    number_pixels;
+
+  MemoryInfo
+    *pixel_info = (MemoryInfo *) NULL;
+
+  QuantumInfo
+    *quantum_info;
+
+  QuantumType
+    quantum_type;
+
+  register ssize_t
+    i;
+
+  size_t
+    pad;
+
+  ssize_t
+    row_index;
+
+  TIFF
+    *tiff;
+
+  TIFFMethodType
+    method;
+
+  uint16
+    compress_tag,
+    bits_per_sample,
+    endian,
+    extra_samples,
+    interlace,
+    max_sample_value,
+    min_sample_value,
+    orientation,
+    pages,
+    photometric,
+    *sample_info,
+    sample_format,
+    samples_per_pixel,
+    units,
+    value;
+
+  uint32
+    height,
+    rows_per_strip,
+    width;
+
+  unsigned char
+    *pixels;
+
+  void
+    *sans[2] = { NULL, NULL };
+
+  /*
+    Open image.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  (void) SetMagickThreadValue(tiff_exception,exception);
+  tiff=TIFFClientOpen(image->filename,"rb",(thandle_t) image,TIFFReadBlob,
+    TIFFWriteBlob,TIFFSeekBlob,TIFFCloseBlob,TIFFGetBlobSize,TIFFMapBlob,
+    TIFFUnmapBlob);
+  if (tiff == (TIFF *) NULL)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  if (exception->severity > ErrorException)
+    {
+      TIFFClose(tiff);
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  if (image_info->number_scenes != 0)
+    {
+      /*
+        Generate blank images for subimage specification (e.g. image.tif[4].
+        We need to check the number of directores because it is possible that
+        the subimage(s) are stored in the photoshop profile.
+      */
+      if (image_info->scene < (size_t) TIFFNumberOfDirectories(tiff))
+        {
+          for (i=0; i < (ssize_t) image_info->scene; i++)
+          {
+            status=TIFFReadDirectory(tiff) != 0 ? MagickTrue : MagickFalse;
+            if (status == MagickFalse)
+              {
+                TIFFClose(tiff);
+                image=DestroyImageList(image);
+                return((Image *) NULL);
+              }
+            AcquireNextImage(image_info,image,exception);
+            if (GetNextImageInList(image) == (Image *) NULL)
+              {
+                TIFFClose(tiff);
+                image=DestroyImageList(image);
+                return((Image *) NULL);
+              }
+            image=SyncNextImageInList(image);
+          }
+      }
+  }
+  more_frames=MagickTrue;
+  do
+  {
+DisableMSCWarning(4127)
+    if (0 && (image_info->verbose != MagickFalse))
+      TIFFPrintDirectory(tiff,stdout,MagickFalse);
+RestoreMSCWarning
+    photometric=PHOTOMETRIC_RGB;
+    if ((TIFFGetField(tiff,TIFFTAG_IMAGEWIDTH,&width) != 1) ||
+        (TIFFGetField(tiff,TIFFTAG_IMAGELENGTH,&height) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_PHOTOMETRIC,&photometric,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_COMPRESSION,&compress_tag,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_FILLORDER,&endian,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_PLANARCONFIG,&interlace,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_SAMPLESPERPIXEL,&samples_per_pixel,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_BITSPERSAMPLE,&bits_per_sample,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_SAMPLEFORMAT,&sample_format,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_MINSAMPLEVALUE,&min_sample_value,sans) != 1) ||
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_MAXSAMPLEVALUE,&max_sample_value,sans) != 1))
+      {
+        TIFFClose(tiff);
+        ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+      }
+    if (((sample_format != SAMPLEFORMAT_IEEEFP) || (bits_per_sample != 64)) &&
+        ((bits_per_sample <= 0) || (bits_per_sample > 32)))
+      {
+        TIFFClose(tiff);
+        ThrowReaderException(CorruptImageError,"UnsupportedBitsPerPixel");
+      }
+    if (sample_format == SAMPLEFORMAT_IEEEFP)
+      (void) SetImageProperty(image,"quantum:format","floating-point",
+        exception);
+    switch (photometric)
+    {
+      case PHOTOMETRIC_MINISBLACK:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","min-is-black",
+          exception);
+        break;
+      }
+      case PHOTOMETRIC_MINISWHITE:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","min-is-white",
+          exception);
+        break;
+      }
+      case PHOTOMETRIC_PALETTE:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","palette",exception);
+        break;
+      }
+      case PHOTOMETRIC_RGB:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","RGB",exception);
+        break;
+      }
+      case PHOTOMETRIC_CIELAB:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","CIELAB",exception);
+        break;
+      }
+      case PHOTOMETRIC_LOGL:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","CIE Log2(L)",
+          exception);
+        break;
+      }
+      case PHOTOMETRIC_LOGLUV:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","LOGLUV",exception);
+        break;
+      }
+#if defined(PHOTOMETRIC_MASK)
+      case PHOTOMETRIC_MASK:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","MASK",exception);
+        break;
+      }
+#endif
+      case PHOTOMETRIC_SEPARATED:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","separated",exception);
+        break;
+      }
+      case PHOTOMETRIC_YCBCR:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","YCBCR",exception);
+        break;
+      }
+      default:
+      {
+        (void) SetImageProperty(image,"tiff:photometric","unknown",exception);
+        break;
+      }
+    }
+    if (image->debug != MagickFalse)
+      {
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),"Geometry: %ux%u",
+          (unsigned int) width,(unsigned int) height);
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),"Interlace: %u",
+          interlace);
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+          "Bits per sample: %u",bits_per_sample);
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+          "Min sample value: %u",min_sample_value);
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+          "Max sample value: %u",max_sample_value);
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),"Photometric "
+          "interpretation: %s",GetImageProperty(image,"tiff:photometric",
+          exception));
+      }
+    image->columns=(size_t) width;
+    image->rows=(size_t) height;
+    image->depth=(size_t) bits_per_sample;
+    if (image->debug != MagickFalse)
+      (void) LogMagickEvent(CoderEvent,GetMagickModule(),"Image depth: %.20g",
+        (double) image->depth);
+    image->endian=MSBEndian;
+    if (endian == FILLORDER_LSB2MSB)
+      image->endian=LSBEndian;
+#if defined(MAGICKCORE_HAVE_TIFFISBIGENDIAN)
+    if (TIFFIsBigEndian(tiff) == 0)
+      {
+        (void) SetImageProperty(image,"tiff:endian","lsb",exception);
+        image->endian=LSBEndian;
+      }
+    else
+      {
+        (void) SetImageProperty(image,"tiff:endian","msb",exception);
+        image->endian=MSBEndian;
+      }
+#endif
+    if ((photometric == PHOTOMETRIC_MINISBLACK) ||
+        (photometric == PHOTOMETRIC_MINISWHITE))
+      SetImageColorspace(image,GRAYColorspace,exception);
+    if (photometric == PHOTOMETRIC_SEPARATED)
+      SetImageColorspace(image,CMYKColorspace,exception);
+    if (photometric == PHOTOMETRIC_CIELAB)
+      SetImageColorspace(image,LabColorspace,exception);
+    status=TIFFGetProfiles(tiff,image,exception);
+    if (status == MagickFalse)
+      {
+        TIFFClose(tiff);
+        return(DestroyImageList(image));
+      }
+    status=TIFFGetProperties(tiff,image,exception);
+    if (status == MagickFalse)
+      {
+        TIFFClose(tiff);
+        return(DestroyImageList(image));
+      }
+    option=GetImageOption(image_info,"tiff:exif-properties");
+    if (IsStringFalse(option) == MagickFalse) /* enabled by default */
+      TIFFGetEXIFProperties(tiff,image,exception);
+    if ((TIFFGetFieldDefaulted(tiff,TIFFTAG_XRESOLUTION,&x_resolution,sans) == 1) &&
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_YRESOLUTION,&y_resolution,sans) == 1))
+      {
+        image->resolution.x=x_resolution;
+        image->resolution.y=y_resolution;
+      }
+    if (TIFFGetFieldDefaulted(tiff,TIFFTAG_RESOLUTIONUNIT,&units,sans) == 1)
+      {
+        if (units == RESUNIT_INCH)
+          image->units=PixelsPerInchResolution;
+        if (units == RESUNIT_CENTIMETER)
+          image->units=PixelsPerCentimeterResolution;
+      }
+    if ((TIFFGetFieldDefaulted(tiff,TIFFTAG_XPOSITION,&x_position,sans) == 1) &&
+        (TIFFGetFieldDefaulted(tiff,TIFFTAG_YPOSITION,&y_position,sans) == 1))
+      {
+        image->page.x=(ssize_t) ceil(x_position*image->resolution.x-0.5);
+        image->page.y=(ssize_t) ceil(y_position*image->resolution.y-0.5);
+      }
+    if (TIFFGetFieldDefaulted(tiff,TIFFTAG_ORIENTATION,&orientation,sans) == 1)
+      image->orientation=(OrientationType) orientation;
+    if (TIFFGetField(tiff,TIFFTAG_WHITEPOINT,&chromaticity) == 1)
+      {
+        if (chromaticity != (float *) NULL)
+          {
+            image->chromaticity.white_point.x=chromaticity[0];
+            image->chromaticity.white_point.y=chromaticity[1];
+          }
+      }
+    if (TIFFGetField(tiff,TIFFTAG_PRIMARYCHROMATICITIES,&chromaticity) == 1)
+      {
+        if (chromaticity != (float *) NULL)
+          {
+            image->chromaticity.red_primary.x=chromaticity[0];
+            image->chromaticity.red_primary.y=chromaticity[1];
+            image->chromaticity.green_primary.x=chromaticity[2];
+            image->chromaticity.green_primary.y=chromaticity[3];
+            image->chromaticity.blue_primary.x=chromaticity[4];
+            image->chromaticity.blue_primary.y=chromaticity[5];
+          }
+      }
+#if defined(MAGICKCORE_HAVE_TIFFISCODECCONFIGURED) || (TIFFLIB_VERSION > 20040919)
+    if ((compress_tag != COMPRESSION_NONE) &&
+        (TIFFIsCODECConfigured(compress_tag) == 0))
+      {
+        TIFFClose(tiff);
+        ThrowReaderException(CoderError,"CompressNotSupported");
+      }
+#endif
+    switch (compress_tag)
+    {
+      case COMPRESSION_NONE: image->compression=NoCompression; break;
+      case COMPRESSION_CCITTFAX3: image->compression=FaxCompression; break;
+      case COMPRESSION_CCITTFAX4: image->compression=Group4Compression; break;
+      case COMPRESSION_JPEG:
+      {
+         image->compression=JPEGCompression;
+#if defined(JPEG_SUPPORT)
+         {
+           char
+             sampling_factor[MagickPathExtent];
+
+           uint16
+             horizontal,
+             vertical;
+
+           tiff_status=TIFFGetField(tiff,TIFFTAG_YCBCRSUBSAMPLING,&horizontal,
+             &vertical);
+           if (tiff_status == 1)
+             {
+               (void) FormatLocaleString(sampling_factor,MagickPathExtent,
+                 "%dx%d",horizontal,vertical);
+               (void) SetImageProperty(image,"jpeg:sampling-factor",
+                 sampling_factor,exception);
+               (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                 "Sampling Factors: %s",sampling_factor);
+             }
+         }
+#endif
+        break;
+      }
+      case COMPRESSION_OJPEG: image->compression=JPEGCompression; break;
+#if defined(COMPRESSION_LZMA)
+      case COMPRESSION_LZMA: image->compression=LZMACompression; break;
+#endif
+      case COMPRESSION_LZW: image->compression=LZWCompression; break;
+      case COMPRESSION_DEFLATE: image->compression=ZipCompression; break;
+      case COMPRESSION_ADOBE_DEFLATE: image->compression=ZipCompression; break;
+#if defined(COMPRESSION_WEBP)
+      case COMPRESSION_WEBP: image->compression=WebPCompression; break;
+#endif
+#if defined(COMPRESSION_ZSTD)
+      case COMPRESSION_ZSTD: image->compression=ZstdCompression; break;
+#endif
+      default: image->compression=RLECompression; break;
+    }
+    quantum_info=(QuantumInfo *) NULL;
+    if ((photometric == PHOTOMETRIC_PALETTE) &&
+        (pow(2.0,1.0*bits_per_sample) <= MaxColormapSize))
+      {
+        size_t
+          colors;
+
+        colors=(size_t) GetQuantumRange(bits_per_sample)+1;
+        if (AcquireImageColormap(image,colors,exception) == MagickFalse)
+          {
+            TIFFClose(tiff);
+            ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+          }
+      }
+    value=(unsigned short) image->scene;
+    if (TIFFGetFieldDefaulted(tiff,TIFFTAG_PAGENUMBER,&value,&pages,sans) == 1)
+      image->scene=value;
+    if (image->storage_class == PseudoClass)
+      {
+        size_t
+          range;
+
+        uint16
+          *blue_colormap,
+          *green_colormap,
+          *red_colormap;
+
+        /*
+          Initialize colormap.
+        */
+        tiff_status=TIFFGetField(tiff,TIFFTAG_COLORMAP,&red_colormap,
+          &green_colormap,&blue_colormap);
+        if (tiff_status == 1)
+          {
+            if ((red_colormap != (uint16 *) NULL) &&
+                (green_colormap != (uint16 *) NULL) &&
+                (blue_colormap != (uint16 *) NULL))
+              {
+                range=255;  /* might be old style 8-bit colormap */
+                for (i=0; i < (ssize_t) image->colors; i++)
+                  if ((red_colormap[i] >= 256) || (green_colormap[i] >= 256) ||
+                      (blue_colormap[i] >= 256))
+                    {
+                      range=65535;
+                      break;
+                    }
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  image->colormap[i].red=ClampToQuantum(((double)
+                    QuantumRange*red_colormap[i])/range);
+                  image->colormap[i].green=ClampToQuantum(((double)
+                    QuantumRange*green_colormap[i])/range);
+                  image->colormap[i].blue=ClampToQuantum(((double)
+                    QuantumRange*blue_colormap[i])/range);
+                }
+              }
+          }
+      }
+    if (image_info->ping != MagickFalse)
+      {
+        if (image_info->number_scenes != 0)
+          if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+            break;
+        goto next_tiff_frame;
+      }
+    status=SetImageExtent(image,image->columns,image->rows,exception);
+    if (status == MagickFalse)
+      {
+        TIFFClose(tiff);
+        return(DestroyImageList(image));
+      }
+    status=ResetImagePixels(image,exception);
+    if (status == MagickFalse)
+      {
+        TIFFClose(tiff);
+        return(DestroyImageList(image));
+      }
+    /*
+      Allocate memory for the image and pixel buffer.
+    */
+    quantum_info=AcquireQuantumInfo(image_info,image);
+    if (quantum_info == (QuantumInfo *) NULL)
+      ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    if (sample_format == SAMPLEFORMAT_UINT)
+      status=SetQuantumFormat(image,quantum_info,UnsignedQuantumFormat);
+    if (sample_format == SAMPLEFORMAT_INT)
+      status=SetQuantumFormat(image,quantum_info,SignedQuantumFormat);
+    if (sample_format == SAMPLEFORMAT_IEEEFP)
+      status=SetQuantumFormat(image,quantum_info,FloatingPointQuantumFormat);
+    if (status == MagickFalse)
+      ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    status=MagickTrue;
+    switch (photometric)
+    {
+      case PHOTOMETRIC_MINISBLACK:
+      {
+        quantum_info->min_is_white=MagickFalse;
+        break;
+      }
+      case PHOTOMETRIC_MINISWHITE:
+      {
+        quantum_info->min_is_white=MagickTrue;
+        break;
+      }
+      default:
+        break;
+    }
+    tiff_status=TIFFGetFieldDefaulted(tiff,TIFFTAG_EXTRASAMPLES,&extra_samples,
+      &sample_info,sans);
+    if (tiff_status == 1)
+      {
+        (void) SetImageProperty(image,"tiff:alpha","unspecified",exception);
+        if (extra_samples == 0)
+          {
+            if ((samples_per_pixel == 4) && (photometric == PHOTOMETRIC_RGB))
+              image->alpha_trait=BlendPixelTrait;
+          }
+        else
+          for (i=0; i < extra_samples; i++)
+          {
+            image->alpha_trait=BlendPixelTrait;
+            if (sample_info[i] == EXTRASAMPLE_ASSOCALPHA)
+              {
+                SetQuantumAlphaType(quantum_info,AssociatedQuantumAlpha);
+                (void) SetImageProperty(image,"tiff:alpha","associated",
+                  exception);
+              }
+            else
+              if (sample_info[i] == EXTRASAMPLE_UNASSALPHA)
+                {
+                  SetQuantumAlphaType(quantum_info,DisassociatedQuantumAlpha);
+                  (void) SetImageProperty(image,"tiff:alpha","unassociated",
+                    exception);
+                }
+          }
+      }
+    if (image->alpha_trait != UndefinedPixelTrait)
+      (void) SetImageAlphaChannel(image,OpaqueAlphaChannel,exception);
+    method=ReadGenericMethod;
+    rows_per_strip=(uint32) image->rows;
+    if (TIFFGetField(tiff,TIFFTAG_ROWSPERSTRIP,&rows_per_strip) == 1)
+      {
+        char
+          buffer[MagickPathExtent];
+
+        (void) FormatLocaleString(buffer,MagickPathExtent,"%u",
+          (unsigned int) rows_per_strip);
+        (void) SetImageProperty(image,"tiff:rows-per-strip",buffer,exception);
+        method=ReadStripMethod;
+        if (rows_per_strip > (uint32) image->rows)
+          rows_per_strip=(uint32) image->rows;
+      }
+    if (TIFFIsTiled(tiff) != MagickFalse)
+      method=ReadTileMethod;
+    if (image->compression == JPEGCompression)
+      method=GetJPEGMethod(image,tiff,photometric,bits_per_sample,
+        samples_per_pixel);
+    if ((photometric == PHOTOMETRIC_LOGLUV) ||
+        (photometric == PHOTOMETRIC_YCBCR))
+      method=ReadGenericMethod;
+    quantum_info->endian=LSBEndian;
+    quantum_type=RGBQuantum;
+    if (TIFFScanlineSize(tiff) <= 0)
+      ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    if ((1.0*TIFFScanlineSize(tiff)) > (2.53*GetBlobSize(image)))
+      ThrowTIFFException(CorruptImageError,"InsufficientImageDataInFile");
+    number_pixels=MagickMax(TIFFScanlineSize(tiff),MagickMax((ssize_t)
+      image->columns*samples_per_pixel*pow(2.0,ceil(log(bits_per_sample)/
+      log(2.0))),image->columns*rows_per_strip));
+    pixel_info=AcquireVirtualMemory(number_pixels,sizeof(uint32));
+    if (pixel_info == (MemoryInfo *) NULL)
+      ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+    pixels=(unsigned char *) GetVirtualMemoryBlob(pixel_info);
+    (void) memset(pixels,0,number_pixels*sizeof(uint32));
+    quantum_type=IndexQuantum;
+    pad=(size_t) MagickMax((ssize_t) samples_per_pixel-1,0);
+    if (image->alpha_trait != UndefinedPixelTrait)
+      {
+        if (image->storage_class == PseudoClass)
+          quantum_type=IndexAlphaQuantum;
+        else
+          quantum_type=samples_per_pixel == 1 ? AlphaQuantum : GrayAlphaQuantum;
+      }
+    else
+      if (image->storage_class != PseudoClass)
+        quantum_type=GrayQuantum;
+    if ((samples_per_pixel > 2) && (interlace != PLANARCONFIG_SEPARATE))
+      {
+        pad=(size_t) MagickMax((size_t) samples_per_pixel-3,0);
+        quantum_type=RGBQuantum;
+        if (image->alpha_trait != UndefinedPixelTrait)
+          {
+            quantum_type=RGBAQuantum;
+            pad=(size_t) MagickMax((size_t) samples_per_pixel-4,0);
+          }
+        if (image->colorspace == CMYKColorspace)
+          {
+            pad=(size_t) MagickMax((size_t) samples_per_pixel-4,0);
+            quantum_type=CMYKQuantum;
+            if (image->alpha_trait != UndefinedPixelTrait)
+              {
+                quantum_type=CMYKAQuantum;
+                pad=(size_t) MagickMax((size_t) samples_per_pixel-5,0);
+              }
+          }
+        status=SetQuantumPad(image,quantum_info,pad*((bits_per_sample+7) >> 3));
+        if (status == MagickFalse)
+          ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+      }
+    switch (method)
+    {
+      case ReadYCCKMethod:
+      {
+        /*
+          Convert YCC TIFF image.
+        */
+        for (row_index=0; row_index < (ssize_t) image->rows; row_index++)
+        {
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          unsigned char
+            *p;
+
+          tiff_status=TIFFReadPixels(tiff,0,row_index,(char *) pixels);
+          if (tiff_status == -1)
+            break;
+          q=QueueAuthenticPixels(image,0,row_index,image->columns,1,exception);
+          if (q == (Quantum *) NULL)
+            break;
+          p=pixels;
+          for (x=0; x < (ssize_t) image->columns; x++)
+          {
+            SetPixelCyan(image,ScaleCharToQuantum(ClampYCC((double) *p+
+              (1.402*(double) *(p+2))-179.456)),q);
+            SetPixelMagenta(image,ScaleCharToQuantum(ClampYCC((double) *p-
+              (0.34414*(double) *(p+1))-(0.71414*(double ) *(p+2))+
+              135.45984)),q);
+            SetPixelYellow(image,ScaleCharToQuantum(ClampYCC((double) *p+
+              (1.772*(double) *(p+1))-226.816)),q);
+            SetPixelBlack(image,ScaleCharToQuantum((unsigned char) *(p+3)),q);
+            q+=GetPixelChannels(image);
+            p+=4;
+          }
+          if (SyncAuthenticPixels(image,exception) == MagickFalse)
+            break;
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) row_index,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+        break;
+      }
+      // Implement reading TIFF images using either strip-based or tile-based methods.
+      // For strip-based images, allocate memory for the strip size, read each strip,
+      // and import quantum pixels for each scanline. For tile-based images, get tile
+      // dimensions, allocate memory, read each tile, and import quantum pixels for
+      // each row within the tile. Handle various color channels (RGB, CMYK, Alpha)
+      // and manage progress updates for loading the image.
+      // <MASK>
+      case ReadGenericMethod:
+      default:
+      {
+        MemoryInfo
+          *generic_info = (MemoryInfo * ) NULL;
+
+        register uint32
+          *p;
+
+        uint32
+          *pixels;
+
+        /*
+          Convert generic TIFF image.
+        */
+        if (HeapOverflowSanityCheck(image->rows,sizeof(*pixels)) != MagickFalse)
+          ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+        number_pixels=(MagickSizeType) image->columns*image->rows;
+        generic_info=AcquireVirtualMemory(number_pixels,sizeof(uint32));
+        if (generic_info == (MemoryInfo *) NULL)
+          ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+        pixels=(uint32 *) GetVirtualMemoryBlob(generic_info);
+        (void) TIFFReadRGBAImage(tiff,(uint32) image->columns,(uint32)
+          image->rows,(uint32 *) pixels,0);
+        p=pixels+number_pixels-1;
+        for (row_index=0; row_index < (ssize_t) image->rows; row_index++)
+        {
+          register ssize_t
+            x;
+
+          register Quantum
+            *magick_restrict q;
+
+          q=QueueAuthenticPixels(image,0,row_index,image->columns,1,exception);
+          if (q == (Quantum *) NULL)
+            break;
+          q+=GetPixelChannels(image)*(image->columns-1);
+          for (x=0; x < (ssize_t) image->columns; x++)
+          {
+            SetPixelRed(image,ScaleCharToQuantum((unsigned char)
+              TIFFGetR(*p)),q);
+            SetPixelGreen(image,ScaleCharToQuantum((unsigned char)
+              TIFFGetG(*p)),q);
+            SetPixelBlue(image,ScaleCharToQuantum((unsigned char)
+              TIFFGetB(*p)),q);
+            if (image->alpha_trait != UndefinedPixelTrait)
+              SetPixelAlpha(image,ScaleCharToQuantum((unsigned char)
+                TIFFGetA(*p)),q);
+            p--;
+            q-=GetPixelChannels(image);
+          }
+          if (SyncAuthenticPixels(image,exception) == MagickFalse)
+            break;
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) row_index,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+        generic_info=RelinquishVirtualMemory(generic_info);
+        break;
+      }
+    }
+    pixel_info=RelinquishVirtualMemory(pixel_info);
+    SetQuantumImageType(image,quantum_type);
+  next_tiff_frame:
+    if (quantum_info != (QuantumInfo *) NULL)
+      quantum_info=DestroyQuantumInfo(quantum_info);
+    if (photometric == PHOTOMETRIC_CIELAB)
+      DecodeLabImage(image,exception);
+    if ((photometric == PHOTOMETRIC_LOGL) ||
+        (photometric == PHOTOMETRIC_MINISBLACK) ||
+        (photometric == PHOTOMETRIC_MINISWHITE))
+      {
+        image->type=GrayscaleType;
+        if (bits_per_sample == 1)
+          image->type=BilevelType;
+      }
+    /*
+      Proceed to next image.
+    */
+    if (image_info->number_scenes != 0)
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    more_frames=TIFFReadDirectory(tiff) != 0 ? MagickTrue : MagickFalse;
+    if (more_frames != MagickFalse)
+      {
+        /*
+          Allocate next image structure.
+        */
+        AcquireNextImage(image_info,image,exception);
+        if (GetNextImageInList(image) == (Image *) NULL)
+          {
+            status=MagickFalse;
+            break;
+          }
+        image=SyncNextImageInList(image);
+        status=SetImageProgress(image,LoadImagesTag,image->scene-1,
+          image->scene);
+        if (status == MagickFalse)
+          break;
+      }
+  } while ((status != MagickFalse) && (more_frames != MagickFalse));
+  TIFFClose(tiff);
+  if ((image_info->number_scenes != 0) &&
+      (image_info->scene >= GetImageListLength(image)))
+    status=MagickFalse;
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  TIFFReadPhotoshopLayers(image_info,image,exception);
+  return(GetFirstImageInList(image));
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// coders/tiff.c
+static MagickBooleanType WriteTIFFImage(const ImageInfo *image_info,
+  Image *image,ExceptionInfo *exception)
+{
+  const char
+    *mode,
+    *option;
+
+  CompressionType
+    compression;
+
+  EndianType
+    endian_type;
+
+  MagickBooleanType
+    adjoin,
+    debug,
+    status;
+
+  MagickOffsetType
+    scene;
+
+  QuantumInfo
+    *quantum_info;
+
+  QuantumType
+    quantum_type;
+
+  register ssize_t
+    i;
+
+  size_t
+    imageListLength,
+    length;
+
+  ssize_t
+    y;
+
+  TIFF
+    *tiff;
+
+  TIFFInfo
+    tiff_info;
+
+  uint16
+    bits_per_sample,
+    compress_tag,
+    endian,
+    photometric,
+    predictor;
+
+  unsigned char
+    *pixels;
+
+  void
+    *sans[2] = { NULL, NULL };
+
+  /*
+    Open TIFF file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  status=OpenBlob(image_info,image,WriteBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    return(status);
+  (void) SetMagickThreadValue(tiff_exception,exception);
+  endian_type=(HOST_FILLORDER == FILLORDER_LSB2MSB) ? LSBEndian : MSBEndian;
+  option=GetImageOption(image_info,"tiff:endian");
+  if (option != (const char *) NULL)
+    {
+      if (LocaleNCompare(option,"msb",3) == 0)
+        endian_type=MSBEndian;
+      if (LocaleNCompare(option,"lsb",3) == 0)
+        endian_type=LSBEndian;
+    }
+  mode=endian_type == LSBEndian ? "wl" : "wb";
+#if defined(TIFF_VERSION_BIG)
+  if (LocaleCompare(image_info->magick,"TIFF64") == 0)
+    mode=endian_type == LSBEndian ? "wl8" : "wb8";
+#endif
+  tiff=TIFFClientOpen(image->filename,mode,(thandle_t) image,TIFFReadBlob,
+    TIFFWriteBlob,TIFFSeekBlob,TIFFCloseBlob,TIFFGetBlobSize,TIFFMapBlob,
+    TIFFUnmapBlob);
+  if (tiff == (TIFF *) NULL)
+    return(MagickFalse);
+  if (exception->severity > ErrorException)
+    {
+      TIFFClose(tiff);
+      return(MagickFalse);
+    }
+  (void) DeleteImageProfile(image,"tiff:37724");
+  scene=0;
+  debug=IsEventLogging();
+  (void) debug;
+  adjoin=image_info->adjoin;
+  imageListLength=GetImageListLength(image);
+  do
+  {
+    /*
+      Initialize TIFF fields.
+    */
+    if ((image_info->type != UndefinedType) &&
+        (image_info->type != OptimizeType))
+      (void) SetImageType(image,image_info->type,exception);
+    compression=UndefinedCompression;
+    if (image->compression != JPEGCompression)
+      compression=image->compression;
+    if (image_info->compression != UndefinedCompression)
+      compression=image_info->compression;
+    switch (compression)
+    {
+      case FaxCompression:
+      case Group4Compression:
+      {
+        if (IsImageMonochrome(image) == MagickFalse)
+          (void) SetImageType(image,BilevelType,exception);
+        (void) SetImageDepth(image,1,exception);
+        break;
+      }
+      case JPEGCompression:
+      {
+        (void) SetImageStorageClass(image,DirectClass,exception);
+        (void) SetImageDepth(image,8,exception);
+        break;
+      }
+      default:
+        break;
+    }
+    quantum_info=AcquireQuantumInfo(image_info,image);
+    if (quantum_info == (QuantumInfo *) NULL)
+      ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+    if ((image->storage_class != PseudoClass) && (image->depth >= 32) &&
+        (quantum_info->format == UndefinedQuantumFormat) &&
+        (IsHighDynamicRangeImage(image,exception) != MagickFalse))
+      {
+        status=SetQuantumFormat(image,quantum_info,FloatingPointQuantumFormat);
+        if (status == MagickFalse)
+          {
+            quantum_info=DestroyQuantumInfo(quantum_info);
+            ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+          }
+      }
+    if ((LocaleCompare(image_info->magick,"PTIF") == 0) &&
+        (GetPreviousImageInList(image) != (Image *) NULL))
+      (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_REDUCEDIMAGE);
+    if ((image->columns != (uint32) image->columns) ||
+        (image->rows != (uint32) image->rows))
+      ThrowWriterException(ImageError,"WidthOrHeightExceedsLimit");
+    (void) TIFFSetField(tiff,TIFFTAG_IMAGELENGTH,(uint32) image->rows);
+    (void) TIFFSetField(tiff,TIFFTAG_IMAGEWIDTH,(uint32) image->columns);
+    switch (compression)
+    {
+      case FaxCompression:
+      {
+        compress_tag=COMPRESSION_CCITTFAX3;
+        option=GetImageOption(image_info,"quantum:polarity");
+        if (option == (const char *) NULL)
+          SetQuantumMinIsWhite(quantum_info,MagickTrue);
+        break;
+      }
+      case Group4Compression:
+      {
+        compress_tag=COMPRESSION_CCITTFAX4;
+        option=GetImageOption(image_info,"quantum:polarity");
+        if (option == (const char *) NULL)
+          SetQuantumMinIsWhite(quantum_info,MagickTrue);
+        break;
+      }
+#if defined(COMPRESSION_JBIG)
+      case JBIG1Compression:
+      {
+        compress_tag=COMPRESSION_JBIG;
+        break;
+      }
+#endif
+      case JPEGCompression:
+      {
+        compress_tag=COMPRESSION_JPEG;
+        break;
+      }
+#if defined(COMPRESSION_LZMA)
+      case LZMACompression:
+      {
+        compress_tag=COMPRESSION_LZMA;
+        break;
+      }
+#endif
+      case LZWCompression:
+      {
+        compress_tag=COMPRESSION_LZW;
+        break;
+      }
+      case RLECompression:
+      {
+        compress_tag=COMPRESSION_PACKBITS;
+        break;
+      }
+      case ZipCompression:
+      {
+        compress_tag=COMPRESSION_ADOBE_DEFLATE;
+        break;
+      }
+#if defined(COMPRESSION_ZSTD)
+      case ZstdCompression:
+      {
+        compress_tag=COMPRESSION_ZSTD;
+        break;
+      }
+#endif
+      case NoCompression:
+      default:
+      {
+        compress_tag=COMPRESSION_NONE;
+        break;
+      }
+    }
+#if defined(MAGICKCORE_HAVE_TIFFISCODECCONFIGURED) || (TIFFLIB_VERSION > 20040919)
+    if ((compress_tag != COMPRESSION_NONE) &&
+        (TIFFIsCODECConfigured(compress_tag) == 0))
+      {
+        (void) ThrowMagickException(exception,GetMagickModule(),CoderError,
+          "CompressionNotSupported","`%s'",CommandOptionToMnemonic(
+          MagickCompressOptions,(ssize_t) compression));
+        compress_tag=COMPRESSION_NONE;
+        compression=NoCompression;
+      }
+#else
+      switch (compress_tag)
+      {
+#if defined(CCITT_SUPPORT)
+        case COMPRESSION_CCITTFAX3:
+        case COMPRESSION_CCITTFAX4:
+#endif
+#if defined(YCBCR_SUPPORT) && defined(JPEG_SUPPORT)
+        case COMPRESSION_JPEG:
+#endif
+#if defined(LZMA_SUPPORT) && defined(COMPRESSION_LZMA)
+        case COMPRESSION_LZMA:
+#endif
+#if defined(LZW_SUPPORT)
+        case COMPRESSION_LZW:
+#endif
+#if defined(PACKBITS_SUPPORT)
+        case COMPRESSION_PACKBITS:
+#endif
+#if defined(ZIP_SUPPORT)
+        case COMPRESSION_ADOBE_DEFLATE:
+#endif
+        case COMPRESSION_NONE:
+          break;
+        default:
+        {
+          (void) ThrowMagickException(exception,GetMagickModule(),CoderError,
+            "CompressionNotSupported","`%s'",CommandOptionToMnemonic(
+            MagickCompressOptions,(ssize_t) compression));
+          compress_tag=COMPRESSION_NONE;
+          compression=NoCompression;
+          break;
+        }
+      }
+#endif
+    if (image->colorspace == CMYKColorspace)
+      {
+        photometric=PHOTOMETRIC_SEPARATED;
+        (void) TIFFSetField(tiff,TIFFTAG_SAMPLESPERPIXEL,4);
+        (void) TIFFSetField(tiff,TIFFTAG_INKSET,INKSET_CMYK);
+      }
+    else
+      {
+        /*
+          Full color TIFF raster.
+        */
+        if (image->colorspace == LabColorspace)
+          {
+            photometric=PHOTOMETRIC_CIELAB;
+            EncodeLabImage(image,exception);
+          }
+        else
+          if (image->colorspace == YCbCrColorspace)
+            {
+              photometric=PHOTOMETRIC_YCBCR;
+              (void) TIFFSetField(tiff,TIFFTAG_YCBCRSUBSAMPLING,1,1);
+              (void) SetImageStorageClass(image,DirectClass,exception);
+              (void) SetImageDepth(image,8,exception);
+            }
+          else
+            photometric=PHOTOMETRIC_RGB;
+        (void) TIFFSetField(tiff,TIFFTAG_SAMPLESPERPIXEL,3);
+        if ((image_info->type != TrueColorType) &&
+            (image_info->type != TrueColorAlphaType))
+          {
+            if ((image_info->type != PaletteType) &&
+                (SetImageGray(image,exception) != MagickFalse))
+              {
+                photometric=(uint16) (quantum_info->min_is_white !=
+                  MagickFalse ? PHOTOMETRIC_MINISWHITE :
+                  PHOTOMETRIC_MINISBLACK);
+                (void) TIFFSetField(tiff,TIFFTAG_SAMPLESPERPIXEL,1);
+                if ((image->depth == 1) &&
+                    (image->alpha_trait == UndefinedPixelTrait))
+                  SetImageMonochrome(image,exception);
+              }
+            else
+              if (image->storage_class == PseudoClass)
+                {
+                  size_t
+                    depth;
+
+                  /*
+                    Colormapped TIFF raster.
+                  */
+                  (void) TIFFSetField(tiff,TIFFTAG_SAMPLESPERPIXEL,1);
+                  photometric=PHOTOMETRIC_PALETTE;
+                  depth=1;
+                  while ((GetQuantumRange(depth)+1) < image->colors)
+                    depth<<=1;
+                  status=SetQuantumDepth(image,quantum_info,depth);
+                  if (status == MagickFalse)
+                    ThrowWriterException(ResourceLimitError,
+                      "MemoryAllocationFailed");
+                }
+          }
+      }
+    (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_FILLORDER,&endian,sans);
+    if ((compress_tag == COMPRESSION_CCITTFAX3) ||
+        (compress_tag == COMPRESSION_CCITTFAX4))
+      {
+         if ((photometric != PHOTOMETRIC_MINISWHITE) &&
+             (photometric != PHOTOMETRIC_MINISBLACK))
+          {
+            compress_tag=COMPRESSION_NONE;
+            endian=FILLORDER_MSB2LSB;
+          }
+      }
+    option=GetImageOption(image_info,"tiff:fill-order");
+    if (option != (const char *) NULL)
+      {
+        if (LocaleNCompare(option,"msb",3) == 0)
+          endian=FILLORDER_MSB2LSB;
+        if (LocaleNCompare(option,"lsb",3) == 0)
+          endian=FILLORDER_LSB2MSB;
+      }
+    (void) TIFFSetField(tiff,TIFFTAG_COMPRESSION,compress_tag);
+    (void) TIFFSetField(tiff,TIFFTAG_FILLORDER,endian);
+    (void) TIFFSetField(tiff,TIFFTAG_BITSPERSAMPLE,quantum_info->depth);
+    if (image->alpha_trait != UndefinedPixelTrait)
+      {
+        uint16
+          extra_samples,
+          sample_info[1],
+          samples_per_pixel;
+
+        /*
+          TIFF has a matte channel.
+        */
+        extra_samples=1;
+        sample_info[0]=EXTRASAMPLE_UNASSALPHA;
+        option=GetImageOption(image_info,"tiff:alpha");
+        if (option != (const char *) NULL)
+          {
+            if (LocaleCompare(option,"associated") == 0)
+              sample_info[0]=EXTRASAMPLE_ASSOCALPHA;
+            else
+              if (LocaleCompare(option,"unspecified") == 0)
+                sample_info[0]=EXTRASAMPLE_UNSPECIFIED;
+          }
+        (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_SAMPLESPERPIXEL,
+          &samples_per_pixel,sans);
+        (void) TIFFSetField(tiff,TIFFTAG_SAMPLESPERPIXEL,samples_per_pixel+1);
+        (void) TIFFSetField(tiff,TIFFTAG_EXTRASAMPLES,extra_samples,
+          &sample_info);
+        if (sample_info[0] == EXTRASAMPLE_ASSOCALPHA)
+          SetQuantumAlphaType(quantum_info,AssociatedQuantumAlpha);
+      }
+    (void) TIFFSetField(tiff,TIFFTAG_PHOTOMETRIC,photometric);
+    switch (quantum_info->format)
+    {
+      case FloatingPointQuantumFormat:
+      {
+        (void) TIFFSetField(tiff,TIFFTAG_SAMPLEFORMAT,SAMPLEFORMAT_IEEEFP);
+        (void) TIFFSetField(tiff,TIFFTAG_SMINSAMPLEVALUE,quantum_info->minimum);
+        (void) TIFFSetField(tiff,TIFFTAG_SMAXSAMPLEVALUE,quantum_info->maximum);
+        break;
+      }
+      case SignedQuantumFormat:
+      {
+        (void) TIFFSetField(tiff,TIFFTAG_SAMPLEFORMAT,SAMPLEFORMAT_INT);
+        break;
+      }
+      case UnsignedQuantumFormat:
+      {
+        (void) TIFFSetField(tiff,TIFFTAG_SAMPLEFORMAT,SAMPLEFORMAT_UINT);
+        break;
+      }
+      default:
+        break;
+    }
+    (void) TIFFSetField(tiff,TIFFTAG_PLANARCONFIG,PLANARCONFIG_CONTIG);
+    if (photometric == PHOTOMETRIC_RGB)
+      if ((image_info->interlace == PlaneInterlace) ||
+          (image_info->interlace == PartitionInterlace))
+        (void) TIFFSetField(tiff,TIFFTAG_PLANARCONFIG,PLANARCONFIG_SEPARATE);
+    predictor=0;
+    switch (compress_tag)
+    {
+      case COMPRESSION_JPEG:
+      {
+#if defined(JPEG_SUPPORT)
+        if (image_info->quality != UndefinedCompressionQuality)
+          (void) TIFFSetField(tiff,TIFFTAG_JPEGQUALITY,image_info->quality);
+        (void) TIFFSetField(tiff,TIFFTAG_JPEGCOLORMODE,JPEGCOLORMODE_RAW);
+        if (IssRGBCompatibleColorspace(image->colorspace) != MagickFalse)
+          {
+            const char
+              *value;
+
+            (void) TIFFSetField(tiff,TIFFTAG_JPEGCOLORMODE,JPEGCOLORMODE_RGB);
+            if (image->colorspace == YCbCrColorspace)
+              {
+                const char
+                  *sampling_factor;
+
+                GeometryInfo
+                  geometry_info;
+
+                MagickStatusType
+                  flags;
+
+                sampling_factor=(const char *) NULL;
+                value=GetImageProperty(image,"jpeg:sampling-factor",exception);
+                if (value != (char *) NULL)
+                  {
+                    sampling_factor=value;
+                    if (image->debug != MagickFalse)
+                      (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+                        "  Input sampling-factors=%s",sampling_factor);
+                  }
+                if (image_info->sampling_factor != (char *) NULL)
+                  sampling_factor=image_info->sampling_factor;
+                if (sampling_factor != (const char *) NULL)
+                  {
+                    flags=ParseGeometry(sampling_factor,&geometry_info);
+                    if ((flags & SigmaValue) == 0)
+                      geometry_info.sigma=geometry_info.rho;
+                    (void) TIFFSetField(tiff,TIFFTAG_YCBCRSUBSAMPLING,(uint16)
+                      geometry_info.rho,(uint16) geometry_info.sigma);
+                  }
+                }
+          }
+        (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_BITSPERSAMPLE,
+          &bits_per_sample,sans);
+        if (bits_per_sample == 12)
+          (void) TIFFSetField(tiff,TIFFTAG_JPEGTABLESMODE,JPEGTABLESMODE_QUANT);
+#endif
+        break;
+      }
+      case COMPRESSION_ADOBE_DEFLATE:
+      {
+        (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_BITSPERSAMPLE,
+          &bits_per_sample,sans);
+        if (((photometric == PHOTOMETRIC_RGB) ||
+             (photometric == PHOTOMETRIC_SEPARATED) ||
+             (photometric == PHOTOMETRIC_MINISBLACK)) &&
+            ((bits_per_sample == 8) || (bits_per_sample == 16)))
+          predictor=PREDICTOR_HORIZONTAL;
+        (void) TIFFSetField(tiff,TIFFTAG_ZIPQUALITY,(long) (
+          image_info->quality == UndefinedCompressionQuality ? 7 :
+          MagickMin((ssize_t) image_info->quality/10,9)));
+        break;
+      }
+      case COMPRESSION_CCITTFAX3:
+      {
+        /*
+          Byte-aligned EOL.
+        */
+        (void) TIFFSetField(tiff,TIFFTAG_GROUP3OPTIONS,4);
+        break;
+      }
+      case COMPRESSION_CCITTFAX4:
+        break;
+#if defined(LZMA_SUPPORT) && defined(COMPRESSION_LZMA)
+      case COMPRESSION_LZMA:
+      {
+        if (((photometric == PHOTOMETRIC_RGB) ||
+             (photometric == PHOTOMETRIC_SEPARATED) ||
+             (photometric == PHOTOMETRIC_MINISBLACK)) &&
+            ((bits_per_sample == 8) || (bits_per_sample == 16)))
+          predictor=PREDICTOR_HORIZONTAL;
+        (void) TIFFSetField(tiff,TIFFTAG_LZMAPRESET,(long) (
+          image_info->quality == UndefinedCompressionQuality ? 7 :
+          MagickMin((ssize_t) image_info->quality/10,9)));
+        break;
+      }
+#endif
+      case COMPRESSION_LZW:
+      {
+        (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_BITSPERSAMPLE,
+          &bits_per_sample,sans);
+        if (((photometric == PHOTOMETRIC_RGB) ||
+             (photometric == PHOTOMETRIC_SEPARATED) ||
+             (photometric == PHOTOMETRIC_MINISBLACK)) &&
+            ((bits_per_sample == 8) || (bits_per_sample == 16)))
+          predictor=PREDICTOR_HORIZONTAL;
+        break;
+      }
+#if defined(WEBP_SUPPORT) && defined(COMPRESSION_WEBP)
+      case COMPRESSION_WEBP:
+      {
+        (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_BITSPERSAMPLE,
+          &bits_per_sample,sans);
+        if (((photometric == PHOTOMETRIC_RGB) ||
+             (photometric == PHOTOMETRIC_SEPARATED) ||
+             (photometric == PHOTOMETRIC_MINISBLACK)) &&
+            ((bits_per_sample == 8) || (bits_per_sample == 16)))
+          predictor=PREDICTOR_HORIZONTAL;
+        (void) TIFFSetField(tiff,TIFFTAG_WEBP_LEVEL,image_info->quality);
+        if (image_info->quality >= 100)
+          (void) TIFFSetField(tiff,TIFFTAG_WEBP_LOSSLESS,1);
+        break;
+      }
+#endif
+#if defined(ZSTD_SUPPORT) && defined(COMPRESSION_ZSTD)
+      case COMPRESSION_ZSTD:
+      {
+        (void) TIFFGetFieldDefaulted(tiff,TIFFTAG_BITSPERSAMPLE,
+          &bits_per_sample,sans);
+        if (((photometric == PHOTOMETRIC_RGB) ||
+             (photometric == PHOTOMETRIC_SEPARATED) ||
+             (photometric == PHOTOMETRIC_MINISBLACK)) &&
+            ((bits_per_sample == 8) || (bits_per_sample == 16)))
+          predictor=PREDICTOR_HORIZONTAL;
+        (void) TIFFSetField(tiff,TIFFTAG_ZSTD_LEVEL,22*image_info->quality/
+          100.0);
+        break;
+      }
+#endif
+      default:
+        break;
+    }
+    option=GetImageOption(image_info,"tiff:predictor");
+    if (option != (const char * ) NULL)
+      predictor=(uint16) strtol(option,(char **) NULL,10);
+    if (predictor != 0)
+      (void) TIFFSetField(tiff,TIFFTAG_PREDICTOR,predictor);
+    if ((image->resolution.x != 0.0) && (image->resolution.y != 0.0))
+      {
+        unsigned short
+          units;
+
+        /*
+          Set image resolution.
+        */
+        units=RESUNIT_NONE;
+        if (image->units == PixelsPerInchResolution)
+          units=RESUNIT_INCH;
+        if (image->units == PixelsPerCentimeterResolution)
+          units=RESUNIT_CENTIMETER;
+        (void) TIFFSetField(tiff,TIFFTAG_RESOLUTIONUNIT,(uint16) units);
+        (void) TIFFSetField(tiff,TIFFTAG_XRESOLUTION,image->resolution.x);
+        (void) TIFFSetField(tiff,TIFFTAG_YRESOLUTION,image->resolution.y);
+        if ((image->page.x < 0) || (image->page.y < 0))
+          (void) ThrowMagickException(exception,GetMagickModule(),CoderError,
+            "TIFF: negative image positions unsupported","%s",image->filename);
+        if ((image->page.x > 0) && (image->resolution.x > 0.0))
+          {
+            /*
+              Set horizontal image position.
+            */
+            (void) TIFFSetField(tiff,TIFFTAG_XPOSITION,(float) image->page.x/
+              image->resolution.x);
+          }
+        if ((image->page.y > 0) && (image->resolution.y > 0.0))
+          {
+            /*
+              Set vertical image position.
+            */
+            (void) TIFFSetField(tiff,TIFFTAG_YPOSITION,(float) image->page.y/
+              image->resolution.y);
+          }
+      }
+    if (image->chromaticity.white_point.x != 0.0)
+      {
+        float
+          chromaticity[6];
+
+        /*
+          Set image chromaticity.
+        */
+        chromaticity[0]=(float) image->chromaticity.red_primary.x;
+        chromaticity[1]=(float) image->chromaticity.red_primary.y;
+        chromaticity[2]=(float) image->chromaticity.green_primary.x;
+        chromaticity[3]=(float) image->chromaticity.green_primary.y;
+        chromaticity[4]=(float) image->chromaticity.blue_primary.x;
+        chromaticity[5]=(float) image->chromaticity.blue_primary.y;
+        (void) TIFFSetField(tiff,TIFFTAG_PRIMARYCHROMATICITIES,chromaticity);
+        chromaticity[0]=(float) image->chromaticity.white_point.x;
+        chromaticity[1]=(float) image->chromaticity.white_point.y;
+        (void) TIFFSetField(tiff,TIFFTAG_WHITEPOINT,chromaticity);
+      }
+    option=GetImageOption(image_info,"tiff:write-layers");
+    if (IsStringTrue(option) != MagickFalse)
+      {
+        (void) TIFFWritePhotoshopLayers(image,image_info,endian_type,exception);
+        adjoin=MagickFalse;
+      }
+    if ((LocaleCompare(image_info->magick,"PTIF") != 0) &&
+        (adjoin != MagickFalse) && (imageListLength > 1))
+      {
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+        if (image->scene != 0)
+          (void) TIFFSetField(tiff,TIFFTAG_PAGENUMBER,(uint16) image->scene,
+            imageListLength);
+      }
+    if (image->orientation != UndefinedOrientation)
+      (void) TIFFSetField(tiff,TIFFTAG_ORIENTATION,(uint16) image->orientation);
+    else
+      (void) TIFFSetField(tiff,TIFFTAG_ORIENTATION,ORIENTATION_TOPLEFT);
+    TIFFSetProfiles(tiff,image);
+    {
+      uint16
+        page,
+        pages;
+
+      page=(uint16) scene;
+      pages=(uint16) imageListLength;
+      if ((LocaleCompare(image_info->magick,"PTIF") != 0) &&
+          (adjoin != MagickFalse) && (pages > 1))
+        (void) TIFFSetField(tiff,TIFFTAG_SUBFILETYPE,FILETYPE_PAGE);
+      (void) TIFFSetField(tiff,TIFFTAG_PAGENUMBER,page,pages);
+    }
+    (void) TIFFSetProperties(tiff,adjoin,image,exception);
+DisableMSCWarning(4127)
+    if (0)
+RestoreMSCWarning
+      (void) TIFFSetEXIFProperties(tiff,image,exception);
+    /*
+      Write image scanlines.
+    */
+    if (GetTIFFInfo(image_info,tiff,&tiff_info) == MagickFalse)
+      ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+    if (compress_tag == COMPRESSION_CCITTFAX4)
+      (void) TIFFSetField(tiff,TIFFTAG_ROWSPERSTRIP,(uint32) image->rows);
+    quantum_info->endian=LSBEndian;
+    pixels=(unsigned char *) GetQuantumPixels(quantum_info);
+    tiff_info.scanline=(unsigned char *) GetQuantumPixels(quantum_info);
+    switch (photometric)
+    {
+      case PHOTOMETRIC_CIELAB:
+      case PHOTOMETRIC_YCBCR:
+      case PHOTOMETRIC_RGB:
+      {
+        /*
+          RGB TIFF image.
+        */
+        switch (image_info->interlace)
+        {
+          case NoInterlace:
+          default:
+          {
+            quantum_type=RGBQuantum;
+            if (image->alpha_trait != UndefinedPixelTrait)
+              quantum_type=RGBAQuantum;
+            for (y=0; y < (ssize_t) image->rows; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+              if (p == (const Quantum *) NULL)
+                break;
+              length=ExportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+                quantum_type,pixels,exception);
+              (void) length;
+              if (TIFFWritePixels(tiff,&tiff_info,y,0,image) == -1)
+                break;
+              if (image->previous == (Image *) NULL)
+                {
+                  status=SetImageProgress(image,SaveImageTag,(MagickOffsetType)
+                    y,image->rows);
+                  if (status == MagickFalse)
+                    break;
+                }
+            }
+            break;
+          }
+          case PlaneInterlace:
+          case PartitionInterlace:
+          {
+            /*
+              Plane interlacing:  RRRRRR...GGGGGG...BBBBBB...
+            */
+            for (y=0; y < (ssize_t) image->rows; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+              if (p == (const Quantum *) NULL)
+                break;
+              length=ExportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+                RedQuantum,pixels,exception);
+              if (TIFFWritePixels(tiff,&tiff_info,y,0,image) == -1)
+                break;
+            }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,SaveImageTag,100,400);
+                if (status == MagickFalse)
+                  break;
+              }
+            for (y=0; y < (ssize_t) image->rows; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+              if (p == (const Quantum *) NULL)
+                break;
+              length=ExportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+                GreenQuantum,pixels,exception);
+              if (TIFFWritePixels(tiff,&tiff_info,y,1,image) == -1)
+                break;
+            }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,SaveImageTag,200,400);
+                if (status == MagickFalse)
+                  break;
+              }
+            for (y=0; y < (ssize_t) image->rows; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+              if (p == (const Quantum *) NULL)
+                break;
+              length=ExportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+                BlueQuantum,pixels,exception);
+              if (TIFFWritePixels(tiff,&tiff_info,y,2,image) == -1)
+                break;
+            }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,SaveImageTag,300,400);
+                if (status == MagickFalse)
+                  break;
+              }
+            if (image->alpha_trait != UndefinedPixelTrait)
+              for (y=0; y < (ssize_t) image->rows; y++)
+              {
+                register const Quantum
+                  *magick_restrict p;
+
+                p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+                if (p == (const Quantum *) NULL)
+                  break;
+                length=ExportQuantumPixels(image,(CacheView *) NULL,
+                  quantum_info,AlphaQuantum,pixels,exception);
+                if (TIFFWritePixels(tiff,&tiff_info,y,3,image) == -1)
+                  break;
+              }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,SaveImageTag,400,400);
+                if (status == MagickFalse)
+                  break;
+              }
+            break;
+          }
+        }
+        break;
+      }
+      case PHOTOMETRIC_SEPARATED:
+      {
+        /*
+          CMYK TIFF image.
+        */
+        quantum_type=CMYKQuantum;
+        if (image->alpha_trait != UndefinedPixelTrait)
+          quantum_type=CMYKAQuantum;
+        if (image->colorspace != CMYKColorspace)
+          (void) TransformImageColorspace(image,CMYKColorspace,exception);
+        for (y=0; y < (ssize_t) image->rows; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+          if (p == (const Quantum *) NULL)
+            break;
+          length=ExportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+            quantum_type,pixels,exception);
+          if (TIFFWritePixels(tiff,&tiff_info,y,0,image) == -1)
+            break;
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,SaveImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+        break;
+      }
+      case PHOTOMETRIC_PALETTE:
+      {
+        uint16
+          *blue,
+          *green,
+          *red;
+
+        /*
+          Colormapped TIFF image.
+        */
+        red=(uint16 *) AcquireQuantumMemory(65536,sizeof(*red));
+        green=(uint16 *) AcquireQuantumMemory(65536,sizeof(*green));
+        blue=(uint16 *) AcquireQuantumMemory(65536,sizeof(*blue));
+        if ((red == (uint16 *) NULL) || (green == (uint16 *) NULL) ||
+            (blue == (uint16 *) NULL))
+          {
+            if (red != (uint16 *) NULL)
+              red=(uint16 *) RelinquishMagickMemory(red);
+            if (green != (uint16 *) NULL)
+              green=(uint16 *) RelinquishMagickMemory(green);
+            if (blue != (uint16 *) NULL)
+              blue=(uint16 *) RelinquishMagickMemory(blue);
+            ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+          }
+        /*
+          Initialize TIFF colormap.
+        */
+        (void) memset(red,0,65536*sizeof(*red));
+        (void) memset(green,0,65536*sizeof(*green));
+        (void) memset(blue,0,65536*sizeof(*blue));
+        for (i=0; i < (ssize_t) image->colors; i++)
+        {
+          red[i]=ScaleQuantumToShort(image->colormap[i].red);
+          green[i]=ScaleQuantumToShort(image->colormap[i].green);
+          blue[i]=ScaleQuantumToShort(image->colormap[i].blue);
+        }
+        (void) TIFFSetField(tiff,TIFFTAG_COLORMAP,red,green,blue);
+        red=(uint16 *) RelinquishMagickMemory(red);
+        green=(uint16 *) RelinquishMagickMemory(green);
+        blue=(uint16 *) RelinquishMagickMemory(blue);
+      }
+      default:
+      {
+        /*
+          Convert PseudoClass packets to contiguous grayscale scanlines.
+        */
+        quantum_type=IndexQuantum;
+        if (image->alpha_trait != UndefinedPixelTrait)
+          {
+            if (photometric != PHOTOMETRIC_PALETTE)
+              quantum_type=GrayAlphaQuantum;
+            else
+              quantum_type=IndexAlphaQuantum;
+           }
+         else
+           if (photometric != PHOTOMETRIC_PALETTE)
+             quantum_type=GrayQuantum;
+        for (y=0; y < (ssize_t) image->rows; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+          if (p == (const Quantum *) NULL)
+            break;
+          length=ExportQuantumPixels(image,(CacheView *) NULL,quantum_info,
+            quantum_type,pixels,exception);
+          if (TIFFWritePixels(tiff,&tiff_info,y,0,image) == -1)
+            break;
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,SaveImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+        break;
+      }
+    }
+    quantum_info=DestroyQuantumInfo(quantum_info);
+    if (image->colorspace == LabColorspace)
+      DecodeLabImage(image,exception);
+    DestroyTIFFInfo(&tiff_info);
+DisableMSCWarning(4127)
+    if (0 && (image_info->verbose != MagickFalse))
+RestoreMSCWarning
+      TIFFPrintDirectory(tiff,stdout,MagickFalse);
+    if (TIFFWriteDirectory(tiff) == 0)
+      {
+        status=MagickFalse;
+        break;
+      }
+    image=SyncNextImageInList(image);
+    if (image == (Image *) NULL)
+      break;
+    status=SetImageProgress(image,SaveImagesTag,scene++,imageListLength);
+    if (status == MagickFalse)
+      break;
+  } while (adjoin != MagickFalse);
+  TIFFClose(tiff);
+  return(status);
+}
+
+// the below code fragment can be found in:
+// coders/tga.c
+static Image *ReadTGAImage(const ImageInfo *image_info,ExceptionInfo *exception)
+{
+  Image
+    *image;
+
+  MagickBooleanType
+    status;
+
+  PixelInfo
+    pixel;
+
+  Quantum
+    index;
+
+  register Quantum
+    *q;
+
+  register ssize_t
+    i,
+    x;
+
+  size_t
+    base,
+    flag,
+    offset,
+    skip;
+
+  ssize_t
+    count,
+    y;
+
+  TGAInfo
+    tga_info;
+
+  unsigned char
+    j,
+    k,
+    pixels[4],
+    runlength;
+
+  unsigned int
+    alpha_bits;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Read TGA header information.
+  */
+  count=ReadBlob(image,1,&tga_info.id_length);
+  tga_info.colormap_type=(unsigned char) ReadBlobByte(image);
+  tga_info.image_type=(TGAImageType) ReadBlobByte(image);
+  if ((count != 1) ||
+      ((tga_info.image_type != TGAColormap) &&
+       (tga_info.image_type != TGARGB) &&
+       (tga_info.image_type != TGAMonochrome) &&
+       (tga_info.image_type != TGARLEColormap) &&
+       (tga_info.image_type != TGARLERGB) &&
+       (tga_info.image_type != TGARLEMonochrome)) ||
+      (((tga_info.image_type == TGAColormap) ||
+       (tga_info.image_type == TGARLEColormap)) &&
+       (tga_info.colormap_type == 0)))
+    ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+  tga_info.colormap_index=ReadBlobLSBShort(image);
+  tga_info.colormap_length=ReadBlobLSBShort(image);
+  tga_info.colormap_size=(unsigned char) ReadBlobByte(image);
+  tga_info.x_origin=ReadBlobLSBShort(image);
+  tga_info.y_origin=ReadBlobLSBShort(image);
+  tga_info.width=(unsigned short) ReadBlobLSBShort(image);
+  tga_info.height=(unsigned short) ReadBlobLSBShort(image);
+  tga_info.bits_per_pixel=(unsigned char) ReadBlobByte(image);
+  tga_info.attributes=(unsigned char) ReadBlobByte(image);
+  if (EOFBlob(image) != MagickFalse)
+    ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+  if ((((tga_info.bits_per_pixel <= 1) || (tga_info.bits_per_pixel >= 17)) &&
+       (tga_info.bits_per_pixel != 24) && (tga_info.bits_per_pixel != 32)))
+    ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+  /*
+    Initialize image structure.
+  */
+  image->columns=tga_info.width;
+  image->rows=tga_info.height;
+  if ((tga_info.image_type != TGAMonochrome) &&
+      (tga_info.image_type != TGARLEMonochrome))
+    {
+      alpha_bits=(tga_info.attributes & 0x0FU);
+      image->alpha_trait=(alpha_bits > 0) || (tga_info.bits_per_pixel == 32) ||
+        (tga_info.colormap_size == 32) ?  BlendPixelTrait : UndefinedPixelTrait;
+    }
+  if ((tga_info.image_type != TGAColormap) &&
+      (tga_info.image_type != TGARLEColormap))
+    image->depth=(size_t) ((tga_info.bits_per_pixel <= 8) ? 8 :
+      (tga_info.bits_per_pixel <= 16) ? 5 : 8);
+  else
+    image->depth=(size_t) ((tga_info.colormap_size <= 8) ? 8 :
+      (tga_info.colormap_size <= 16) ? 5 : 8);
+  if ((tga_info.image_type == TGAColormap) ||
+      (tga_info.image_type == TGARLEColormap))
+    image->storage_class=PseudoClass;
+  if ((tga_info.image_type == TGAMonochrome) ||
+      (tga_info.image_type == TGARLEMonochrome))
+    {
+      image->type=GrayscaleType;
+      image->colorspace=GRAYColorspace;
+    }
+  image->compression=NoCompression;
+  if ((tga_info.image_type == TGARLEColormap) ||
+      (tga_info.image_type == TGARLEMonochrome) ||
+      (tga_info.image_type == TGARLERGB))
+    image->compression=RLECompression;
+  if (image->storage_class == PseudoClass)
+    {
+      if (tga_info.colormap_type != 0)
+        image->colors=tga_info.colormap_index+tga_info.colormap_length;
+      else
+        {
+          size_t
+            one;
+
+          one=1;
+          image->colors=one << tga_info.bits_per_pixel;
+          if ((MagickSizeType) image->colors > GetBlobSize(image))
+            ThrowReaderException(CorruptImageError,
+              "InsufficientImageDataInFile");
+          if (AcquireImageColormap(image,image->colors,exception) == MagickFalse)
+            ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+        }
+    }
+  if (tga_info.id_length != 0)
+    {
+      char
+        *comment;
+
+      size_t
+        length;
+
+      /*
+        TGA image comment.
+      */
+      length=(size_t) tga_info.id_length;
+      comment=(char *) NULL;
+      if (~length >= (MagickPathExtent-1))
+        comment=(char *) AcquireQuantumMemory(length+MagickPathExtent,
+          sizeof(*comment));
+      if (comment == (char *) NULL)
+        ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+      count=ReadBlob(image,length,(unsigned char *) comment);
+      if (count == (ssize_t) length)
+        {
+          comment[length]='\0';
+          (void) SetImageProperty(image,"comment",comment,exception);
+        }
+      comment=DestroyString(comment);
+    }
+  image->orientation=BottomLeftOrientation;
+  if ((tga_info.attributes & (1UL << 4)) == 0)
+    {
+      if ((tga_info.attributes & (1UL << 5)) == 0)
+        image->orientation=BottomLeftOrientation;
+      else
+        image->orientation=TopLeftOrientation;
+    }
+  else
+    {
+      if ((tga_info.attributes & (1UL << 5)) == 0)
+        image->orientation=BottomRightOrientation;
+      else
+        image->orientation=TopRightOrientation;
+    }
+  if (image_info->ping != MagickFalse)
+    {
+      (void) CloseBlob(image);
+      return(image);
+    }
+  status=SetImageExtent(image,image->columns,image->rows,exception);
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  (void) memset(&pixel,0,sizeof(pixel));
+  pixel.alpha=(MagickRealType) OpaqueAlpha;
+  if (tga_info.colormap_type != 0)
+    {
+      /*
+        Read TGA raster colormap.
+      */
+      if (image->colors < tga_info.colormap_index)
+        image->colors=tga_info.colormap_index;
+      if (AcquireImageColormap(image,image->colors,exception) == MagickFalse)
+        ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+      for (i=0; i < (ssize_t) tga_info.colormap_index; i++)
+        image->colormap[i]=pixel;
+      for ( ; i < (ssize_t) image->colors; i++)
+      {
+        switch (tga_info.colormap_size)
+        {
+          case 8:
+          default:
+          {
+            /*
+              Gray scale.
+            */
+            pixel.red=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            pixel.green=pixel.red;
+            pixel.blue=pixel.red;
+            break;
+          }
+          case 15:
+          case 16:
+          {
+            QuantumAny
+              range;
+
+            /*
+              5 bits each of red green and blue.
+            */
+            j=(unsigned char) ReadBlobByte(image);
+            k=(unsigned char) ReadBlobByte(image);
+            range=GetQuantumRange(5UL);
+            pixel.red=(MagickRealType) ScaleAnyToQuantum(1UL*(k & 0x7c) >> 2,
+              range);
+            pixel.green=(MagickRealType) ScaleAnyToQuantum((1UL*(k & 0x03)
+              << 3)+(1UL*(j & 0xe0) >> 5),range);
+            pixel.blue=(MagickRealType) ScaleAnyToQuantum(1UL*(j & 0x1f),range);
+            break;
+          }
+          case 24:
+          {
+            /*
+              8 bits each of blue, green and red.
+            */
+            pixel.blue=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            pixel.green=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            pixel.red=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            break;
+          }
+          case 32:
+          {
+            /*
+              8 bits each of blue, green, red, and alpha.
+            */
+            pixel.blue=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            pixel.green=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            pixel.red=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            pixel.alpha=(MagickRealType) ScaleCharToQuantum((unsigned char)
+              ReadBlobByte(image));
+            break;
+          }
+        }
+        image->colormap[i]=pixel;
+      }
+    }
+  /*
+    Convert TGA pixels to pixel packets.
+  */
+  base=0;
+  flag=0;
+  skip=MagickFalse;
+  index=0;
+  runlength=0;
+  offset=0;
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    q=QueueAuthenticPixels(image,0,offset,image->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      break;
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      if ((tga_info.image_type == TGARLEColormap) ||
+          (tga_info.image_type == TGARLERGB) ||
+          (tga_info.image_type == TGARLEMonochrome))
+        {
+          if (runlength != 0)
+            {
+              runlength--;
+              skip=flag != 0;
+            }
+          else
+            {
+              count=ReadBlob(image,1,&runlength);
+              if (count != 1)
+                ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+              flag=runlength & 0x80;
+              if (flag != 0)
+                runlength-=128;
+              skip=MagickFalse;
+            }
+        }
+      if (skip == MagickFalse)
+        switch (tga_info.bits_per_pixel)
+        {
+          case 8:
+          default:
+          {
+            /*
+              Gray scale.
+            */
+            if (ReadBlob(image,1,pixels) != 1)
+              ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+            index=(Quantum) pixels[0];
+            if (tga_info.colormap_type != 0)
+              pixel=image->colormap[(ssize_t) ConstrainColormapIndex(image,
+                (ssize_t) index,exception)];
+            else
+              {
+                pixel.red=(MagickRealType) ScaleCharToQuantum((unsigned char)
+                  index);
+                pixel.green=(MagickRealType) ScaleCharToQuantum((unsigned char)
+                  index);
+                pixel.blue=(MagickRealType) ScaleCharToQuantum((unsigned char)
+                  index);
+              }
+            break;
+          }
+          case 15:
+          case 16:
+          {
+            QuantumAny
+              range;
+
+            /*
+              5 bits each of RGB.
+            */
+            if (ReadBlob(image,2,pixels) != 2)
+              ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+            j=pixels[0];
+            k=pixels[1];
+            range=GetQuantumRange(5UL);
+            pixel.red=(MagickRealType) ScaleAnyToQuantum(1UL*(k & 0x7c) >> 2,
+              range);
+            pixel.green=(MagickRealType) ScaleAnyToQuantum((1UL*
+              (k & 0x03) << 3)+(1UL*(j & 0xe0) >> 5),range);
+            pixel.blue=(MagickRealType) ScaleAnyToQuantum(1UL*(j & 0x1f),range);
+            if (image->alpha_trait != UndefinedPixelTrait)
+              pixel.alpha=(MagickRealType) ((k & 0x80) == 0 ? (Quantum)
+                TransparentAlpha : (Quantum) OpaqueAlpha);
+            if (image->storage_class == PseudoClass)
+              index=(Quantum) ConstrainColormapIndex(image,((ssize_t) (k << 8))+
+                j,exception);
+            break;
+          }
+          case 24:
+          {
+            /*
+              BGR pixels.
+            */
+            if (ReadBlob(image,3,pixels) != 3)
+              ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+            pixel.blue=(MagickRealType) ScaleCharToQuantum(pixels[0]);
+            pixel.green=(MagickRealType) ScaleCharToQuantum(pixels[1]);
+            pixel.red=(MagickRealType) ScaleCharToQuantum(pixels[2]);
+            break;
+          }
+          case 32:
+          {
+            /*
+              BGRA pixels.
+            */
+            if (ReadBlob(image,4,pixels) != 4)
+              ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+            pixel.blue=(MagickRealType) ScaleCharToQuantum(pixels[0]);
+            pixel.green=(MagickRealType) ScaleCharToQuantum(pixels[1]);
+            pixel.red=(MagickRealType) ScaleCharToQuantum(pixels[2]);
+            pixel.alpha=(MagickRealType) ScaleCharToQuantum(pixels[3]);
+            break;
+          }
+        }
+      if (status == MagickFalse)
+        ThrowReaderException(CorruptImageError,"UnableToReadImageData");
+      if (image->storage_class == PseudoClass)
+        SetPixelIndex(image,index,q);
+      SetPixelRed(image,ClampToQuantum(pixel.red),q);
+      SetPixelGreen(image,ClampToQuantum(pixel.green),q);
+      SetPixelBlue(image,ClampToQuantum(pixel.blue),q);
+      if (image->alpha_trait != UndefinedPixelTrait)
+        SetPixelAlpha(image,ClampToQuantum(pixel.alpha),q);
+      q+=GetPixelChannels(image);
+    }
+    if (((unsigned char) (tga_info.attributes & 0xc0) >> 6) == 2)
+      offset+=2;
+    else
+      offset++;
+    if (offset >= (ssize_t) image->rows)
+      {
+        base++;
+        offset=base;
+      }
+    if (SyncAuthenticPixels(image,exception) == MagickFalse)
+      break;
+    if (image->previous == (Image *) NULL)
+      {
+        status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+          image->rows);
+        if (status == MagickFalse)
+          break;
+      }
+  }
+  if (EOFBlob(image) != MagickFalse)
+    ThrowFileException(exception,CorruptImageError,"UnexpectedEndOfFile",
+      image->filename);
+  (void) CloseBlob(image);
+  return(GetFirstImageInList(image));
+}
+
+// the below code fragment can be found in:
+// coders/rgb.c
+static Image *ReadRGBImage(const ImageInfo *image_info,ExceptionInfo *exception)
+{
+  const void
+    *stream;
+
+  Image
+    *canvas_image,
+    *image;
+
+  MagickBooleanType
+    status;
+
+  MagickOffsetType
+    scene;
+
+  QuantumInfo
+    *quantum_info;
+
+  QuantumType
+    quantum_type;
+
+  register ssize_t
+    i;
+
+  size_t
+    length;
+
+  ssize_t
+    count,
+    y;
+
+  unsigned char
+    *pixels;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  if ((image->columns == 0) || (image->rows == 0))
+    ThrowReaderException(OptionError,"MustSpecifyImageSize");
+  if (image_info->interlace != PartitionInterlace)
+    {
+      status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+      if (status == MagickFalse)
+        {
+          image=DestroyImageList(image);
+          return((Image *) NULL);
+        }
+      if (DiscardBlobBytes(image,(MagickSizeType) image->offset) == MagickFalse)
+        ThrowFileException(exception,CorruptImageError,"UnexpectedEndOfFile",
+          image->filename);
+    }
+  /*
+    Create virtual canvas to support cropping (i.e. image.rgb[100x100+10+20]).
+  */
+  canvas_image=CloneImage(image,image->extract_info.width,1,MagickFalse,
+    exception);
+  if(canvas_image == (Image *) NULL)
+    ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+  (void) SetImageVirtualPixelMethod(canvas_image,BlackVirtualPixelMethod,
+    exception);
+  quantum_info=AcquireQuantumInfo(image_info,canvas_image);
+  if (quantum_info == (QuantumInfo *) NULL)
+    {
+      canvas_image=DestroyImage(canvas_image);
+      ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+    }
+  quantum_type=RGBQuantum;
+  if (LocaleCompare(image_info->magick,"RGBA") == 0)
+    {
+      quantum_type=RGBAQuantum;
+      image->alpha_trait=BlendPixelTrait;
+      canvas_image->alpha_trait=BlendPixelTrait;
+    }
+  if (LocaleCompare(image_info->magick,"RGBO") == 0)
+    {
+      quantum_type=RGBOQuantum;
+      image->alpha_trait=BlendPixelTrait;
+      canvas_image->alpha_trait=BlendPixelTrait;
+    }
+  pixels=GetQuantumPixels(quantum_info);
+  if (image_info->number_scenes != 0)
+    while (image->scene < image_info->scene)
+    {
+      /*
+        Skip to next image.
+      */
+      image->scene++;
+      length=GetQuantumExtent(canvas_image,quantum_info,quantum_type);
+      for (y=0; y < (ssize_t) image->rows; y++)
+      {
+        stream=ReadBlobStream(image,length,pixels,&count);
+        if (count != (ssize_t) length)
+          break;
+      }
+    }
+  count=0;
+  length=0;
+  scene=0;
+  status=MagickTrue;
+  stream=NULL;
+  do
+  {
+    /*
+      Read pixels to virtual canvas image then push to image.
+    */
+    if ((image_info->ping != MagickFalse) && (image_info->number_scenes != 0))
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    status=SetImageExtent(image,image->columns,image->rows,exception);
+    if (status == MagickFalse)
+      break;
+    switch (image_info->interlace)
+    {
+      case NoInterlace:
+      default:
+      {
+        /*
+          No interlacing:  RGBRGBRGBRGBRGBRGB...
+        */
+        if (scene == 0)
+          {
+            length=GetQuantumExtent(canvas_image,quantum_info,quantum_type);
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,quantum_type,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) &&
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=QueueAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelRed(image,GetPixelRed(canvas_image,p),q);
+                SetPixelGreen(image,GetPixelGreen(canvas_image,p),q);
+                SetPixelBlue(image,GetPixelBlue(canvas_image,p),q);
+                SetPixelAlpha(image,OpaqueAlpha,q);
+                if (image->alpha_trait != UndefinedPixelTrait)
+                  SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        break;
+      }
+      case LineInterlace:
+      {
+        static QuantumType
+          quantum_types[4] =
+          {
+            RedQuantum,
+            GreenQuantum,
+            BlueQuantum,
+            AlphaQuantum
+          };
+
+        /*
+          Line interlacing:  RRR...GGG...BBB...RRR...GGG...BBB...
+        */
+        if (LocaleCompare(image_info->magick,"RGBO") == 0)
+          quantum_types[3]=OpacityQuantum;
+        if (scene == 0)
+          {
+            length=GetQuantumExtent(canvas_image,quantum_info,RedQuantum);
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          for (i=0; i < (ssize_t) (image->alpha_trait != UndefinedPixelTrait ? 4 : 3); i++)
+          {
+            register const Quantum
+              *magick_restrict p;
+
+            register Quantum
+              *magick_restrict q;
+
+            register ssize_t
+              x;
+
+            if (count != (ssize_t) length)
+              {
+                status=MagickFalse;
+                ThrowFileException(exception,CorruptImageError,
+                  "UnexpectedEndOfFile",image->filename);
+                break;
+              }
+            quantum_type=quantum_types[i];
+            q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+              exception);
+            if (q == (Quantum *) NULL)
+              break;
+            length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+              quantum_info,quantum_type,(unsigned char *) stream,exception);
+            if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+              break;
+            if (((y-image->extract_info.y) >= 0) &&
+                ((y-image->extract_info.y) < (ssize_t) image->rows))
+              {
+                p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,
+                  0,canvas_image->columns,1,exception);
+                q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                  image->columns,1,exception);
+                if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                  break;
+                for (x=0; x < (ssize_t) image->columns; x++)
+                {
+                  switch (quantum_type)
+                  {
+                    case RedQuantum:
+                    {
+                      SetPixelRed(image,GetPixelRed(canvas_image,p),q);
+                      break;
+                    }
+                    case GreenQuantum:
+                    {
+                      SetPixelGreen(image,GetPixelGreen(canvas_image,p),q);
+                      break;
+                    }
+                    case BlueQuantum:
+                    {
+                      SetPixelBlue(image,GetPixelBlue(canvas_image,p),q);
+                      break;
+                    }
+                    case OpacityQuantum:
+                    {
+                      SetPixelOpacity(image,GetPixelOpacity(canvas_image,p),q);
+                      break;
+                    }
+                    case AlphaQuantum:
+                    {
+                      SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                      break;
+                    }
+                    default:
+                      break;
+                  }
+                  p+=GetPixelChannels(canvas_image);
+                  q+=GetPixelChannels(image);
+                }
+                if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                  break;
+              }
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+        break;
+      }
+      case PlaneInterlace:
+      {
+        /*
+          Plane interlacing:  RRRRRR...GGGGGG...BBBBBB...
+        */
+        if (scene == 0)
+          {
+            length=GetQuantumExtent(canvas_image,quantum_info,RedQuantum);
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,RedQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) &&
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelRed(image,GetPixelRed(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,1,6);
+            if (status == MagickFalse)
+              break;
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,GreenQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) &&
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelGreen(image,GetPixelGreen(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+           }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,2,6);
+            if (status == MagickFalse)
+              break;
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+            status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,BlueQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) &&
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelBlue(image,GetPixelBlue(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,4,6);
+            if (status == MagickFalse)
+              break;
+          }
+        if (image->alpha_trait != UndefinedPixelTrait)
+          {
+            for (y=0; y < (ssize_t) image->extract_info.height; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              register Quantum
+                *magick_restrict q;
+
+              register ssize_t
+                x;
+
+              if (count != (ssize_t) length)
+                {
+                  status=MagickFalse;
+                  ThrowFileException(exception,CorruptImageError,
+                    "UnexpectedEndOfFile",image->filename);
+                  break;
+                }
+              q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+                exception);
+              if (q == (Quantum *) NULL)
+                break;
+              length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+                quantum_info,AlphaQuantum,(unsigned char *) stream,exception);
+              if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+                break;
+              if (((y-image->extract_info.y) >= 0) &&
+                  ((y-image->extract_info.y) < (ssize_t) image->rows))
+                {
+                  p=GetVirtualPixels(canvas_image,
+                    canvas_image->extract_info.x,0,canvas_image->columns,1,
+                    exception);
+                  q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                    image->columns,1,exception);
+                  if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                    break;
+                  for (x=0; x < (ssize_t) image->columns; x++)
+                  {
+                    SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                    p+=GetPixelChannels(canvas_image);
+                    q+=GetPixelChannels(image);
+                  }
+                  if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                    break;
+                }
+              stream=ReadBlobStream(image,length,pixels,&count);
+            }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,LoadImageTag,5,6);
+                if (status == MagickFalse)
+                  break;
+              }
+          }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,6,6);
+            if (status == MagickFalse)
+              break;
+          }
+        break;
+      }
+      case PartitionInterlace:
+      {
+        /*
+          Partition interlacing:  RRRRRR..., GGGGGG..., BBBBBB...
+        */
+        AppendImageFormat("R",image->filename);
+        status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+        if (status == MagickFalse)
+          break;
+        if (DiscardBlobBytes(image,(MagickSizeType) image->offset) == MagickFalse)
+          {
+            status=MagickFalse;
+            ThrowFileException(exception,CorruptImageError,
+              "UnexpectedEndOfFile",image->filename);
+            break;
+          }
+        length=GetQuantumExtent(canvas_image,quantum_info,RedQuantum);
+        for (i=0; i < (ssize_t) scene; i++)
+        {
+          for (y=0; y < (ssize_t) image->extract_info.height; y++)
+          {
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              break;
+          }
+          if (count != (ssize_t) length)
+            break;
+        }
+        stream=ReadBlobStream(image,length,pixels,&count);
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,RedQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) &&
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelRed(image,GetPixelRed(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,1,5);
+            if (status == MagickFalse)
+              break;
+          }
+        (void) CloseBlob(image);
+        AppendImageFormat("G",image->filename);
+        status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+        if (status == MagickFalse)
+          break;
+        length=GetQuantumExtent(canvas_image,quantum_info,GreenQuantum);
+        for (i=0; i < (ssize_t) scene; i++)
+        {
+          for (y=0; y < (ssize_t) image->extract_info.height; y++)
+          {
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              break;
+          }
+          if (count != (ssize_t) length)
+            break;
+        }
+        stream=ReadBlobStream(image,length,pixels,&count);
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,GreenQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) &&
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelGreen(image,GetPixelGreen(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+           }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,2,5);
+            if (status == MagickFalse)
+              break;
+          }
+        (void) CloseBlob(image);
+        AppendImageFormat("B",image->filename);
+        status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+        if (status == MagickFalse)
+          break;
+        length=GetQuantumExtent(canvas_image,quantum_info,BlueQuantum);
+        for (i=0; i < (ssize_t) scene; i++)
+        {
+          for (y=0; y < (ssize_t) image->extract_info.height; y++)
+          {
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              break;
+          }
+          if (count != (ssize_t) length)
+            break;
+        }
+        stream=ReadBlobStream(image,length,pixels,&count);
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,BlueQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) &&
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelBlue(image,GetPixelBlue(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+           }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,3,5);
+            if (status == MagickFalse)
+              break;
+          }
+        if (image->alpha_trait != UndefinedPixelTrait)
+          {
+            (void) CloseBlob(image);
+            AppendImageFormat("A",image->filename);
+            status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+            if (status == MagickFalse)
+              break;
+            length=GetQuantumExtent(canvas_image,quantum_info,AlphaQuantum);
+            for (i=0; i < (ssize_t) scene; i++)
+            {
+              for (y=0; y < (ssize_t) image->extract_info.height; y++)
+              {
+                stream=ReadBlobStream(image,length,pixels,&count);
+                if (count != (ssize_t) length)
+                  break;
+              }
+              if (count != (ssize_t) length)
+                break;
+            }
+            stream=ReadBlobStream(image,length,pixels,&count);
+            for (y=0; y < (ssize_t) image->extract_info.height; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              register Quantum
+                *magick_restrict q;
+
+              register ssize_t
+                x;
+
+              if (count != (ssize_t) length)
+                {
+                  status=MagickFalse;
+                  ThrowFileException(exception,CorruptImageError,
+                    "UnexpectedEndOfFile",image->filename);
+                  break;
+                }
+              q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+                exception);
+              if (q == (Quantum *) NULL)
+                break;
+              length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+                quantum_info,BlueQuantum,(unsigned char *) stream,exception);
+              if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+                break;
+              if (((y-image->extract_info.y) >= 0) &&
+                  ((y-image->extract_info.y) < (ssize_t) image->rows))
+                {
+                  p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,
+                    0,canvas_image->columns,1,exception);
+                  q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                    image->columns,1,exception);
+                  if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                    break;
+                  for (x=0; x < (ssize_t) image->columns; x++)
+                  {
+                    SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                    p+=GetPixelChannels(canvas_image);
+                    q+=GetPixelChannels(image);
+                  }
+                  if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                    break;
+               }
+              stream=ReadBlobStream(image,length,pixels,&count);
+            }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,LoadImageTag,4,5);
+                if (status == MagickFalse)
+                  break;
+              }
+          }
+        (void) CloseBlob(image);
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,5,5);
+            if (status == MagickFalse)
+              break;
+          }
+        break;
+      }
+    }
+    if (status == MagickFalse)
+      break;
+    SetQuantumImageType(image,quantum_type);
+    /*
+      Proceed to next image.
+    */
+    if (image_info->number_scenes != 0)
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    if (count == (ssize_t) length)
+      {
+        /*
+          Allocate next image structure.
+        */
+        AcquireNextImage(image_info,image,exception);
+        if (GetNextImageInList(image) == (Image *) NULL)
+          {
+            status=MagickFalse;
+            break;
+          }
+        image=SyncNextImageInList(image);
+        status=SetImageProgress(image,LoadImagesTag,TellBlob(image),
+          GetBlobSize(image));
+        if (status == MagickFalse)
+          break;
+      }
+    scene++;
+  } while (count == (ssize_t) length);
+  quantum_info=DestroyQuantumInfo(quantum_info);
+  canvas_image=DestroyImage(canvas_image);
+  (void) CloseBlob(image);
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  return(GetFirstImageInList(image));
+}
+
+// the below code fragment can be found in:
+// coders/cmyk.c
+static Image *ReadCMYKImage(const ImageInfo *image_info,
+  ExceptionInfo *exception)
+{
+  const void
+    *stream;
+
+  Image
+    *canvas_image,
+    *image;
+
+  MagickBooleanType
+    status;
+
+  MagickOffsetType
+    scene;
+
+  QuantumInfo
+    *quantum_info;
+
+  QuantumType
+    quantum_type;
+
+  register ssize_t
+    i;
+
+  size_t
+    length;
+
+  ssize_t
+    count,
+    y;
+
+  unsigned char
+    *pixels;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  if ((image->columns == 0) || (image->rows == 0))
+    ThrowReaderException(OptionError,"MustSpecifyImageSize");
+  status=SetImageExtent(image,image->columns,image->rows,exception);
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  (void) SetImageColorspace(image,CMYKColorspace,exception);
+  if (image_info->interlace != PartitionInterlace)
+    {
+      status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+      if (status == MagickFalse)
+        {
+          image=DestroyImageList(image);
+          return((Image *) NULL);
+        }
+      if (DiscardBlobBytes(image,(MagickSizeType) image->offset) == MagickFalse)
+        ThrowFileException(exception,CorruptImageError,"UnexpectedEndOfFile",
+          image->filename);
+    }
+  /*
+    Create virtual canvas to support cropping (i.e. image.cmyk[100x100+10+20]).
+  */
+  canvas_image=CloneImage(image,image->extract_info.width,1,MagickFalse,
+    exception);
+  if (canvas_image == (Image *) NULL)
+    ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+  (void) SetImageVirtualPixelMethod(canvas_image,BlackVirtualPixelMethod,
+    exception);
+  quantum_info=AcquireQuantumInfo(image_info,canvas_image);
+  if (quantum_info == (QuantumInfo *) NULL)
+    {
+      canvas_image=DestroyImage(canvas_image);
+      ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+    }
+  quantum_type=CMYKQuantum;
+  if (LocaleCompare(image_info->magick,"CMYKA") == 0)
+    {
+      quantum_type=CMYKAQuantum;
+      image->alpha_trait=BlendPixelTrait;
+    }
+  pixels=GetQuantumPixels(quantum_info);
+  if (image_info->number_scenes != 0)
+    while (image->scene < image_info->scene)
+    {
+      /*
+        Skip to next image.
+      */
+      image->scene++;
+      length=GetQuantumExtent(canvas_image,quantum_info,quantum_type);
+      for (y=0; y < (ssize_t) image->rows; y++)
+      {
+        stream=ReadBlobStream(image,length,pixels,&count);
+        if (count != (ssize_t) length)
+          break;
+      }
+    }
+  count=0;
+  length=0;
+  scene=0;
+  status=MagickTrue;
+  stream=NULL;
+  do
+  {
+    /*
+      Read pixels to virtual canvas image then push to image.
+    */
+    if ((image_info->ping != MagickFalse) && (image_info->number_scenes != 0))
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    status=SetImageExtent(image,image->columns,image->rows,exception);
+    if (status == MagickFalse)
+      break;
+    if (SetImageColorspace(image,CMYKColorspace,exception) == MagickFalse)
+      break;
+    switch (image_info->interlace)
+    {
+      case NoInterlace:
+      default:
+      {
+        /*
+          No interlacing:  CMYKCMYKCMYKCMYKCMYKCMYK...
+        */
+        if (scene == 0)
+          {
+            length=GetQuantumExtent(canvas_image,quantum_info,quantum_type);
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,quantum_type,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=QueueAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelRed(image,GetPixelRed(canvas_image,p),q);
+                SetPixelGreen(image,GetPixelGreen(canvas_image,p),q);
+                SetPixelBlue(image,GetPixelBlue(canvas_image,p),q);
+                SetPixelBlack(image,GetPixelBlack(canvas_image,p),q);
+                SetPixelAlpha(image,OpaqueAlpha,q);
+                if (image->alpha_trait != UndefinedPixelTrait)
+                  SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        break;
+      }
+      case LineInterlace:
+      {
+        static QuantumType
+          quantum_types[5] =
+          {
+            CyanQuantum,
+            MagentaQuantum,
+            YellowQuantum,
+            BlackQuantum,
+            OpacityQuantum
+          };
+
+        /*
+          Line interlacing:  CCC...MMM...YYY...KKK...CCC...MMM...YYY...KKK...
+        */
+        if (scene == 0)
+          {
+            length=GetQuantumExtent(canvas_image,quantum_info,CyanQuantum);
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          for (i=0; i < (ssize_t) (image->alpha_trait != UndefinedPixelTrait ? 5 : 4); i++)
+          {
+            register const Quantum
+              *magick_restrict p;
+
+            register Quantum
+              *magick_restrict q;
+
+            register ssize_t
+              x;
+
+            if (count != (ssize_t) length)
+              {
+                status=MagickFalse;
+                ThrowFileException(exception,CorruptImageError,
+                  "UnexpectedEndOfFile",image->filename);
+                break;
+              }
+            quantum_type=quantum_types[i];
+            q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+              exception);
+            if (q == (Quantum *) NULL)
+              break;
+            length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+              quantum_info,quantum_type,(unsigned char *) stream,exception);
+            if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+              break;
+            if (((y-image->extract_info.y) >= 0) && 
+                ((y-image->extract_info.y) < (ssize_t) image->rows))
+              {
+                p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,
+                  0,canvas_image->columns,1,exception);
+                q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                  image->columns,1,exception);
+                if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                  break;
+                for (x=0; x < (ssize_t) image->columns; x++)
+                {
+                  switch (quantum_type)
+                  {
+                    case CyanQuantum:
+                    {
+                      SetPixelCyan(image,GetPixelCyan(canvas_image,p),q);
+                      break;
+                    }
+                    case MagentaQuantum:
+                    {
+                      SetPixelMagenta(image,GetPixelMagenta(canvas_image,p),q);
+                      break;
+                    }
+                    case YellowQuantum:
+                    {
+                      SetPixelYellow(image,GetPixelYellow(canvas_image,p),q);
+                      break;
+                    }
+                    case BlackQuantum:
+                    {
+                      SetPixelBlack(image,GetPixelBlack(canvas_image,p),q);
+                      break;
+                    }
+                    case OpacityQuantum:
+                    {
+                      SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                      break;
+                    }
+                    default:
+                      break;
+                  }
+                  p+=GetPixelChannels(canvas_image);
+                  q+=GetPixelChannels(image);
+                }
+                if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                  break;
+              }
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+          if (image->previous == (Image *) NULL)
+            {
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+        }
+        break;
+      }
+      case PlaneInterlace:
+      {
+        /*
+          Plane interlacing:  CCCCCC...MMMMMM...YYYYYY...KKKKKK...
+        */
+        if (scene == 0)
+          {
+            length=GetQuantumExtent(canvas_image,quantum_info,CyanQuantum);
+            stream=ReadBlobStream(image,length,pixels,&count);
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,CyanQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelRed(image,GetPixelRed(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,1,6);
+            if (status == MagickFalse)
+              break;
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,MagentaQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelGreen(image,GetPixelGreen(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+           }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,2,6);
+            if (status == MagickFalse)
+              break;
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,YellowQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelBlue(image,GetPixelBlue(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,3,6);
+            if (status == MagickFalse)
+              break;
+          }
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,BlackQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelBlack(image,GetPixelBlack(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,4,6);
+            if (status == MagickFalse)
+              break;
+          }
+        if (image->alpha_trait != UndefinedPixelTrait)
+          {
+            for (y=0; y < (ssize_t) image->extract_info.height; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              register Quantum
+                *magick_restrict q;
+
+              register ssize_t
+                x;
+
+              if (count != (ssize_t) length)
+                {
+                  status=MagickFalse;
+                  ThrowFileException(exception,CorruptImageError,
+                    "UnexpectedEndOfFile",image->filename);
+                  break;
+                }
+              q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+                exception);
+              if (q == (Quantum *) NULL)
+                break;
+              length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+                quantum_info,AlphaQuantum,(unsigned char *) stream,exception);
+              if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+                break;
+              if (((y-image->extract_info.y) >= 0) && 
+                  ((y-image->extract_info.y) < (ssize_t) image->rows))
+                {
+                  p=GetVirtualPixels(canvas_image,
+                    canvas_image->extract_info.x,0,canvas_image->columns,1,
+                    exception);
+                  q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                    image->columns,1,exception);
+                  if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                    break;
+                  for (x=0; x < (ssize_t) image->columns; x++)
+                  {
+                    SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                    p+=GetPixelChannels(canvas_image);
+                    q+=GetPixelChannels(image);
+                  }
+                  if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                    break;
+                }
+              stream=ReadBlobStream(image,length,pixels,&count);
+            }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,LoadImageTag,5,6);
+                if (status == MagickFalse)
+                  break;
+              }
+          }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,6,6);
+            if (status == MagickFalse)
+              break;
+          }
+        break;
+      }
+      case PartitionInterlace:
+      {
+        /*
+          Partition interlacing:  CCCCCC..., MMMMMM..., YYYYYY..., KKKKKK...
+        */
+        AppendImageFormat("C",image->filename);
+        status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+        if (status == MagickFalse)
+          break;
+        if (DiscardBlobBytes(image,(MagickSizeType) image->offset) == MagickFalse)
+          {
+            status=MagickFalse;
+            ThrowFileException(exception,CorruptImageError,"UnexpectedEndOfFile",
+              image->filename);
+            break;
+          }
+        length=GetQuantumExtent(canvas_image,quantum_info,CyanQuantum);
+        for (i=0; i < (ssize_t) scene; i++)
+        {
+          for (y=0; y < (ssize_t) image->extract_info.height; y++)
+          {
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              break;
+          }
+          if (count != (ssize_t) length)
+            break;
+        }
+        stream=ReadBlobStream(image,length,pixels,&count);
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,CyanQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelRed(image,GetPixelRed(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+            }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,1,5);
+            if (status == MagickFalse)
+              break;
+          }
+        (void) CloseBlob(image);
+        AppendImageFormat("M",image->filename);
+        status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+        if (status == MagickFalse)
+          break;
+        length=GetQuantumExtent(canvas_image,quantum_info,MagentaQuantum);
+        for (i=0; i < (ssize_t) scene; i++)
+        {
+          for (y=0; y < (ssize_t) image->extract_info.height; y++)
+          {
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              break;
+          }
+          if (count != (ssize_t) length)
+            break;
+        }
+        stream=ReadBlobStream(image,length,pixels,&count);
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,MagentaQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) || (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelGreen(image,GetPixelGreen(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+           }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,2,5);
+            if (status == MagickFalse)
+              break;
+          }
+        (void) CloseBlob(image);
+        AppendImageFormat("Y",image->filename);
+        status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+        if (status == MagickFalse)
+          break;
+        length=GetQuantumExtent(canvas_image,quantum_info,YellowQuantum);
+        for (i=0; i < (ssize_t) scene; i++)
+        {
+          for (y=0; y < (ssize_t) image->extract_info.height; y++)
+          {
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              break;
+          }
+          if (count != (ssize_t) length)
+            break;
+        }
+        stream=ReadBlobStream(image,length,pixels,&count);
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,YellowQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) ||
+                  (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelBlue(image,GetPixelBlue(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+           }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,3,5);
+            if (status == MagickFalse)
+              break;
+          }
+        (void) CloseBlob(image);
+        AppendImageFormat("K",image->filename);
+        status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+        if (status == MagickFalse)
+          break;
+        length=GetQuantumExtent(canvas_image,quantum_info,BlackQuantum);
+        for (i=0; i < (ssize_t) scene; i++)
+        {
+          for (y=0; y < (ssize_t) image->extract_info.height; y++)
+          {
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              break;
+          }
+          if (count != (ssize_t) length)
+            break;
+        }
+        stream=ReadBlobStream(image,length,pixels,&count);
+        for (y=0; y < (ssize_t) image->extract_info.height; y++)
+        {
+          register const Quantum
+            *magick_restrict p;
+
+          register Quantum
+            *magick_restrict q;
+
+          register ssize_t
+            x;
+
+          if (count != (ssize_t) length)
+            {
+              status=MagickFalse;
+              ThrowFileException(exception,CorruptImageError,
+                "UnexpectedEndOfFile",image->filename);
+              break;
+            }
+          q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+            exception);
+          if (q == (Quantum *) NULL)
+            break;
+          length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+            quantum_info,BlackQuantum,(unsigned char *) stream,exception);
+          if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+            break;
+          if (((y-image->extract_info.y) >= 0) && 
+              ((y-image->extract_info.y) < (ssize_t) image->rows))
+            {
+              p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,0,
+                canvas_image->columns,1,exception);
+              q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                image->columns,1,exception);
+              if ((p == (const Quantum *) NULL) ||
+                  (q == (Quantum *) NULL))
+                break;
+              for (x=0; x < (ssize_t) image->columns; x++)
+              {
+                SetPixelBlack(image,GetPixelBlack(canvas_image,p),q);
+                p+=GetPixelChannels(canvas_image);
+                q+=GetPixelChannels(image);
+              }
+              if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                break;
+           }
+          stream=ReadBlobStream(image,length,pixels,&count);
+        }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,3,5);
+            if (status == MagickFalse)
+              break;
+          }
+        if (image->alpha_trait != UndefinedPixelTrait)
+          {
+            (void) CloseBlob(image);
+            AppendImageFormat("A",image->filename);
+            status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+            if (status == MagickFalse)
+              break;
+            length=GetQuantumExtent(canvas_image,quantum_info,AlphaQuantum);
+            for (i=0; i < (ssize_t) scene; i++)
+            {
+              for (y=0; y < (ssize_t) image->extract_info.height; y++)
+              {
+                stream=ReadBlobStream(image,length,pixels,&count);
+                if (count != (ssize_t) length)
+                  break;
+              }
+              if (count != (ssize_t) length)
+                break;
+            }
+            stream=ReadBlobStream(image,length,pixels,&count);
+            for (y=0; y < (ssize_t) image->extract_info.height; y++)
+            {
+              register const Quantum
+                *magick_restrict p;
+
+              register Quantum
+                *magick_restrict q;
+
+              register ssize_t
+                x;
+
+              if (count != (ssize_t) length)
+                {
+                  status=MagickFalse;
+                  ThrowFileException(exception,CorruptImageError,
+                    "UnexpectedEndOfFile",image->filename);
+                  break;
+                }
+              q=GetAuthenticPixels(canvas_image,0,0,canvas_image->columns,1,
+                exception);
+              if (q == (Quantum *) NULL)
+                break;
+              length=ImportQuantumPixels(canvas_image,(CacheView *) NULL,
+                quantum_info,YellowQuantum,(unsigned char *) stream,exception);
+              if (SyncAuthenticPixels(canvas_image,exception) == MagickFalse)
+                break;
+              if (((y-image->extract_info.y) >= 0) && 
+                  ((y-image->extract_info.y) < (ssize_t) image->rows))
+                {
+                  p=GetVirtualPixels(canvas_image,canvas_image->extract_info.x,
+                    0,canvas_image->columns,1,exception);
+                  q=GetAuthenticPixels(image,0,y-image->extract_info.y,
+                    image->columns,1,exception);
+                  if ((p == (const Quantum *) NULL) ||
+                      (q == (Quantum *) NULL))
+                    break;
+                  for (x=0; x < (ssize_t) image->columns; x++)
+                  {
+                    SetPixelAlpha(image,GetPixelAlpha(canvas_image,p),q);
+                    p+=GetPixelChannels(canvas_image);
+                    q+=GetPixelChannels(image);
+                  }
+                  if (SyncAuthenticPixels(image,exception) == MagickFalse)
+                    break;
+               }
+              stream=ReadBlobStream(image,length,pixels,&count);
+            }
+            if (image->previous == (Image *) NULL)
+              {
+                status=SetImageProgress(image,LoadImageTag,4,5);
+                if (status == MagickFalse)
+                  break;
+              }
+          }
+        if (image->previous == (Image *) NULL)
+          {
+            status=SetImageProgress(image,LoadImageTag,5,5);
+            if (status == MagickFalse)
+              break;
+          }
+        break;
+      }
+    }
+    if (status == MagickFalse)
+      break;
+    SetQuantumImageType(image,quantum_type);
+    /*
+      Proceed to next image.
+    */
+    if (image_info->number_scenes != 0)
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    if (count == (ssize_t) length)
+      {
+        /*
+          Allocate next image structure.
+        */
+        AcquireNextImage(image_info,image,exception);
+        if (GetNextImageInList(image) == (Image *) NULL)
+          {
+            status=MagickFalse;
+            break;
+          }
+        image=SyncNextImageInList(image);
+        status=SetImageProgress(image,LoadImagesTag,TellBlob(image),
+          GetBlobSize(image));
+        if (status == MagickFalse)
+          break;
+      }
+    scene++;
+  } while (count == (ssize_t) length);
+  quantum_info=DestroyQuantumInfo(quantum_info);
+  canvas_image=DestroyImage(canvas_image);
+  (void) CloseBlob(image);
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  return(GetFirstImageInList(image));
+}
+
+// the below code fragment can be found in:
+// coders/mpc.c
+static Image *ReadMPCImage(const ImageInfo *image_info,ExceptionInfo *exception)
+{
+  char
+    cache_filename[MagickPathExtent],
+    id[MagickPathExtent],
+    keyword[MagickPathExtent],
+    *options;
+
+  const unsigned char
+    *p;
+
+  GeometryInfo
+    geometry_info;
+
+  Image
+    *image;
+
+  int
+    c;
+
+  LinkedListInfo
+    *profiles;
+
+  MagickBooleanType
+    status;
+
+  MagickOffsetType
+    offset;
+
+  MagickStatusType
+    flags;
+
+  register ssize_t
+    i;
+
+  size_t
+    depth,
+    extent,
+    length;
+
+  ssize_t
+    count;
+
+  unsigned int
+    signature;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  (void) CopyMagickString(cache_filename,image->filename,MagickPathExtent-6);
+  AppendImageFormat("cache",cache_filename);
+  c=ReadBlobByte(image);
+  if (c == EOF)
+    {
+      image=DestroyImage(image);
+      return((Image *) NULL);
+    }
+  *id='\0';
+  (void) memset(keyword,0,sizeof(keyword));
+  offset=0;
+  do
+  {
+    /*
+      Decode image header;  header terminates one character beyond a ':'.
+    */
+    SetGeometryInfo(&geometry_info);
+    profiles=(LinkedListInfo *) NULL;
+    length=MagickPathExtent;
+    options=AcquireString((char *) NULL);
+    signature=GetMagickSignature((const StringInfo *) NULL);
+    image->depth=8;
+    image->compression=NoCompression;
+    while ((isgraph(c) != MagickFalse) && (c != (int) ':'))
+    {
+      register char
+        *p;
+
+      if (c == (int) '{')
+        {
+          char
+            *comment;
+
+          /*
+            Read comment-- any text between { }.
+          */
+          length=MagickPathExtent;
+          comment=AcquireString((char *) NULL);
+          for (p=comment; comment != (char *) NULL; p++)
+          {
+            c=ReadBlobByte(image);
+            if (c == (int) '\\')
+              c=ReadBlobByte(image);
+            else
+              if ((c == EOF) || (c == (int) '}'))
+                break;
+            if ((size_t) (p-comment+1) >= length)
+              {
+                *p='\0';
+                length<<=1;
+                comment=(char *) ResizeQuantumMemory(comment,length+
+                  MagickPathExtent,sizeof(*comment));
+                if (comment == (char *) NULL)
+                  break;
+                p=comment+strlen(comment);
+              }
+            *p=(char) c;
+          }
+          if (comment == (char *) NULL)
+            {
+              options=DestroyString(options);
+              ThrowReaderException(ResourceLimitError,
+                "MemoryAllocationFailed");
+            }
+          *p='\0';
+          (void) SetImageProperty(image,"comment",comment,exception);
+          comment=DestroyString(comment);
+          c=ReadBlobByte(image);
+        }
+      else
+        if (isalnum(c) != MagickFalse)
+          {
+            /*
+              Get the keyword.
+            */
+            length=MagickPathExtent-1;
+            p=keyword;
+            do
+            {
+              if (c == (int) '=')
+                break;
+              if ((size_t) (p-keyword) < (MagickPathExtent-1))
+                *p++=(char) c;
+              c=ReadBlobByte(image);
+            } while (c != EOF);
+            *p='\0';
+            p=options;
+            while (isspace(c) != 0)
+              c=ReadBlobByte(image);
+            if (c == (int) '=')
+              {
+                /*
+                  Get the keyword value.
+                */
+                c=ReadBlobByte(image);
+                while ((c != (int) '}') && (c != EOF))
+                {
+                  if ((size_t) (p-options+1) >= length)
+                    {
+                      *p='\0';
+                      length<<=1;
+                      options=(char *) ResizeQuantumMemory(options,length+
+                        MagickPathExtent,sizeof(*options));
+                      if (options == (char *) NULL)
+                        break;
+                      p=options+strlen(options);
+                    }
+                  *p++=(char) c;
+                  c=ReadBlobByte(image);
+                  if (c == '\\')
+                    {
+                      c=ReadBlobByte(image);
+                      if (c == (int) '}')
+                        {
+                          *p++=(char) c;
+                          c=ReadBlobByte(image);
+                        }
+                    }
+                  if (*options != '{')
+                    if (isspace(c) != 0)
+                      break;
+                }
+                if (options == (char *) NULL)
+                  ThrowReaderException(ResourceLimitError,
+                    "MemoryAllocationFailed");
+              }
+            *p='\0';
+            if (*options == '{')
+              (void) CopyMagickString(options,options+1,strlen(options));
+            /*
+              Assign a value to the specified keyword.
+            */
+            switch (*keyword)
+            {
+              case 'a':
+              case 'A':
+              {
+                if (LocaleCompare(keyword,"alpha-trait") == 0)
+                  {
+                    ssize_t
+                      alpha_trait;
+
+                    alpha_trait=ParseCommandOption(MagickPixelTraitOptions,
+                      MagickFalse,options);
+                    if (alpha_trait < 0)
+                      break;
+                    image->alpha_trait=(PixelTrait) alpha_trait;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'b':
+              case 'B':
+              {
+                if (LocaleCompare(keyword,"background-color") == 0)
+                  {
+                    (void) QueryColorCompliance(options,AllCompliance,
+                      &image->background_color,exception);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"blue-primary") == 0)
+                  {
+                    flags=ParseGeometry(options,&geometry_info);
+                    image->chromaticity.blue_primary.x=geometry_info.rho;
+                    image->chromaticity.blue_primary.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->chromaticity.blue_primary.y=
+                        image->chromaticity.blue_primary.x;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"border-color") == 0)
+                  {
+                    (void) QueryColorCompliance(options,AllCompliance,
+                      &image->border_color,exception);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'c':
+              case 'C':
+              {
+                if (LocaleCompare(keyword,"class") == 0)
+                  {
+                    ssize_t
+                      storage_class;
+
+                    storage_class=ParseCommandOption(MagickClassOptions,
+                      MagickFalse,options);
+                    if (storage_class < 0)
+                      break;
+                    image->storage_class=(ClassType) storage_class;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"colors") == 0)
+                  {
+                    image->colors=StringToUnsignedLong(options);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"colorspace") == 0)
+                  {
+                    ssize_t
+                      colorspace;
+
+                    colorspace=ParseCommandOption(MagickColorspaceOptions,
+                      MagickFalse,options);
+                    if (colorspace < 0)
+                      break;
+                    image->colorspace=(ColorspaceType) colorspace;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"compression") == 0)
+                  {
+                    ssize_t
+                      compression;
+
+                    compression=ParseCommandOption(MagickCompressOptions,
+                      MagickFalse,options);
+                    if (compression < 0)
+                      break;
+                    image->compression=(CompressionType) compression;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"columns") == 0)
+                  {
+                    image->columns=StringToUnsignedLong(options);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'd':
+              case 'D':
+              {
+                if (LocaleCompare(keyword,"delay") == 0)
+                  {
+                    image->delay=StringToUnsignedLong(options);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"depth") == 0)
+                  {
+                    image->depth=StringToUnsignedLong(options);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"dispose") == 0)
+                  {
+                    ssize_t
+                      dispose;
+
+                    dispose=ParseCommandOption(MagickDisposeOptions,MagickFalse,
+                      options);
+                    if (dispose < 0)
+                      break;
+                    image->dispose=(DisposeType) dispose;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'e':
+              case 'E':
+              {
+                if (LocaleCompare(keyword,"endian") == 0)
+                  {
+                    ssize_t
+                      endian;
+
+                    endian=ParseCommandOption(MagickEndianOptions,MagickFalse,
+                      options);
+                    if (endian < 0)
+                      break;
+                    image->endian=(EndianType) endian;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"error") == 0)
+                  {
+                    image->error.mean_error_per_pixel=StringToDouble(options,
+                      (char **) NULL);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'g':
+              case 'G':
+              {
+                if (LocaleCompare(keyword,"gamma") == 0)
+                  {
+                    image->gamma=StringToDouble(options,(char **) NULL);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"green-primary") == 0)
+                  {
+                    flags=ParseGeometry(options,&geometry_info);
+                    image->chromaticity.green_primary.x=geometry_info.rho;
+                    image->chromaticity.green_primary.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->chromaticity.green_primary.y=
+                        image->chromaticity.green_primary.x;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'i':
+              case 'I':
+              {
+                if (LocaleCompare(keyword,"id") == 0)
+                  {
+                    (void) CopyMagickString(id,options,MagickPathExtent);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"iterations") == 0)
+                  {
+                    image->iterations=StringToUnsignedLong(options);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'm':
+              case 'M':
+              {
+                if (LocaleCompare(keyword,"magick-signature") == 0)
+                  {
+                    signature=(unsigned int) StringToUnsignedLong(options);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"mattecolor") == 0)
+                  {
+                    (void) QueryColorCompliance(options,AllCompliance,
+                      &image->matte_color,exception);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"maximum-error") == 0)
+                  {
+                    image->error.normalized_maximum_error=StringToDouble(
+                      options,(char **) NULL);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"mean-error") == 0)
+                  {
+                    image->error.normalized_mean_error=StringToDouble(options,
+                      (char **) NULL);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"montage") == 0)
+                  {
+                    (void) CloneString(&image->montage,options);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'n':
+              case 'N':
+              {
+                if (LocaleCompare(keyword,"number-channels") == 0)
+                  {
+                    image->number_channels=StringToUnsignedLong(options);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"number-meta-channels") == 0)
+                  {
+                    image->number_meta_channels=StringToUnsignedLong(options);
+                    if (image->number_meta_channels > MaxPixelChannels)
+                      {
+                        if (profiles != (LinkedListInfo *) NULL)
+                          profiles=DestroyLinkedList(profiles,
+                            RelinquishMagickMemory);
+                        options=DestroyString(options);
+                        ThrowReaderException(CorruptImageError,
+                          "ImproperImageHeader");
+                      }
+                    break;
+                  }
+                break;
+              }
+              case 'o':
+              case 'O':
+              {
+                if (LocaleCompare(keyword,"orientation") == 0)
+                  {
+                    ssize_t
+                      orientation;
+
+                    orientation=ParseCommandOption(MagickOrientationOptions,
+                      MagickFalse,options);
+                    if (orientation < 0)
+                      break;
+                    image->orientation=(OrientationType) orientation;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'p':
+              case 'P':
+              {
+                if (LocaleCompare(keyword,"page") == 0)
+                  {
+                    char
+                      *geometry;
+
+                    geometry=GetPageGeometry(options);
+                    (void) ParseAbsoluteGeometry(geometry,&image->page);
+                    geometry=DestroyString(geometry);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"pixel-intensity") == 0)
+                  {
+                    ssize_t
+                      intensity;
+
+                    intensity=ParseCommandOption(MagickPixelIntensityOptions,
+                      MagickFalse,options);
+                    if (intensity < 0)
+                      break;
+                    image->intensity=(PixelIntensityMethod) intensity;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"profile") == 0)
+                  {
+                    if (profiles == (LinkedListInfo *) NULL)
+                      profiles=NewLinkedList(0);
+                    (void) AppendValueToLinkedList(profiles,
+                      AcquireString(options));
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'q':
+              case 'Q':
+              {
+                if (LocaleCompare(keyword,"quality") == 0)
+                  {
+                    image->quality=StringToUnsignedLong(options);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'r':
+              case 'R':
+              {
+                if (LocaleCompare(keyword,"red-primary") == 0)
+                  {
+                    flags=ParseGeometry(options,&geometry_info);
+                    image->chromaticity.red_primary.x=geometry_info.rho;
+                    if ((flags & SigmaValue) != 0)
+                      image->chromaticity.red_primary.y=geometry_info.sigma;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"rendering-intent") == 0)
+                  {
+                    ssize_t
+                      rendering_intent;
+
+                    rendering_intent=ParseCommandOption(MagickIntentOptions,
+                      MagickFalse,options);
+                    if (rendering_intent < 0)
+                      break;
+                    image->rendering_intent=(RenderingIntent) rendering_intent;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"resolution") == 0)
+                  {
+                    flags=ParseGeometry(options,&geometry_info);
+                    image->resolution.x=geometry_info.rho;
+                    image->resolution.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->resolution.y=image->resolution.x;
+                    break;
+                  }
+                if (LocaleCompare(keyword,"rows") == 0)
+                  {
+                    image->rows=StringToUnsignedLong(options);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 's':
+              case 'S':
+              {
+                if (LocaleCompare(keyword,"scene") == 0)
+                  {
+                    image->scene=StringToUnsignedLong(options);
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 't':
+              case 'T':
+              {
+                if (LocaleCompare(keyword,"ticks-per-second") == 0)
+                  {
+                    image->ticks_per_second=(ssize_t) StringToLong(options);
+                    break;
+                  }
+                if (LocaleCompare(keyword,"tile-offset") == 0)
+                  {
+                    char
+                      *geometry;
+
+                    geometry=GetPageGeometry(options);
+                    (void) ParseAbsoluteGeometry(geometry,&image->tile_offset);
+                    geometry=DestroyString(geometry);
+                  }
+                if (LocaleCompare(keyword,"type") == 0)
+                  {
+                    ssize_t
+                      type;
+
+                    type=ParseCommandOption(MagickTypeOptions,MagickFalse,
+                      options);
+                    if (type < 0)
+                      break;
+                    image->type=(ImageType) type;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'u':
+              case 'U':
+              {
+                if (LocaleCompare(keyword,"units") == 0)
+                  {
+                    ssize_t
+                      units;
+
+                    units=ParseCommandOption(MagickResolutionOptions,
+                      MagickFalse,options);
+                    if (units < 0)
+                      break;
+                    image->units=(ResolutionType) units;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              case 'w':
+              case 'W':
+              {
+                if (LocaleCompare(keyword,"white-point") == 0)
+                  {
+                    flags=ParseGeometry(options,&geometry_info);
+                    image->chromaticity.white_point.x=geometry_info.rho;
+                    image->chromaticity.white_point.y=geometry_info.sigma;
+                    if ((flags & SigmaValue) == 0)
+                      image->chromaticity.white_point.y=
+                        image->chromaticity.white_point.x;
+                    break;
+                  }
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+              default:
+              {
+                (void) SetImageProperty(image,keyword,options,exception);
+                break;
+              }
+            }
+          }
+        else
+          c=ReadBlobByte(image);
+      while (isspace(c) != 0)
+        c=ReadBlobByte(image);
+    }
+    options=DestroyString(options);
+    (void) ReadBlobByte(image);
+    /*
+      Verify that required image information is defined.
+    */
+    if ((LocaleCompare(id,"MagickPixelCache") != 0) ||
+        (image->storage_class == UndefinedClass) ||
+        (image->compression == UndefinedCompression) ||
+        (image->columns == 0) || (image->rows == 0) ||
+        (image->number_channels > MaxPixelChannels) ||
+        (image->number_meta_channels > (MaxPixelChannels-8)) ||
+        ((image->number_channels+image->number_meta_channels) >= MaxPixelChannels) ||
+        (image->depth == 0) || (image->depth > 64))
+      {
+        if (profiles != (LinkedListInfo *) NULL)
+          profiles=DestroyLinkedList(profiles,RelinquishMagickMemory);
+        ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+      }
+    if (signature != GetMagickSignature((const StringInfo *) NULL))
+      {
+        if (profiles != (LinkedListInfo *) NULL)
+          profiles=DestroyLinkedList(profiles,RelinquishMagickMemory);
+        ThrowReaderException(CacheError,"IncompatibleAPI");
+      }
+    if (image->montage != (char *) NULL)
+      {
+        register char
+          *p;
+
+        /*
+          Image directory.
+        */
+        extent=MagickPathExtent;
+        image->directory=AcquireString((char *) NULL);
+        p=image->directory;
+        length=0;
+        do
+        {
+          *p='\0';
+          if ((length+MagickPathExtent) >= extent)
+            {
+              /*
+                Allocate more memory for the image directory.
+              */
+              extent<<=1;
+              image->directory=(char *) ResizeQuantumMemory(image->directory,
+                extent+MagickPathExtent,sizeof(*image->directory));
+              if (image->directory == (char *) NULL)
+                {
+                  if (profiles != (LinkedListInfo *) NULL)
+                    profiles=DestroyLinkedList(profiles,RelinquishMagickMemory);
+                  ThrowReaderException(CorruptImageError,
+                    "UnableToReadImageData");
+                }
+              p=image->directory+length;
+            }
+          c=ReadBlobByte(image);
+          if (c == EOF)
+            break;
+          *p++=(char) c;
+          length++;
+        } while (c != (int) '\0');
+      }
+    if (profiles != (LinkedListInfo *) NULL)
+      {
+        const char
+          *name;
+
+        StringInfo
+          *profile;
+
+        /*
+          Read image profile blobs.
+        */
+        ResetLinkedListIterator(profiles);
+        name=(const char *) GetNextValueInLinkedList(profiles);
+        while (name != (const char *) NULL)
+        {
+          length=ReadBlobMSBLong(image);
+          if ((MagickSizeType) length > GetBlobSize(image))
+            break;
+          profile=AcquireStringInfo(length);
+          if (profile == (StringInfo *) NULL)
+            break;
+          count=ReadBlob(image,length,GetStringInfoDatum(profile));
+          if (count != (ssize_t) length)
+            {
+              profile=DestroyStringInfo(profile);
+              break;
+            }
+          status=SetImageProfile(image,name,profile,exception);
+          profile=DestroyStringInfo(profile);
+          if (status == MagickFalse)
+            break;
+          name=(const char *) GetNextValueInLinkedList(profiles);
+        }
+        profiles=DestroyLinkedList(profiles,RelinquishMagickMemory);
+      }
+    depth=GetImageQuantumDepth(image,MagickFalse);
+    if (image->storage_class == PseudoClass)
+      {
+        size_t
+          packet_size;
+
+        unsigned char
+          *colormap;
+
+        /*
+          Create image colormap.
+        */
+        packet_size=(size_t) (3UL*depth/8UL);
+        if ((MagickSizeType) (packet_size*image->colors) > GetBlobSize(image))
+          ThrowReaderException(CorruptImageError,"InsufficientImageDataInFile");
+        image->colormap=(PixelInfo *) AcquireQuantumMemory(image->colors+1,
+          sizeof(*image->colormap));
+        if (image->colormap == (PixelInfo *) NULL)
+          ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+        if (image->colors != 0)
+          {
+            /*
+              Read image colormap from file.
+            */
+            colormap=(unsigned char *) AcquireQuantumMemory(image->colors,
+              packet_size*sizeof(*colormap));
+            if (colormap == (unsigned char *) NULL)
+              ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+            count=ReadBlob(image,packet_size*image->colors,colormap);
+            if (count != (ssize_t) (packet_size*image->colors))
+              {
+                colormap=(unsigned char *) RelinquishMagickMemory(colormap);
+                ThrowReaderException(CorruptImageError,
+                  "InsufficientImageDataInFile");
+              }
+            p=colormap;
+            switch (depth)
+            {
+              default:
+                colormap=(unsigned char *) RelinquishMagickMemory(colormap);
+                ThrowReaderException(CorruptImageError,
+                  "ImageDepthNotSupported");
+              case 8:
+              {
+                unsigned char
+                  pixel;
+
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  p=PushCharPixel(p,&pixel);
+                  image->colormap[i].red=(MagickRealType)
+                    ScaleCharToQuantum(pixel);
+                  p=PushCharPixel(p,&pixel);
+                  image->colormap[i].green=(MagickRealType)
+                    ScaleCharToQuantum(pixel);
+                  p=PushCharPixel(p,&pixel);
+                  image->colormap[i].blue=(MagickRealType)
+                    ScaleCharToQuantum(pixel);
+                }
+                break;
+              }
+              case 16:
+              {
+                unsigned short
+                  pixel;
+
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  p=PushShortPixel(MSBEndian,p,&pixel);
+                  image->colormap[i].red=(MagickRealType)
+                    ScaleShortToQuantum(pixel);
+                  p=PushShortPixel(MSBEndian,p,&pixel);
+                  image->colormap[i].green=(MagickRealType)
+                    ScaleShortToQuantum(pixel);
+                  p=PushShortPixel(MSBEndian,p,&pixel);
+                  image->colormap[i].blue=(MagickRealType)
+                    ScaleShortToQuantum(pixel);
+                }
+                break;
+              }
+              case 32:
+              {
+                unsigned int
+                  pixel;
+
+                for (i=0; i < (ssize_t) image->colors; i++)
+                {
+                  p=PushLongPixel(MSBEndian,p,&pixel);
+                  image->colormap[i].red=(MagickRealType)
+                    ScaleLongToQuantum(pixel);
+                  p=PushLongPixel(MSBEndian,p,&pixel);
+                  image->colormap[i].green=(MagickRealType)
+                    ScaleLongToQuantum(pixel);
+                  p=PushLongPixel(MSBEndian,p,&pixel);
+                  image->colormap[i].blue=(MagickRealType)
+                    ScaleLongToQuantum(pixel);
+                }
+                break;
+              }
+            }
+            colormap=(unsigned char *) RelinquishMagickMemory(colormap);
+          }
+      }
+    if ((image_info->ping != MagickFalse) && (image_info->number_scenes != 0))
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    if ((AcquireMagickResource(WidthResource,image->columns) == MagickFalse) ||
+        (AcquireMagickResource(HeightResource,image->rows) == MagickFalse))
+      ThrowReaderException(ImageError,"WidthOrHeightExceedsLimit");
+    /*
+      Attach persistent pixel cache.
+    */
+    status=PersistPixelCache(image,cache_filename,MagickTrue,&offset,exception);
+    if (status == MagickFalse)
+      {
+        status=SetImageExtent(image,image->columns,image->rows,exception);
+        ThrowReaderException(CacheError,"UnableToPersistPixelCache");
+      }
+    if (EOFBlob(image) != MagickFalse)
+      {
+        ThrowFileException(exception,CorruptImageError,"UnexpectedEndOfFile",
+          image->filename);
+        break;
+      }
+    /*
+      Proceed to next image.
+    */
+    do
+    {
+      c=ReadBlobByte(image);
+    } while ((isgraph(c) == MagickFalse) && (c != EOF));
+    if (c != EOF)
+      {
+        /*
+          Allocate next image structure.
+        */
+        AcquireNextImage(image_info,image,exception);
+        if (GetNextImageInList(image) == (Image *) NULL)
+          {
+            status=MagickFalse;
+            break;
+          }
+        image=SyncNextImageInList(image);
+        status=SetImageProgress(image,LoadImagesTag,TellBlob(image),
+          GetBlobSize(image));
+        if (status == MagickFalse)
+          break;
+      }
+  } while (c != EOF);
+  (void) CloseBlob(image);
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  return(GetFirstImageInList(image));
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

@@ -1,0 +1,101 @@
+// <MASK>
+static inline void
+outputBits (int nBits, uint64_t bits, uint64_t* c, int* lc, uint8_t** out)
+{
+    uint8_t* outPtr = *out;
+    *c <<= nBits;
+    *lc += nBits;
+    *c |= bits;
+
+    while (*lc >= 8)
+    {
+        *outPtr++ = (uint8_t) (*c >> (*lc -= 8));
+    }
+    *out = outPtr;
+}
+
+static inline uint64_t
+getBits (uint32_t nBits, uint64_t* c, uint32_t* lc, const uint8_t** in)
+{
+    uint8_t* inPtr = *in;
+    while (*lc < nBits)
+    {
+        *c = (*c << 8) | (uint64_t) (*inPtr++);
+        *lc += 8;
+    }
+
+    *in = inPtr;
+    *lc -= nBits;
+    return (*c >> *lc) & ((1 << nBits) - 1);
+}
+
+static exr_result_t
+hufDecode (
+    const uint64_t* hcode,  // i : encoding table
+    const HufDec*   hdecod, // i : decoding table
+    const uint8_t*  in,     // i : compressed input buffer
+    uint64_t        ni,     // i : input size (in bits)
+    uint32_t        rlc,    // i : run-length code
+    uint64_t        no,     // i : expected output size (count of uint16 items)
+    uint16_t*       out)    // o : output buffer
+{
+    uint64_t       c    = 0;
+    int            lc   = 0;
+    uint16_t*      outb = out;
+    uint16_t*      oe   = out + no;
+    const uint8_t* ie   = in + (ni + 7) / 8; // input byte size
+
+    while (in < ie)
+    {
+        getChar (c, lc, in);
+
+        while (lc >= HUF_DECBITS)
+        {
+            uint64_t decoffset = (c >> (lc - HUF_DECBITS)) & HUF_DECMASK;
+            const HufDec* pl = hdecod + decoffset;
+
+            if (pl->len)
+            {
+                lc -= pl->len;
+                getCode (pl->lit, rlc, c, lc, in, ie, out, outb, oe);
+            }
+            else
+            {
+                uint32_t        j;
+                const uint32_t* decbuf = pl->p;
+                if (!pl->p) return EXR_ERR_CORRUPT_CHUNK; // wrong code
+
+                for (j = 0; j < pl->lit; j++)
+                {
+                    int l = hufLength (hcode[decbuf[j]]);
+
+                    while (lc < l && in < ie) // get more bits
+                    {
+                        getChar (c, lc, in);
+                    }
+
+                    if (lc >= l)
+                    {
+                        if (hufCode (hcode[decbuf[j]]) ==
+                            ((c >> (lc - l)) & ((1 << l) - 1)))
+                        {
+                            lc -= l;
+                            getCode (
+                                decbuf[j], rlc, c, lc, in, ie, out, outb, oe);
+                            break;
+                        }
+                    }
+                }
+
+                if (j == pl->lit) return EXR_ERR_CORRUPT_CHUNK;
+            }
+        }
+    }
+
+    if (ni != 0)
+    {
+        return EXR_ERR_CORRUPT_CHUNK;
+    }
+
+    return EXR_ERR_SUCCESS;
+}

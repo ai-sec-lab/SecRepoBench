@@ -1,0 +1,363 @@
+TagNames[i] = (cmsTagSignature) 0;
+         }
+
+         _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+         return TRUE;
+    }
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i >= 0) {
+
+        // Already exists? delete it
+        _cmsDeleteTagByPos(Icc, i);
+    }
+    else {
+
+        // No, make a new one
+        if (Icc -> TagCount >= MAX_TABLE_TAG) {
+            cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return FALSE;
+        }
+
+        Icc -> TagCount++;
+        i = (int) Icc -> TagCount - 1;
+    }
+
+    // Get the handler. The true type is there
+    Type = _cmsGetTagTrueType(hProfile, sig);
+    if (Type == 0) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get type handler
+    TypeHandler = _cmsGetTagTypeHandler(Icc ->ContextID, Type);
+    if (TypeHandler == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get tag descriptor
+    TagDescriptor = _cmsGetTagDescriptor(Icc->ContextID, sig);
+    if (TagDescriptor == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Check if type is supported
+    if (!IsTypeSupported(TagDescriptor, Type)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Get version
+    Version = cmsGetProfileVersion(hProfile);
+
+    // Decide if we should save as raw
+    if (TagDescriptor ->SaveAsRaw != NULL) {
+        Icc ->TagSaveAsRaw[i] = TagDescriptor ->SaveAsRaw(Version, data);
+    }
+    else {
+        Icc ->TagSaveAsRaw[i] = FALSE;
+    }
+
+    // Write the tag
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+    Icc -> TagPtrs[i] = LocalTypeHandler.WritePtr(&LocalTypeHandler, Icc ->IOhandler, (void*) data, TagDescriptor ->ElemCount);
+
+    if (Icc -> TagPtrs[i] == NULL) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Set tag signature
+    Icc -> TagNames[i] = sig;
+
+    // Set tag offset
+    Icc -> TagOffsets[i] = Icc ->IOhandler->UsedSpace;
+
+    // Set tag size
+    Icc -> TagSizes[i] = LocalTypeHandler.SizeOf(LocalTypeHandler, data, TagDescriptor ->ElemCount);
+
+    // Set link if any
+    if (TagDescriptor ->Link != NULL) {
+        Icc ->TagLinked[i] = TagDescriptor ->Link(Version, data);
+    }
+    else {
+        Icc ->TagLinked[i] = (cmsTagSignature) 0;
+    }
+
+    // Unlock
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+
+    return TRUE;
+}
+
+
+// -------------------------------------------------------------------------------------------------------------------
+
+// Add a tag to a profile. If the tag already exists, it is replaced.
+cmsBool CMSEXPORT cmsAddTag(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data)
+{
+    return cmsWriteTag(hProfile, sig, data);
+}
+
+// Remove a tag from a profile. If the tag does not exist, it does nothing.
+cmsBool CMSEXPORT cmsDeleteTag(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    return cmsWriteTag(hProfile, sig, NULL);
+}
+
+// Add a tag to a profile. If the tag already exists, it is replaced.
+cmsBool CMSEXPORT cmsSetTag(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data)
+{
+    return cmsWriteTag(hProfile, sig, data);
+}
+
+// Get tag data
+void* CMSEXPORT cmsGetTag(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    return cmsReadTag(hProfile, sig);
+}
+
+// Get tag data
+cmsBool CMSEXPORT cmsGetTagData(cmsHPROFILE hProfile, cmsTagSignature sig, void* Buffer)
+{
+    void* Data = cmsReadTag(hProfile, sig);
+    if (Data == NULL) return FALSE;
+
+    memmove(Buffer, Data, cmsTagMBS(sig));
+    return TRUE;
+}
+
+// Get tag size
+cmsUInt32Number CMSEXPORT cmsGetTagSize(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    return cmsTagMBS(sig);
+}
+
+// Get tag type
+cmsTagTypeSignature CMSEXPORT cmsGetTagType(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    return _cmsGetTagTrueType(hProfile, sig);
+}
+
+// Get tag descriptor
+cmsTagDescriptor* CMSEXPORT cmsGetTagDescriptor(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    return _cmsGetTagDescriptor(hProfile, sig);
+}
+
+// Get tag descriptor
+cmsTagDescriptor* CMSEXPORT _cmsGetTagDescriptor(cmsHPROFILE hProfile, cmsTagSignature sig)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    for (i=0; i < (int) Icc -> TagCount; i++) {
+
+        if (Icc -> TagNames[i] == sig) {
+
+            return _cmsGetTagDescriptorByPos(Icc, i);
+        }
+    }
+
+    return NULL;
+}
+
+// Get tag descriptor by position
+cmsTagDescriptor* CMSEXPORT _cmsGetTagDescriptorByPos(_cmsICCPROFILE* Icc, int i)
+{
+    cmsTagDescriptor* TagDescriptor = NULL;
+    cmsTagTypeHandler* TypeHandler;
+
+    if (i < 0 || i >= (int) Icc -> TagCount) return NULL;
+
+    if (Icc -> TagNames[i] == (cmsTagSignature) 0) return NULL;
+
+    // Get the handler. The true type is there
+    TypeHandler =  Icc -> TagTypeHandlers[i];
+    if (TypeHandler == NULL) return NULL;
+
+    // Get tag descriptor
+    TagDescriptor = _cmsGetTagDescriptorByTypeHandler(Icc->ContextID, TypeHandler);
+    if (TagDescriptor == NULL) return NULL;
+
+    return TagDescriptor;
+}
+
+// Get tag descriptor by type handler
+cmsTagDescriptor* CMSEXPORT _cmsGetTagDescriptorByTypeHandler(cmsContext ContextID, cmsTagTypeHandler* TypeHandler)
+{
+    cmsTagDescriptor* TagDescriptor = NULL;
+    cmsTagTypeSignature Type = TypeHandler ->Signature;
+
+    // Get tag descriptor
+    TagDescriptor = _cmsGetTagDescriptorByType(ContextID, Type);
+    if (TagDescriptor == NULL) return NULL;
+
+    return TagDescriptor;
+}
+
+// Get tag descriptor by type
+cmsTagDescriptor* CMSEXPORT _cmsGetTagDescriptorByType(cmsContext ContextID, cmsTagTypeSignature Type)
+{
+    cmsTagDescriptor* TagDescriptor = NULL;
+    cmsTagPluginChunkType* PluginChunk = cmsGetTagPluginChunk(ContextID);
+
+    if (PluginChunk == NULL) return NULL;
+
+    // Search for the tag descriptor
+    for (int i=0; i < PluginChunk->nItems; i++) {
+
+        if (PluginChunk->Items[i].Type == Type) {
+
+            TagDescriptor = &PluginChunk->Items[i];
+            break;
+        }
+    }
+
+    return TagDescriptor;
+}
+
+// Get tag plugin chunk
+cmsTagPluginChunkType* CMSEXPORT cmsGetTagPluginChunk(cmsContext ContextID)
+{
+    return _cmsGetTagPluginChunk(ContextID);
+}
+
+// Get tag plugin chunk
+cmsTagPluginChunkType* CMSEXPORT _cmsGetTagPluginChunk(cmsContext ContextID)
+{
+    cmsPluginChunk* PluginChunk = cmsGetPluginChunk(ContextID);
+
+    if (PluginChunk == NULL) return NULL;
+
+    // Search for the tag plugin chunk
+    for (int i=0; i < PluginChunk->nItems; i++) {
+
+        if (PluginChunk->Items[i].Type == cmsSigTagChunks) {
+
+            return (cmsTagPluginChunkType*) PluginChunk->Items[i].Data;
+        }
+    }
+
+    return NULL;
+}
+
+// Get plugin chunk
+cmsPluginChunk* CMSEXPORT cmsGetPluginChunk(cmsContext ContextID)
+{
+    return _cmsGetPluginChunk(ContextID);
+}
+
+// Get plugin chunk
+cmsPluginChunk* CMSEXPORT _cmsGetPluginChunk(cmsContext ContextID)
+{
+    cmsPluginChunk* PluginChunk = NULL;
+    cmsPluginBase* Plugin = cmsGetPluginBase(ContextID);
+
+    if (Plugin == NULL) return NULL;
+
+    // Search for the plugin chunk
+    for (int i=0; i < Plugin->nItems; i++) {
+
+        if (Plugin->Items[i].Type == cmsSigPluginChunk) {
+
+            PluginChunk = (cmsPluginChunk*) Plugin->Items[i].Data;
+            break;
+        }
+    }
+
+    return PluginChunk;
+}
+
+// Get plugin base
+cmsPluginBase* CMSEXPORT cmsGetPluginBase(cmsContext ContextID)
+{
+    return _cmsGetPluginBase(ContextID);
+}
+
+// Get plugin base
+cmsPluginBase* CMSEXPORT _cmsGetPluginBase(cmsContext ContextID)
+{
+    cmsPluginBase* Plugin = NULL;
+    cmsPluginBaseChunk* PluginBaseChunk = cmsGetPluginBaseChunk(ContextID);
+
+    if (PluginBaseChunk == NULL) return NULL;
+
+    // Search for the plugin base
+    for (int i=0; i < PluginBaseChunk->nItems; i++) {
+
+        if (PluginBaseChunk->Items[i].Type == cmsSigPluginBase) {
+
+            Plugin = (cmsPluginBase*) PluginBaseChunk->Items[i].Data;
+            break;
+        }
+    }
+
+    return Plugin;
+}
+
+// Get plugin base chunk
+cmsPluginBaseChunk* CMSEXPORT cmsGetPluginBaseChunk(cmsContext ContextID)
+{
+    return _cmsGetPluginBaseChunk(ContextID);
+}
+
+// Get plugin base chunk
+cmsPluginBaseChunk* CMSEXPORT _cmsGetPluginBaseChunk(cmsContext ContextID)
+{
+    cmsPluginBaseChunk* PluginBaseChunk = NULL;
+    cmsPluginInfo* PluginInfo = cmsGetPluginInfo(ContextID);
+
+    if (PluginInfo == NULL) return NULL;
+
+    // Search for the plugin base chunk
+    for (int i=0; i < PluginInfo->nItems; i++) {
+
+        if (PluginInfo->Items[i].Type == cmsSigPluginBaseChunk) {
+
+            PluginBaseChunk = (cmsPluginBaseChunk*) PluginInfo->Items[i].Data;
+            break;
+        }
+    }
+
+    return PluginBaseChunk;
+}
+
+// Get plugin info
+cmsPluginInfo* CMSEXPORT cmsGetPluginInfo(cmsContext ContextID)
+{
+    return _cmsGetPluginInfo(ContextID);
+}
+
+// Get plugin info
+cmsPluginInfo* CMSEXPORT _cmsGetPluginInfo(cmsContext ContextID)
+{
+    cmsPluginInfo* PluginInfo = NULL;
+    cmsPluginInfoChunk* PluginInfoChunk = cmsGetPluginInfoChunk(ContextID);
+
+    if (PluginInfoChunk == NULL) return NULL;
+
+    // Search for the plugin info
+    for (int i=0; i < PluginInfoChunk->nItems; i++) {
+
+        if (PluginInfoChunk->Items[i].Type == cmsSigPluginInfo) {
+
+            PluginInfo = (cmsPluginInfo*) PluginInfoChunk->Items[i].Data;
+            break;
+        }
+    }
+
+    return PluginInfo;
+}
+
+// Get plugin info chunk
+cmsPluginInfoChunk* CMSEXPORT cmsGetPluginInfoChunk(cmsContext ContextID)
+{
+    return _cmsGetPluginInfoChunk(ContextID);

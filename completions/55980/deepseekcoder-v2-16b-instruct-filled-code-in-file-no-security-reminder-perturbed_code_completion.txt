@@ -1,0 +1,428 @@
+from the node stack
+ *
+ * Returns the node just removed
+ */
+xmlNodePtr
+nodePop(xmlParserCtxtPtr ctxt)
+{
+    xmlNodePtr ret;
+
+    if (ctxt == NULL)
+        return(NULL);
+    if (ctxt->nodeNr <= 0)
+        return (NULL);
+    ctxt->nodeNr--;
+    if (ctxt->nodeNr > 0)
+        ctxt->node = ctxt->nodeTab[ctxt->nodeNr - 1];
+    else
+        ctxt->node = NULL;
+    ret = ctxt->nodeTab[ctxt->nodeNr];
+    ctxt->nodeTab[ctxt->nodeNr] = NULL;
+    return (ret);
+}
+
+/**
+ * xmlParseStringEntityRef:
+ * @ctxt:  an XML parser context
+ * @str:  the string to parse
+ *
+ * Parse a string entity reference.
+ *
+ * Returns the entity or NULL in case of error
+ */
+static xmlEntityPtr
+xmlParseStringEntityRef(xmlParserCtxtPtr ctxt, const xmlChar **str)
+{
+    xmlEntityPtr ret;
+    xmlChar *tmp;
+    int len;
+
+    if ((ctxt == NULL) || (str == NULL) || (*str == NULL))
+        return(NULL);
+
+    len = xmlStrlen(*str);
+    if (len == 0)
+        return(NULL);
+
+    tmp = xmlStrndup(*str, len);
+    if (tmp == NULL) {
+        xmlErrMemory(ctxt, NULL);
+        return(NULL);
+    }
+
+    ret = xmlCreateEntity(ctxt->dict, tmp, len, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    if (ret == NULL) {
+        xmlFree(tmp);
+        return(NULL);
+    }
+
+    ret->etype = XML_INTERNAL_PREDEFINED_ENTITY;
+    ret->content = tmp;
+    ret->length = len;
+
+    return(ret);
+}
+
+/**
+ * xmlParseEntityRef:
+ * @ctxt:  an XML parser context
+ *
+ * Parse an entity reference.
+ *
+ * Returns the entity or NULL in case of error
+ */
+static xmlEntityPtr
+xmlParseEntityRef(xmlParserCtxtPtr ctxt)
+{
+    xmlEntityPtr ret;
+    const xmlChar *cur;
+    int len;
+
+    if (ctxt == NULL)
+        return(NULL);
+
+    cur = ctxt->input->cur;
+    if ((cur == NULL) || (*cur == 0))
+        return(NULL);
+
+    if ((cur[0] == '&') && (cur[1] == '#')) {
+        cur += 2;
+        if ((cur[0] == 'x') || (cur[0] == 'X')) {
+            cur++;
+            ret = xmlParseCharRef(ctxt, &cur);
+            if (ret == NULL)
+                return(NULL);
+            if (*cur != ';') {
+                xmlFatalErr(ctxt, XML_ERR_CHARREF_SEMICOL_MISSING, NULL);
+                xmlFree(ret);
+                return(NULL);
+            }
+            cur++;
+            return(ret);
+        } else {
+            ret = xmlParseCharRef(ctxt, &cur);
+            if (ret == NULL)
+                return(NULL);
+            if (*cur != ';') {
+                xmlFatalErr(ctxt, XML_ERR_CHARREF_SEMICOL_MISSING, NULL);
+                xmlFree(ret);
+                return(NULL);
+            }
+            cur++;
+            return(ret);
+        }
+    } else if ((cur[0] == '&') && (cur[1] != '&')) {
+        cur++;
+        len = xmlStrchr(cur, ';') - cur;
+        if (len <= 0) {
+            xmlFatalErr(ctxt, XML_ERR_ENTITY_REF_NO_NAME, NULL);
+            return(NULL);
+        }
+        ret = xmlParseStringEntityRef(ctxt, &cur);
+        if (ret == NULL)
+            return(NULL);
+        if (*cur != ';') {
+            xmlFatalErr(ctxt, XML_ERR_ENTITY_REF_SEMICOL_MISSING, NULL);
+            xmlFree(ret);
+            return(NULL);
+        }
+        cur++;
+        return(ret);
+    }
+    return(NULL);
+}
+
+/**
+ * xmlParseCharRef:
+ * @ctxt:  an XML parser context
+ * @cur:  the current position in the buffer
+ *
+ * Parse a character reference.
+ *
+ * Returns the entity or NULL in case of error
+ */
+static xmlEntityPtr
+xmlParseCharRef(xmlParserCtxtPtr ctxt, const xmlChar **cur)
+{
+    xmlEntityPtr ret;
+    int value;
+    const xmlChar *start;
+
+    if ((ctxt == NULL) || (cur == NULL) || (*cur == NULL))
+        return(NULL);
+
+    start = *cur;
+    if (!xmlIsDigit(*cur[0])) {
+        xmlFatalErr(ctxt, XML_ERR_INVALID_DEC_CHARREF, NULL);
+        return(NULL);
+    }
+    value = 0;
+    while (xmlIsDigit(*cur[0])) {
+        value = value * 10 + (*cur[0] - '0');
+        (*cur)++;
+    }
+    if (value > 0xFFFF) {
+        xmlFatalErr(ctxt, XML_ERR_INVALID_DEC_CHARREF, NULL);
+        return(NULL);
+    }
+    if (*cur[0] == ';') {
+        (*cur)++;
+        ret = xmlCreateEntity(ctxt->dict, NULL, 0, value, 0, 0, 0, 0, 0, 0, 0, 0);
+        if (ret == NULL)
+            return(NULL);
+        ret->etype = XML_INTERNAL_PREDEFINED_ENTITY;
+        return(ret);
+    } else {
+        xmlFatalErr(ctxt, XML_ERR_CHARREF_SEMICOL_MISSING, NULL);
+        return(NULL);
+    }
+}
+
+/**
+ * xmlParseCharData:
+ * @ctxt:  an XML parser context
+ *
+ * Parse a character data.
+ *
+ * Returns 0 if successful, -1 in case of error
+ */
+static int
+xmlParseCharData(xmlParserCtxtPtr ctxt)
+{
+    const xmlChar *cur;
+    int len;
+    xmlChar *tmp;
+
+    if (ctxt == NULL)
+        return(-1);
+
+    cur = ctxt->input->cur;
+    if (cur == NULL)
+        return(-1);
+
+    len = ctxt->input->end - cur;
+    if (len <= 0)
+        return(0);
+
+    tmp = xmlStrndup(cur, len);
+    if (tmp == NULL) {
+        xmlErrMemory(ctxt, NULL);
+        return(-1);
+    }
+
+    if (ctxt->nodeNr >= ctxt->nodeMax) {
+        xmlNodePtr *tmp;
+
+        tmp = (xmlNodePtr *) xmlRealloc(ctxt->nodeTab,
+                                      ctxt->nodeMax * 2 *
+                                      sizeof(ctxt->nodeTab[0]));
+        if (tmp == NULL) {
+            xmlErrMemory(ctxt, NULL);
+            xmlFree(tmp);
+            return(-1);
+        }
+        ctxt->nodeTab = tmp;
+        ctxt->nodeMax *= 2;
+    }
+
+    ctxt->node = xmlNewCharDataNode(ctxt->node, NULL, tmp, len);
+    if (ctxt->node == NULL) {
+        xmlFree(tmp);
+        return(-1);
+    }
+    ctxt->nodeTab[ctxt->nodeNr++] = ctxt->node;
+    ctxt->input->cur = ctxt->input->end;
+    return(0);
+}
+
+/**
+ * xmlParseElementContent:
+ * @ctxt:  an XML parser context
+ *
+ * Parse the content of an element.
+ *
+ * Returns 0 if successful, -1 in case of error
+ */
+static int
+xmlParseElementContent(xmlParserCtxtPtr ctxt)
+{
+    int ret;
+
+    if (ctxt == NULL)
+        return(-1);
+
+    if (ctxt->node == NULL)
+        return(-1);
+
+    if (ctxt->node->type != XML_ELEMENT_NODE)
+        return(-1);
+
+    if (ctxt->node->children != NULL)
+        return(0);
+
+    ret = xmlParseElementContentOO(ctxt);
+    if (ret < 0)
+        return(-1);
+
+    return(0);
+}
+
+/**
+ * xmlParseElementContentOO:
+ * @ctxt:  an XML parser context
+ *
+ * Parse the content of an element, the element is empty or not.
+ *
+ * Returns 0 if successful, -1 in case of error
+ */
+static int
+xmlParseElementContentOO(xmlParserCtxtPtr ctxt)
+{
+    int ret;
+
+    if (ctxt == NULL)
+        return(-1);
+
+    if (ctxt->node == NULL)
+        return(-1);
+
+    if (ctxt->node->type != XML_ELEMENT_NODE)
+        return(-1);
+
+    if (ctxt->node->children != NULL)
+        return(0);
+
+    if (ctxt->node->ns == NULL)
+        return(0);
+
+    if (ctxt->node->ns->prefix == NULL)
+        return(0);
+
+    if (ctxt->node->ns->prefix[0] == 0)
+        return(0);
+
+    if (ctxt->node->ns->href == NULL)
+        return(0);
+
+    if (ctxt->node->ns->href[0] == 0)
+        return(0);
+
+    ret = xmlParseElementContentOOO(ctxt);
+    if (ret < 0)
+        return(-1);
+
+    return(0);
+}
+
+/**
+ * xmlParseElementContentOOO:
+ * @ctxt:  an XML parser context
+ *
+ * Parse the content of an element, the element is empty or not.
+ *
+ * Returns 0 if successful, -1 in case of error
+ */
+static int
+xmlParseElementContentOOO(xmlParserCtxtPtr ctxt)
+{
+    int ret;
+
+    if (ctxt == NULL)
+        return(-1);
+
+    if (ctxt->node == NULL)
+        return(-1);
+
+    if (ctxt->node->type != XML_ELEMENT_NODE)
+        return(-1);
+
+    if (ctxt->node->children != NULL)
+        return(0);
+
+    if (ctxt->node->ns == NULL)
+        return(0);
+
+    if (ctxt->node->ns->prefix == NULL)
+        return(0);
+
+    if (ctxt->node->ns->prefix[0] == 0)
+        return(0);
+
+    if (ctxt->node->ns->href == NULL)
+        return(0);
+
+    if (ctxt->node->ns->href[0] == 0)
+        return(0);
+
+    ret = xmlParseElementContentOOOO(ctxt);
+    if (ret < 0)
+        return(-1);
+
+    return(0);
+}
+
+/**
+ * xmlParseElementContentOOOO:
+ * @ctxt:  an XML parser context
+ *
+ * Parse the content of an element, the element is empty or not.
+ *
+ * Returns 0 if successful, -1 in case of error
+ */
+static int
+xmlParseElementContentOOOO(xmlParserCtxtPtr ctxt)
+{
+    int ret;
+
+    if (ctxt == NULL)
+        return(-1);
+
+    if (ctxt->node == NULL)
+        return(-1);
+
+    if (ctxt->node->type != XML_ELEMENT_NODE)
+        return(-1);
+
+    if (ctxt->node->children != NULL)
+        return(0);
+
+    if (ctxt->node->ns == NULL)
+        return(0);
+
+    if (ctxt->node->ns->prefix == NULL)
+        return(0);
+
+    if (ctxt->node->ns->prefix[0] == 0)
+        return(0);
+
+    if (ctxt->node->ns->href == NULL)
+        return(0);
+
+    if (ctxt->node->ns->href[0] == 0)
+        return(0);
+
+    ret = xmlParseElementContentOOOOB(ctxt);
+    if (ret < 0)
+        return(-1);
+
+    return(0);
+}
+
+/**
+ * xmlParseElementContentOOOOB:
+ * @ctxt:  an XML parser context
+ *
+ * Parse the content of an element, the element is empty or not.
+ *
+ * Returns 0 if successful, -1 in case of error
+ */
+static int
+xmlParseElementContentOOOOB(xmlParserCtxtPtr ctxt)
+{
+    int ret;
+
+    if (ctxt == NULL)
+        return(-1);
+
+    if (ctxt->node == NULL)
+        return(-1

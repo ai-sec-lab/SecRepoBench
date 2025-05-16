@@ -1,0 +1,74 @@
+NDPI_LOG_DBG(ndpi_struct, "search OpenVPN\n");
+
+  if(packet->payload_packet_len < 2) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  // If over TCP, adjust the payload pointer by skipping the packet length bytes
+  if(packet->tcp != NULL) {
+    if(packet->payload_packet_len < 4) {
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+      return;
+    }
+    ovpn_payload += 2; // Skip the packet length bytes in TCP mode
+  }
+
+  // Extract operation code
+  operationcode = ovpn_payload[0] >> 3; // The op code is in the 5 most significant bits
+
+  // For UDP packets, perform additional checks
+  if(packet->udp != NULL) {
+    if(flow->packet_counter == 1) {
+      // First packet check for specific criteria
+      if((packet->payload_packet_len == 14 && operationcode == 7) ||
+         (packet->payload_packet_len == 78 && operationcode == 7) ||
+         (packet->payload_packet_len == 86 && operationcode == 7)) {
+        NDPI_LOG_INFO(ndpi_struct, "found OpenVPN UDP handshake\n");
+        ndpi_int_openvpn_add_connection(ndpi_struct, flow);
+        return;
+      }
+    }
+
+    // Check for client reset packets (operation code 1)
+    if(flow->l4.udp.openvpn_counter < 10 && operationcode == 1) {
+      // Try to extract session ID
+      if(packet->payload_packet_len >= 16) {
+        alen = ovpn_payload[1]; // Get the array length
+        if(alen >= 8) {
+          // Store session ID
+          flow->l4.udp.openvpn_session_id = get_u_int64_t(ovpn_payload, 2);
+          NDPI_LOG_DBG2(ndpi_struct, "Stored OpenVPN session ID\n");
+        }
+      }
+    }
+    // Check for server reset packets (operation code 2)
+    else if(flow->l4.udp.openvpn_counter > 0 && flow->l4.udp.openvpn_counter < 10 && operationcode == 2) {
+      // Try to verify session ID
+      if(packet->payload_packet_len >= 16) {
+        alen = ovpn_payload[1]; // Get the array length
+        if(alen >= 8) {
+          // Get session ID from packet
+          session_remote = &ovpn_payload[2];
+          hmac_size = 0;
+          
+          // Compare with stored session ID
+          if(flow->l4.udp.openvpn_session_id == get_u_int64_t(session_remote, hmac_size)) {
+            NDPI_LOG_INFO(ndpi_struct, "found OpenVPN with session ID match\n");
+            ndpi_int_openvpn_add_connection(ndpi_struct, flow);
+            return;
+          } else {
+            failed = 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Increment the OpenVPN counter
+  flow->l4.udp.openvpn_counter++;
+
+  // If detection failed, exclude the protocol
+  if(failed) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  }

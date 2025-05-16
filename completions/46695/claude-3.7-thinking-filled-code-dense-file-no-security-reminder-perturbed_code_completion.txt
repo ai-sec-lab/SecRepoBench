@@ -1,0 +1,254 @@
+if (encoding != (const char *) NULL)
+    {
+      encoding_type=FT_ENCODING_UNICODE;
+      if (LocaleCompare(encoding,"AdobeCustom") == 0)
+        encoding_type=FT_ENCODING_ADOBE_CUSTOM;
+      else if (LocaleCompare(encoding,"AdobeExpert") == 0)
+        encoding_type=FT_ENCODING_ADOBE_EXPERT;
+      else if (LocaleCompare(encoding,"AdobeStandard") == 0)
+        encoding_type=FT_ENCODING_ADOBE_STANDARD;
+      else if (LocaleCompare(encoding,"AppleRoman") == 0)
+        encoding_type=FT_ENCODING_APPLE_ROMAN;
+      else if (LocaleCompare(encoding,"BIG5") == 0)
+        encoding_type=FT_ENCODING_BIG5;
+      else if (LocaleCompare(encoding,"GB2312") == 0)
+        encoding_type=FT_ENCODING_GB2312;
+      else if (LocaleCompare(encoding,"Johab") == 0)
+        encoding_type=FT_ENCODING_JOHAB;
+      else if (LocaleCompare(encoding,"Latin1") == 0)
+        encoding_type=FT_ENCODING_LATIN_1;
+      else if (LocaleCompare(encoding,"Latin2") == 0)
+        encoding_type=FT_ENCODING_LATIN_2;
+      else if (LocaleCompare(encoding,"Microsoft") == 0)
+        encoding_type=FT_ENCODING_MS_SYMBOL;
+      else if (LocaleCompare(encoding,"Shift-JIS") == 0)
+        encoding_type=FT_ENCODING_SJIS;
+      else if (LocaleCompare(encoding,"Symbol") == 0)
+        encoding_type=FT_ENCODING_MS_SYMBOL;
+      else if (LocaleCompare(encoding,"Unicode") == 0)
+        encoding_type=FT_ENCODING_UNICODE;
+      else if (LocaleCompare(encoding,"Wansung") == 0)
+        encoding_type=FT_ENCODING_WANSUNG;
+      
+      ft_status=FT_Select_Charmap(face,encoding_type);
+      if (ft_status != 0)
+        {
+          (void) FT_Done_Face(face);
+          (void) FT_Done_FreeType(library);
+          ThrowFreetypeErrorException("UnableToSetEncoding",ft_status,encoding);
+          return(MagickFalse);
+        }
+    }
+  
+  /* Set character size based on the point size and resolution */
+  resolution.x=72.0;
+  resolution.y=72.0;
+  if (draw_info->density != (char *) NULL)
+    {
+      GeometryInfo
+        geometry_info;
+
+      MagickStatusType
+        flags;
+
+      flags=ParseGeometry(draw_info->density,&geometry_info);
+      resolution.x=geometry_info.rho;
+      resolution.y=geometry_info.sigma;
+      if ((flags & SigmaValue) == 0)
+        resolution.y=resolution.x;
+    }
+  
+  ft_status=FT_Set_Char_Size(face,(FT_F26Dot6) (64.0*draw_info->pointsize),
+    (FT_F26Dot6) (64.0*draw_info->pointsize),(FT_UInt) resolution.x,
+    (FT_UInt) resolution.y);
+  if (ft_status != 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToSetPointSize",ft_status,draw_info->font);
+      return(MagickFalse);
+    }
+  
+  /* Initialize metrics */
+  metrics->pixels_per_em.x=face->size->metrics.x_ppem;
+  metrics->pixels_per_em.y=face->size->metrics.y_ppem;
+  metrics->ascent=(double) face->size->metrics.ascender/64.0;
+  metrics->descent=(double) face->size->metrics.descender/64.0;
+  metrics->width=0;
+  metrics->origin.x=0;
+  metrics->origin.y=0;
+  metrics->height=(double) face->size->metrics.height/64.0;
+  metrics->max_advance=(double) face->size->metrics.max_advance/64.0;
+  
+  /* Correct bad ascender/descender values */
+  if (metrics->ascent == 0.0)
+    metrics->ascent=(double) face->bbox.yMax*metrics->pixels_per_em.y/
+      face->units_per_EM;
+  if (metrics->descent == 0.0)
+    metrics->descent=(-1.0)*(double) face->bbox.yMin*
+      metrics->pixels_per_em.y/face->units_per_EM;
+  
+  /* Set underline position and thickness */
+  metrics->underline_position=FT_MulFix(face->underline_position,
+    face->size->metrics.y_scale)/64.0;
+  metrics->underline_thickness=FT_MulFix(face->underline_thickness,
+    face->size->metrics.y_scale)/64.0;
+  if (metrics->underline_thickness == 0.0)
+    metrics->underline_thickness=1.0;
+  
+  /* Return if there is no text or no glyphs */
+  if (draw_info->text == (char *) NULL)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  if (face->num_glyphs == 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  
+  /* Configure rendering options */
+  flags=FT_LOAD_NO_BITMAP;
+  if (draw_info->text_antialias == MagickFalse)
+    flags|=FT_LOAD_TARGET_MONO;
+  else
+    {
+      if (img->colorspace == CMYKColorspace)
+        flags|=FT_LOAD_TARGET_NORMAL;
+      else
+        flags|=FT_LOAD_TARGET_LCD;
+    }
+  if (draw_info->render == MagickFalse)
+    flags|=FT_LOAD_NO_HINTING;
+  
+  /* Set up transformation matrix */
+  affine.xx=(FT_Fixed) (65536.0*draw_info->affine.sx+0.5);
+  affine.yx=(FT_Fixed) (-65536.0*draw_info->affine.rx+0.5);
+  affine.xy=(FT_Fixed) (65536.0*draw_info->affine.ry+0.5);
+  affine.yy=(FT_Fixed) (65536.0*draw_info->affine.sy+0.5);
+  
+  /* Prepare for glyph rendering */
+  annotate_info=CloneDrawInfo((ImageInfo *) NULL,draw_info);
+  if (annotate_info == (DrawInfo *) NULL)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+        img->filename);
+    }
+  
+  /* Parse text into graphemes */
+  length=strlen(draw_info->text);
+  grapheme=(GraphemeInfo *) AcquireQuantumMemory(length+1,sizeof(*grapheme));
+  if (grapheme == (GraphemeInfo *) NULL)
+    {
+      annotate_info=DestroyDrawInfo(annotate_info);
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowBinaryException(ResourceLimitError,"MemoryAllocationFailed",
+        img->filename);
+    }
+  
+  /* Handle text encoding */
+  status=MagickTrue;
+  if (draw_info->encoding != (char *) NULL)
+    {
+      utf8=(unsigned char *) AcquireString(draw_info->text);
+      status=ConvertAnyFormat(utf8,draw_info->encoding);
+      if (status == MagickFalse)
+        {
+          utf8=(unsigned char *) RelinquishMagickMemory(utf8);
+          (void) ThrowMagickException(exception,GetMagickModule(),
+            TypeError,"UnrecognizedCharacterSet","`%s'",draw_info->encoding);
+        }
+    }
+  else
+    utf8=(unsigned char *) draw_info->text;
+  
+  /* Convert text to graphemes */
+  p=(char *) utf8;
+  for (i=0; i < (ssize_t) length; i++)
+    {
+      if (GetUTFCode((const unsigned char *) p) == 0)
+        break;
+      grapheme[i].index=i;
+      grapheme[i].code=GetUTFCode((const unsigned char *) p);
+      p+=GetUTFOctets((const unsigned char *) p);
+    }
+  grapheme[i].index=i;
+  grapheme[i].code=0;
+  
+  /* Set bounding box */
+  bounds.xMin=0;
+  bounds.yMin=0;
+  bounds.xMax=0;
+  bounds.yMax=0;
+  
+  /* Render each grapheme */
+  point.x=0.0;
+  point.y=0.0;
+  last_character=0;
+  for (i=0; i < (ssize_t) length; i++)
+    {
+      if (grapheme[i].code == 0)
+        break;
+      
+      glyph.id=FT_Get_Char_Index(face,grapheme[i].code);
+      if (glyph.id == 0)
+        continue;
+      
+      FT_Set_Transform(face,&affine,NULL);
+      
+      ft_status=FT_Load_Glyph(face,glyph.id,flags);
+      if (ft_status != 0)
+        continue;
+      
+      ft_status=FT_Get_Glyph(face->glyph,&glyph.image);
+      if (ft_status != 0)
+        continue;
+      
+      /* Update bounding box */
+      if (last_character == 0)
+        {
+          bounds.xMin=face->glyph->metrics.horiBearingX-64;
+          bounds.xMax=face->glyph->metrics.horiBearingX+face->glyph->metrics.width+64;
+          bounds.yMin=face->glyph->metrics.horiBearingY-face->glyph->metrics.height-64;
+          bounds.yMax=face->glyph->metrics.horiBearingY+64;
+        }
+      else
+        {
+          if (face->glyph->metrics.horiBearingX-64 < bounds.xMin)
+            bounds.xMin=face->glyph->metrics.horiBearingX-64;
+          if (face->glyph->metrics.horiBearingX+face->glyph->metrics.width+64 > bounds.xMax)
+            bounds.xMax=face->glyph->metrics.horiBearingX+face->glyph->metrics.width+64;
+          if (face->glyph->metrics.horiBearingY-face->glyph->metrics.height-64 < bounds.yMin)
+            bounds.yMin=face->glyph->metrics.horiBearingY-face->glyph->metrics.height-64;
+          if (face->glyph->metrics.horiBearingY+64 > bounds.yMax)
+            bounds.yMax=face->glyph->metrics.horiBearingY+64;
+        }
+      
+      last_character++;
+      point.x+=face->glyph->advance.x/64.0;
+      point.y+=face->glyph->advance.y/64.0;
+      
+      FT_Done_Glyph(glyph.image);
+    }
+  
+  /* Set final metrics */
+  metrics->width=point.x;
+  metrics->bounds.x1=(double) bounds.xMin/64.0;
+  metrics->bounds.y1=(double) bounds.yMin/64.0;
+  metrics->bounds.x2=(double) bounds.xMax/64.0;
+  metrics->bounds.y2=(double) bounds.yMax/64.0;
+  
+  /* Clean up */
+  grapheme=(GraphemeInfo *) RelinquishMagickMemory(grapheme);
+  if (draw_info->encoding != (char *) NULL)
+    utf8=(unsigned char *) RelinquishMagickMemory(utf8);
+  annotate_info=DestroyDrawInfo(annotate_info);
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+  return(MagickTrue);

@@ -1,0 +1,139 @@
+if (encoding != NULL)
+  {
+    if (LocaleCompare(encoding, "UTF-8") == 0 || LocaleCompare(encoding, "utf8") == 0)
+      encoding_type = FT_ENCODING_UNICODE;
+    else if (LocaleCompare(encoding, "latin1") == 0)
+      encoding_type = FT_ENCODING_LATIN_1;
+    else if (LocaleCompare(encoding, "symbol") == 0)
+      encoding_type = FT_ENCODING_MS_SYMBOL;
+    else if (LocaleCompare(encoding, "ascii") == 0)
+      encoding_type = FT_ENCODING_NONE;
+    else
+    {
+      args.pathname=DestroyString(args.pathname);
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnsupportedEncoding", ft_status, encoding);
+      return MagickFalse;
+    }
+
+    ft_status = FT_Set_Charmap(face, FT_Get_Charmap(face, encoding_type));
+    if (ft_status != 0)
+    {
+      args.pathname=DestroyString(args.pathname);
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToSetCharmap", ft_status, encoding);
+      return MagickFalse;
+    }
+  }
+
+  resolution.x = draw_info->pointsize;
+  resolution.y = draw_info->resolution.x != 0.0 ? draw_info->resolution.x : DefaultResolution;
+
+  ft_status = FT_Set_Char_Size(face, 0, (FT_F26Dot6)(draw_info->pointsize * 64),
+    (FT_UInt)(resolution.x), (FT_UInt)(resolution.y));
+
+  if (ft_status != 0)
+  {
+    args.pathname=DestroyString(args.pathname);
+    (void) FT_Done_Face(face);
+    (void) FT_Done_FreeType(library);
+    ThrowFreetypeErrorException("UnableToSetCharSize", ft_status, draw_info->font);
+    return MagickFalse;
+  }
+
+  metrics->ascent = face->size->metrics.ascender / 64.0;
+  metrics->descent = -(face->size->metrics.descender / 64.0);
+  metrics->width = 0.0;
+  metrics->height = (metrics->ascent + metrics->descent);
+  metrics->max_advance = face->size->metrics.max_advance / 64.0;
+
+  if ((metrics->ascent <= 0.0) || (metrics->descent <= 0.0))
+  {
+    /*
+      Sanitize ascender and descender values by fallback to bbox.
+    */
+    FT_BBox cbox;
+    FT_GlyphSlot slot = face->glyph;
+
+    FT_Outline_Get_CBox(&slot->outline, &cbox);
+
+    metrics->ascent = cbox.yMax / 64.0;
+    metrics->descent = -cbox.yMin / 64.0;
+  }
+
+  metrics->underline_position = -face->underline_position / 64.0;
+  metrics->underline_thickness = face->underline_thickness / 64.0;
+
+  if (draw_info->text == NULL || strlen(draw_info->text) == 0)
+  {
+    (void) FT_Done_Face(face);
+    (void) FT_Done_FreeType(library);
+    return MagickTrue;
+  }
+
+  flags = FT_LOAD_DEFAULT;
+  if (image->matte && draw_info->fill.opacity != OpaqueOpacity)
+    flags |= FT_LOAD_NO_HINTING;
+
+  if (draw_info->render == MagickFalse)
+    flags |= FT_LOAD_NO_BITMAP;
+
+  grapheme = NULL;
+  length = ComplexTextLayout(image, draw_info, draw_info->text,
+    strlen(draw_info->text), face, flags, &grapheme, exception);
+
+  for (i = 0; i < (ssize_t)length; i++)
+  {
+    ft_status = FT_Load_Glyph(face, grapheme[i].index, flags);
+    if (ft_status != 0)
+      continue;
+
+    if ((face->glyph->format != FT_GLYPH_FORMAT_BITMAP) &&
+        (face->glyph->format != FT_GLYPH_FORMAT_OUTLINE))
+    {
+      ft_status = FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+      if (ft_status != 0)
+        continue;
+    }
+
+    if (face->glyph->format == FT_GLYPH_FORMAT_OUTLINE)
+    {
+      origin.x = (FT_Fixed)(grapheme[i].x_offset * 64.0);
+      origin.y = (FT_Fixed)(grapheme[i].y_offset * 64.0);
+
+      affine.xx = 0x10000L;
+      affine.xy = 0;
+      affine.yx = 0;
+      affine.yy = 0x10000L;
+
+      ft_status = FT_Outline_Transform(&face->glyph->outline, &affine);
+      if (ft_status == 0)
+        FT_Outline_Translate(&face->glyph->outline, origin.x, origin.y);
+
+      status = TraceGlyphOutline(img, draw_info, offset, face->glyph->outline, metrics, exception);
+    }
+    else
+    {
+      bitmap = (FT_BitmapGlyph)FT_Get_Glyph(face->glyph, &glyph.image);
+      if (bitmap != NULL)
+      {
+        status = RenderBitmapGlyph(img, draw_info, offset, bitmap, metrics, exception);
+        glyph.image = NULL;
+        FT_Done_Glyph((FT_Glyph)bitmap);
+      }
+    }
+  }
+
+  if (grapheme != NULL)
+    grapheme = RelinquishMagickMemory(grapheme);
+
+  bounds = face->bbox;
+  metrics->width = (bounds.xMax - bounds.xMin) / 64.0;
+  metrics->height = (bounds.yMax - bounds.yMin) / 64.0;
+
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+
+  return status;

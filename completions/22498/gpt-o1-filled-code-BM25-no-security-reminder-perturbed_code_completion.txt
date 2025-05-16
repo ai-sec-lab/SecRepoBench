@@ -1,0 +1,68 @@
+{
+  u_int32_t i = 0, line_start = 0, header_count = 0;
+  const u_int8_t *payload = packet->payload;
+  const u_int32_t len = packet->payload_packet_len;
+  int found_header_end = 0;
+
+  /* Parse payload for lines separated by "\r\n" */
+  for(i = 0; (i+1) < len && packet->parsed_lines < NDPI_MAX_PACKET_LINES; i++) {
+    /* Check if we hit a CRLF */
+    if(payload[i] == '\r' && payload[i+1] == '\n') {
+      packet->line[packet->parsed_lines].ptr = (u_int8_t *)&payload[line_start];
+      packet->line[packet->parsed_lines].len = (u_int16_t)(i - line_start);
+      packet->parsed_lines++;
+
+      i += 1; /* Skip the '\n' */
+      line_start = i + 1; /* Next line starts after "\r\n" */
+
+      /* Check if we've hit "\r\n\r\n" -> end of headers */
+      if((line_start < len) && (i+1 < len) &&
+	 ((i+1) < (len-1)) && (payload[i+1] == '\r') && ((i+2) < len) && (payload[i+2] == '\n')) {
+	found_header_end = 1;
+	/* Store subsequent bytes in dataflow->initial_binary_bytes or similar */
+	if((i+3) < len) {
+	  dataflow->initial_binary_bytes_len = len - (i+3);
+	  if(dataflow->initial_binary_bytes_len > sizeof(dataflow->initial_binary_bytes)) {
+	    dataflow->initial_binary_bytes_len = sizeof(dataflow->initial_binary_bytes);
+	  }
+	  memcpy(dataflow->initial_binary_bytes, &payload[i+3], dataflow->initial_binary_bytes_len);
+	}
+	break;
+      }
+    }
+  }
+
+  /* If there's an unfinished line at the end */
+  if(!found_header_end && line_start < len && packet->parsed_lines < NDPI_MAX_PACKET_LINES) {
+    packet->line[packet->parsed_lines].ptr = (u_int8_t *)&payload[line_start];
+    packet->line[packet->parsed_lines].len = (u_int16_t)(len - line_start);
+    packet->parsed_lines++;
+  }
+
+  /* Analyze first line for HTTP response codes (e.g., "HTTP/1.1 200 OK") */
+  if(packet->parsed_lines > 0 && packet->line[0].len >= 12) {
+    if(!strncasecmp((const char *)packet->line[0].ptr, "HTTP/", 5)) {
+      /* Simple parse: isolate status code if present */
+      char status_str[4] = {0};
+      const char *first_line = (const char *)packet->line[0].ptr;
+      if(packet->line[0].len >= 12) {
+	memcpy(status_str, &first_line[9], 3); /* "HTTP/X.X " has 8 chars, status code next */
+	/* We could process the status code here if needed */
+      }
+    }
+  }
+
+  /* Identify specific HTTP headers and increment header_count */
+  for(i = 1; i < packet->parsed_lines; i++) {
+    const char *hdr = (const char *)packet->line[i].ptr;
+    if(!strncasecmp(hdr, "Host:", 5) ||
+       !strncasecmp(hdr, "Server:", 7) ||
+       !strncasecmp(hdr, "Content-Type:", 13) ||
+       !strncasecmp(hdr, "User-Agent:", 11)) {
+      header_count++;
+      /* We can store positions/lengths as needed (e.g., in packet->http_header_offsets) */
+    }
+  }
+
+  packet->http_header_count = header_count; /* Store total headers found */
+}

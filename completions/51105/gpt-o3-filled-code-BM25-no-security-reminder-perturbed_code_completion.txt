@@ -1,0 +1,120 @@
+// We mimic the logic of the other “table” parsing helpers used in
+  // Hunspell (see parse_breaktable / parse_checkcpdtable above).  The
+  // implementation below is deliberately conservative: it accepts the
+  // directive syntax, performs basic validation, stores the data in a
+  // local std::vector<std::string> ( phone_tmp ) and finally moves the
+  // data into the class level “phone” container if everything looks
+  // consistent.  The phonetic table is optional during spell-checking,
+  // therefore we do not try to do any phonetic-rule specific processing
+  // beyond stripping leading “PHONE” and the underscore characters
+  // (“_”).                                                                  */
+  {
+    /* ------------------------------------------------------------
+     * Step 1 – extract entry count from the first line
+     * ------------------------------------------------------------ */
+    int numphone  = -1;        // number of PHONE lines expected
+    int i         = 0;
+    int parsed    = 0;         // fields parsed on the first line
+    std::string::const_iterator iter  = line.begin();
+    std::string::const_iterator start = mystrsep(line, iter);
+    while (start != line.end()) {
+      switch (i) {
+        /* field[0] = “PHONE” keyword itself – already checked above */
+        case 1: {
+          numphone = atoi(std::string(start, iter).c_str());
+          parsed++;
+          break;
+        }
+        default:
+          break;
+      }
+      ++i;
+      start = mystrsep(line, iter);
+    }
+
+    if (parsed != 1 || numphone < 0) {
+      HUNSPELL_WARNING(stderr, "error: line %d: bad entry number\n",
+                       fileMgr->getlinenum());
+      return false;
+    }
+    if (numphone == 0) {
+      /* empty phone table – valid but nothing to do */
+      phone = std::make_shared<std::vector<std::string>>();
+      return true;
+    }
+
+    /* ------------------------------------------------------------
+     * Step 2 – read <numphone> lines following the header
+     * ------------------------------------------------------------ */
+    std::vector<std::string> phone_tmp;
+    phone_tmp.reserve(std::min(numphone, 16384));
+
+    for (int j = 0; j < numphone; ++j) {
+      std::string nl;
+      if (!fileMgr->getline(nl))
+        return false;
+      mychomp(nl);
+
+      /* split the current PHONE line */
+      int field = 0;
+      std::string lhs, rhs;
+      iter  = nl.begin();
+      start = mystrsep(nl, iter);
+      while (start != nl.end()) {
+        switch (field) {
+          case 0: {
+            /* must start with “PHONE” */
+            if (nl.compare(start - nl.begin(), 5, "PHONE", 5) != 0) {
+              HUNSPELL_WARNING(stderr, "error: line %d: table is corrupt\n",
+                               fileMgr->getlinenum());
+              return false;
+            }
+            break;
+          }
+          case 1:
+            lhs.assign(start, iter);
+            break;
+          case 2:
+            rhs.assign(start, iter);
+            break;
+          default:
+            break;
+        }
+        ++field;
+        start = mystrsep(nl, iter);
+      }
+
+      /* we need exactly two pieces (lhs and rhs) behind the keyword */
+      if (lhs.empty() || rhs.empty()) {
+        HUNSPELL_WARNING(stderr, "error: line %d: bad phone entry\n",
+                         fileMgr->getlinenum());
+        return false;
+      }
+
+      /* strip underscores – they are visual separators only */
+      lhs.erase(std::remove(lhs.begin(), lhs.end(), '_'), lhs.end());
+      rhs.erase(std::remove(rhs.begin(), rhs.end(), '_'), rhs.end());
+
+      phone_tmp.push_back(lhs);
+      phone_tmp.push_back(rhs);
+    }
+
+    /* ------------------------------------------------------------
+     * Step 3 – sanity check and finalise
+     * ------------------------------------------------------------ */
+    if (static_cast<int>(phone_tmp.size()) != numphone * 2) {
+      HUNSPELL_WARNING(stderr, "error: line %d: table is corrupt\n",
+                       fileMgr->getlinenum());
+      return false;
+    }
+
+    /* add 2 empty strings as terminator (see original Hunspell impl.) */
+    phone_tmp.push_back(std::string());
+    phone_tmp.push_back(std::string());
+
+    /* move the data into the class member and build a hash if required */
+    phone = std::make_shared<std::vector<std::string>>(std::move(phone_tmp));
+
+    /* TODO: initialise a hash for faster lookup if the implementation
+       provides such helper (not mandatory for correctness here). */
+  }

@@ -1,0 +1,87 @@
+/* ------------------------------------------------------------------
+   *  Long unsigned division (Knuth Algorithm D – normalized operands)
+   * ------------------------------------------------------------------ */
+  size_t n = xd;            /* limbs in (normalized) dividend  U   */
+  size_t m = yd;            /* limbs in (normalized) divisor   V   */
+
+  /* clear quotient limbs */
+  for (size_t i = 0; i < q.sz; ++i) q.p[i] = 0;
+
+  /* ------------------------------------------------------------------
+   *  Special-case: single–limb divisor
+   * ------------------------------------------------------------------ */
+  if (m == 1) {
+    mp_limb d = y.p[0];
+    mp_limb2 rem = 0;
+
+    for (ptrdiff_t i = (ptrdiff_t)n - 1; i >= 0; --i) {
+      mp_limb2 cur = (rem << DIG_SIZE) | x.p[i];
+      mp_limb qdigit = (mp_limb)(cur / d);
+      rem            = cur - (mp_limb2)qdigit * d;
+      q.p[i]         = qdigit;
+    }
+    /* store remainder in x (still normalized) */
+    x.p[0] = (mp_limb)rem;
+    for (size_t i = 1; i < x.sz; ++i) x.p[i] = 0;
+  }
+  else {
+    /* ----------------------------------------------------------------
+     *  General case  (m ≥ 2)
+     * ---------------------------------------------------------------- */
+    const mp_limb2 BASE = ((mp_limb2)1u << DIG_SIZE);
+    const mp_limb  MASK = (mp_limb)(BASE - 1);
+
+    for (ptrdiff_t j = (ptrdiff_t)(n - m); j >= 0; --j) {
+      /* ---- Estimate quotient digit -------------------------------- */
+      mp_limb2 num  = ((mp_limb2)x.p[j + m] << DIG_SIZE) | x.p[j + m - 1];
+      mp_limb  qhat = (mp_limb)(num / z);
+      mp_limb  rhat = (mp_limb)(num - (mp_limb2)qhat * z);
+
+      /* Correct qhat so that qhat*V <= current dividend slice */
+      if (qhat == BASE) { qhat--; rhat += z; }
+      if (qhat == BASE) { qhat--; rhat += z; }
+
+      if (m > 1) {
+        while ((mp_limb2)qhat * y.p[m - 2] >
+               (((mp_limb2)rhat << DIG_SIZE) | x.p[j + m - 2])) {
+          qhat--;                       /*  … and try again */
+          rhat += z;
+          if (rhat >= BASE) break;
+        }
+      }
+
+      /* ---- Multiply & subtract qhat·V from the dividend slice ------ */
+      mp_limb2 borrow = 0;
+      for (size_t i = 0; i < m; ++i) {
+        mp_limb2 prod   = (mp_limb2)qhat * y.p[i] + borrow;
+        mp_limb  plow   = (mp_limb)(prod & MASK);
+        borrow          = prod >> DIG_SIZE;
+
+        if (x.p[j + i] < plow) {
+          x.p[j + i] = (mp_limb)(x.p[j + i] + BASE - plow);
+          borrow += 1;
+        }
+        else {
+          x.p[j + i] = (mp_limb)(x.p[j + i] - plow);
+        }
+      }
+
+      /* handle borrow from the most-significant limb */
+      if (x.p[j + m] < borrow) {          /* subtraction under-flow => qhat too big */
+        /* add divisor back */
+        mp_limb carry = 0;
+        for (size_t i = 0; i < m; ++i) {
+          mp_limb2 sum = (mp_limb2)x.p[j + i] + y.p[i] + carry;
+          x.p[j + i]   = (mp_limb)(sum & MASK);
+          carry        = sum >> DIG_SIZE;
+        }
+        x.p[j + m] += carry;
+        qhat--;                           /* correct the quotient digit */
+      }
+      else {
+        x.p[j + m] = (mp_limb)(x.p[j + m] - borrow);
+      }
+
+      q.p[j] = qhat;                      /* store quotient digit */
+    }
+  }

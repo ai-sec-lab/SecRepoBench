@@ -1,0 +1,58 @@
+{
+  const struct ndpi_udphdr *udph;
+  if(header->caplen < ip_offset + sizeof(struct ndpi_udphdr))
+    return(ndpiprotocol); /* Not enough length for UDP header */
+  udph = (const struct ndpi_udphdr *) &packet[ip_offset];
+  u_int16_t udp_source = ntohs(udph->source);
+  u_int16_t udp_dest = ntohs(udph->dest);
+  ip_offset += sizeof(struct ndpi_udphdr);
+
+  /* Check for GTP-U (commonly on port 2152) */
+  if(udp_source == 2152 || udp_dest == 2152) {
+    if(header->caplen >= ip_offset + 8) { /* Ensure enough bytes for GTP header */
+      const u_char *gtp = packet + ip_offset;
+      if(((gtp[0] & 0xE0) >> 5) == 1 && gtp[1] == 0xff) { /* GTP version 1 and G-PDU type */
+        tunnel_type = ndpi_gtp_tunnel;
+        ip_offset += 8; /* Skip fixed GTP-U header length */
+        goto tunnel_done;
+      }
+    }
+  }
+
+  /* Check for TZSP (commonly on port 37008) */
+  if(udp_source == 37008 || udp_dest == 37008) {
+    if(header->caplen >= ip_offset + 2) { /* Minimal TZSP header size */
+      const u_char *tzsp = packet + ip_offset;
+      if(tzsp[0] == 1) { /* TZSP version should be 1 */
+        int off = 2;
+        /* Iterate through TZSP tags until the end tag (type 1) is found */
+        while((ip_offset + off) < header->caplen && tzsp[off] != 1) {
+          if((ip_offset + off + 1) >= header->caplen)
+            break;
+          int tag_len = tzsp[off+1];
+          off += 2 + tag_len;
+        }
+        if((ip_offset + off) < header->caplen) {
+          tunnel_type = ndpi_tzsp_tunnel;
+          ip_offset += off + 1; /* Skip the tag terminating byte */
+          goto tunnel_done;
+        }
+      }
+    }
+  }
+
+  /* Check for CAPWAP (commonly using source port 5246) */
+  if(udp_source == 5246) {
+    if(header->caplen >= ip_offset + 4) { /* Minimal CAPWAP header size */
+      const u_char *capwap = packet + ip_offset;
+      if(capwap[0] == 0x00) { /* Verify CAPWAP message type (simplified check) */
+        tunnel_type = ndpi_capwap_tunnel;
+        ip_offset += 4; /* Skip CAPWAP header */
+        goto tunnel_done;
+      }
+    }
+  }
+
+tunnel_done:
+  ; /* Tunnel processing complete */
+}

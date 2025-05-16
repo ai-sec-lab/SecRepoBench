@@ -1,0 +1,655 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+void ndpi_search_raknet(struct ndpi_detection_module_struct *ndpi_struct,
+                        struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct * const packet = &ndpi_struct->packet;
+  u_int8_t op, ip_addr_offset, required_packets = 3;
+
+  NDPI_LOG_DBG(ndpi_struct, "search RakNet\n");
+
+  if (packet->udp == NULL || packet->payload_packet_len < 7)
+  {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+    return;
+  }
+
+  op = packet->payload[0];
+
+  switch (op)
+  {
+    case 0x00: /* Connected Ping */
+      if (packet->payload_packet_len != 8)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+      required_packets = 6;
+      break;
+
+    case 0x01: /* Unconnected Ping */
+    case 0x02: /* Unconnected Ping */
+      if (packet->payload_packet_len != 32)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+      required_packets = 6;
+      break;
+
+    case 0x03: /* Connected Pong */
+      if (packet->payload_packet_len != 16)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+      required_packets = 6;
+      break;
+
+    case 0x05: /* Open Connection Request 1 */
+      if (packet->payload_packet_len < 18 ||
+          packet->payload[17] > 10 /* maximum supported protocol version */)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+      required_packets = 6;
+      break;
+
+    case 0x06: /* Open Connection Reply 1 */
+      if (packet->payload_packet_len != 28 ||
+          packet->payload[25] > 0x01 /* connection uses encryption: bool -> 0x00 or 0x01 */)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+
+      {
+        u_int16_t max_mtu_size = ntohs(get_u_int16_t(packet->payload, 26));
+        if (max_mtu_size > 1500 /* Max. supported MTU, see: http://www.jenkinssoftware.com/raknet/manual/programmingtips.html */)
+        {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+      }
+      required_packets = 4;
+      break;
+
+    // Handle RakNet protocol packets for Open Connection Request 2 and Open Connection Reply 2.
+    // Extract the IP address offset from the packet and verify the packet length.
+    // Ensure the calculated MTU size does not exceed a predefined maximum limit.
+    // Exclude the protocol from further detection if any validation fails.
+    // <MASK>
+
+    case 0x10: /* Connection Request Accepted */
+    case 0x13: /* New Incoming Connection */
+      {
+        ip_addr_offset = 4 + raknet_dissect_ip(packet, 0);
+        if (op == 0x10)
+        {
+          ip_addr_offset += 2; // System Index
+        }
+        for (size_t i = 0; i < 10; ++i)
+        {
+          ip_addr_offset += 3 + raknet_dissect_ip(packet, ip_addr_offset);
+        }
+        ip_addr_offset += 16;
+        if (ip_addr_offset != packet->payload_packet_len)
+        {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+      }
+      break;
+
+    /* Check for Frame Set Packet's */
+    case 0x80:
+    case 0x81:
+    case 0x82:
+    case 0x83:
+    case 0x84:
+    case 0x85:
+    case 0x86:
+    case 0x87:
+    case 0x88:
+    case 0x89:
+    case 0x8a:
+    case 0x8b:
+    case 0x8c:
+    case 0x8d:
+      {
+        size_t frame_offset = 4;
+
+        do {
+          u_int8_t msg_flags = get_u_int8_t(packet->payload, frame_offset);
+          if ((msg_flags & 0x0F) != 0)
+          {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+
+          u_int16_t msg_size = ntohs(get_u_int16_t(packet->payload, frame_offset + 1));
+          msg_size /= 8;
+          if (msg_size == 0)
+          {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            break;
+          }
+
+          u_int8_t reliability_type = (msg_flags & 0xE0) >> 5;
+          if (reliability_type >= 2 && reliability_type <= 4 /* is reliable? */)
+          {
+            frame_offset += 3;
+          }
+          if (reliability_type == 1 || reliability_type == 4 /* is sequenced? */)
+          {
+            frame_offset += 3;
+          }
+          if (reliability_type == 3 || reliability_type == 7 /* is ordered? */)
+          {
+            frame_offset += 4;
+          }
+          if ((msg_flags & 0x10) != 0 /* is fragmented? */)
+          {
+            frame_offset += 10;
+          }
+
+          frame_offset += msg_size + 3;
+        } while (frame_offset + 3 <= packet->payload_packet_len);
+
+        /* We've dissected enough to be sure. */
+        if (frame_offset == packet->payload_packet_len)
+        {
+          ndpi_int_raknet_add_connection(ndpi_struct, flow);
+        } else {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        }
+        return;
+      }
+      break;
+
+    case 0x09: /* Connection Request */
+      if (packet->payload_packet_len != 16)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+      required_packets = 6;
+      break;
+
+    case 0x15: /* Disconnect */
+      required_packets = 8;
+      break;
+
+    case 0x19: /* Incompatible Protocol */
+      if (packet->payload_packet_len != 25 ||
+          packet->payload[17] > 10)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+      break;
+
+    case 0x1c: /* Unconnected Pong */
+      if (packet->payload_packet_len < 35)
+      {
+        NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        return;
+      }
+
+      {
+        u_int16_t motd_len = ntohs(get_u_int16_t(packet->payload, 33));
+
+        if (motd_len == 0 || motd_len + 35 != packet->payload_packet_len)
+        {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+          return;
+        }
+      }
+      break;
+
+    case 0xa0: /* NACK */
+    case 0xc0: /* ACK */
+      {
+        u_int16_t record_count = ntohs(get_u_int16_t(packet->payload, 1));
+        size_t record_index = 0, record_offset = 3;
+
+        do {
+          if (packet->payload[record_offset] == 0x00 /* Range */)
+          {
+            record_offset += 7;
+          } else if (packet->payload[record_offset] == 0x01 /* No Range */)
+          {
+            record_offset += 4;
+          } else {
+            NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+            return;
+          }
+        } while (++record_index < record_count &&
+                 record_offset + 4 <= packet->payload_packet_len);
+
+        if (record_index == record_count && record_offset == packet->payload_packet_len)
+        {
+          ndpi_int_raknet_add_connection(ndpi_struct, flow);
+        } else {
+          NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+        }
+        return;
+      }
+      break;
+
+    case 0xfe: /* Game Packet */
+      required_packets = 8;
+      break;
+
+    default: /* Invalid RakNet packet */
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+      return;
+  }
+
+  if (flow->packet_counter < required_packets)
+  {
+    return;
+  }
+
+  ndpi_int_raknet_add_connection(ndpi_struct, flow);
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/rdp.c
+void ndpi_search_rdp(struct ndpi_detection_module_struct *ndpi_struct,
+		     struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+	
+  NDPI_LOG_DBG(ndpi_struct, "search RDP\n");
+
+  if (packet->tcp != NULL) {
+    if (packet->payload_packet_len > 10
+	&& get_u_int8_t(packet->payload, 0) > 0
+	&& get_u_int8_t(packet->payload, 0) < 4 && get_u_int16_t(packet->payload, 2) == ntohs(packet->payload_packet_len)
+	&& get_u_int8_t(packet->payload, 4) == packet->payload_packet_len - 5
+	&& get_u_int8_t(packet->payload, 5) == 0xe0
+	&& get_u_int16_t(packet->payload, 6) == 0 && get_u_int16_t(packet->payload, 8) == 0 && get_u_int8_t(packet->payload, 10) == 0) {
+      NDPI_LOG_INFO(ndpi_struct, "found RDP\n");
+    rdp_found:
+      ndpi_int_rdp_add_connection(ndpi_struct, flow);
+      ndpi_set_risk(ndpi_struct, flow, NDPI_DESKTOP_OR_FILE_SHARING_SESSION); /* Remote assistance */
+      return;
+    }
+
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  } else if(packet->udp != NULL) {
+    u_int16_t s_port = ntohs(packet->udp->source);
+    u_int16_t d_port = ntohs(packet->udp->dest);
+
+    if((packet->payload_packet_len >= 10) && ((s_port == RDP_PORT) || (d_port == RDP_PORT))) {
+      if(s_port == RDP_PORT) {
+	/* Server -> Client */
+	if(flow->l4.udp.rdp_from_srv_pkts == 0)
+	  memcpy(flow->l4.udp.rdp_from_srv, packet->payload, 3), flow->l4.udp.rdp_from_srv_pkts = 1;
+	else {
+	  if(memcmp(flow->l4.udp.rdp_from_srv, packet->payload, 3) != 0)
+	    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	  else {
+	    flow->l4.udp.rdp_from_srv_pkts = 2 /* stage 2 */;
+	    
+	    if(flow->l4.udp.rdp_to_srv_pkts == 2)
+	      goto rdp_found;
+	  }
+	}
+      } else {
+	/* Client -> Server */
+	if(flow->l4.udp.rdp_to_srv_pkts == 0)
+	  memcpy(flow->l4.udp.rdp_to_srv, packet->payload, 3), flow->l4.udp.rdp_to_srv_pkts = 1;
+	else {
+	  if(memcmp(flow->l4.udp.rdp_to_srv, packet->payload, 3) != 0)
+	    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	  else {
+	    flow->l4.udp.rdp_to_srv_pkts = 2 /* stage 2 */;
+	    
+	    if(flow->l4.udp.rdp_from_srv_pkts == 2)
+	      goto rdp_found;
+	  }
+	}
+      }
+    } else
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/netflow.c
+void ndpi_search_netflow(struct ndpi_detection_module_struct *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  // const u_int8_t *packet_payload = packet->payload;
+  u_int32_t payload_len = packet->payload_packet_len;
+  time_t now;
+  struct timeval now_tv;
+
+  NDPI_LOG_DBG(ndpi_struct, "search netflow\n");
+
+  if((packet->udp != NULL) && (payload_len >= 24)) {
+    u_int16_t version = (packet->payload[0] << 8) + packet->payload[1], uptime_offset;
+    u_int32_t when, *_when;
+    u_int16_t n = (packet->payload[2] << 8) + packet->payload[3], expected_len = 0;
+
+    switch(version) {
+    case 1:
+    case 5:
+    case 7:
+    case 9:
+      if((n == 0) || (n > 30)) {
+	NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	return;
+      }
+      
+      switch(version) {
+      case 1:
+	expected_len = n * sizeof(struct flow_ver1_rec) + 16 /* header */;
+	break;
+
+      case 5:
+	expected_len = n * sizeof(struct flow_ver5_rec) + 24 /* header */;
+	break;
+
+      case 7:
+	expected_len = n * sizeof(struct flow_ver7_rec) + 24 /* header */;
+	break;
+
+      case 9:
+	/* We need to check the template */
+	break;
+      }
+
+      if((expected_len > 0) && (expected_len != payload_len)) {
+	NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	return;
+      }
+
+      uptime_offset = 8;
+      break;
+
+    case 10: /* IPFIX */
+      {      
+	u_int16_t ipfix_len = n;
+
+	if(ipfix_len != payload_len) {
+	  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+	  return;
+	}
+      }    
+      uptime_offset = 4;
+      break;
+      
+    default:
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+      return;
+    }
+
+    _when = (u_int32_t*)&packet->payload[uptime_offset]; /* Sysuptime */
+    when = ntohl(*_when);
+
+    do_gettimeofday(&now_tv);
+    now = now_tv.tv_sec;
+
+    if(((version == 1) && (when == 0))
+       || ((when >= 946684800 /* 1/1/2000 */) && (when <= (u_int32_t)now))) {
+      NDPI_LOG_INFO(ndpi_struct, "found netflow\n");
+      ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_NETFLOW, NDPI_PROTOCOL_UNKNOWN, NDPI_CONFIDENCE_DPI);
+      return;
+    }
+  } else
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/rtcp.c
+void ndpi_search_rtcp(struct ndpi_detection_module_struct *ndpi_struct,
+		      struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  u_int16_t dport = 0, sport = 0;
+
+  NDPI_LOG_DBG(ndpi_struct, "search RTCP\n");
+
+  if(packet->tcp != NULL) {
+    sport = ntohs(packet->tcp->source), dport = ntohs(packet->tcp->dest);
+    NDPI_LOG_DBG2(ndpi_struct, "calculating dport over tcp\n");
+
+    if(packet->payload_packet_len > 13 && (sport == 554 || dport == 554) &&
+       packet->payload[0] == 0x00 && packet->payload[1] == 0x00 &&
+       packet->payload[2] == 0x01 && packet->payload[3] == 0x01 &&
+       packet->payload[4] == 0x08 && packet->payload[5] == 0x0a &&
+       packet->payload[6] == 0x00 && packet->payload[7] == 0x01) {
+      NDPI_LOG_INFO(ndpi_struct, "found rtcp\n");
+      ndpi_int_rtcp_add_connection(ndpi_struct, flow);
+    }
+  } else if(packet->udp != NULL) {
+    /* Let's check first the RTCP packet length */
+    u_int16_t len, offset = 0, rtcp_section_len;
+    
+    while(offset + 3 < packet->payload_packet_len) {
+      len = packet->payload[2+offset] * 256 + packet->payload[2+offset+1];
+      rtcp_section_len = (len + 1) * 4;
+      
+      if(((offset+rtcp_section_len) > packet->payload_packet_len) || (rtcp_section_len == 0) || (len == 0))
+	goto exclude_rtcp;
+      else
+	offset += rtcp_section_len;
+    }
+    
+    NDPI_LOG_DBG2(ndpi_struct, "calculating dport over udp\n");
+    /* TODO changed a pair of length condition to the && from ||. Is it correct? */
+    if(((packet->payload_packet_len >= 28 && packet->payload_packet_len <= 1200) &&
+	((packet->payload[0] == 0x80) && ((packet->payload[1] == 0xc8) || (packet->payload[1] == 0xc9)) && (packet->payload[2] == 0x00)))
+       || (packet->payload_packet_len >= 3 && ((packet->payload[0] == 0x81) && ((packet->payload[1] == 0xc8) || (packet->payload[1] == 0xc9))
+	    && (packet->payload[2] == 0x00)))) {
+      NDPI_LOG_INFO(ndpi_struct, "found rtcp\n");
+      ndpi_int_rtcp_add_connection(ndpi_struct, flow);
+    }
+
+    if(flow->packet_counter > 3)
+      NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  } else {
+  exclude_rtcp:
+    
+    NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/rtp.c
+static void ndpi_rtp_search(struct ndpi_detection_module_struct *ndpi_struct,
+			    struct ndpi_flow_struct *flow,
+			    const u_int8_t * payload, const u_int16_t payload_len)
+{
+  struct ndpi_packet_struct *packet = &flow->packet;
+
+  u_int8_t stage;
+  u_int16_t seqnum = ntohs(get_u_int16_t(payload, 2));
+
+  NDPI_LOG_DBG(ndpi_struct, "search rtp\n");
+
+  if(payload_len == 4 && get_u_int32_t(packet->payload, 0) == 0 && flow->packet_counter < 8) {
+    NDPI_LOG_DBG(ndpi_struct, "need next packet, maybe ClearSea out calls\n");
+    return;
+  }
+
+  if(payload_len == 5 && memcmp(payload, "hello", 5) == 0) {
+    NDPI_LOG_DBG(ndpi_struct,
+		 "need next packet, initial hello packet of SIP out calls.\n");
+    return;
+  }
+
+  if(payload_len == 1 && payload[0] == 0) {
+    NDPI_LOG_DBG(ndpi_struct,
+		 "need next packet, payload_packet_len == 1 && payload[0] == 0.\n");
+    return;
+  }
+
+  if(payload_len == 3 && memcmp(payload, "png", 3) == 0) {
+    /* weird packet found in Ninja GlobalIP trace */
+    NDPI_LOG_DBG(ndpi_struct, "skipping packet with len = 3 and png payload\n");
+    return;
+  }
+
+  if(payload_len < 12) {
+    NDPI_LOG_DBG(ndpi_struct, "minimal packet size for rtp packets: 12\n");
+    goto exclude_rtp;
+  }
+
+  if(payload_len == 12 && get_u_int32_t(payload, 0) == 0 && get_u_int32_t(payload, 4) == 0 && get_u_int32_t(payload, 8) == 0) {
+    NDPI_LOG_DBG(ndpi_struct, "skipping packet with len = 12 and only 0-bytes\n");
+    return;
+  }
+
+  if((payload[0] & 0xc0) == 0xc0 || (payload[0] & 0xc0) == 0x40 || (payload[0] & 0xc0) == 0x00) {
+    NDPI_LOG_DBG(ndpi_struct, "version = 3 || 1 || 0, maybe first rtp packet\n");
+    return;
+  }
+
+  if((payload[0] & 0xc0) != 0x80) {
+    NDPI_LOG_DBG(ndpi_struct, "rtp version must be 2, first two bits of a packets must be 10\n");
+    goto exclude_rtp;
+  }
+
+  /* rtp_payload_type are the last seven bits of the second byte */
+  if(flow->rtp_payload_type[packet->packet_direction] != (payload[1] & 0x7F)) {
+    NDPI_LOG_DBG(ndpi_struct, "payload_type has changed, reset stages\n");
+    packet->packet_direction == 0 ? (flow->rtp_stage1 = 0) : (flow->rtp_stage2 = 0);
+  }
+  /* first bit of first byte is not part of payload_type */
+  flow->rtp_payload_type[packet->packet_direction] = payload[1] & 0x7F;
+
+  stage = (packet->packet_direction == 0 ? flow->rtp_stage1 : flow->rtp_stage2);
+
+  if(stage > 0) {
+    NDPI_LOG_DBG(ndpi_struct, "stage = %u\n", packet->packet_direction == 0 ? flow->rtp_stage1 : flow->rtp_stage2);
+    if(flow->rtp_ssid[packet->packet_direction] != get_u_int32_t(payload, 8)) {
+      NDPI_LOG_DBG(ndpi_struct, "ssid has changed, goto exclude rtp\n");
+      goto exclude_rtp;
+    }
+
+    if(seqnum == flow->rtp_seqnum[packet->packet_direction]) {
+      NDPI_LOG_DBG(ndpi_struct, "maybe \"retransmission\", need next packet\n");
+      return;
+    } else if((u_int16_t) (seqnum - flow->rtp_seqnum[packet->packet_direction]) < RTP_MAX_OUT_OF_ORDER) {
+      NDPI_LOG_DBG(ndpi_struct,
+		   "new packet has larger sequence number (within valid range)\n");
+      update_seq(ndpi_struct, flow, packet->packet_direction, seqnum);
+    } else if((u_int16_t) (flow->rtp_seqnum[packet->packet_direction] - seqnum) < RTP_MAX_OUT_OF_ORDER) {
+      NDPI_LOG_DBG(ndpi_struct,
+		   "new packet has smaller sequence number (within valid range)\n");
+      init_seq(ndpi_struct, flow, packet->packet_direction, seqnum, 1);
+    } else {
+      NDPI_LOG_DBG(ndpi_struct,
+		   "sequence number diff is too big, goto exclude rtp.\n");
+      goto exclude_rtp;
+    }
+  } else {
+    NDPI_LOG_DBG(ndpi_struct, "rtp_ssid[%u] = %u\n", packet->packet_direction,
+		 flow->rtp_ssid[packet->packet_direction]);
+    flow->rtp_ssid[packet->packet_direction] = get_u_int32_t(payload, 8);
+    if(flow->packet_counter < 3) {
+      NDPI_LOG_DBG(ndpi_struct, "packet_counter < 3, need next packet\n");
+    }
+    init_seq(ndpi_struct, flow, packet->packet_direction, seqnum, 1);
+  }
+  if(seqnum <= 3) {
+    NDPI_LOG_DBG(ndpi_struct, "sequence_number = %u, too small, need next packet, return\n", seqnum);
+    return;
+  }
+
+  if(stage == 3) {
+    NDPI_LOG_DBG(ndpi_struct, "add connection I\n");
+    ndpi_int_rtp_add_connection(ndpi_struct, flow);
+  } else {
+    packet->packet_direction == 0 ? flow->rtp_stage1++ : flow->rtp_stage2++;
+    NDPI_LOG_DBG(ndpi_struct, "stage[%u]++; need next packet\n",
+		 packet->packet_direction);
+  }
+  return;
+
+exclude_rtp:
+  if(packet->detected_protocol_stack[0] == NDPI_PROTOCOL_STUN
+     || /* packet->real_protocol_read_only == NDPI_PROTOCOL_STUN */) {
+    NDPI_LOG_DBG(ndpi_struct, "STUN: is detected, need next packet\n");
+    return;
+  }
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/rtsp.c
+void ndpi_search_rtsp_tcp_udp(struct ndpi_detection_module_struct
+			      *ndpi_struct, struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  NDPI_LOG_DBG(ndpi_struct, "search RTSP\n");
+
+  if (packet->parsed_lines == 0)
+  {
+    ndpi_parse_packet_line_info(ndpi_struct, flow);
+  }
+
+  if (packet->parsed_lines > 0 &&
+      LINE_ENDS(packet->line[0], "RTSP/1.0") != 0)
+  {
+    ndpi_int_rtsp_add_connection(ndpi_struct, flow);
+    return;
+  }
+
+  if (flow->rtsprdt_stage == 0
+      && !(flow->detected_protocol_stack[0] == NDPI_PROTOCOL_RTCP)
+      ) {
+    flow->rtsprdt_stage = 1 + packet->packet_direction;
+    NDPI_LOG_DBG2(ndpi_struct, "maybe handshake 1; need next packet, return\n");
+    return;
+  }
+
+  if (flow->packet_counter < 3 && flow->rtsprdt_stage == 1 + packet->packet_direction) {
+
+    NDPI_LOG_DBG2(ndpi_struct, "maybe handshake 2; need next packet\n");
+    return;
+  }
+
+  if (packet->payload_packet_len > 20 && flow->rtsprdt_stage == 2 - packet->packet_direction) {
+    char buf[32] = { 0 };
+    u_int len = packet->payload_packet_len;
+
+    if(len >= (sizeof(buf)-1)) len = sizeof(buf)-1;
+    strncpy(buf, (const char*)packet->payload, len);
+
+    // RTSP Server Message
+    if((memcmp(packet->payload, "RTSP/1.0 ", 9) == 0)
+       || (strstr(buf, "rtsp://") != NULL)) {
+      NDPI_LOG_DBG2(ndpi_struct, "found RTSP/1.0 \n");
+      NDPI_LOG_INFO(ndpi_struct, "found RTSP\n");
+      ndpi_int_rtsp_add_connection(ndpi_struct, flow);
+      return;
+    }
+  }
+
+  if (packet->udp != NULL && flow->detected_protocol_stack[0] == NDPI_PROTOCOL_UNKNOWN
+      && ((NDPI_COMPARE_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_RTP) == 0)
+	  || (NDPI_COMPARE_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_RTCP) == 0)
+	  )) {
+    NDPI_LOG_DBG2(ndpi_struct,
+	     "maybe RTSP RTP, RTSP RTCP, RDT; need next packet.\n");
+    return;
+  }
+
+
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow);
+  return;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

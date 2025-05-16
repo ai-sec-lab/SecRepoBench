@@ -1,0 +1,66 @@
+// <MASK>
+// Check if the time format string contains a year specifier ("%Y" or "%y").
+// If found, set a flag indicating the presence of a year in the format.
+p->time_has_year = (strstr(time_fmt, "%Y") != NULL || strstr(time_fmt, "%y") != NULL);
+
+// If the format contains "%s", set it as an epoch format and indicate it includes a year.
+if (strstr(time_fmt, "%s") != NULL) {
+    p->time_fmt_is_epoch = FLB_TRUE;
+    p->time_has_year = FLB_TRUE;
+}
+// If neither is found, allocate memory to prepend a year ("%Y") to the time format string.
+else if (!p->time_has_year) {
+    size_t len = strlen(time_fmt) + 3; // 3 for "%Y "
+    p->time_fmt_year = flb_malloc(len);
+    if (!p->time_fmt_year) {
+        flb_errno();
+        flb_free(p->time_fmt);
+        flb_free(p->time_fmt_full);
+        flb_free(p);
+        return NULL;
+    }
+    snprintf(p->time_fmt_year, len, "%%Y %s", time_fmt);
+    p->time_fmt = p->time_fmt_year;
+}
+
+// Check if the time format contains timezone indicators ("%z", "%Z", etc.).
+p->time_with_tz = (strstr(time_fmt, "%z") != NULL || strstr(time_fmt, "%Z") != NULL);
+
+// If timezone support is enabled, set a flag indicating timezone is included.
+// Otherwise, log an error and clean up if the platform does not support timezone parsing.
+#ifdef FLB_HAVE_GMTIME_R
+    p->time_with_tz = FLB_TRUE;
+#else
+    if (p->time_with_tz) {
+        flb_error("[parser:%s] time format '%s' contains timezone specifiers, "
+                  "but the platform does not support timezone parsing",
+                  name, time_fmt);
+        flb_free(p->time_fmt);
+        flb_free(p->time_fmt_full);
+        flb_free(p);
+        return NULL;
+    }
+#endif
+
+// Determine the correct format string to use for fractional seconds handling.
+p->time_frac_by_pos = strcspn(time_fmt, "%L");
+if (p->time_frac_by_pos < strlen(time_fmt)) {
+    p->time_frac_len = 1;
+    p->time_frac_ptr = p->time_fmt + p->time_frac_by_pos;
+} else {
+    p->time_frac_by_pos = 0;
+    p->time_frac_len = 0;
+    p->time_frac_ptr = NULL;
+}
+
+// Process an optional fixed timezone offset if provided, adjusting the offset variable.
+if (time_offset) {
+    p->time_offset = flb_parser_tzone_offset(time_offset);
+    if (p->time_offset == -1) {
+        flb_error("[parser:%s] invalid time offset '%s'", name, time_offset);
+        flb_free(p->time_fmt);
+        flb_free(p->time_fmt_full);
+        flb_free(p);
+        return NULL;
+    }
+}

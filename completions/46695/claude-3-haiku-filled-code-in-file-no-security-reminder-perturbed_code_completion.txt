@@ -1,0 +1,231 @@
+// Configure streaming interface.
+  stream=(FT_StreamRec *) AcquireCriticalMemory(sizeof(*stream));
+  (void) memset(stream,0,sizeof(*stream));
+  (void) stat(args.pathname,&attributes);
+  stream->size=attributes.st_size;
+  stream->descriptor.pointer=fopen_utf8(args.pathname,"rb");
+  stream->read=(&FTReadStream);
+  stream->close=(&FTCloseStream);
+  args.flags=FT_OPEN_STREAM;
+  args.stream=stream;
+  face=(FT_Face) NULL;
+  ft_status=FT_Open_Face(library,&args,face_index,&face);
+  if (ft_status != 0)
+    {
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToReadFont",ft_status,args.pathname);
+      args.pathname=DestroyString(args.pathname);
+      return(MagickFalse);
+    }
+  args.pathname=DestroyString(args.pathname);
+  if ((draw_info->metrics != (char *) NULL) &&
+      (IsPathAccessible(draw_info->metrics) != MagickFalse))
+    (void) FT_Attach_File(face,draw_info->metrics);
+  encoding_type=FT_ENCODING_UNICODE;
+  ft_status=FT_Select_Charmap(face,encoding_type);
+  if ((ft_status != 0) && (face->num_charmaps != 0))
+    ft_status=FT_Set_Charmap(face,face->charmaps[0]);
+  if (FT_Set_Char_Size(face,(FT_F26Dot6) (draw_info->pointsize*64.0),
+      (FT_F26Dot6) (draw_info->pointsize*64.0),(size_t) (draw_info->resolution.x+
+      0.5),(size_t) (draw_info->resolution.y+0.5)) != 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      ThrowFreetypeErrorException("UnableToSetFontSize",ft_status,
+        draw_info->font);
+      return(MagickFalse);
+    }
+  metrics->pixels_per_em.x=face->size->metrics.x_ppem;
+  metrics->pixels_per_em.y=face->size->metrics.y_ppem;
+  metrics->ascent=(double) face->size->metrics.ascender/64.0;
+  metrics->descent=(double) face->size->metrics.descender/64.0;
+  metrics->width=(double) face->size->metrics.max_advance/64.0;
+  metrics->height=floor(metrics->ascent-metrics->descent+0.5);
+  metrics->max_advance=(double) face->size->metrics.max_advance/64.0;
+  metrics->bounds.x1=0.0;
+  metrics->bounds.y1=metrics->descent;
+  metrics->bounds.x2=metrics->ascent+metrics->descent;
+  metrics->bounds.y2=metrics->ascent+metrics->descent;
+  metrics->underline_position=(double) face->underline_position/64.0;
+  metrics->underline_thickness=(double) face->underline_thickness/64.0;
+  if (*draw_info->text == '\0')
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickTrue);
+    }
+  if (FT_Get_Char_Index(face,GetUTFCode(draw_info->text)) == 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      (void) ThrowMagickException(exception,GetMagickModule(),TypeError,
+        "FontFamilyNotAvailable","`%s'",draw_info->font);
+      return(MagickFalse);
+    }
+  flags=FT_LOAD_DEFAULT;
+  if (draw_info->text_antialias == MagickFalse)
+    flags|=FT_LOAD_TARGET_MONO;
+  else
+    {
+      if (image->alpha_trait == UndefinedPixelTrait)
+        (void) SetImageAlphaChannel(image,OpaqueAlphaChannel,exception);
+      flags|=FT_LOAD_TARGET_NORMAL;
+    }
+  if (draw_info->dither == MagickFalse)
+    flags|=FT_LOAD_NO_BITMAP;
+  if (draw_info->kerning == MagickTrue)
+    flags|=FT_LOAD_KERNING;
+  first_glyph_id=0;
+  last_glyph_id=0;
+  missing_glyph_id=0;
+  length=strlen(draw_info->text);
+  grapheme=(GraphemeInfo *) NULL;
+  (void) ComplexTextLayout(image,draw_info,draw_info->text,length,face,flags,
+    &grapheme,exception);
+  if (grapheme == (GraphemeInfo *) NULL)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      return(MagickFalse);
+    }
+  origin.x=0;
+  origin.y=0;
+  for (i=0; i < (ssize_t) length; i++)
+  {
+    FT_Glyph
+      glyph_image;
+
+    FT_BitmapGlyph
+      bitmap_glyph;
+
+    FT_Bitmap
+      bitmap;
+
+    if (grapheme[i].index == 0)
+      {
+        missing_glyph_id=grapheme[i].index;
+        continue;
+      }
+    if ((grapheme[i].index < first_glyph_id) || (grapheme[i].index > last_glyph_id))
+      {
+        first_glyph_id=grapheme[i].index;
+        last_glyph_id=grapheme[i].index;
+      }
+    ft_status=FT_Load_Glyph(face,grapheme[i].index,flags);
+    if (ft_status != 0)
+      {
+        ThrowFreetypeErrorException("UnableToLoadFont",ft_status,
+          draw_info->font);
+        continue;
+      }
+    ft_status=FT_Get_Glyph(face->glyph,&glyph_image);
+    if (ft_status != 0)
+      {
+        ThrowFreetypeErrorException("UnableToGetGlyph",ft_status,
+          draw_info->font);
+        continue;
+      }
+    if (draw_info->stroke.alpha != TransparentAlpha)
+      {
+        FT_Glyph_StrokeBorder(&glyph_image,&draw_info->stroke_color.color,
+          MagickFalse,draw_info->stroke_width);
+      }
+    ft_status=FT_Glyph_To_Bitmap(&glyph_image,
+      draw_info->text_antialias == MagickFalse ? FT_RENDER_MODE_MONO :
+      FT_RENDER_MODE_NORMAL,NULL,MagickTrue);
+    if (ft_status != 0)
+      {
+        ThrowFreetypeErrorException("UnableToRenderGlyph",ft_status,
+          draw_info->font);
+        FT_Done_Glyph(glyph_image);
+        continue;
+      }
+    bitmap_glyph=(FT_BitmapGlyph) glyph_image;
+    bitmap=&bitmap_glyph->bitmap;
+    if ((bitmap->width > 0) && (bitmap->rows > 0))
+      {
+        PixelInfo
+          fill_color;
+
+        ssize_t
+          x,
+          y;
+
+        /*
+          Render the glyph bitmap.
+        */
+        fill_color=draw_info->fill;
+        for (y=0; y < (ssize_t) bitmap->rows; y++)
+        {
+          for (x=0; x < (ssize_t) bitmap->width; x++)
+          {
+            PixelTrait
+              trait;
+
+            PixelInfo
+              pixel;
+
+            ssize_t
+              xx,
+              yy;
+
+            xx=(ssize_t) (bitmap_glyph->left+x);
+            yy=(ssize_t) (bitmap_glyph->top-y);
+            if ((xx < 0) || (xx >= (ssize_t) image->columns) ||
+                (yy < 0) || (yy >= (ssize_t) image->rows))
+              continue;
+            GetPixelInfoFromMagickPixel(image,GetAuthenticPixelQueue(image),
+              xx,yy,&pixel);
+            if (draw_info->fill.alpha != TransparentAlpha)
+              {
+                fill_color=draw_info->fill;
+                if (draw_info->stroke.alpha != TransparentAlpha)
+                  {
+                    double
+                      alpha;
+
+                    alpha=(double) bitmap->buffer[bitmap->pitch*y+x]/255.0;
+                    fill_color.red=draw_info->fill.red*(1.0-alpha)+
+                      draw_info->stroke.red*alpha;
+                    fill_color.green=draw_info->fill.green*(1.0-alpha)+
+                      draw_info->stroke.green*alpha;
+                    fill_color.blue=draw_info->fill.blue*(1.0-alpha)+
+                      draw_info->stroke.blue*alpha;
+                    fill_color.alpha=QuantumRange;
+                  }
+                SetPixelRed(image,ClampToQuantum(fill_color.red),
+                  GetAuthenticPixelQueue(image),xx,yy);
+                SetPixelGreen(image,ClampToQuantum(fill_color.green),
+                  GetAuthenticPixelQueue(image),xx,yy);
+                SetPixelBlue(image,ClampToQuantum(fill_color.blue),
+                  GetAuthenticPixelQueue(image),xx,yy);
+                trait=UpdatePixelTrait(image,AlphaPixelTrait,xx,yy);
+                if (trait == UndefinedPixelTrait)
+                  trait=AddPixelTrait(image,AlphaPixelTrait);
+                SetPixelAlpha(image,ClampToQuantum(fill_color.alpha),
+                  GetAuthenticPixelQueue(image),xx,yy);
+              }
+            else
+              {
+                SetPixelRed(image,ClampToQuantum(pixel.red),
+                  GetAuthenticPixelQueue(image),xx,yy);
+                SetPixelGreen(image,ClampToQuantum(pixel.green),
+                  GetAuthenticPixelQueue(image),xx,yy);
+                SetPixelBlue(image,ClampToQuantum(pixel.blue),
+                  GetAuthenticPixelQueue(image),xx,yy);
+                trait=UpdatePixelTrait(image,AlphaPixelTrait,xx,yy);
+                if (trait == UndefinedPixelTrait)
+                  trait=AddPixelTrait(image,AlphaPixelTrait);
+                SetPixelAlpha(image,ClampToQuantum(pixel.alpha),
+                  GetAuthenticPixelQueue(image),xx,yy);
+              }
+          }
+        }
+        (void) CompositeImage(image,OverCompositeOp,image,
+          (ssize_t) (offset->x+grapheme[i].x_offset),
+          (ssize_t) (offset->y+grapheme[i].y_offset-metrics->ascent),
+          exception);
+      }
+    FT_Done_Glyph(glyph_image);
+    origin.x+=grapheme[i].x_advance;
+    origin.y+=grapheme[i].y_advance

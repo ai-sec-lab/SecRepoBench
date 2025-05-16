@@ -1,0 +1,158 @@
+{
+    if(handshake_type == 0x02) { /* Server Hello */
+      offset += (1 + session_id_len);
+
+      ja3.cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      flow->protos.stun_ssl.ssl.cipher_suite = ja3.cipher_suite;
+
+#ifdef DEBUG_TLS
+      printf("SSL Server Hello [session_id_len: %u][cipher_suite: %04X]\n",
+	     session_id_len, ja3.cipher_suite);
+#endif
+    } else { /* Client Hello */
+      u_int16_t cipher_suites_length = ntohs(*((u_int16_t*)&packet->payload[offset]));
+      offset += 2;
+
+      if((offset + cipher_suites_length) > total_len) {
+#ifdef DEBUG_TLS
+        printf("SSL Client Hello invalid cipher_suites_length\n");
+#endif
+        return(0);
+      }
+
+      for(i = 0; i < (cipher_suites_length / 2); i++) {
+        u_int16_t cipher_suite = ntohs(*((u_int16_t*)&packet->payload[offset + (i * 2)]));
+
+        if((cipher_suite & 0xFF00) != 0x1300) {
+          if(ja3.cipher_suites_len < (sizeof(ja3.cipher_suites) - 1)) {
+            snprintf(&ja3.cipher_suites[ja3.cipher_suites_len],
+                     sizeof(ja3.cipher_suites) - ja3.cipher_suites_len,
+                     "%s%u",
+                     (ja3.cipher_suites_len > 0) ? "," : "",
+                     cipher_suite);
+            ja3.cipher_suites_len = strlen(ja3.cipher_suites);
+          }
+        } else {
+#ifdef DEBUG_TLS
+          printf("Skipping GREASE cipher suite %04X\n", cipher_suite);
+#endif
+        }
+      }
+
+      offset += cipher_suites_length;
+
+      /* compression_methods */
+      offset += 1 + packet->payload[offset];
+
+      /* extensions */
+      if(offset < total_len) {
+        extension_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+        offset += 2;
+
+        if((offset + extension_len) > total_len) {
+#ifdef DEBUG_TLS
+          printf("SSL Client Hello invalid extension_len\n");
+#endif
+          return(0);
+        }
+
+        j = 0;
+        while((offset < (extension_len + (offset - 2))) && (j < 100)) {
+          u_int16_t extension_type = ntohs(*((u_int16_t*)&packet->payload[offset]));
+          u_int16_t extension_data_len;
+
+          offset += 2;
+
+          if(offset >= (extension_len + (offset - 4)))
+            break;
+
+          extension_data_len = ntohs(*((u_int16_t*)&packet->payload[offset]));
+          offset += 2;
+
+          if((offset + extension_data_len) > (extension_len + (offset - 6))) {
+#ifdef DEBUG_TLS
+            printf("SSL Client Hello invalid extension_data_len\n");
+#endif
+            break;
+          }
+
+          switch(extension_type) {
+          case 0x0000: /* server_name */
+          case 0x0005: /* status_request */
+          case 0x000d: /* supported_groups */
+          case 0x000b: /* ec_point_formats */
+          case 0x0010: /* application_layer_protocol_negotiation */
+          case 0x0016: /* encrypt_then_mac */
+          case 0x0017: /* extended_master_secret */
+          case 0x0023: /* session_ticket */
+          case 0x002b: /* supported_versions */
+            if(ja3.extensions_len < (sizeof(ja3.extensions) - 1)) {
+              snprintf(&ja3.extensions[ja3.extensions_len],
+                       sizeof(ja3.extensions) - ja3.extensions_len,
+                       "%s%u",
+                       (ja3.extensions_len > 0) ? "," : "",
+                       extension_type);
+              ja3.extensions_len = strlen(ja3.extensions);
+            }
+            break;
+          case 0xff01: /* renegotiation_info */
+            break;
+          default:
+            if((extension_type & 0xFF00) == 0x0000) {
+#ifdef DEBUG_TLS
+              printf("Skipping GREASE extension %04X\n", extension_type);
+#endif
+            } else {
+#ifdef DEBUG_TLS
+              printf("Unknown extension %04X\n", extension_type);
+#endif
+            }
+            break;
+          }
+
+          offset += extension_data_len;
+          j++;
+        }
+
+        if(offset != (extension_len + (offset - 4))) {
+#ifdef DEBUG_TLS
+          printf("SSL Client Hello invalid offset after extensions\n");
+#endif
+        }
+      }
+    }
+
+    ja3_str_len = snprintf(ja3_str, sizeof(ja3_str), "%u,%s,%u,%s",
+                           ja3.tls_handshake_version,
+                           ja3.cipher_suites,
+                           ja3invalid, /* Not supported yet */
+                           ja3.extensions);
+
+    if(ja3_str_len >= sizeof(ja3_str)) {
+      ja3_str_len = sizeof(ja3_str) - 1;
+      ja3_str[ja3_str_len] = '\0';
+    }
+
+#ifdef DEBUG_TLS
+    printf("SSL JA3 string: %s\n", ja3_str);
+#endif
+
+    ndpi_MD5Init(&ctx);
+    ndpi_MD5Update(&ctx, (const unsigned char*)ja3_str, ja3_str_len);
+    ndpi_MD5Final(md5_hash, &ctx);
+
+    memcpy(flow->l4.tcp.tls.ja3_hash, md5_hash, 16);
+    flow->l4.tcp.tls.ja3_hash_present = 1;
+
+#ifdef DEBUG_TLS
+    printf("SSL JA3 hash: ");
+    for(i = 0; i < 16; i++)
+      printf("%02x", md5_hash[i]);
+    printf("\n");
+#endif
+
+    if(handshake_type == 0x02)
+      return(2);
+    else
+      return(1);
+  }

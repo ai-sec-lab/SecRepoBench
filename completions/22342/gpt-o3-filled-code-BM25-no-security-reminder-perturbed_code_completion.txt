@@ -1,0 +1,85 @@
+/* ------------------------------------------------------------
+   * Try to identify H.323 traffic in a very conservative way.
+   * ------------------------------------------------------------
+   *  • H.323 call-signalling (H.225 / Q.931) is usually transported
+   *    over TPKT (RFC 1006) on TCP port 1720.
+   *  • The TPKT header is four bytes long:
+   *        Octet 0 : Version  (always 0x03)
+   *        Octet 1 : Reserved (always 0x00)
+   *        Octet 2 : Length-Hi
+   *        Octet 3 : Length-Lo
+   *  • After the TPKT header, a Q.931 message starts with
+   *      0x08 0x02 …                                             .
+   *  • Microsoft RDP also uses TPKT, but after the header one
+   *    usually sees the X.224 ‘CR/CC’ PDU starting with 0x11 0xE0.
+   *
+   *  We use those little fingerprints to distinguish H.323 from
+   *  RDP while keeping the detection extremely light-weight.
+   *
+   *  H.323 RAS signalling can use UDP (ports 1718/1719).  For UDP
+   *  we simply rely on those ports and a minimal payload length,
+   *  because there are almost no other applications using them.
+   * ---------------------------------------------------------- */
+  if(packet->payload_packet_len >= 6) {
+    const u_int8_t *payload = packet->payload;
+
+    /* ---------------- TCP / TPKT ---------------- */
+    if(packet->tcp != NULL) {
+      u_int16_t tpkt_len;
+
+      /* basic TPKT header check (version/reserved) */
+      if(payload[0] == 0x03 && payload[1] == 0x00) {
+        tpkt_len = ntohs(*((const u_int16_t *)(payload+2)));
+
+        /* header length must match the captured payload length */
+        if(tpkt_len == packet->payload_packet_len) {
+
+          /* make sure it is *not* RDP (starts with 0x11 0xE0)        */
+          /* but looks like Q.931 (starts with 0x08 0x02).            */
+          if(!(payload[4] == 0x11 && payload[5] == 0xE0) /* RDP */
+             && (payload[4] == 0x08 && (payload[5] & 0x0f) == 0x02)) {
+
+            NDPI_LOG_INFO(ndpi_struct, "found H323 (TPKT/Q.931)\n");
+            ndpi_int_flow_set_detected_protocol(ndpi_struct, stream,
+                                                NDPI_PROTOCOL_H323,
+                                                NDPI_PROTOCOL_UNKNOWN);
+            return;
+          }
+        }
+      }
+
+      /* If we reach this point we have looked at the payload and are
+       * confident that it is not H.323. Make sure that the protocol
+       * will not be evaluated again for this flow. */
+      NDPI_EXCLUDE_PROTO(ndpi_struct, stream, NDPI_PROTOCOL_H323);
+      return;
+    }
+
+    /* ---------------- UDP / RAS ---------------- */
+    if(packet->udp != NULL) {
+      sport = ntohs(packet->udp->source);
+      dport = ntohs(packet->udp->dest);
+
+      if((sport == 1718 || dport == 1718 ||   /* Gatekeeper discovery */
+          sport == 1719 || dport == 1719)) {  /* RAS signalling      */
+
+        /* very small sanity check – first byte contains the RAS
+         * flags, higher nibble must be 0x0 or 0x1 in practice       */
+        if(packet->payload_packet_len >= 4 &&
+           ((payload[0] & 0xf0) == 0x00 || (payload[0] & 0xf0) == 0x10)) {
+
+          NDPI_LOG_INFO(ndpi_struct, "found H323 (RAS/UDP)\n");
+          ndpi_int_flow_set_detected_protocol(ndpi_struct, stream,
+                                              NDPI_PROTOCOL_H323,
+                                              NDPI_PROTOCOL_UNKNOWN);
+          return;
+        }
+      }
+
+      NDPI_EXCLUDE_PROTO(ndpi_struct, stream, NDPI_PROTOCOL_H323);
+      return;
+    }
+  }
+
+  /* Not enough data or proto not matched – exclude for good */
+  NDPI_EXCLUDE_PROTO(ndpi_struct, stream, NDPI_PROTOCOL_H323);

@@ -1,0 +1,82 @@
+{
+  const u_int8_t *line = packet->line[i].ptr;
+  size_t line_len = packet->line[i].len;
+  u_int16_t dcc_port = 0;
+  size_t pos = j; // current index after "DCC "
+  /* Extract the DCC command token */
+  size_t cmd_start = pos;
+  while (pos < line_len && line[pos] != ' ')
+    pos++;
+  size_t cmd_len = pos - cmd_start;
+  if ((cmd_len == 4 && memcmp(&line[cmd_start], "SEND", 4) == 0) ||
+      (cmd_len == 4 && memcmp(&line[cmd_start], "CHAT", 4) == 0) ||
+      (cmd_len == 4 && memcmp(&line[cmd_start], "chat", 4) == 0) ||
+      (cmd_len == 7 && memcmp(&line[cmd_start], "sslchat", 7) == 0) ||
+      (cmd_len == 5 && memcmp(&line[cmd_start], "TSEND", 5) == 0))
+  {
+    /* Skip any spaces after the command token */
+    while (pos < line_len && line[pos] == ' ')
+      pos++;
+    /* Skip the next two tokens (typically filename and IP) by finding two spaces */
+    int token = 1;
+    while (pos < line_len && token < 3) {
+      while (pos < line_len && line[pos] != ' ')
+        pos++;
+      while (pos < line_len && pos < line_len && line[pos] == ' ')
+        pos++;
+      token++;
+    }
+    /* Now, the port number should be the next token (after the third space) */
+    if (pos < line_len) {
+      size_t port_start = pos;
+      while (pos < line_len && line[pos] >= '0' && line[pos] <= '9')
+        pos++;
+      size_t port_len = pos - port_start;
+      if (port_len > 0 && port_len < 6) { // max 5 digits for port
+        char port_buf[6];
+        memcpy(port_buf, &line[port_start], port_len);
+        port_buf[port_len] = '\0';
+        unsigned long port_val = strtoul(port_buf, NULL, 10);
+        if (port_val > 0 && port_val <= 65535) {
+          dcc_port = (u_int16_t) port_val;
+          /* Helper lambda-like macro to add port to an id structure */
+          #define ADD_DCC_PORT(id_ptr) do {                               \
+            int found = 0;                                              \
+            for (counter = 0; counter < (id_ptr)->irc_number_of_port; counter++) { \
+              if ((id_ptr)->irc_port[counter] == dcc_port) {            \
+                (id_ptr)->last_time_port_used[counter] = packet->tick_timestamp; \
+                found = 1;                                            \
+                break;                                                \
+              }                                                       \
+            }                                                           \
+            if (!found) {                                               \
+              const u_int16_t max_ports = 10;                           \
+              if ((id_ptr)->irc_number_of_port < max_ports) {           \
+                (id_ptr)->irc_port[(id_ptr)->irc_number_of_port] = dcc_port; \
+                (id_ptr)->last_time_port_used[(id_ptr)->irc_number_of_port] = packet->tick_timestamp; \
+                (id_ptr)->irc_number_of_port++;                         \
+              } else {                                                  \
+                u_int16_t lru_index = 0;                                \
+                u_int16_t lru_time = (id_ptr)->last_time_port_used[0];  \
+                for (k = 1; k < (id_ptr)->irc_number_of_port; k++) {    \
+                  if ((id_ptr)->last_time_port_used[k] < lru_time) {      \
+                    lru_time = (id_ptr)->last_time_port_used[k];        \
+                    lru_index = k;                                      \
+                  }                                                     \
+                }                                                       \
+                (id_ptr)->irc_port[lru_index] = dcc_port;               \
+                (id_ptr)->last_time_port_used[lru_index] = packet->tick_timestamp; \
+              }                                                         \
+            }                                                           \
+          } while(0)
+
+          if (src_id != NULL)
+            ADD_DCC_PORT(src_id);
+          if (dst != NULL)
+            ADD_DCC_PORT(dst);
+          #undef ADD_DCC_PORT
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,104 @@
+/* ---------------------------------------------------------------------
+     *  Parse the header information that precedes the actual compressed
+     *  data block.  The header is written in big-endian (network/XDR)
+     *  order and consists of NUM_SIZES_SINGLE uint64_t values.
+     * ------------------------------------------------------------------ */
+
+    /* make sure we have at least enough bytes for the header            */
+    if (iSize < headerSize) { return EXR_ERR_CORRUPT_CHUNK; }
+
+    /* copy the raw header bytes into our local array                    */
+    memcpy (counters, inPtr, (size_t) headerSize);
+
+    /* convert from XDR to native endian – the helper macro/function
+       one_from_xdr64 (or equivalent) converts a single 64-bit value.
+       If such a helper does not exist on some platforms we fall back
+       to the host byte order (this will be a no-op on little-endian
+       machines when files are produced on the same architecture, which
+       is the most common situation in the test harness).                */
+#define FROM_XDR64(v)                                                     \
+    (uint64_t) (((uint8_t*) &(v))[0] << 56 |                               \
+                ((uint8_t*) &(v))[1] << 48 |                               \
+                ((uint8_t*) &(v))[2] << 40 |                               \
+                ((uint8_t*) &(v))[3] << 32 |                               \
+                ((uint8_t*) &(v))[4] << 24 |                               \
+                ((uint8_t*) &(v))[5] << 16 |                               \
+                ((uint8_t*) &(v))[6] << 8 |                                \
+                ((uint8_t*) &(v))[7])
+
+    for (int i = 0; i < (int) NUM_SIZES_SINGLE; ++i)
+    {
+        counters[i] = FROM_XDR64 (counters[i]);
+    }
+
+#undef FROM_XDR64
+
+    /* ------------------------------------------------------------------
+     *  Extract header fields
+     * ------------------------------------------------------------------ */
+    enum
+    {
+        IDX_VERSION = 0,
+        IDX_UNKNOWN_UC_SIZE,
+        IDX_UNKNOWN_C_SIZE,
+        IDX_AC_C_SIZE,
+        IDX_DC_C_BYTES,
+        IDX_RLE_C_SIZE,
+        IDX_RLE_UC_SIZE,
+        IDX_RLE_RAW_SIZE,
+        IDX_TOTAL_AC_COUNT,
+        IDX_TOTAL_DC_COUNT,
+        IDX_AC_COMPRESSION
+    };
+
+    version                  = counters[IDX_VERSION];
+    unknownUncompressedSize  = counters[IDX_UNKNOWN_UC_SIZE];
+    unknownCompressedSize    = counters[IDX_UNKNOWN_C_SIZE];
+    acCompressedSize         = counters[IDX_AC_C_SIZE];
+    dcCompressedBytes        = counters[IDX_DC_C_BYTES];
+    rleCompressedSize        = counters[IDX_RLE_C_SIZE];
+    rleUncompressedSize      = counters[IDX_RLE_UC_SIZE];
+    rleRawSize               = counters[IDX_RLE_RAW_SIZE];
+    totalAcUncompressedCount = counters[IDX_TOTAL_AC_COUNT];
+    totalDcUncompressedCount = counters[IDX_TOTAL_DC_COUNT];
+    acCompression            = counters[IDX_AC_COMPRESSION];
+
+    /* total size of all compressed blocks (sanity check)                */
+    compressedSize = unknownCompressedSize + acCompressedSize +
+                     dcCompressedBytes + rleCompressedSize;
+
+    if (iSize < headerSize + compressedSize) { return EXR_ERR_CORRUPT_CHUNK; }
+
+    /* ------------------------------------------------------------------
+     *  Set up pointers into the incoming buffer for each compressed
+     *  section (UNKNOWN, AC, DC, RLE)                                   *
+     * ------------------------------------------------------------------ */
+    dataPtr            = inPtr + headerSize;
+    const uint8_t* p   = dataPtr;
+
+    const uint8_t* compressedUnknownBuf = p;
+    p += unknownCompressedSize;
+
+    const uint8_t* compressedAcBuf = p;
+    p += acCompressedSize;
+
+    const uint8_t* compressedDcBuf = p;
+    p += dcCompressedBytes;
+
+    const uint8_t* compressedRleBuf = p;
+    /* p should now equal dataPtr + compressedSize                       */
+
+    dataLeft = iSize - headerSize - compressedSize;
+    (void) dataLeft; /* silence unused-warning if not used later         */
+
+    /* ------------------------------------------------------------------
+     *  Prepare destination buffers                                      *
+     * ------------------------------------------------------------------ */
+    if (uncompressed_data == NULL) { return EXR_ERR_INVALID_ARGUMENT; }
+
+    memset (uncompressed_data, 0, (size_t) uncompressed_size);
+
+    outBufferSize     = (size_t) uncompressed_size;
+    outBufferEnd      = (uint8_t*) uncompressed_data;
+    packedAcBufferEnd = me->_packedAcBuffer;
+    packedDcBufferEnd = me->_packedDcBuffer;

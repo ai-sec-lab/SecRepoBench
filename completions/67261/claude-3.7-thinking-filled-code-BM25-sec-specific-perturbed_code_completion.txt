@@ -1,0 +1,89 @@
+u8 *dst = NULL;
+u32 res_size;
+const u8 *res = data;
+u32 copy_len = buffer_length;
+
+// Check for UTF BOM
+if ((buffer_length >= 3) && (data[0] == 0xEF) && (data[1] == 0xBB) && (data[2] == 0xBF)) {
+    // UTF-8 BOM
+    res += 3;
+    copy_len -= 3;
+} else if ((buffer_length >= 2) && (data[0] == 0xFF) && (data[1] == 0xFE)) {
+    // UTF-16 little endian BOM
+    // Allocate for worst case: each UTF-16 char could become 3 UTF-8 bytes
+    u32 max_size = (buffer_length - 2) * 3;
+    dst = gf_malloc(max_size + 1); // +1 for null terminator
+    if (!dst) return NULL;
+    
+    // Convert UTF-16LE to UTF-8
+    u32 char_count = (buffer_length - 2) / 2;
+    res_size = gf_utf16_to_utf8((const u16 *)(data + 2), char_count, dst, max_size);
+    if (res_size == 0) {
+        gf_free(dst);
+        return NULL;
+    }
+    
+    dst[res_size] = 0; // Ensure null-termination
+    res = dst;
+    copy_len = res_size;
+} else if ((buffer_length >= 2) && (data[0] == 0xFE) && (data[1] == 0xFF)) {
+    // UTF-16 big endian BOM
+    // Allocate for worst case: each UTF-16 char could become 3 UTF-8 bytes
+    u32 max_size = (buffer_length - 2) * 3;
+    dst = gf_malloc(max_size + 1);
+    if (!dst) return NULL;
+    
+    // Calculate UTF-16 character count
+    u32 char_count = (buffer_length - 2) / 2;
+    
+    // Need to convert from BE to LE for the conversion function
+    u16 *utf16le = (u16 *)gf_malloc(char_count * sizeof(u16));
+    if (!utf16le) {
+        gf_free(dst);
+        return NULL;
+    }
+    
+    // Convert BE to LE
+    const u8 *src = data + 2;
+    for (u32 i = 0; i < char_count; i++) {
+        utf16le[i] = (src[2*i] << 8) | src[2*i + 1];
+    }
+    
+    // Convert UTF-16LE to UTF-8
+    res_size = gf_utf16_to_utf8(utf16le, char_count, dst, max_size);
+    gf_free(utf16le);
+    
+    if (res_size == 0) {
+        gf_free(dst);
+        return NULL;
+    }
+    
+    dst[res_size] = 0; // Ensure null-termination
+    res = dst;
+    copy_len = res_size;
+} else {
+    // No BOM, make a copy for safe string manipulation
+    dst = gf_malloc(buffer_length + 1);
+    if (!dst) return NULL;
+    memcpy(dst, data, buffer_length);
+    dst[buffer_length] = 0; // Null-terminate
+    res = dst;
+    copy_len = buffer_length;
+}
+
+// Set the result size
+res_size = copy_len;
+
+// Strip leading whitespace
+while (res_size && ((res[0] == ' ') || (res[0] == '\t') || (res[0] == '\r') || (res[0] == '\n'))) {
+    res++;
+    res_size--;
+}
+
+// Define PROBE_OK macro for returning MIME type and freeing memory
+#define PROBE_OK(_score, _mime)  \
+{                                \
+    if (score) *score = _score;  \
+    if (dst) gf_free(dst);       \
+    return _mime;                \
+}

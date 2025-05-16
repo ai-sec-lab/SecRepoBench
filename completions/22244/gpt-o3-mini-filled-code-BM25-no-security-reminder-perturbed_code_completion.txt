@@ -1,0 +1,51 @@
+NDPI_LOG_DBG(ndpi_struct, "search openvpn\n");
+
+/* Ensure there is at least one byte for the operation code */
+if(packet->payload_packet_len < 1)
+  return;
+
+/* If the packet is TCP, adjust the payload pointer if necessary.
+   (Assuming that any TCP‐specific offset adjustment has been performed elsewhere if needed) */
+   
+/* Extract the operation code from the payload */
+operationcode = ovpn_payload[0];
+
+/* Process only UDP packets further */
+if(packet->udp != NULL) {
+  /* First UDP packet: if payload length and operation code match expected criteria, mark as OpenVPN */
+  if(flow->openvpn_counter == 0) {
+    if(packet->payload_packet_len == 64 && operationcode == 0x01) {
+      packet->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+      return;
+    }
+  }
+  /* For subsequent UDP packets: look for client reset */
+  if(flow->openvpn_counter < 5 && operationcode == 0x02) {
+    /* Check that payload is long enough to contain a session ID (4 bytes) */
+    if(packet->payload_packet_len >= 5) {
+      session_remote = &ovpn_payload[1];
+      memcpy(flow->openvpn_session, session_remote, 4);
+    }
+  }
+  /* For packets with a server reset operation code */
+  else if(flow->openvpn_counter >= 1 && flow->openvpn_counter < 10 && operationcode == 0x03) {
+    if(packet->payload_packet_len >= 5) {
+      /* Verify the session ID in the packet matches the stored session ID */
+      if(memcmp(flow->openvpn_session, &ovpn_payload[1], 4) == 0) {
+        packet->detected_protocol_stack[0] = NDPI_PROTOCOL_OPENVPN;
+        return;
+      }
+      else {
+        failed = 1;
+      }
+    }
+  }
+}
+
+/* Increment the OpenVPN packet counter */
+flow->openvpn_counter++;
+
+/* If an earlier check marked the detection as failed, exclude OpenVPN from further consideration */
+if(failed) {
+  NDPI_EXCLUDE_PROTO(packet, NDPI_PROTOCOL_OPENVPN);
+}

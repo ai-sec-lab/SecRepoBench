@@ -1,0 +1,47 @@
+if (packet->payload_len < 10) {
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+  return;
+}
+
+if (packet->tcp != NULL && packet->payload_len > 10) {
+  ovpn_payload += 10; // Adjust payload pointer for TCP
+}
+
+operationcode = *ovpn_payload;
+
+if (packet->udp != NULL) {
+  if (packet->payload_len == 10 && operationcode == 16) {
+    NDPI_LOG_INFO(ndpi_struct, "Found OpenVPN control channel packet\n");
+    ndpi_int_add_protocol_to_flow(flow, NDPI_PROTOCOL_OPENVPN);
+    return;
+  }
+
+  if (flow->openvpn_counter < 5 && operationcode == 1) {
+    session_remote = ovpn_payload + 1;
+    alen = session_remote[0];
+    if (alen >= 4 && alen <= 8 && packet->payload_len >= 2 + alen) {
+      memcpy(flow->openvpn_session_id, session_remote + 1, alen);
+      flow->openvpn_session_id_len = alen;
+    }
+  }
+
+  if (flow->openvpn_counter >= 5 && flow->openvpn_counter < 20 && operationcode == 2) {
+    if (packet->payload_len >= 2 + flow->openvpn_session_id_len) {
+      session_remote = ovpn_payload + 1;
+      alen = session_remote[0];
+      if (alen == flow->openvpn_session_id_len && memcmp(flow->openvpn_session_id, session_remote + 1, alen) == 0) {
+        NDPI_LOG_INFO(ndpi_struct, "Confirmed OpenVPN session\n");
+        ndpi_int_add_protocol_to_flow(flow, NDPI_PROTOCOL_OPENVPN);
+        return;
+      } else {
+        failed = 1;
+      }
+    }
+  }
+}
+
+flow->openvpn_counter++;
+
+if (failed) {
+  NDPI_EXCLUDE_PROTO(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN);
+}

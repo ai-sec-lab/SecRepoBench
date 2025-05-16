@@ -1,0 +1,61 @@
+/* Prepare AEAD and Header Protection ciphers using the derived secret. */
+  if(!quic_pp_cipher_init(&ciphers.pp_cipher, GCRY_MD_SHA256, 16, client_secret, version, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM)) {
+    NDPI_LOG_DBG(ndpi_struct, "Error initializing pp_cipher\n");
+    return NULL;
+  }
+  if(!quic_hp_cipher_init(&ciphers.hp_cipher, GCRY_MD_SHA256, 16, client_secret, version)) {
+    NDPI_LOG_DBG(ndpi_struct, "Error initializing hp_cipher\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  /* Parse QUIC long header fields to find packet number offset. */
+  uint32_t offset = 0, consumed = 0;
+  /* Skip first byte (flags) plus 4 bytes of version. */
+  if(packet->payload_packet_len < 6) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short to include flags and version\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  offset += 5;
+
+  /* Skip Destination Connection ID length and ID itself. */
+  if(offset + 1 + dest_conn_id_len > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short for Destination Connection ID\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  offset += 1 + dest_conn_id_len;
+
+  /* Skip Source Connection ID length and ID itself. */
+  if(offset + 1 + src_conn_id_len > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Packet too short for Source Connection ID\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  offset += 1 + src_conn_id_len;
+
+  /* Decode token length as a variable-length integer and skip the token. */
+  if(!ndpi_quic_varint_decode(packet->payload, packet->payload_packet_len, &offset, &token_length)) {
+    NDPI_LOG_DBG(ndpi_struct, "Failed to decode token length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  if(offset + token_length > packet->payload_packet_len) {
+    NDPI_LOG_DBG(ndpi_struct, "Token length exceeds packet size\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+  offset += token_length;
+
+  /* Decode payload length as a variable-length integer. */
+  if(!ndpi_quic_varint_decode(packet->payload, packet->payload_packet_len, &offset, &payload_length)) {
+    NDPI_LOG_DBG(ndpi_struct, "Failed to decode payload length\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  /* The packet number starts at the current offset. */
+  pn_offset = offset;
+  NDPI_LOG_DBG2(ndpi_struct, "pn_offset=%u token_length=%"PRIu64" payload_length=%"PRIu64"\n",
+                pn_offset, token_length, payload_length);

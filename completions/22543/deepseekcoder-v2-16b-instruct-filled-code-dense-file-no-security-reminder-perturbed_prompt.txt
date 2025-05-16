@@ -1,0 +1,2261 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static Image *ReadJP2Image(const ImageInfo *image_info,ExceptionInfo *exception)
+{
+  const char
+    *option;
+
+  Image
+    *image;
+
+  int
+    jp2_status;
+
+  MagickBooleanType
+    status;
+
+  opj_codec_t
+    *jp2_codec;
+
+  opj_dparameters_t
+    parameters;
+
+  opj_image_t
+    *jp2_image;
+
+  opj_stream_t
+    *jp2_stream;
+
+  register ssize_t
+    i;
+
+  ssize_t
+    y;
+
+  unsigned char
+    sans[4];
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Initialize JP2 codec.
+  */
+  if (ReadBlob(image,4,sans) != 4)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  (void) SeekBlob(image,SEEK_SET,0);
+  if (LocaleCompare(image_info->magick,"JPT") == 0)
+    jp2_codec=opj_create_decompress(OPJ_CODEC_JPT);
+  else
+    if (IsJ2K(sans,4) != MagickFalse)
+      jp2_codec=opj_create_decompress(OPJ_CODEC_J2K);
+    else
+      jp2_codec=opj_create_decompress(OPJ_CODEC_JP2);
+  opj_set_warning_handler(jp2_codec,JP2WarningHandler,exception);
+  opj_set_error_handler(jp2_codec,JP2ErrorHandler,exception);
+  opj_set_default_decoder_parameters(&parameters);
+  option=GetImageOption(image_info,"jp2:reduce-factor");
+  if (option != (const char *) NULL)
+    parameters.cp_reduce=StringToInteger(option);
+  option=GetImageOption(image_info,"jp2:quality-layers");
+  if (option != (const char *) NULL)
+    parameters.cp_layer=StringToInteger(option);
+  if (opj_setup_decoder(jp2_codec,&parameters) == 0)
+    {
+      opj_destroy_codec(jp2_codec);
+      ThrowReaderException(DelegateError,"UnableToManageJP2Stream");
+    }
+  jp2_stream=opj_stream_create(OPJ_J2K_STREAM_CHUNK_SIZE,1);
+  opj_stream_set_read_function(jp2_stream,JP2ReadHandler);
+  opj_stream_set_write_function(jp2_stream,JP2WriteHandler);
+  opj_stream_set_seek_function(jp2_stream,JP2SeekHandler);
+  opj_stream_set_skip_function(jp2_stream,JP2SkipHandler);
+  opj_stream_set_user_data(jp2_stream,image,NULL);
+  opj_stream_set_user_data_length(jp2_stream,GetBlobSize(image));
+  if (opj_read_header(jp2_stream,jp2_codec,&jp2_image) == 0)
+    {
+      opj_stream_destroy(jp2_stream);
+      opj_destroy_codec(jp2_codec);
+      ThrowReaderException(DelegateError,"UnableToDecodeImageFile");
+    }
+  jp2_status=OPJ_TRUE;
+  if (image->ping == MagickFalse)
+    {
+      if ((image->columns != 0) && (image->rows != 0))
+        /*
+          Extract an area from the image.
+        */
+        jp2_status=opj_set_decode_area(jp2_codec,jp2_image,
+          (OPJ_INT32) image->extract_info.x,(OPJ_INT32) image->extract_info.y,
+          (OPJ_INT32) (image->extract_info.x+(ssize_t) image->columns),
+          (OPJ_INT32) (image->extract_info.y+(ssize_t) image->rows));
+      else
+        jp2_status=opj_set_decode_area(jp2_codec,jp2_image,0,0,
+          jp2_image->comps[0].w,jp2_image->comps[0].h);
+      if (jp2_status == OPJ_FALSE)
+        {
+          opj_stream_destroy(jp2_stream);
+          opj_destroy_codec(jp2_codec);
+          opj_image_destroy(jp2_image);
+          ThrowReaderException(DelegateError,"UnableToDecodeImageFile");
+        }
+    }
+  if ((AcquireMagickResource(WidthResource,(size_t) jp2_image->comps[0].w) == MagickFalse) ||
+      (AcquireMagickResource(HeightResource,(size_t) jp2_image->comps[0].h) == MagickFalse))
+    {
+      opj_stream_destroy(jp2_stream);
+      opj_destroy_codec(jp2_codec);
+      opj_image_destroy(jp2_image);
+      ThrowReaderException(DelegateError,"UnableToDecodeImageFile");
+    }
+  if ((image_info->number_scenes != 0) && (image_info->scene != 0))
+    jp2_status=opj_get_decoded_tile(jp2_codec,jp2_stream,jp2_image,
+      (unsigned int) image_info->scene-1);
+  else
+    if (image->ping == MagickFalse)
+      {
+        jp2_status=opj_decode(jp2_codec,jp2_stream,jp2_image);
+        if (jp2_status != OPJ_FALSE)
+          jp2_status=opj_end_decompress(jp2_codec,jp2_stream);
+      }
+  if (jp2_status == OPJ_FALSE)
+    {
+      opj_stream_destroy(jp2_stream);
+      opj_destroy_codec(jp2_codec);
+      opj_image_destroy(jp2_image);
+      ThrowReaderException(DelegateError,"UnableToDecodeImageFile");
+    }
+  opj_stream_destroy(jp2_stream);
+  for (i=0; i < (ssize_t) jp2_image->numcomps; i++)
+  {
+    if ((jp2_image->comps[0].dx == 0) || (jp2_image->comps[0].dy == 0) ||
+        (jp2_image->comps[0].prec != jp2_image->comps[i].prec) ||
+        (jp2_image->comps[0].sgnd != jp2_image->comps[i].sgnd) ||
+        ((image->ping == MagickFalse) && (jp2_image->comps[i].data == NULL)))
+      {
+        opj_destroy_codec(jp2_codec);
+        opj_image_destroy(jp2_image);
+        ThrowReaderException(CoderError,"IrregularChannelGeometryNotSupported")
+      }
+  }
+  /*
+    Convert JP2 image.
+  */
+  image->columns=(size_t) jp2_image->comps[0].w;
+  image->rows=(size_t) jp2_image->comps[0].h;
+  image->depth=jp2_image->comps[0].prec;
+  image->compression=JPEG2000Compression;
+  if (jp2_image->numcomps == 1)
+    SetImageColorspace(image,GRAYColorspace,exception);
+  else
+    if (jp2_image->color_space == 2)
+      {
+        SetImageColorspace(image,GRAYColorspace,exception);
+        if (jp2_image->numcomps > 1)
+          image->alpha_trait=BlendPixelTrait;
+      }
+    else
+      if (jp2_image->color_space == 3)
+        SetImageColorspace(image,Rec601YCbCrColorspace,exception);
+  if (jp2_image->numcomps > 3)
+    image->alpha_trait=BlendPixelTrait;
+  if (jp2_image->icc_profile_buf != (unsigned char *) NULL)
+    {
+      StringInfo
+        *profile;
+
+      profile=BlobToStringInfo(jp2_image->icc_profile_buf,
+        jp2_image->icc_profile_len);
+      if (profile != (StringInfo *) NULL)
+        {
+          SetImageProfile(image,"icc",profile,exception);
+          profile=DestroyStringInfo(profile);
+        }
+    }
+  if (image->ping != MagickFalse)
+    {
+      opj_destroy_codec(jp2_codec);
+      opj_image_destroy(jp2_image);
+      return(GetFirstImageInList(image));
+    }
+  status=SetImageExtent(image,image->columns,image->rows,exception);
+  if (status == MagickFalse)
+    {
+      opj_destroy_codec(jp2_codec);
+      opj_image_destroy(jp2_image);
+      return(DestroyImageList(image));
+    }
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    register Quantum
+      *magick_restrict q;
+
+    register ssize_t
+      columnindex;
+
+    q=GetAuthenticPixels(image,0,y,image->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      break;
+    for (columnindex=0; columnindex < (ssize_t) image->columns; columnindex++)
+    {
+      for (i=0; i < (ssize_t) jp2_image->numcomps; i++)
+      {
+        double
+          pixel,
+          scale;
+
+        // Calculate the scale factor and pixel value for the JP2 image component.
+        // <MASK>
+        switch (i)
+        {
+           case 0:
+           {
+             if (jp2_image->numcomps == 1)
+               {
+                 SetPixelGray(image,ClampToQuantum(pixel),q);
+                 SetPixelAlpha(image,OpaqueAlpha,q);
+                 break;
+               }
+             SetPixelRed(image,ClampToQuantum(pixel),q);
+             SetPixelGreen(image,ClampToQuantum(pixel),q);
+             SetPixelBlue(image,ClampToQuantum(pixel),q);
+             SetPixelAlpha(image,OpaqueAlpha,q);
+             break;
+           }
+           case 1:
+           {
+             if (jp2_image->numcomps == 2)
+               {
+                 SetPixelAlpha(image,ClampToQuantum(pixel),q);
+                 break;
+               }
+             SetPixelGreen(image,ClampToQuantum(pixel),q);
+             break;
+           }
+           case 2:
+           {
+             SetPixelBlue(image,ClampToQuantum(pixel),q);
+             break;
+           }
+           case 3:
+           {
+             SetPixelAlpha(image,ClampToQuantum(pixel),q);
+             break;
+           }
+        }
+      }
+      q+=GetPixelChannels(image);
+    }
+    if (SyncAuthenticPixels(image,exception) == MagickFalse)
+      break;
+    status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+      image->rows);
+    if (status == MagickFalse)
+      break;
+  }
+  /*
+    Free resources.
+  */
+  opj_destroy_codec(jp2_codec);
+  opj_image_destroy(jp2_image);
+  (void) CloseBlob(image);
+  if ((image_info->number_scenes != 0) && (image_info->scene != 0))
+    AppendImageToList(&image,CloneImage(image,0,0,MagickTrue,exception));
+  return(GetFirstImageInList(image));
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// coders/jp2.c
+static MagickBooleanType WriteJP2Image(const ImageInfo *image_info,Image *image,
+  ExceptionInfo *exception)
+{
+  const char
+    *option,
+    *property;
+
+  int
+    jp2_status;
+
+  MagickBooleanType
+    status;
+
+  opj_codec_t
+    *jp2_codec;
+
+  OPJ_COLOR_SPACE
+    jp2_colorspace;
+
+  opj_cparameters_t
+    *parameters;
+
+  opj_image_cmptparm_t
+    jp2_info[5];
+
+  opj_image_t
+    *jp2_image;
+
+  opj_stream_t
+    *jp2_stream;
+
+  register ssize_t
+    i;
+
+  ssize_t
+    y;
+
+  unsigned int
+    channels;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  assert(image != (Image *) NULL);
+  assert(image->signature == MagickCoreSignature);
+  if (image->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",image->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  status=OpenBlob(image_info,image,WriteBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    return(status);
+  /*
+    Initialize JPEG 2000 API.
+  */
+  parameters=(opj_cparameters_t *) AcquireMagickMemory(sizeof(*parameters));
+  if (parameters == (opj_cparameters_t *) NULL)
+    ThrowWriterException(ResourceLimitError,"MemoryAllocationFailed");
+  opj_set_default_encoder_parameters(parameters);
+  option=GetImageOption(image_info,"jp2:number-resolutions");
+  if (option != (const char *) NULL)
+    parameters->numresolution=StringToInteger(option);
+  else
+    parameters->numresolution=CalculateNumResolutions(image->columns,
+      image->rows);
+  parameters->tcp_numlayers=1;
+  parameters->tcp_rates[0]=0;  /* lossless */
+  parameters->cp_disto_alloc=1;
+  if ((image_info->quality != 0) && (image_info->quality != 100))
+    {
+      parameters->tcp_distoratio[0]=(double) image_info->quality;
+      parameters->cp_fixed_quality=OPJ_TRUE;
+      parameters->cp_disto_alloc=0;
+    }
+  if (image_info->extract != (char *) NULL)
+    {
+      RectangleInfo
+        geometry;
+
+      int
+        flags;
+
+      /*
+        Set tile size.
+      */
+      (void) memset(&geometry,0,sizeof(geometry));
+      flags=ParseAbsoluteGeometry(image_info->extract,&geometry);
+      parameters->cp_tdx=(int) geometry.width;
+      parameters->cp_tdy=(int) geometry.width;
+      if ((flags & HeightValue) != 0)
+        parameters->cp_tdy=(int) geometry.height;
+      if ((flags & XValue) != 0)
+        parameters->cp_tx0=geometry.x;
+      if ((flags & YValue) != 0)
+        parameters->cp_ty0=geometry.y;
+      parameters->tile_size_on=OPJ_TRUE;
+      parameters->numresolution=CalculateNumResolutions(parameters->cp_tdx,
+        parameters->cp_tdy);
+    }
+  option=GetImageOption(image_info,"jp2:quality");
+  if (option != (const char *) NULL)
+    {
+      register const char
+        *p;
+
+      /*
+        Set quality PSNR.
+      */
+      p=option;
+      for (i=0; sscanf(p,"%f",&parameters->tcp_distoratio[i]) == 1; i++)
+      {
+        if (i > 100)
+          break;
+        while ((*p != '\0') && (*p != ','))
+          p++;
+        if (*p == '\0')
+          break;
+        p++;
+      }
+      parameters->tcp_numlayers=i+1;
+      parameters->cp_fixed_quality=OPJ_TRUE;
+      parameters->cp_disto_alloc=0;
+    }
+  option=GetImageOption(image_info,"jp2:progression-order");
+  if (option != (const char *) NULL)
+    {
+      if (LocaleCompare(option,"LRCP") == 0)
+        parameters->prog_order=OPJ_LRCP;
+      if (LocaleCompare(option,"RLCP") == 0)
+        parameters->prog_order=OPJ_RLCP;
+      if (LocaleCompare(option,"RPCL") == 0)
+        parameters->prog_order=OPJ_RPCL;
+      if (LocaleCompare(option,"PCRL") == 0)
+        parameters->prog_order=OPJ_PCRL;
+      if (LocaleCompare(option,"CPRL") == 0)
+        parameters->prog_order=OPJ_CPRL;
+    }
+  option=GetImageOption(image_info,"jp2:rate");
+  if (option != (const char *) NULL)
+    {
+      register const char
+        *p;
+
+      /*
+        Set compression rate.
+      */
+      p=option;
+      for (i=0; sscanf(p,"%f",&parameters->tcp_rates[i]) == 1; i++)
+      {
+        if (i >= 100)
+          break;
+        while ((*p != '\0') && (*p != ','))
+          p++;
+        if (*p == '\0')
+          break;
+        p++;
+      }
+      parameters->tcp_numlayers=i+1;
+      parameters->cp_disto_alloc=OPJ_TRUE;
+    }
+  if (image_info->sampling_factor != (const char *) NULL)
+    (void) sscanf(image_info->sampling_factor,"%d,%d",
+      &parameters->subsampling_dx,&parameters->subsampling_dy);
+  property=GetImageProperty(image,"comment",exception);
+  if (property != (const char *) NULL)
+    parameters->cp_comment=(char *) property;
+  channels=3;
+  jp2_colorspace=OPJ_CLRSPC_SRGB;
+  if (image->colorspace == YUVColorspace)
+    {
+      jp2_colorspace=OPJ_CLRSPC_SYCC;
+      parameters->subsampling_dx=2;
+    }
+  else
+    {
+      if (IsGrayColorspace(image->colorspace) != MagickFalse)
+        {
+          channels=1;
+          jp2_colorspace=OPJ_CLRSPC_GRAY;
+        }
+      else
+        (void) TransformImageColorspace(image,sRGBColorspace,exception);
+      if (image->alpha_trait != UndefinedPixelTrait)
+        channels++;
+    }
+  parameters->tcp_mct=channels == 3 ? 1 : 0;
+  memset(jp2_info,0,sizeof(jp2_info));
+  for (i=0; i < (ssize_t) channels; i++)
+  {
+    jp2_info[i].prec=(OPJ_UINT32) image->depth;
+    jp2_info[i].bpp=(OPJ_UINT32) image->depth;
+    if ((image->depth == 1) &&
+        ((LocaleCompare(image_info->magick,"JPT") == 0) ||
+         (LocaleCompare(image_info->magick,"JP2") == 0)))
+      {
+        jp2_info[i].prec++;  /* OpenJPEG returns exception for depth @ 1 */
+        jp2_info[i].bpp++;
+      }
+    jp2_info[i].sgnd=0;
+    jp2_info[i].dx=parameters->subsampling_dx;
+    jp2_info[i].dy=parameters->subsampling_dy;
+    jp2_info[i].w=(OPJ_UINT32) image->columns;
+    jp2_info[i].h=(OPJ_UINT32) image->rows;
+  }
+  jp2_image=opj_image_create((OPJ_UINT32) channels,jp2_info,jp2_colorspace);
+  if (jp2_image == (opj_image_t *) NULL)
+    {
+      parameters=(opj_cparameters_t *) RelinquishMagickMemory(parameters);
+      ThrowWriterException(DelegateError,"UnableToEncodeImageFile");
+    }
+  jp2_image->x0=parameters->image_offset_x0;
+  jp2_image->y0=parameters->image_offset_y0;
+  jp2_image->x1=(unsigned int) (2*parameters->image_offset_x0+
+    (image->columns-1)*parameters->subsampling_dx+1);
+  jp2_image->y1=(unsigned int) (2*parameters->image_offset_y0+
+    (image->rows-1)*parameters->subsampling_dx+1);
+  if ((image->depth == 12) &&
+      ((image->columns == 2048) || (image->rows == 1080) ||
+       (image->columns == 4096) || (image->rows == 2160)))
+    CinemaProfileCompliance(jp2_image,parameters);
+  if (channels == 4)
+    jp2_image->comps[3].alpha=1;
+  else
+   if ((channels == 2) && (jp2_colorspace == OPJ_CLRSPC_GRAY))
+     jp2_image->comps[1].alpha=1;
+  /*
+    Convert to JP2 pixels.
+  */
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    register const Quantum
+      *p;
+
+    ssize_t
+      x;
+
+    p=GetVirtualPixels(image,0,y,image->columns,1,exception);
+    if (p == (const Quantum *) NULL)
+      break;
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      for (i=0; i < (ssize_t) channels; i++)
+      {
+        double
+          scale;
+
+        register int
+          *q;
+
+        scale=(double) (((size_t) 1UL << jp2_image->comps[i].prec)-1)/
+          QuantumRange;
+        q=jp2_image->comps[i].data+(y/jp2_image->comps[i].dy*
+          image->columns/jp2_image->comps[i].dx+x/jp2_image->comps[i].dx);
+        switch (i)
+        {
+          case 0:
+          {
+            if (jp2_colorspace == OPJ_CLRSPC_GRAY)
+              {
+                *q=(int) (scale*GetPixelGray(image,p));
+                break;
+              }
+            *q=(int) (scale*GetPixelRed(image,p));
+            break;
+          }
+          case 1:
+          {
+            if (jp2_colorspace == OPJ_CLRSPC_GRAY)
+              {
+                *q=(int) (scale*GetPixelAlpha(image,p));
+                break;
+              }
+            *q=(int) (scale*GetPixelGreen(image,p));
+            break;
+          }
+          case 2:
+          {
+            *q=(int) (scale*GetPixelBlue(image,p));
+            break;
+          }
+          case 3:
+          {
+            *q=(int) (scale*GetPixelAlpha(image,p));
+            break;
+          }
+        }
+      }
+      p+=GetPixelChannels(image);
+    }
+    status=SetImageProgress(image,SaveImageTag,(MagickOffsetType) y,
+      image->rows);
+    if (status == MagickFalse)
+      break;
+  }
+  if (LocaleCompare(image_info->magick,"JPT") == 0)
+    jp2_codec=opj_create_compress(OPJ_CODEC_JPT);
+  else
+    if (LocaleCompare(image_info->magick,"J2K") == 0)
+      jp2_codec=opj_create_compress(OPJ_CODEC_J2K);
+    else
+      jp2_codec=opj_create_compress(OPJ_CODEC_JP2);
+  opj_set_warning_handler(jp2_codec,JP2WarningHandler,exception);
+  opj_set_error_handler(jp2_codec,JP2ErrorHandler,exception);
+  opj_setup_encoder(jp2_codec,parameters,jp2_image);
+  jp2_stream=opj_stream_create(OPJ_J2K_STREAM_CHUNK_SIZE,OPJ_FALSE);
+  if (jp2_stream == (opj_stream_t *) NULL)
+    {
+      opj_destroy_codec(jp2_codec);
+      opj_image_destroy(jp2_image);
+      parameters=(opj_cparameters_t *) RelinquishMagickMemory(parameters);
+      ThrowWriterException(DelegateError,"UnableToEncodeImageFile");
+    }
+  opj_stream_set_read_function(jp2_stream,JP2ReadHandler);
+  opj_stream_set_write_function(jp2_stream,JP2WriteHandler);
+  opj_stream_set_seek_function(jp2_stream,JP2SeekHandler);
+  opj_stream_set_skip_function(jp2_stream,JP2SkipHandler);
+  opj_stream_set_user_data(jp2_stream,image,NULL);
+  jp2_status=opj_start_compress(jp2_codec,jp2_image,jp2_stream);
+  if ((jp2_status == 0) || (opj_encode(jp2_codec,jp2_stream) == 0) ||
+      (opj_end_compress(jp2_codec,jp2_stream) == 0))
+    {
+      opj_stream_destroy(jp2_stream);
+      opj_destroy_codec(jp2_codec);
+      opj_image_destroy(jp2_image);
+      parameters=(opj_cparameters_t *) RelinquishMagickMemory(parameters);
+      ThrowWriterException(DelegateError,"UnableToEncodeImageFile");
+    }
+  /*
+    Free resources.
+  */
+  opj_stream_destroy(jp2_stream);
+  opj_destroy_codec(jp2_codec);
+  opj_image_destroy(jp2_image);
+  parameters=(opj_cparameters_t *) RelinquishMagickMemory(parameters);
+  (void) CloseBlob(image);
+  return(MagickTrue);
+}
+
+// the below code fragment can be found in:
+// coders/jpeg.c
+static Image *ReadJPEGImage_(const ImageInfo *image_info,
+  struct jpeg_decompress_struct *jpeg_info,ExceptionInfo *exception)
+{
+  char
+    value[MagickPathExtent];
+
+  const char
+    *dct_method,
+    *option;
+
+  ErrorManager
+    error_manager;
+
+  Image
+    *image;
+
+  JSAMPLE
+    *volatile jpeg_pixels;
+
+  JSAMPROW
+    scanline[1];
+
+  MagickBooleanType
+    debug,
+    status;
+
+  MagickSizeType
+    number_pixels;
+
+  MemoryInfo
+    *memory_info;
+
+  Quantum
+    index;
+
+  register ssize_t
+    i;
+
+  struct jpeg_error_mgr
+    jpeg_error;
+
+  struct jpeg_progress_mgr
+    jpeg_progress;
+
+  register JSAMPLE
+    *p;
+
+  size_t
+    units;
+
+  ssize_t
+    y;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  debug=IsEventLogging();
+  (void) debug;
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Verify that file size large enough to contain a JPEG datastream.
+  */
+  if (GetBlobSize(image) < 107)
+    ThrowReaderException(CorruptImageError,"InsufficientImageDataInFile");
+  /*
+    Initialize JPEG parameters.
+  */
+  (void) memset(&error_manager,0,sizeof(error_manager));
+  (void) memset(jpeg_info,0,sizeof(*jpeg_info));
+  (void) memset(&jpeg_error,0,sizeof(jpeg_error));
+  (void) memset(&jpeg_progress,0,sizeof(jpeg_progress));
+  jpeg_info->err=jpeg_std_error(&jpeg_error);
+  jpeg_info->err->emit_message=(void (*)(j_common_ptr,int)) JPEGWarningHandler;
+  jpeg_info->err->error_exit=(void (*)(j_common_ptr)) JPEGErrorHandler;
+  memory_info=(MemoryInfo *) NULL;
+  error_manager.exception=exception;
+  error_manager.image=image;
+  if (setjmp(error_manager.error_recovery) != 0)
+    {
+      jpeg_destroy_decompress(jpeg_info);
+      if (error_manager.profile != (StringInfo *) NULL)
+        error_manager.profile=DestroyStringInfo(error_manager.profile);
+      (void) CloseBlob(image);
+      number_pixels=(MagickSizeType) image->columns*image->rows;
+      if (number_pixels != 0)
+        return(GetFirstImageInList(image));
+      return(DestroyImage(image));
+    }
+  jpeg_info->client_data=(void *) &error_manager;
+  jpeg_create_decompress(jpeg_info);
+  if (GetMaxMemoryRequest() != ~0UL)
+    jpeg_info->mem->max_memory_to_use=(long) GetMaxMemoryRequest();
+  jpeg_progress.progress_monitor=(void (*)(j_common_ptr)) JPEGProgressHandler;
+  jpeg_info->progress=(&jpeg_progress);
+  JPEGSourceManager(jpeg_info,image);
+  jpeg_set_marker_processor(jpeg_info,JPEG_COM,ReadComment);
+  option=GetImageOption(image_info,"profile:skip");
+  if (IsOptionMember("ICC",option) == MagickFalse)
+    jpeg_set_marker_processor(jpeg_info,ICC_MARKER,ReadICCProfile);
+  if (IsOptionMember("IPTC",option) == MagickFalse)
+    jpeg_set_marker_processor(jpeg_info,IPTC_MARKER,ReadIPTCProfile);
+  for (i=1; i < 16; i++)
+    if ((i != 2) && (i != 13) && (i != 14))
+      if (IsOptionMember("APP",option) == MagickFalse)
+        jpeg_set_marker_processor(jpeg_info,(int) (JPEG_APP0+i),ReadProfile);
+  i=(ssize_t) jpeg_read_header(jpeg_info,TRUE);
+  if ((image_info->colorspace == YCbCrColorspace) ||
+      (image_info->colorspace == Rec601YCbCrColorspace) ||
+      (image_info->colorspace == Rec709YCbCrColorspace))
+    jpeg_info->out_color_space=JCS_YCbCr;
+  /*
+    Set image resolution.
+  */
+  units=0;
+  if ((jpeg_info->saw_JFIF_marker != 0) && (jpeg_info->X_density != 1) &&
+      (jpeg_info->Y_density != 1))
+    {
+      image->resolution.x=(double) jpeg_info->X_density;
+      image->resolution.y=(double) jpeg_info->Y_density;
+      units=(size_t) jpeg_info->density_unit;
+    }
+  if (units == 1)
+    image->units=PixelsPerInchResolution;
+  if (units == 2)
+    image->units=PixelsPerCentimeterResolution;
+  number_pixels=(MagickSizeType) image->columns*image->rows;
+  option=GetImageOption(image_info,"jpeg:size");
+  if ((option != (const char *) NULL) &&
+      (jpeg_info->out_color_space != JCS_YCbCr))
+    {
+      double
+        scale_factor;
+
+      GeometryInfo
+        geometry_info;
+
+      MagickStatusType
+        flags;
+
+      /*
+        Scale the image.
+      */
+      flags=ParseGeometry(option,&geometry_info);
+      if ((flags & SigmaValue) == 0)
+        geometry_info.sigma=geometry_info.rho;
+      jpeg_calc_output_dimensions(jpeg_info);
+      image->magick_columns=jpeg_info->output_width;
+      image->magick_rows=jpeg_info->output_height;
+      scale_factor=1.0;
+      if (geometry_info.rho != 0.0)
+        scale_factor=jpeg_info->output_width/geometry_info.rho;
+      if ((geometry_info.sigma != 0.0) &&
+          (scale_factor > (jpeg_info->output_height/geometry_info.sigma)))
+        scale_factor=jpeg_info->output_height/geometry_info.sigma;
+      jpeg_info->scale_num=1U;
+      jpeg_info->scale_denom=(unsigned int) scale_factor;
+      jpeg_calc_output_dimensions(jpeg_info);
+      if (image->debug != MagickFalse)
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+          "Scale factor: %.20g",(double) scale_factor);
+    }
+#if (JPEG_LIB_VERSION >= 61) && defined(D_PROGRESSIVE_SUPPORTED)
+#if defined(D_LOSSLESS_SUPPORTED)
+  image->interlace=jpeg_info->process == JPROC_PROGRESSIVE ?
+    JPEGInterlace : NoInterlace;
+  image->compression=jpeg_info->process == JPROC_LOSSLESS ?
+    LosslessJPEGCompression : JPEGCompression;
+  if (jpeg_info->data_precision > 8)
+    (void) ThrowMagickException(exception,GetMagickModule(),OptionError,
+      "12-bit JPEG not supported. Reducing pixel data to 8 bits","`%s'",
+      image->filename);
+  if (jpeg_info->data_precision == 16)
+    jpeg_info->data_precision=12;
+#else
+  image->interlace=jpeg_info->progressive_mode != 0 ? JPEGInterlace :
+    NoInterlace;
+  image->compression=JPEGCompression;
+#endif
+#else
+  image->compression=JPEGCompression;
+  image->interlace=JPEGInterlace;
+#endif
+  option=GetImageOption(image_info,"jpeg:colors");
+  if (option != (const char *) NULL)
+    {
+      /*
+        Let the JPEG library quantize the image.
+      */
+      jpeg_info->quantize_colors=TRUE;
+      jpeg_info->desired_number_of_colors=(int) StringToUnsignedLong(option);
+    }
+  option=GetImageOption(image_info,"jpeg:block-smoothing");
+  if (option != (const char *) NULL)
+    jpeg_info->do_block_smoothing=IsStringTrue(option) != MagickFalse ? TRUE :
+      FALSE;
+  dct_method=GetImageOption(image_info,"jpeg:dct-method");
+  if (dct_method != (const char *) NULL)
+    switch (*dct_method)
+    {
+      case 'D':
+      case 'd':
+      {
+        if (LocaleCompare(dct_method,"default") == 0)
+          jpeg_info->dct_method=JDCT_DEFAULT;
+        break;
+      }
+      case 'F':
+      case 'f':
+      {
+        if (LocaleCompare(dct_method,"fastest") == 0)
+          jpeg_info->dct_method=JDCT_FASTEST;
+        if (LocaleCompare(dct_method,"float") == 0)
+          jpeg_info->dct_method=JDCT_FLOAT;
+        break;
+      }
+      case 'I':
+      case 'i':
+      {
+        if (LocaleCompare(dct_method,"ifast") == 0)
+          jpeg_info->dct_method=JDCT_IFAST;
+        if (LocaleCompare(dct_method,"islow") == 0)
+          jpeg_info->dct_method=JDCT_ISLOW;
+        break;
+      }
+    }
+  option=GetImageOption(image_info,"jpeg:fancy-upsampling");
+  if (option != (const char *) NULL)
+    jpeg_info->do_fancy_upsampling=IsStringTrue(option) != MagickFalse ? TRUE :
+      FALSE;
+  jpeg_calc_output_dimensions(jpeg_info);
+  image->columns=jpeg_info->output_width;
+  image->rows=jpeg_info->output_height;
+  image->depth=(size_t) jpeg_info->data_precision;
+  switch (jpeg_info->out_color_space)
+  {
+    case JCS_RGB:
+    default:
+    {
+      (void) SetImageColorspace(image,sRGBColorspace,exception);
+      break;
+    }
+    case JCS_GRAYSCALE:
+    {
+      (void) SetImageColorspace(image,GRAYColorspace,exception);
+      break;
+    }
+    case JCS_YCbCr:
+    {
+      (void) SetImageColorspace(image,YCbCrColorspace,exception);
+      break;
+    }
+    case JCS_CMYK:
+    {
+      (void) SetImageColorspace(image,CMYKColorspace,exception);
+      break;
+    }
+  }
+  if (IsITUFaxImage(image) != MagickFalse)
+    {
+      (void) SetImageColorspace(image,LabColorspace,exception);
+      jpeg_info->out_color_space=JCS_YCbCr;
+    }
+  option=GetImageOption(image_info,"jpeg:colors");
+  if (option != (const char *) NULL)
+    if (AcquireImageColormap(image,StringToUnsignedLong(option),exception) == MagickFalse)
+      {
+        jpeg_destroy_decompress(jpeg_info);
+        ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+      }
+  if ((jpeg_info->output_components == 1) && (jpeg_info->quantize_colors == 0))
+    {
+      size_t
+        colors;
+
+      colors=(size_t) GetQuantumRange(image->depth)+1;
+      if (AcquireImageColormap(image,colors,exception) == MagickFalse)
+        {
+          jpeg_destroy_decompress(jpeg_info);
+          ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+        }
+    }
+  if (image->debug != MagickFalse)
+    {
+      if (image->interlace != NoInterlace)
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+          "Interlace: progressive");
+      else
+        (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+          "Interlace: nonprogressive");
+      (void) LogMagickEvent(CoderEvent,GetMagickModule(),"Data precision: %d",
+        (int) jpeg_info->data_precision);
+      (void) LogMagickEvent(CoderEvent,GetMagickModule(),"Geometry: %dx%d",
+        (int) jpeg_info->output_width,(int) jpeg_info->output_height);
+    }
+  JPEGSetImageQuality(jpeg_info,image);
+  JPEGSetImageSamplingFactor(jpeg_info,image,exception);
+  (void) FormatLocaleString(value,MagickPathExtent,"%.20g",(double)
+    jpeg_info->out_color_space);
+  (void) SetImageProperty(image,"jpeg:colorspace",value,exception);
+#if defined(D_ARITH_CODING_SUPPORTED)
+  if (jpeg_info->arith_code == TRUE)
+    (void) SetImageProperty(image,"jpeg:coding","arithmetic",exception);
+#endif
+  if (image_info->ping != MagickFalse)
+    {
+      jpeg_destroy_decompress(jpeg_info);
+      (void) CloseBlob(image);
+      return(GetFirstImageInList(image));
+    }
+  status=SetImageExtent(image,image->columns,image->rows,exception);
+  if (status == MagickFalse)
+    {
+      jpeg_destroy_decompress(jpeg_info);
+      return(DestroyImageList(image));
+    }
+  (void) jpeg_start_decompress(jpeg_info);
+  if ((jpeg_info->output_components != 1) &&
+      (jpeg_info->output_components != 3) && (jpeg_info->output_components != 4))
+    {
+      jpeg_destroy_decompress(jpeg_info);
+      ThrowReaderException(CorruptImageError,"ImageTypeNotSupported");
+    }
+  memory_info=AcquireVirtualMemory((size_t) image->columns,
+    jpeg_info->output_components*sizeof(*jpeg_pixels));
+  if (memory_info == (MemoryInfo *) NULL)
+    {
+      jpeg_destroy_decompress(jpeg_info);
+      ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+    }
+  jpeg_pixels=(JSAMPLE *) GetVirtualMemoryBlob(memory_info);
+  (void) memset(jpeg_pixels,0,image->columns*
+    jpeg_info->output_components*sizeof(*jpeg_pixels));
+  /*
+    Convert JPEG pixels to pixel packets.
+  */
+  if (setjmp(error_manager.error_recovery) != 0)
+    {
+      if (memory_info != (MemoryInfo *) NULL)
+        memory_info=RelinquishVirtualMemory(memory_info);
+      jpeg_destroy_decompress(jpeg_info);
+      (void) CloseBlob(image);
+      number_pixels=(MagickSizeType) image->columns*image->rows;
+      if (number_pixels != 0)
+        return(GetFirstImageInList(image));
+      return(DestroyImage(image));
+    }
+  if (jpeg_info->quantize_colors != 0)
+    {
+      image->colors=(size_t) jpeg_info->actual_number_of_colors;
+      if (jpeg_info->out_color_space == JCS_GRAYSCALE)
+        for (i=0; i < (ssize_t) image->colors; i++)
+        {
+          image->colormap[i].red=(double) ScaleCharToQuantum(
+            jpeg_info->colormap[0][i]);
+          image->colormap[i].green=image->colormap[i].red;
+          image->colormap[i].blue=image->colormap[i].red;
+          image->colormap[i].alpha=(MagickRealType) OpaqueAlpha;
+        }
+      else
+        for (i=0; i < (ssize_t) image->colors; i++)
+        {
+          image->colormap[i].red=(double) ScaleCharToQuantum(
+            jpeg_info->colormap[0][i]);
+          image->colormap[i].green=(double) ScaleCharToQuantum(
+            jpeg_info->colormap[1][i]);
+          image->colormap[i].blue=(double) ScaleCharToQuantum(
+            jpeg_info->colormap[2][i]);
+          image->colormap[i].alpha=(MagickRealType) OpaqueAlpha;
+        }
+    }
+  scanline[0]=(JSAMPROW) jpeg_pixels;
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    register ssize_t
+      x;
+
+    register Quantum
+      *magick_restrict q;
+
+    if (jpeg_read_scanlines(jpeg_info,scanline,1) != 1)
+      {
+        (void) ThrowMagickException(exception,GetMagickModule(),
+          CorruptImageWarning,"SkipToSyncByte","`%s'",image->filename);
+        continue;
+      }
+    p=jpeg_pixels;
+    q=QueueAuthenticPixels(image,0,y,image->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      break;
+    if (jpeg_info->data_precision > 8)
+      {
+        unsigned short
+          scale;
+
+        scale=65535/(unsigned short) GetQuantumRange((size_t)
+          jpeg_info->data_precision);
+        if (jpeg_info->output_components == 1)
+          for (x=0; x < (ssize_t) image->columns; x++)
+          {
+            ssize_t
+              pixel;
+
+            pixel=(ssize_t) (scale*GETJSAMPLE(*p));
+            index=(Quantum) ConstrainColormapIndex(image,pixel,exception);
+            SetPixelIndex(image,index,q);
+            SetPixelViaPixelInfo(image,image->colormap+(ssize_t) index,q);
+            p++;
+            q+=GetPixelChannels(image);
+          }
+        else
+          if (image->colorspace != CMYKColorspace)
+            for (x=0; x < (ssize_t) image->columns; x++)
+            {
+              SetPixelRed(image,ScaleShortToQuantum(
+                (unsigned short) (scale*GETJSAMPLE(*p++))),q);
+              SetPixelGreen(image,ScaleShortToQuantum(
+                (unsigned short) (scale*GETJSAMPLE(*p++))),q);
+              SetPixelBlue(image,ScaleShortToQuantum(
+                (unsigned short) (scale*GETJSAMPLE(*p++))),q);
+              SetPixelAlpha(image,OpaqueAlpha,q);
+              q+=GetPixelChannels(image);
+            }
+          else
+            for (x=0; x < (ssize_t) image->columns; x++)
+            {
+              SetPixelCyan(image,QuantumRange-ScaleShortToQuantum(
+                (unsigned short) (scale*GETJSAMPLE(*p++))),q);
+              SetPixelMagenta(image,QuantumRange-ScaleShortToQuantum(
+                (unsigned short) (scale*GETJSAMPLE(*p++))),q);
+              SetPixelYellow(image,QuantumRange-ScaleShortToQuantum(
+                (unsigned short) (scale*GETJSAMPLE(*p++))),q);
+              SetPixelBlack(image,QuantumRange-ScaleShortToQuantum(
+                (unsigned short) (scale*GETJSAMPLE(*p++))),q);
+              SetPixelAlpha(image,OpaqueAlpha,q);
+              q+=GetPixelChannels(image);
+            }
+      }
+    else
+      if (jpeg_info->output_components == 1)
+        for (x=0; x < (ssize_t) image->columns; x++)
+        {
+          ssize_t
+            pixel;
+
+          pixel=(ssize_t) GETJSAMPLE(*p);
+          index=(Quantum) ConstrainColormapIndex(image,pixel,exception);
+          SetPixelIndex(image,index,q);
+          SetPixelViaPixelInfo(image,image->colormap+(ssize_t) index,q);
+          p++;
+          q+=GetPixelChannels(image);
+        }
+      else
+        if (image->colorspace != CMYKColorspace)
+          for (x=0; x < (ssize_t) image->columns; x++)
+          {
+            SetPixelRed(image,ScaleCharToQuantum((unsigned char)
+              GETJSAMPLE(*p++)),q);
+            SetPixelGreen(image,ScaleCharToQuantum((unsigned char)
+              GETJSAMPLE(*p++)),q);
+            SetPixelBlue(image,ScaleCharToQuantum((unsigned char)
+              GETJSAMPLE(*p++)),q);
+            SetPixelAlpha(image,OpaqueAlpha,q);
+            q+=GetPixelChannels(image);
+          }
+        else
+          for (x=0; x < (ssize_t) image->columns; x++)
+          {
+            SetPixelCyan(image,QuantumRange-ScaleCharToQuantum(
+              (unsigned char) GETJSAMPLE(*p++)),q);
+            SetPixelMagenta(image,QuantumRange-ScaleCharToQuantum(
+              (unsigned char) GETJSAMPLE(*p++)),q);
+            SetPixelYellow(image,QuantumRange-ScaleCharToQuantum(
+              (unsigned char) GETJSAMPLE(*p++)),q);
+            SetPixelBlack(image,QuantumRange-ScaleCharToQuantum(
+              (unsigned char) GETJSAMPLE(*p++)),q);
+            SetPixelAlpha(image,OpaqueAlpha,q);
+            q+=GetPixelChannels(image);
+          }
+    if (SyncAuthenticPixels(image,exception) == MagickFalse)
+      break;
+    status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+      image->rows);
+    if (status == MagickFalse)
+      {
+        jpeg_abort_decompress(jpeg_info);
+        break;
+      }
+  }
+  if (status != MagickFalse)
+    {
+      error_manager.finished=MagickTrue;
+      if (setjmp(error_manager.error_recovery) == 0)
+        (void) jpeg_finish_decompress(jpeg_info);
+    }
+  /*
+    Free jpeg resources.
+  */
+  jpeg_destroy_decompress(jpeg_info);
+  memory_info=RelinquishVirtualMemory(memory_info);
+  (void) CloseBlob(image);
+  return(GetFirstImageInList(image));
+}
+
+// the below code fragment can be found in:
+// coders/jbig.c
+static Image *ReadJBIGImage(const ImageInfo *image_info,
+  ExceptionInfo *exception)
+{
+  Image
+    *image;
+
+  MagickStatusType
+    status;
+
+  Quantum
+    index;
+
+  register ssize_t
+    x;
+
+  register Quantum
+    *q;
+
+  register unsigned char
+    *p;
+
+  ssize_t
+    length,
+    y;
+
+  struct jbg_dec_state
+    jbig_info;
+
+  unsigned char
+    bit,
+    *buffer,
+    byte;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Initialize JBIG toolkit.
+  */
+  jbg_dec_init(&jbig_info);
+  jbg_dec_maxsize(&jbig_info,(unsigned long) image->columns,(unsigned long)
+    image->rows);
+  image->columns=jbg_dec_getwidth(&jbig_info);
+  image->rows=jbg_dec_getheight(&jbig_info);
+  image->depth=8;
+  image->storage_class=PseudoClass;
+  image->colors=2;
+  /*
+    Read JBIG file.
+  */
+  buffer=(unsigned char *) AcquireQuantumMemory(MagickMaxBufferExtent,
+    sizeof(*buffer));
+  if (buffer == (unsigned char *) NULL)
+    {
+      jbg_dec_free(&jbig_info);
+      ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+    }
+  status=JBG_EAGAIN;
+  do
+  {
+    length=(ssize_t) ReadBlob(image,MagickMaxBufferExtent,buffer);
+    if (length == 0)
+      break;
+    p=buffer;
+    while ((length > 0) && ((status == JBG_EAGAIN) || (status == JBG_EOK)))
+    {
+      size_t
+        count;
+
+      status=jbg_dec_in(&jbig_info,p,length,&count);
+      p+=count;
+      length-=(ssize_t) count;
+    }
+  } while ((status == JBG_EAGAIN) || (status == JBG_EOK));
+  /*
+    Create colormap.
+  */
+  image->columns=jbg_dec_getwidth(&jbig_info);
+  image->rows=jbg_dec_getheight(&jbig_info);
+  image->compression=JBIG2Compression;
+  if (AcquireImageColormap(image,2,exception) == MagickFalse)
+    {
+      jbg_dec_free(&jbig_info);
+      buffer=(unsigned char *) RelinquishMagickMemory(buffer);
+      ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+    }
+  image->colormap[0].red=0;
+  image->colormap[0].green=0;
+  image->colormap[0].blue=0;
+  image->colormap[1].red=QuantumRange;
+  image->colormap[1].green=QuantumRange;
+  image->colormap[1].blue=QuantumRange;
+  image->resolution.x=300;
+  image->resolution.y=300;
+  if (image_info->ping != MagickFalse)
+    {
+      jbg_dec_free(&jbig_info);
+      buffer=(unsigned char *) RelinquishMagickMemory(buffer);
+      (void) CloseBlob(image);
+      return(GetFirstImageInList(image));
+    }
+  status=SetImageExtent(image,image->columns,image->rows,exception);
+  if (status == MagickFalse)
+    {
+      jbg_dec_free(&jbig_info);
+      buffer=(unsigned char *) RelinquishMagickMemory(buffer);
+      return(DestroyImageList(image));
+    }
+  /*
+    Convert X bitmap image to pixel packets.
+  */
+  p=jbg_dec_getimage(&jbig_info,0);
+  for (y=0; y < (ssize_t) image->rows; y++)
+  {
+    q=QueueAuthenticPixels(image,0,y,image->columns,1,exception);
+    if (q == (Quantum *) NULL)
+      break;
+    bit=0;
+    byte=0;
+    for (x=0; x < (ssize_t) image->columns; x++)
+    {
+      if (bit == 0)
+        byte=(*p++);
+      index=(byte & 0x80) ? 0 : 1;
+      bit++;
+      byte<<=1;
+      if (bit == 8)
+        bit=0;
+      SetPixelIndex(image,index,q);
+      SetPixelViaPixelInfo(image,image->colormap+(ssize_t) index,q);
+      q+=GetPixelChannels(image);
+    }
+    if (SyncAuthenticPixels(image,exception) == MagickFalse)
+      break;
+    status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+      image->rows);
+    if (status == MagickFalse)
+      break;
+  }
+  /*
+    Free scale resource.
+  */
+  jbg_dec_free(&jbig_info);
+  buffer=(unsigned char *) RelinquishMagickMemory(buffer);
+  (void) CloseBlob(image);
+  return(GetFirstImageInList(image));
+}
+
+// the below code fragment can be found in:
+// coders/jnx.c
+static Image *ReadJNXImage(const ImageInfo *image_info,ExceptionInfo *exception)
+{
+#define JNXMaxLevels  20
+
+  Image
+    *image,
+    *images;
+
+  JNXInfo
+    jnx_info;
+
+  JNXLevelInfo
+    jnx_level_info[JNXMaxLevels];
+
+  MagickBooleanType
+    status;
+
+  register ssize_t
+    i;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Read JNX header.
+  */
+  (void) memset(&jnx_info,0,sizeof(jnx_info));
+  jnx_info.version=ReadBlobLSBSignedLong(image);
+  if ((jnx_info.version != 3) && (jnx_info.version != 4))
+    ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+  jnx_info.serial=ReadBlobLSBSignedLong(image);
+  jnx_info.northeast.x=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+  jnx_info.northeast.y=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+  jnx_info.southwest.x=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+  jnx_info.southwest.y=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+  jnx_info.levels=ReadBlobLSBSignedLong(image);
+  if (jnx_info.levels > JNXMaxLevels)
+    ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+  jnx_info.expire=ReadBlobLSBSignedLong(image);
+  jnx_info.id=ReadBlobLSBSignedLong(image);
+  jnx_info.crc=ReadBlobLSBSignedLong(image);
+  jnx_info.signature=ReadBlobLSBSignedLong(image);
+  jnx_info.offset=ReadBlobLSBLong(image);
+  if (jnx_info.version > 3)
+    jnx_info.order=ReadBlobLSBSignedLong(image);
+  else
+    if (jnx_info.version == 3)
+      jnx_info.order=30;
+  if (EOFBlob(image) != MagickFalse)
+    ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+  /*
+    Read JNX levels.
+  */
+  (void) memset(&jnx_level_info,0,sizeof(jnx_level_info));
+  for (i=0; i < (ssize_t) jnx_info.levels; i++)
+  {
+    jnx_level_info[i].count=ReadBlobLSBSignedLong(image);
+    if (jnx_level_info[i].count > 50000)
+      ThrowReaderException(CorruptImageError,"ImproperImageHeader");
+    jnx_level_info[i].offset=ReadBlobLSBSignedLong(image);
+    jnx_level_info[i].scale=ReadBlobLSBLong(image);
+    *jnx_level_info[i].copyright='\0';
+    if (jnx_info.version > 3)
+      {
+        register ssize_t
+          j;
+
+        unsigned short
+          c;
+
+        (void) ReadBlobLSBLong(image);
+        j=0;
+        while ((c=ReadBlobLSBShort(image)) != 0)
+          if (j < (MagickPathExtent-1))
+            jnx_level_info[i].copyright[j++]=c;
+        jnx_level_info[i].copyright[j]='\0';
+      }
+    if (EOFBlob(image) != MagickFalse)
+      ThrowReaderException(CorruptImageError,"UnexpectedEndOfFile");
+  }
+  /*
+    Read JNX tiles.
+  */
+  images=NewImageList();
+  for (i=0; i < (ssize_t) jnx_info.levels; i++)
+  {
+    MagickOffsetType
+      offset;
+
+    register ssize_t
+      j;
+
+    offset=SeekBlob(image,(MagickOffsetType) jnx_level_info[i].offset,SEEK_SET);
+    if (offset != (MagickOffsetType) jnx_level_info[i].offset)
+      continue;
+    for (j=0; j < (ssize_t) jnx_level_info[i].count; j++)
+    {
+      Image
+        *tile_image;
+
+      ImageInfo
+        *read_info;
+
+      int
+        tile_offset;
+
+      MagickOffsetType
+        restore_offset;
+
+      PointInfo
+        northeast,
+        southwest;
+
+      ssize_t
+        count;
+
+      unsigned char
+        *blob;
+
+      unsigned int
+        tile_length;
+
+      northeast.x=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+      northeast.y=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+      southwest.x=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+      southwest.y=180.0*ReadBlobLSBSignedLong(image)/0x7fffffff;
+      (void) ReadBlobLSBShort(image); /* width */
+      (void) ReadBlobLSBShort(image); /* height */
+      if (EOFBlob(image) != MagickFalse)
+        {
+          images=DestroyImageList(images);
+          ThrowReaderException(CorruptImageError,"UnexpectedEndOfFile");
+        }
+      tile_length=ReadBlobLSBLong(image);
+      tile_offset=ReadBlobLSBSignedLong(image);
+      if (tile_offset == -1)
+        continue;
+      restore_offset=TellBlob(image);
+      if (restore_offset < 0)
+        continue;
+      offset=SeekBlob(image,(MagickOffsetType) tile_offset,SEEK_SET);
+      if (offset != (MagickOffsetType) tile_offset)
+        continue;
+      /*
+        Read a tile.
+      */
+      if (((MagickSizeType) tile_length) > GetBlobSize(image))
+        {
+          images=DestroyImageList(images);
+          ThrowReaderException(CorruptImageError,"InsufficientImageDataInFile");
+        }
+      blob=(unsigned char *) AcquireQuantumMemory((size_t) tile_length+2,
+        sizeof(*blob));
+      if (blob == (unsigned char *) NULL)
+        {
+          images=DestroyImageList(images);
+          ThrowReaderException(ResourceLimitError,"MemoryAllocationFailed");
+        }
+      blob[0]=0xFF;
+      blob[1]=0xD8;
+      count=ReadBlob(image,tile_length,blob+2);
+      if (count != (ssize_t) tile_length)
+        {
+          images=DestroyImageList(images);
+          blob=(unsigned char *) RelinquishMagickMemory(blob);
+          ThrowReaderException(CorruptImageError,"UnexpectedEndOfFile");
+        }
+      read_info=CloneImageInfo(image_info);
+      (void) CopyMagickString(read_info->magick,"JPEG",MagickPathExtent);
+      tile_image=BlobToImage(read_info,blob,tile_length+2,exception);
+      read_info=DestroyImageInfo(read_info);
+      blob=(unsigned char *) RelinquishMagickMemory(blob);
+      offset=SeekBlob(image,restore_offset,SEEK_SET);
+      if (tile_image == (Image *) NULL)
+        continue;
+      tile_image->depth=8;
+      (void) CopyMagickString(tile_image->magick,image->magick,
+        MagickPathExtent);
+      (void) FormatImageProperty(tile_image,"jnx:northeast","%.20g,%.20g",
+        northeast.x,northeast.y);
+      (void) FormatImageProperty(tile_image,"jnx:southwest","%.20g,%.20g",
+        southwest.x,southwest.y);
+      AppendImageToList(&images,tile_image);
+    }
+    if (image->progress_monitor != (MagickProgressMonitor) NULL)
+      {
+        MagickBooleanType
+          proceed;
+
+        proceed=SetImageProgress(image,LoadImageTag,(MagickOffsetType) i,
+          (MagickSizeType) jnx_info.levels);
+        if (proceed == MagickFalse)
+          status=MagickFalse;
+      }
+  }
+  (void) CloseBlob(image);
+  image=DestroyImage(image);
+  return(GetFirstImageInList(images));
+}
+
+// the below code fragment can be found in:
+// coders/pict.c
+static Image *ReadPICTImage(const ImageInfo *image_info,
+  ExceptionInfo *exception)
+{
+#define ThrowPICTException(exception,message) \
+{ \
+  if (tile_image != (Image *) NULL) \
+    tile_image=DestroyImage(tile_image); \
+  if (read_info != (ImageInfo *) NULL) \
+    read_info=DestroyImageInfo(read_info); \
+  ThrowReaderException((exception),(message)); \
+}
+
+  char
+    geometry[MagickPathExtent],
+    header_ole[4];
+
+  Image
+    *image,
+    *tile_image;
+
+  ImageInfo
+    *read_info;
+
+  int
+    c,
+    code;
+
+  MagickBooleanType
+    jpeg,
+    status;
+
+  PICTRectangle
+    frame;
+
+  PICTPixmap
+    pixmap;
+
+  Quantum
+    index;
+
+  register Quantum
+    *q;
+
+  register ssize_t
+    i,
+    x;
+
+  size_t
+    extent,
+    length;
+
+  ssize_t
+    count,
+    flags,
+    j,
+    version,
+    y;
+
+  StringInfo
+    *profile;
+
+  /*
+    Open image file.
+  */
+  assert(image_info != (const ImageInfo *) NULL);
+  assert(image_info->signature == MagickCoreSignature);
+  if (image_info->debug != MagickFalse)
+    (void) LogMagickEvent(TraceEvent,GetMagickModule(),"%s",
+      image_info->filename);
+  assert(exception != (ExceptionInfo *) NULL);
+  assert(exception->signature == MagickCoreSignature);
+  image=AcquireImage(image_info,exception);
+  status=OpenBlob(image_info,image,ReadBinaryBlobMode,exception);
+  if (status == MagickFalse)
+    {
+      image=DestroyImageList(image);
+      return((Image *) NULL);
+    }
+  /*
+    Read PICT header.
+  */
+  read_info=(ImageInfo *) NULL;
+  tile_image=(Image *) NULL;
+  pixmap.bits_per_pixel=0;
+  pixmap.component_count=0;
+  /*
+    Skip header : 512 for standard PICT and 4, ie "PICT" for OLE2.
+  */
+  header_ole[0]=ReadBlobByte(image);
+  header_ole[1]=ReadBlobByte(image);
+  header_ole[2]=ReadBlobByte(image);
+  header_ole[3]=ReadBlobByte(image);
+  if (!((header_ole[0] == 0x50) && (header_ole[1] == 0x49) &&
+      (header_ole[2] == 0x43) && (header_ole[3] == 0x54 )))
+    for (i=0; i < 508; i++)
+      if (ReadBlobByte(image) == EOF)
+        break;
+  (void) ReadBlobMSBShort(image);  /* skip picture size */
+  if (ReadRectangle(image,&frame) == MagickFalse)
+    ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+  while ((c=ReadBlobByte(image)) == 0) ;
+  if (c != 0x11)
+    ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+  version=(ssize_t) ReadBlobByte(image);
+  if (version == 2)
+    {
+      c=ReadBlobByte(image);
+      if (c != 0xff)
+        ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+    }
+  else
+    if (version != 1)
+      ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+  if ((frame.left < 0) || (frame.right < 0) || (frame.top < 0) ||
+      (frame.bottom < 0) || (frame.left >= frame.right) ||
+      (frame.top >= frame.bottom))
+    ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+  /*
+    Create black canvas.
+  */
+  flags=0;
+  image->depth=8;
+  image->columns=(size_t) (frame.right-frame.left);
+  image->rows=(size_t) (frame.bottom-frame.top);
+  image->resolution.x=DefaultResolution;
+  image->resolution.y=DefaultResolution;
+  image->units=UndefinedResolution;
+  if ((image_info->ping != MagickFalse) && (image_info->number_scenes != 0))
+    if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+      {
+        (void) CloseBlob(image);
+        return(GetFirstImageInList(image));
+      }
+  status=SetImageExtent(image,image->columns,image->rows,exception);
+  if (status != MagickFalse)
+    status=ResetImagePixels(image,exception);
+  if (status == MagickFalse)
+    return(DestroyImageList(image));
+  /*
+    Interpret PICT opcodes.
+  */
+  jpeg=MagickFalse;
+  for (code=0; EOFBlob(image) == MagickFalse; )
+  {
+    if ((image_info->ping != MagickFalse) && (image_info->number_scenes != 0))
+      if (image->scene >= (image_info->scene+image_info->number_scenes-1))
+        break;
+    if ((version == 1) || ((TellBlob(image) % 2) != 0))
+      code=ReadBlobByte(image);
+    if (version == 2)
+      code=ReadBlobMSBSignedShort(image);
+    code&=0xffff;
+    if (code < 0)
+      break;
+    if (code == 0)
+      continue;
+    if (code > 0xa1)
+      {
+        if (image->debug != MagickFalse)
+          (void) LogMagickEvent(CoderEvent,GetMagickModule(),"%04X:",code);
+      }
+    else
+      {
+        if (image->debug != MagickFalse)
+          (void) LogMagickEvent(CoderEvent,GetMagickModule(),
+            "  %04X %s: %s",code,codes[code].name,codes[code].description);
+        switch (code)
+        {
+          case 0x01:
+          {
+            /*
+              Clipping rectangle.
+            */
+            length=ReadBlobMSBShort(image);
+            if ((MagickSizeType) length > GetBlobSize(image))
+              ThrowPICTException(CorruptImageError,
+                "InsufficientImageDataInFile");
+            if (length != 0x000a)
+              {
+                for (i=0; i < (ssize_t) (length-2); i++)
+                  if (ReadBlobByte(image) == EOF)
+                    break;
+                break;
+              }
+            if (ReadRectangle(image,&frame) == MagickFalse)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            if (((frame.left & 0x8000) != 0) || ((frame.top & 0x8000) != 0))
+              break;
+            image->columns=(size_t) (frame.right-frame.left);
+            image->rows=(size_t) (frame.bottom-frame.top);
+            status=SetImageExtent(image,image->columns,image->rows,exception);
+            if (status != MagickFalse)
+              status=ResetImagePixels(image,exception);
+            if (status == MagickFalse)
+              return(DestroyImageList(image));
+            break;
+          }
+          case 0x12:
+          case 0x13:
+          case 0x14:
+          {
+            ssize_t
+              pattern;
+
+            size_t
+              height,
+              width;
+
+            /*
+              Skip pattern definition.
+            */
+            pattern=(ssize_t) ReadBlobMSBShort(image);
+            for (i=0; i < 8; i++)
+              if (ReadBlobByte(image) == EOF)
+                break;
+            if (pattern == 2)
+              {
+                for (i=0; i < 5; i++)
+                  if (ReadBlobByte(image) == EOF)
+                    break;
+                break;
+              }
+            if (pattern != 1)
+              ThrowPICTException(CorruptImageError,"UnknownPatternType");
+            length=ReadBlobMSBShort(image);
+            if ((MagickSizeType) length > GetBlobSize(image))
+              ThrowPICTException(CorruptImageError,
+                "InsufficientImageDataInFile");
+            if (ReadRectangle(image,&frame) == MagickFalse)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            if (ReadPixmap(image,&pixmap) == MagickFalse)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            image->depth=(size_t) pixmap.component_size;
+            image->resolution.x=1.0*pixmap.horizontal_resolution;
+            image->resolution.y=1.0*pixmap.vertical_resolution;
+            image->units=PixelsPerInchResolution;
+            (void) ReadBlobMSBLong(image);
+            flags=(ssize_t) ReadBlobMSBShort(image);
+            length=ReadBlobMSBShort(image);
+            if ((MagickSizeType) length > GetBlobSize(image))
+              ThrowPICTException(CorruptImageError,
+                "InsufficientImageDataInFile");
+            for (i=0; i <= (ssize_t) length; i++)
+              (void) ReadBlobMSBLong(image);
+            width=(size_t) (frame.bottom-frame.top);
+            height=(size_t) (frame.right-frame.left);
+            if (pixmap.bits_per_pixel <= 8)
+              length&=0x7fff;
+            if (pixmap.bits_per_pixel == 16)
+              width<<=1;
+            if (length == 0)
+              length=width;
+            if (length < 8)
+              {
+                for (i=0; i < (ssize_t) (length*height); i++)
+                  if (ReadBlobByte(image) == EOF)
+                    break;
+              }
+            else
+              for (i=0; i < (ssize_t) height; i++)
+              {
+                if (EOFBlob(image) != MagickFalse)
+                  break;
+                if (length > 200)
+                  {
+                    for (j=0; j < (ssize_t) ReadBlobMSBShort(image); j++)
+                      if (ReadBlobByte(image) == EOF)
+                        break;
+                  }
+                else
+                  for (j=0; j < (ssize_t) ReadBlobByte(image); j++)
+                    if (ReadBlobByte(image) == EOF)
+                      break;
+              }
+            break;
+          }
+          case 0x1b:
+          {
+            /*
+              Initialize image background color.
+            */
+            image->background_color.red=(Quantum)
+              ScaleShortToQuantum(ReadBlobMSBShort(image));
+            image->background_color.green=(Quantum)
+              ScaleShortToQuantum(ReadBlobMSBShort(image));
+            image->background_color.blue=(Quantum)
+              ScaleShortToQuantum(ReadBlobMSBShort(image));
+            break;
+          }
+          case 0x70:
+          case 0x71:
+          case 0x72:
+          case 0x73:
+          case 0x74:
+          case 0x75:
+          case 0x76:
+          case 0x77:
+          {
+            /*
+              Skip polygon or region.
+            */
+            length=ReadBlobMSBShort(image);
+            if ((MagickSizeType) length > GetBlobSize(image))
+              ThrowPICTException(CorruptImageError,
+                "InsufficientImageDataInFile");
+            for (i=0; i < (ssize_t) (length-2); i++)
+              if (ReadBlobByte(image) == EOF)
+                break;
+            break;
+          }
+          case 0x90:
+          case 0x91:
+          case 0x98:
+          case 0x99:
+          case 0x9a:
+          case 0x9b:
+          {
+            PICTRectangle
+              source,
+              destination;
+
+            register unsigned char
+              *p;
+
+            size_t
+              j;
+
+            ssize_t
+              bytes_per_line;
+
+            unsigned char
+              *pixels;
+
+            /*
+              Pixmap clipped by a rectangle.
+            */
+            bytes_per_line=0;
+            if ((code != 0x9a) && (code != 0x9b))
+              bytes_per_line=(ssize_t) ReadBlobMSBShort(image);
+            else
+              {
+                (void) ReadBlobMSBShort(image);
+                (void) ReadBlobMSBShort(image);
+                (void) ReadBlobMSBShort(image);
+              }
+            if (ReadRectangle(image,&frame) == MagickFalse)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            /*
+              Initialize tile image.
+            */
+            tile_image=CloneImage(image,(size_t) (frame.right-frame.left),
+              (size_t) (frame.bottom-frame.top),MagickTrue,exception);
+            if (tile_image == (Image *) NULL)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            status=ResetImagePixels(tile_image,exception);
+            if ((code == 0x9a) || (code == 0x9b) ||
+                ((bytes_per_line & 0x8000) != 0))
+              {
+                if (ReadPixmap(image,&pixmap) == MagickFalse)
+                  ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+                tile_image->depth=(size_t) pixmap.component_size;
+                tile_image->alpha_trait=pixmap.component_count == 4 ?
+                  BlendPixelTrait : UndefinedPixelTrait;
+                tile_image->resolution.x=(double) pixmap.horizontal_resolution;
+                tile_image->resolution.y=(double) pixmap.vertical_resolution;
+                tile_image->units=PixelsPerInchResolution;
+                if (tile_image->alpha_trait != UndefinedPixelTrait)
+                  (void) SetImageAlpha(tile_image,OpaqueAlpha,exception);
+              }
+            if ((code != 0x9a) && (code != 0x9b))
+              {
+                /*
+                  Initialize colormap.
+                */
+                tile_image->colors=2;
+                if ((bytes_per_line & 0x8000) != 0)
+                  {
+                    (void) ReadBlobMSBLong(image);
+                    flags=(ssize_t) ReadBlobMSBShort(image);
+                    tile_image->colors=1UL*ReadBlobMSBShort(image)+1;
+                  }
+                status=AcquireImageColormap(tile_image,tile_image->colors,
+                  exception);
+                if (status == MagickFalse)
+                  ThrowPICTException(ResourceLimitError,
+                    "MemoryAllocationFailed");
+                if ((bytes_per_line & 0x8000) != 0)
+                  {
+                    for (i=0; i < (ssize_t) tile_image->colors; i++)
+                    {
+                      j=ReadBlobMSBShort(image) % tile_image->colors;
+                      if ((flags & 0x8000) != 0)
+                        j=(size_t) i;
+                      tile_image->colormap[j].red=(Quantum)
+                        ScaleShortToQuantum(ReadBlobMSBShort(image));
+                      tile_image->colormap[j].green=(Quantum)
+                        ScaleShortToQuantum(ReadBlobMSBShort(image));
+                      tile_image->colormap[j].blue=(Quantum)
+                        ScaleShortToQuantum(ReadBlobMSBShort(image));
+                    }
+                  }
+                else
+                  {
+                    for (i=0; i < (ssize_t) tile_image->colors; i++)
+                    {
+                      tile_image->colormap[i].red=(Quantum) (QuantumRange-
+                        tile_image->colormap[i].red);
+                      tile_image->colormap[i].green=(Quantum) (QuantumRange-
+                        tile_image->colormap[i].green);
+                      tile_image->colormap[i].blue=(Quantum) (QuantumRange-
+                        tile_image->colormap[i].blue);
+                    }
+                  }
+              }
+            if (EOFBlob(image) != MagickFalse)
+              ThrowPICTException(CorruptImageError,
+                "InsufficientImageDataInFile");
+            if (ReadRectangle(image,&source) == MagickFalse)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            if (ReadRectangle(image,&destination) == MagickFalse)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            (void) ReadBlobMSBShort(image);
+            if ((code == 0x91) || (code == 0x99) || (code == 0x9b))
+              {
+                /*
+                  Skip region.
+                */
+                length=ReadBlobMSBShort(image);
+                if ((MagickSizeType) length > GetBlobSize(image))
+                  ThrowPICTException(CorruptImageError,
+                    "InsufficientImageDataInFile");
+                for (i=0; i < (ssize_t) (length-2); i++)
+                  if (ReadBlobByte(image) == EOF)
+                    break;
+              }
+            if ((code != 0x9a) && (code != 0x9b) &&
+                (bytes_per_line & 0x8000) == 0)
+              pixels=DecodeImage(image,tile_image,(size_t) bytes_per_line,1,
+                &extent);
+            else
+              pixels=DecodeImage(image,tile_image,(size_t) bytes_per_line,
+                (unsigned int) pixmap.bits_per_pixel,&extent);
+            if (pixels == (unsigned char *) NULL)
+              ThrowPICTException(CorruptImageError,"UnableToUncompressImage");
+            /*
+              Convert PICT tile image to pixel packets.
+            */
+            p=pixels;
+            for (y=0; y < (ssize_t) tile_image->rows; y++)
+            {
+              if (p > (pixels+extent+image->columns))
+                {
+                  pixels=(unsigned char *) RelinquishMagickMemory(pixels);
+                  ThrowPICTException(CorruptImageError,"NotEnoughPixelData");
+                }
+              q=QueueAuthenticPixels(tile_image,0,y,tile_image->columns,1,
+                exception);
+              if (q == (Quantum *) NULL)
+                break;
+              for (x=0; x < (ssize_t) tile_image->columns; x++)
+              {
+                if (tile_image->storage_class == PseudoClass)
+                  {
+                    index=(Quantum) ConstrainColormapIndex(tile_image,(ssize_t)
+                      *p,exception);
+                    SetPixelIndex(tile_image,index,q);
+                    SetPixelRed(tile_image,
+                      tile_image->colormap[(ssize_t) index].red,q);
+                    SetPixelGreen(tile_image,
+                      tile_image->colormap[(ssize_t) index].green,q);
+                    SetPixelBlue(tile_image,
+                      tile_image->colormap[(ssize_t) index].blue,q);
+                  }
+                else
+                  {
+                    if (pixmap.bits_per_pixel == 16)
+                      {
+                        i=(ssize_t) (*p++);
+                        j=(size_t) (*p);
+                        SetPixelRed(tile_image,ScaleCharToQuantum(
+                          (unsigned char) ((i & 0x7c) << 1)),q);
+                        SetPixelGreen(tile_image,ScaleCharToQuantum(
+                          (unsigned char) (((i & 0x03) << 6) |
+                          ((j & 0xe0) >> 2))),q);
+                        SetPixelBlue(tile_image,ScaleCharToQuantum(
+                          (unsigned char) ((j & 0x1f) << 3)),q);
+                      }
+                    else
+                      if (tile_image->alpha_trait == UndefinedPixelTrait)
+                        {
+                          if (p > (pixels+extent+2*image->columns))
+                            ThrowPICTException(CorruptImageError,
+                              "NotEnoughPixelData");
+                          SetPixelRed(tile_image,ScaleCharToQuantum(*p),q);
+                          SetPixelGreen(tile_image,ScaleCharToQuantum(
+                            *(p+tile_image->columns)),q);
+                          SetPixelBlue(tile_image,ScaleCharToQuantum(
+                            *(p+2*tile_image->columns)),q);
+                        }
+                      else
+                        {
+                          if (p > (pixels+extent+3*image->columns))
+                            ThrowPICTException(CorruptImageError,
+                              "NotEnoughPixelData");
+                          SetPixelAlpha(tile_image,ScaleCharToQuantum(*p),q);
+                          SetPixelRed(tile_image,ScaleCharToQuantum(
+                            *(p+tile_image->columns)),q);
+                          SetPixelGreen(tile_image,ScaleCharToQuantum(
+                            *(p+2*tile_image->columns)),q);
+                          SetPixelBlue(tile_image,ScaleCharToQuantum(
+                            *(p+3*tile_image->columns)),q);
+                        }
+                  }
+                p++;
+                q+=GetPixelChannels(tile_image);
+              }
+              if (SyncAuthenticPixels(tile_image,exception) == MagickFalse)
+                break;
+              if ((tile_image->storage_class == DirectClass) &&
+                  (pixmap.bits_per_pixel != 16))
+                {
+                  p+=(pixmap.component_count-1)*tile_image->columns;
+                  if (p < pixels)
+                    break;
+                }
+              status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) y,
+                tile_image->rows);
+              if (status == MagickFalse)
+                break;
+            }
+            pixels=(unsigned char *) RelinquishMagickMemory(pixels);
+            if ((jpeg == MagickFalse) && (EOFBlob(image) == MagickFalse))
+              if ((code == 0x9a) || (code == 0x9b) ||
+                  ((bytes_per_line & 0x8000) != 0))
+                (void) CompositeImage(image,tile_image,CopyCompositeOp,
+                  MagickTrue,(ssize_t) destination.left,(ssize_t)
+                  destination.top,exception);
+            tile_image=DestroyImage(tile_image);
+            break;
+          }
+          case 0xa1:
+          {
+            unsigned char
+              *info;
+
+            size_t
+              type;
+
+            /*
+              Comment.
+            */
+            type=ReadBlobMSBShort(image);
+            length=ReadBlobMSBShort(image);
+            if ((MagickSizeType) length > GetBlobSize(image))
+              ThrowPICTException(CorruptImageError,
+                "InsufficientImageDataInFile");
+            if (length == 0)
+              break;
+            (void) ReadBlobMSBLong(image);
+            length-=MagickMin(length,4);
+            if (length == 0)
+              break;
+            info=(unsigned char *) AcquireQuantumMemory(length,sizeof(*info));
+            if (info == (unsigned char *) NULL)
+              break;
+            count=ReadBlob(image,length,info);
+            if (count != (ssize_t) length)
+              {
+                info=(unsigned char *) RelinquishMagickMemory(info);
+                ThrowPICTException(ResourceLimitError,"UnableToReadImageData");
+              }
+            switch (type)
+            {
+              case 0xe0:
+              {
+                profile=BlobToStringInfo((const void *) NULL,length);
+                SetStringInfoDatum(profile,info);
+                status=SetImageProfile(image,"icc",profile,exception);
+                profile=DestroyStringInfo(profile);
+                if (status == MagickFalse)
+                  {
+                    info=(unsigned char *) RelinquishMagickMemory(info);
+                    ThrowPICTException(ResourceLimitError,
+                      "MemoryAllocationFailed");
+                  }
+                break;
+              }
+              case 0x1f2:
+              {
+                profile=BlobToStringInfo((const void *) NULL,length);
+                SetStringInfoDatum(profile,info);
+                status=SetImageProfile(image,"iptc",profile,exception);
+                if (status == MagickFalse)
+                  {
+                    info=(unsigned char *) RelinquishMagickMemory(info);
+                    ThrowPICTException(ResourceLimitError,
+                      "MemoryAllocationFailed");
+                  }
+                profile=DestroyStringInfo(profile);
+                break;
+              }
+              default:
+                break;
+            }
+            info=(unsigned char *) RelinquishMagickMemory(info);
+            break;
+          }
+          default:
+          {
+            /*
+              Skip to next op code.
+            */
+            if (codes[code].length == -1)
+              (void) ReadBlobMSBShort(image);
+            else
+              for (i=0; i < (ssize_t) codes[code].length; i++)
+                if (ReadBlobByte(image) == EOF)
+                  break;
+          }
+        }
+      }
+    if (code == 0xc00)
+      {
+        /*
+          Skip header.
+        */
+        for (i=0; i < 24; i++)
+          if (ReadBlobByte(image) == EOF)
+            break;
+        continue;
+      }
+    if (((code >= 0xb0) && (code <= 0xcf)) ||
+        ((code >= 0x8000) && (code <= 0x80ff)))
+      continue;
+    if (code == 0x8200)
+      {
+        /*
+          Embedded JPEG.
+        */
+        jpeg=MagickTrue;
+        length=ReadBlobMSBLong(image);
+        if ((MagickSizeType) length > GetBlobSize(image))
+          ThrowPICTException(CorruptImageError,"InsufficientImageDataInFile");
+        if (length > 154)
+          {
+            const void
+              *stream;
+
+            ssize_t
+              count;
+
+            unsigned char
+              *pixels;
+
+            for (i=0; i < 6; i++)
+              (void) ReadBlobMSBLong(image);
+            if (ReadRectangle(image,&frame) == MagickFalse)
+              ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+            for (i=0; i < 122; i++)
+              if (ReadBlobByte(image) == EOF)
+                break;
+            length-=154;
+            pixels=(unsigned char *) AcquireQuantumMemory(length,
+              sizeof(*pixels));
+            if (pixels == (unsigned char *) NULL)
+              ThrowPICTException(ResourceLimitError,"MemoryAllocationFailed");
+            stream=ReadBlobStream(image,length,pixels,&count);
+            if (count != (ssize_t) length)
+              {
+                pixels=(unsigned char *) RelinquishMagickMemory(pixels);
+                ThrowPICTException(CorruptImageError,"ImproperImageHeader");
+              }
+            read_info=AcquireImageInfo();
+            (void) FormatLocaleString(read_info->filename,MaxTextExtent,
+              "jpeg:%s",image_info->filename);
+            tile_image=BlobToImage(read_info,stream,count,exception);
+            pixels=(unsigned char *) RelinquishMagickMemory(pixels);
+            read_info=DestroyImageInfo(read_info);
+          }
+        if (tile_image == (Image *) NULL)
+          continue;
+        (void) FormatLocaleString(geometry,MagickPathExtent,"%.20gx%.20g",
+          (double) MagickMax(image->columns,tile_image->columns),
+          (double) MagickMax(image->rows,tile_image->rows));
+        (void) SetImageExtent(image,
+          MagickMax(image->columns,tile_image->columns),
+          MagickMax(image->rows,tile_image->rows),exception);
+        (void) TransformImageColorspace(image,tile_image->colorspace,exception);
+        (void) CompositeImage(image,tile_image,CopyCompositeOp,MagickTrue,
+          (ssize_t) frame.left,(ssize_t) frame.right,exception);
+        image->compression=tile_image->compression;
+        tile_image=DestroyImage(tile_image);
+        continue;
+      }
+    if ((code == 0xff) || (code == 0xffff))
+      break;
+    if (((code >= 0xd0) && (code <= 0xfe)) ||
+        ((code >= 0x8100) && (code <= 0xffff)))
+      {
+        /*
+          Skip reserved.
+        */
+        length=ReadBlobMSBShort(image);
+        if ((MagickSizeType) length > GetBlobSize(image))
+          ThrowPICTException(CorruptImageError,
+            "InsufficientImageDataInFile");
+        for (i=0; i < (ssize_t) length; i++)
+          if (ReadBlobByte(image) == EOF)
+            break;
+        continue;
+      }
+    if ((code >= 0x100) && (code <= 0x7fff))
+      {
+        /*
+          Skip reserved.
+        */
+        length=(size_t) ((code >> 7) & 0xff);
+        if ((MagickSizeType) length > GetBlobSize(image))
+          ThrowPICTException(CorruptImageError,
+            "InsufficientImageDataInFile");
+        for (i=0; i < (ssize_t) length; i++)
+          if (ReadBlobByte(image) == EOF)
+            break;
+        continue;
+      }
+  }
+  (void) CloseBlob(image);
+  return(GetFirstImageInList(image));
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

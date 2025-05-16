@@ -1,0 +1,94 @@
+{
+      /* Point to UDP header */
+      u_int16_t l4_offset = ip_offset + ip_len;
+
+      if(header->caplen >= (u_int32_t)(l4_offset + sizeof(struct ndpi_udphdr))) {
+        struct ndpi_udphdr *udph = (struct ndpi_udphdr *) &packet[l4_offset];
+        u_int16_t sport = ntohs(udph->source), dport = ntohs(udph->dest);
+        u_int32_t l7_offset = l4_offset + sizeof(struct ndpi_udphdr);
+
+        /* ******************************************** */
+        /* **************   GTP-U  ********************* */
+        /* ******************************************** */
+        if((sport == 2152) || (dport == 2152)) {        /* GTP-U port       */
+          if(header->caplen >= l7_offset + 8) {         /* min GTP hdr size */
+            const u_int8_t *gtp = &packet[l7_offset];
+            u_int8_t flags        = gtp[0];
+            u_int8_t message_type = gtp[1];
+
+            /* GTP version 1 and G-PDU (0xFF) */
+            if(((flags >> 5) & 0x07) == 1 && message_type == 0xFF) {
+              u_int8_t ext_hdr_len = 8; /* base header length */
+
+              /* Rough handling of optional header fields */
+              if(flags & 0x04) ext_hdr_len += 4; /* Sequence number */
+              if(flags & 0x02) ext_hdr_len += 1; /* N-PDU number    */
+              if(flags & 0x01) ext_hdr_len += 4; /* Extension header */
+
+              if(header->caplen >= l7_offset + ext_hdr_len + 1 /* at least 1 payload byte */) {
+                ip_offset   = l7_offset + ext_hdr_len;
+                tunnel_type = ndpi_gtp_tunnel;
+                goto iph_check;
+              }
+            }
+          }
+        }
+
+        /* ******************************************** */
+        /* **************   TZSP   ********************* */
+        /* ******************************************** */
+        if((sport == 37008) || (dport == 37008)) {      /* Default TZSP port */
+          if(header->caplen >= l7_offset + 4) {         /* version/type/encap */
+            const u_int8_t *ptr  = &packet[l7_offset];
+            u_int8_t version     = ptr[0];
+            if(version == 1) {
+              /* Skip fixed TZSP header (4 bytes) */
+              u_int32_t tzsp_off = l7_offset + 4;
+
+              /* Walk through variable-length tags until END tag (type == 1) */
+              while((tzsp_off + 2) < header->caplen) {
+                u_int8_t tag_type = packet[tzsp_off];
+                u_int8_t tag_len  = packet[tzsp_off + 1];
+                tzsp_off += 2;
+
+                if(tag_type == 1 /* END */)
+                  break;
+
+                tzsp_off += tag_len;
+              }
+
+              /* After tags, an encapsulated Ethernet frame follows           */
+              /* Skip Ethernet header (assume 14 bytes) and point to IP hdr   */
+              if((tzsp_off + 14) < header->caplen) {
+                ip_offset   = tzsp_off + 14;
+                tunnel_type = ndpi_tzsp_tunnel;
+                goto iph_check;
+              }
+            }
+          }
+        }
+
+        /* ******************************************** */
+        /* **************  CAPWAP  ********************* */
+        /* ******************************************** */
+        if((sport == 5247) || (dport == 5247)) {  /* CAPWAP data port */
+          if(header->caplen >= l7_offset + 8) {   /* minimum CAPWAP header */
+            const u_int8_t *cw  = &packet[l7_offset];
+            u_int8_t hdr_len_w  = cw[1] & 0x0F;          /* header len (words) */
+            u_int32_t cw_hdrlen = (hdr_len_w + 1) * 4;   /* bytes (incl. first word) */
+
+            if(header->caplen >= l7_offset + cw_hdrlen + 1) {
+              ip_offset   = l7_offset + cw_hdrlen;
+              /* If next bytes don't look like IP, try to skip 8 bytes of 802.11 header */
+              if(ip_offset + 1 < header->caplen) {
+                u_int8_t v = packet[ip_offset] >> 4;
+                if((v != 4) && (v != 6) && (header->caplen >= ip_offset + 8))
+                  ip_offset += 8;
+              }
+              tunnel_type = ndpi_capwap_tunnel;
+              goto iph_check;
+            }
+          }
+        }
+      }
+    }

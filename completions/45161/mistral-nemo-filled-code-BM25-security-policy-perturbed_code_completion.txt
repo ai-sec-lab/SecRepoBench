@@ -1,0 +1,215 @@
+if (fits_in_pe(pe_struct, table_offset, row_size))
+{
+  // Validate the current table and its number of rows. If not valid, skip processing this table.
+  if (row_count > 0)
+  {
+    // Check the Parent field.
+    customattribute_table = (PCUSTOMATTRIBUTE_TABLE) row_ptr;
+
+    if (index_size == 4)
+    {
+      // Low 5 bits tell us what this is an index into. Remaining bits tell us the index value.
+      // Parent must be an index into the Assembly (0x0E) table.
+      if ((*(DWORD*) customattribute_table & 0x1F) != 0x0E)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+    }
+    else
+    {
+      // Low 5 bits tell us what this is an index into. Remaining bits tell us the index value.
+      // Parent must be an index into the Assembly (0x0E) table.
+      if ((*(WORD*) customattribute_table & 0x1F) != 0x0E)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+    }
+
+    // Check the Type field.
+    customattribute_table = (PCUSTOMATTRIBUTE_TABLE) (row_ptr + index_size);
+
+    if (index_size2 == 4)
+    {
+      // Low 3 bits tell us what this is an index into. Remaining bits tell us the index value. Only values 2 and 3 are defined.
+      // Type must be an index into the MemberRef table.
+      if ((*(DWORD*) customattribute_table & 0x07) != 0x03)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      type_index = *(DWORD*) customattribute_table >> 3;
+    }
+    else
+    {
+      // Low 3 bits tell us what this is an index into. Remaining bits tell us the index value. Only values 2 and 3 are defined.
+      // Type must be an index into the MemberRef table.
+      if ((*(WORD*) customattribute_table & 0x07) != 0x03)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      // Cast the index to a 32bit value.
+      type_index = (DWORD) (*(WORD*) customattribute_table >> 3);
+    }
+
+    if (type_index > 0)
+      type_index--;
+
+    // Now follow the Type index into the MemberRef table.
+    memberref_row = memberref_ptr + (memberref_row_size * type_index);
+
+    if (!fits_in_pe(pe_struct, memberref_row, memberref_row_size))
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    if (index_sizes.memberref == 4)
+    {
+      // Low 3 bits tell us what this is an index into. Remaining bits tell us the index value. Class must be an index into the TypeRef table.
+      if ((*(DWORD*) memberref_row & 0x07) != 0x01)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      class_index = *(DWORD*) memberref_row >> 3;
+    }
+    else
+    {
+      // Low 3 bits tell us what this is an index into. Remaining bits tell us the index value. Class must be an index into the TypeRef table.
+      if ((*(WORD*) memberref_row & 0x07) != 0x01)
+      {
+        row_ptr += row_size;
+        continue;
+      }
+
+      // Cast the index to a 32bit value.
+      class_index = (DWORD) (*(WORD*) memberref_row >> 3);
+    }
+
+    if (class_index > 0)
+      class_index--;
+
+    // Now follow the Class index into the TypeRef table.
+    typeref_row = typeref_ptr + (typeref_row_size * class_index);
+
+    if (!fits_in_pe(pe_struct, typeref_row, typeref_row_size))
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    // Skip over the ResolutionScope and check the Name field, which is an index into the Strings heap.
+    row_count = max_rows(
+        4,
+        yr_le32toh(rows.module),
+        yr_le32toh(rows.moduleref),
+        yr_le32toh(rows.assemblyref),
+        yr_le32toh(rows.typeref));
+
+    if (row_count > (0xFFFF >> 0x02))
+      typeref_row += 4;
+    else
+      typeref_row += 2;
+
+    if (index_sizes.string == 4)
+    {
+      name = pe_get_dotnet_string(
+          pe_struct,
+          string_offset,
+          *(DWORD*) typeref_row);
+    }
+    else
+    {
+      name = pe_get_dotnet_string(
+          pe_struct,
+          string_offset,
+          *(WORD*) typeref_row);
+    }
+
+    if (name != NULL && strncmp(name, "GuidAttribute", 13) != 0)
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    // Get the Value field.
+    customattribute_table =
+        (PCUSTOMATTRIBUTE_TABLE) (row_ptr + index_size + index_size2);
+
+    if (index_sizes.blob == 4)
+      blob_index = *(DWORD*) customattribute_table;
+    else
+      // Cast the value (index into blob table) to a 32bit value.
+      blob_index = (DWORD) (*(WORD*) customattribute_table);
+
+    // Everything checks out. Make sure the index into the blob field is valid (non-null and within range).
+    blob_offset = pe_struct->data + metadata_root +
+                  yr_le32toh(streams->blob->Offset) + blob_index;
+
+    // If index into blob is 0 or past the end of the blob stream, skip it. We don't know the size of the blob entry yet because that is encoded in the start.
+    if (blob_index == 0x00 || blob_offset >= pe_struct->data + pe_struct->data_size)
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    blob_result = dotnet_parse_blob_entry(pe_struct, blob_offset);
+
+    if (blob_result.size == 0)
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    blob_length = blob_result.length;
+    blob_offset += blob_result.size;
+
+    // Quick sanity check to make sure the blob entry is within bounds and its length is at least 3 (2 bytes for the 16 bits prolog and 1 byte for the string length)
+    if (blob_length < 3 ||
+        blob_offset + blob_length >= pe_struct->data + pe_struct->data_size)
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    // Custom attributes MUST have a 16 bit prolog of 0x0001
+    if (*(WORD*) blob_offset != 0x0001)
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    // The next byte after the 16 bit prolog is the length of the string.
+    blob_offset += 2;
+    uint8_t str_len = *blob_offset;
+
+    // Increment blob_offset so that it points to the first byte of the string.
+    blob_offset += 1;
+
+    if (blob_offset + str_len > pe_struct->data + pe_struct->data_size)
+    {
+      row_ptr += row_size;
+      continue;
+    }
+
+    if (*blob_offset == 0xFF || *blob_offset == 0x00)
+    {
+      typelib[0] = '\0';
+    }
+    else
+    {
+      strncpy(typelib, (char*) blob_offset, str_len);
+      typelib[str_len] = '\0';
+    }
+
+    set_string(typelib, pe_struct->object, "typelib");
+
+    row_ptr += row_size;
+  }
+}

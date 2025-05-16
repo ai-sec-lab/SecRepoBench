@@ -1,0 +1,184 @@
+case ReadStripMethod:
+{
+  uint32 stripIndex, numberStrips, rowsPerStrip;
+  uint32 *stripPixels = (uint32 *) NULL;
+  size_t stripSize, stripHeight;
+  MagickSizeType totalPixels;
+  ssize_t rowOffset = 0;
+
+  if (TIFFGetField(tiff,TIFFTAG_ROWSPERSTRIP,&rowsPerStrip) != 1)
+    rowsPerStrip=(uint32) image->rows;
+
+  numberStrips=TIFFNumberOfStrips(tiff);
+  stripSize=TIFFStripSize(tiff);
+  if (stripSize == 0)
+    ThrowTIFFException(CorruptImageError,"InvalidStripSize");
+
+  totalPixels=(MagickSizeType) rowsPerStrip*image->columns;
+  if ((totalPixels == 0) || (HeapOverflowSanityCheck(rowsPerStrip,
+      image->columns*sizeof(uint32)) != MagickFalse))
+    ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+
+  stripPixels=(uint32 *) AcquireQuantumMemory((size_t) totalPixels,
+    sizeof(uint32));
+  if (stripPixels == (uint32 *) NULL)
+    ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+
+  for (stripIndex=0; stripIndex < numberStrips; stripIndex++)
+  {
+    tmsize_t count;
+    stripHeight=(rowsPerStrip*(stripIndex+1) > image->rows) ?
+      (uint32) (image->rows-(rowsPerStrip*stripIndex)) : rowsPerStrip;
+
+    (void) memset(stripPixels,0,stripHeight*(size_t) image->columns*
+      sizeof(uint32));
+
+    count=TIFFReadRGBAStrip(tiff,stripIndex*rowsPerStrip,stripPixels);
+    if (count == 0)
+      break;
+
+    /*
+      TIFFReadRGBAStrip() returns bottom-to-top rows. We need to reverse them.
+    */
+    {
+      uint32 *p = stripPixels + (stripHeight * (size_t) image->columns) - 1;
+      for (row_index=(ssize_t) 0; row_index < (ssize_t) stripHeight; row_index++)
+      {
+        register ssize_t x;
+        register Quantum *magick_restrict q;
+        ssize_t realRow=(ssize_t) (rowOffset+stripHeight-1-row_index);
+
+        if (realRow >= (ssize_t) image->rows)
+          break;
+        q=QueueAuthenticPixels(image,0,realRow,image->columns,1,exception);
+        if (q == (Quantum *) NULL)
+          break;
+        q += GetPixelChannels(image)*(image->columns-1);
+        for (x=0; x < (ssize_t) image->columns; x++)
+        {
+          SetPixelRed(image,ScaleCharToQuantum((unsigned char) TIFFGetR(*p)),q);
+          SetPixelGreen(image,ScaleCharToQuantum((unsigned char) TIFFGetG(*p)),q);
+          SetPixelBlue(image,ScaleCharToQuantum((unsigned char) TIFFGetB(*p)),q);
+          if (image->alpha_trait != UndefinedPixelTrait)
+            SetPixelAlpha(image,ScaleCharToQuantum((unsigned char) TIFFGetA(*p)),q);
+          p--;
+          q-=GetPixelChannels(image);
+        }
+        if (SyncAuthenticPixels(image,exception) == MagickFalse)
+          break;
+      }
+    }
+    rowOffset+=(ssize_t) stripHeight;
+
+    if (image->previous == (Image *) NULL)
+    {
+      status=SetImageProgress(image,LoadImageTag,(MagickOffsetType) rowOffset,
+        image->rows);
+      if (status == MagickFalse)
+        break;
+    }
+  }
+
+  stripPixels=(uint32 *) RelinquishMagickMemory(stripPixels);
+  break;
+}
+case ReadTileMethod:
+{
+  uint32 tileWidth, tileLength, tileCols, tileRows;
+  unsigned char *tileBuffer = (unsigned char *) NULL;
+  uint32 *tilePixels = (uint32 *) NULL;
+  tsize_t tileSize;
+
+  tileWidth=0;
+  tileLength=0;
+  TIFFGetFieldDefaulted(tiff,TIFFTAG_TILEWIDTH,&tileWidth);
+  TIFFGetFieldDefaulted(tiff,TIFFTAG_TILELENGTH,&tileLength);
+  if ((tileWidth == 0) || (tileLength == 0))
+    ThrowTIFFException(CorruptImageError,"InvalidTileGeometry");
+
+  tileSize=TIFFTileSize(tiff);
+  if (tileSize <= 0)
+    ThrowTIFFException(CorruptImageError,"InvalidTileSize");
+
+  tileBuffer=(unsigned char *) AcquireQuantumMemory((size_t) tileSize,
+    sizeof(*tileBuffer));
+  if (tileBuffer == (unsigned char *) NULL)
+    ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+
+  tileCols=(uint32) ((image->columns+tileWidth-1)/tileWidth);
+  tileRows=(uint32) ((image->rows+tileLength-1)/tileLength);
+
+  tilePixels=(uint32 *) AcquireQuantumMemory((size_t) tileWidth*tileLength,
+    sizeof(uint32));
+  if (tilePixels == (uint32 *) NULL)
+  {
+    tileBuffer=(unsigned char *) RelinquishMagickMemory(tileBuffer);
+    ThrowTIFFException(ResourceLimitError,"MemoryAllocationFailed");
+  }
+  /*
+    Loop over all tiles.
+  */
+  for (row_index=0; row_index < (ssize_t) tileRows; row_index++)
+  {
+    for (ssize_t colIndex=0; colIndex < (ssize_t) tileCols; colIndex++)
+    {
+      uint32 rowOffset=(uint32) row_index*tileLength;
+      uint32 colOffset=(uint32) colIndex*tileWidth;
+      size_t rowsToProcess=(rowOffset+tileLength <= image->rows ?
+        tileLength : (uint32) (image->rows-rowOffset));
+      size_t colsToProcess=(colOffset+tileWidth <= image->columns ?
+        tileWidth : (uint32) (image->columns-colOffset));
+
+      (void) memset(tilePixels,0,(size_t) tileWidth*tileLength*
+        sizeof(uint32));
+
+      if (TIFFReadRGBATile(tiff,colOffset,rowOffset,tilePixels) != 0)
+      {
+        /*
+          TIFFReadRGBATile() returns bottom-to-top rows.
+        */
+        uint32 *p=tilePixels + (tileLength*(size_t) tileWidth) - 1;
+        for (ssize_t tileRow=0; tileRow < (ssize_t) rowsToProcess; tileRow++)
+        {
+          register ssize_t x;
+          register Quantum *magick_restrict q;
+          ssize_t realRow=(ssize_t) (rowOffset+rowsToProcess-1-tileRow);
+
+          if (realRow >= (ssize_t) image->rows)
+            break;
+          q=QueueAuthenticPixels(image,colOffset,(ssize_t) realRow,
+            colsToProcess,1,exception);
+          if (q == (Quantum *) NULL)
+            break;
+          q+=GetPixelChannels(image)*(colsToProcess-1);
+          for (x=0; x < (ssize_t) colsToProcess; x++)
+          {
+            SetPixelRed(image,ScaleCharToQuantum((unsigned char) TIFFGetR(*p)),q);
+            SetPixelGreen(image,ScaleCharToQuantum((unsigned char) TIFFGetG(*p)),q);
+            SetPixelBlue(image,ScaleCharToQuantum((unsigned char) TIFFGetB(*p)),q);
+            if (image->alpha_trait != UndefinedPixelTrait)
+              SetPixelAlpha(image,ScaleCharToQuantum((unsigned char) TIFFGetA(*p)),q);
+            p--;
+            q-=GetPixelChannels(image);
+          }
+          if (SyncAuthenticPixels(image,exception) == MagickFalse)
+            break;
+        }
+      }
+
+      if (image->previous == (Image *) NULL)
+      {
+        MagickOffsetType progress=(MagickOffsetType)
+          (row_index*tileCols + colIndex);
+        MagickOffsetType maxTiles=(MagickOffsetType) tileCols*tileRows;
+        status=SetImageProgress(image,LoadImageTag,progress,maxTiles);
+        if (status == MagickFalse)
+          break;
+      }
+    }
+  }
+
+  tilePixels=(uint32 *) RelinquishMagickMemory(tilePixels);
+  tileBuffer=(unsigned char *) RelinquishMagickMemory(tileBuffer);
+  break;
+}

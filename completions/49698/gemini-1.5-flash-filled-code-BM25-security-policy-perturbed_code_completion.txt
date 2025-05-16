@@ -1,0 +1,43 @@
+pctxt = (const struct _internal_exr_context*) decode->context;
+    ptr   = compressed;
+    // Check if the compressed data size is at least 20 bytes for a valid header.
+    if (nCompressed < 20)
+    {
+        if (nRawSize != 0) return EXR_ERR_CORRUPT_CHUNK;
+        return EXR_ERR_SUCCESS;
+    }
+    // Read the header information from the compressed data.
+    im = readUInt (ptr);
+    iM = readUInt (ptr + 4);
+    // Validate that 'im' and 'iM' are within acceptable limits.
+    if (im < 0 || im >= HUF_ENCSIZE || iM < 0 || iM >= HUF_ENCSIZE)
+        return EXR_ERR_CORRUPT_CHUNK;
+    // Calculate the number of bytes to read for the Huffman table.
+    uint32_t tableLength = readUInt (ptr + 8);
+    uint32_t nBits       = readUInt (ptr + 12);
+    nBytes                = (static_cast<uint64_t> (nBits) + 7) / 8;
+    // Ensure there is enough data in the buffer to perform decompression.
+    ptr += 20;
+    if (ptr + nBytes > compressed + nCompressed) return EXR_ERR_CORRUPT_CHUNK;
+    // Check if fast Huffman decoding is enabled and applicable based on the data size.
+    if (pctxt->fast_huf_decode && nBits > 128)
+    {
+        FastHufDecoder fhd (ptr, nCompressed - (ptr - compressed), im, iM, iM);
+        // must be nBytes remaining in buffer
+        if (ptr - compressed + nBytes > nCompressed) return EXR_ERR_CORRUPT_CHUNK;
+        fhd.decode ((unsigned char*) ptr, nBits, raw, nRawSize);
+    }
+    else
+    {
+        AutoArray<uint64_t, HUF_ENCSIZE> freq;
+        AutoArray<HufDec, HUF_DECSIZE>   hdec;
+        hufClearDecTable (hdec);
+        // Clear and unpack the Huffman encoding table for use in decoding.
+        rv = hufUnpackEncTable (&ptr, nCompressed - (ptr - compressed), im, iM, freq);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+        // Build the Huffman decoding table based on frequency data.
+        hufBuildDecTable (freq, im, iM, hdec);
+        // Execute the appropriate decoding function (fast or standard) and return the result.
+        hufDecode (freq, hdec, ptr, nBits, iM, nRawSize, raw);
+        hufFreeDecTable (hdec);
+    }

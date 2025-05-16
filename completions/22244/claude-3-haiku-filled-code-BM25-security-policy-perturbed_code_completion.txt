@@ -1,0 +1,44 @@
+// <MASK>
+if(packet->payload_packet_len >= 8) {
+    if(packet->tcp != NULL) {
+        ovpn_payload = packet->payload + 4;
+        packet->payload_packet_len -= 4;
+    }
+
+    operationcode = ovpn_payload[0];
+    alen = ovpn_payload[1];
+
+    if(packet->udp != NULL) {
+        if((packet->payload_packet_len == 8 || packet->payload_packet_len == 9) && operationcode == 0x38) {
+            NDPI_LOG_INFO(ndpi_struct, "found OpenVPN over UDP");
+            ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+        } else if(flow->openvpn_counter < 5 && operationcode == 0x17) {
+            session_remote = &ovpn_payload[2];
+            hmac_size = (alen > 0) ? ovpn_payload[2 + alen] : 0;
+            if(hmac_size >= 0 && hmac_size <= 20) {
+                NDPI_LOG_INFO(ndpi_struct, "found OpenVPN client reset over UDP");
+                ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+                flow->openvpn_counter++;
+                memcpy(flow->openvpn_session_id, session_remote, alen);
+                flow->openvpn_session_id_len = alen;
+            } else {
+                failed = 1;
+            }
+        } else if(flow->openvpn_counter >= 5 && flow->openvpn_counter < 10 && operationcode == 0x18) {
+            session_remote = &ovpn_payload[2];
+            hmac_size = (alen > 0) ? ovpn_payload[2 + alen] : 0;
+            if(hmac_size >= 0 && hmac_size <= 20 && flow->openvpn_session_id_len == alen && memcmp(flow->openvpn_session_id, session_remote, alen) == 0) {
+                NDPI_LOG_INFO(ndpi_struct, "found OpenVPN server reset over UDP");
+                ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+            } else {
+                failed = 1;
+            }
+        }
+    }
+
+    flow->openvpn_counter++;
+
+    if(failed) {
+        NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+    }
+}

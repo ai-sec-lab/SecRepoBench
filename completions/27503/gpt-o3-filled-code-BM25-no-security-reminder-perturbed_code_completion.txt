@@ -1,0 +1,135 @@
+/*----------------------------------------------------------
+		**	Decode stream element
+		**--------------------------------------------------------*/
+		switch (tag)
+		{
+			case ID_END:					/* end-of-frame tag										*/
+				BitBufferByteAlign (bits, false) ;	/* make sure we're byte-aligned before exiting			*/
+				goto NoMoreChannels ;				/* finished												*/
+
+			case ID_FIL:					/* “filler” element – just skip it						*/
+			{
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;	/* ignore												*/
+				/*	specification says the first byte indicates number of bytes to skip					*/
+				uint8_t fillCount = BitBufferReadSmall (bits, 8) ;
+				while (fillCount--)
+					(void) BitBufferReadSmall (bits, 8) ;
+				break ;
+			}
+
+			/*--------------------------------------------------------------------
+			**	Mono / LFE element  (single-channel element)
+			**------------------------------------------------------------------*/
+			case ID_SCE:		/* mono													*/
+			case ID_LFE:		/* low-frequency (sub-woofer)							*/
+			{
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+
+				/*	read common mono header														*/
+				headerByte  = BitBufferReadSmall (bits, 8) ;
+				partialFrame = (headerByte >> 3) & 0x1u ;
+				escapeFlag   =  headerByte        & 0x1u ;
+
+				if (partialFrame)
+				{
+					uint32_t frameSamples = BitBufferRead (bits, 32) ;
+					*outNumSamples = frameSamples ;
+				}
+
+				if (escapeFlag)
+				{
+					/*	Un-compressed frame – just copy samples out									*/
+					uint32_t bitsPerSample = p->mBitDepth ;
+					for (i = 0 ; i < *outNumSamples ; ++i)
+					{
+						switch (bitsPerSample)
+						{
+							case 16:	val =  (int32_t) ((int16_t) BitBufferRead (bits, 16)) << 16 ;	break ;
+							case 20:	val =  (int32_t) BitBufferRead (bits, 16) << 12 ;				break ;
+							case 24:	val =  (int32_t) BitBufferRead (bits, 24) << 8 ;				break ;
+							case 32:	val =  (int32_t) BitBufferRead (bits, 32) ;					break ;
+							default:	val = 0 ;														break ;
+						}
+						sampleBuffer [channelIndex + (i * numChannels)] = val ;
+					}
+				}
+				else
+				{
+					/*	compressed mono element not yet supported										*/
+					status = kALAC_UnsupportedErr ;
+					goto Exit ;
+				}
+
+				++channelIndex ;			/* we consumed one channel								*/
+				break ;
+			}
+
+			/*--------------------------------------------------------------------
+			**	Stereo pair element
+			**------------------------------------------------------------------*/
+			case ID_CPE:					/* channel-pair (stereo) element						*/
+			{
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+
+				/*	read header flags																*/
+				headerByte  = BitBufferReadSmall (bits, 8) ;
+				partialFrame = (headerByte >> 3) & 0x1u ;
+				escapeFlag   =  headerByte        & 0x1u ;
+
+				if (partialFrame)
+				{
+					uint32_t frameSamples = BitBufferRead (bits, 32) ;
+					*outNumSamples = frameSamples ;
+				}
+
+				if (escapeFlag)
+				{
+					/*	Un-compressed – copy both channels											*/
+					uint32_t bitsPerSample = p->mBitDepth ;
+					for (i = 0 ; i < *outNumSamples ; ++i)
+					{
+						/*	left channel															*/
+						switch (bitsPerSample)
+						{
+							case 16:	val = (int32_t) ((int16_t) BitBufferRead (bits, 16)) << 16 ;	break ;
+							case 20:	val = (int32_t) BitBufferRead (bits, 16) << 12 ;				break ;
+							case 24:	val = (int32_t) BitBufferRead (bits, 24) << 8 ;				break ;
+							case 32:	val = (int32_t) BitBufferRead (bits, 32) ;					break ;
+							default:	val = 0 ;														break ;
+						}
+						sampleBuffer [channelIndex + (i * numChannels)] = val ;
+
+						/*	right channel															*/
+						switch (bitsPerSample)
+						{
+							case 16:	val = (int32_t) ((int16_t) BitBufferRead (bits, 16)) << 16 ;	break ;
+							case 20:	val = (int32_t) BitBufferRead (bits, 16) << 12 ;				break ;
+							case 24:	val = (int32_t) BitBufferRead (bits, 24) << 8 ;				break ;
+							case 32:	val = (int32_t) BitBufferRead (bits, 32) ;					break ;
+							default:	val = 0 ;														break ;
+						}
+						sampleBuffer [channelIndex + 1 + (i * numChannels)] = val ;
+					}
+				}
+				else
+				{
+					/*	compressed stereo element not yet supported									*/
+					status = kALAC_UnsupportedErr ;
+					goto Exit ;
+				}
+
+				channelIndex += 2 ;			/* consumed two channels								*/
+				break ;
+			}
+
+			/*--------------------------------------------------------------------
+			**	Any other tag – not currently supported
+			**------------------------------------------------------------------*/
+			default:
+				status = kALAC_UnsupportedErr ;
+				goto Exit ;
+		}
+
+		/*	if we've processed all channels requested by the caller, stop								*/
+		if (channelIndex >= numChannels)
+			goto NoMoreChannels ;

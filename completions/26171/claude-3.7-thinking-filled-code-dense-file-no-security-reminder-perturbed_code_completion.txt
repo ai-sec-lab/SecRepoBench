@@ -1,0 +1,100 @@
+int32_t j, neblock, nstreams;
+int32_t cbytes;                   /* number of compressed bytes in split */
+int32_t ntbytes = 0;              /* number of uncompressed bytes */
+int32_t srcoffset = src_offset;  /* preserve the offset for later */
+int32_t typesize = context->typesize;
+const char* compname;
+int dont_split = (context->header_flags & 0x10) >> 4;
+int last_filter_index = last_filter(context->filters, 'd');
+uint8_t* _dest = (last_filter_index >= 0) ? tmp : dest + destinationoffset;
+
+/* The number of compressed data streams for this block */
+if (!dont_split && !leftoverblock) {
+    nstreams = (int32_t)typesize;
+} 
+else {
+    nstreams = 1;
+}
+
+neblock = bsize / nstreams;
+
+for (j = 0; j < nstreams; j++) {
+    cbytes = sw32_(src + srcoffset);
+    srcoffset += sizeof(int32_t);
+    
+    if (cbytes < 0) {
+        /* Negative cbytes means this is a run (special case) */
+        uint8_t value = -cbytes;
+        memset(_dest + j * neblock, value, (unsigned int)neblock);
+        ntbytes += neblock;
+    } 
+    else if (cbytes == neblock) {
+        /* No compression, just memcpy */
+        if (srcoffset + cbytes > srcsize) {
+            return -1;  /* Not enough input to read uncompressed data */
+        }
+        memcpy(_dest + j * neblock, src + srcoffset, (unsigned int)cbytes);
+        srcoffset += cbytes;
+        ntbytes += cbytes;
+    } 
+    else {
+        /* Decompress data */
+        if (srcoffset + cbytes > srcsize) {
+            return -1;  /* Not enough input to read compressed data */
+        }
+        
+        int decompressed;
+        switch (compformat) {
+            case BLOSC_BLOSCLZ:
+                decompressed = blosclz_decompress(src + srcoffset, cbytes, 
+                                                 _dest + j * neblock, (int)neblock);
+                break;
+#if defined(HAVE_LZ4)
+            case BLOSC_LZ4:
+                decompressed = lz4_wrap_decompress((char*)(src + srcoffset), (size_t)cbytes,
+                                                 (char*)(_dest + j * neblock), (size_t)neblock);
+                break;
+            case BLOSC_LZ4HC:
+                decompressed = lz4_wrap_decompress((char*)(src + srcoffset), (size_t)cbytes,
+                                                 (char*)(_dest + j * neblock), (size_t)neblock);
+                break;
+#endif /* HAVE_LZ4 */
+#if defined(HAVE_LIZARD)
+            case BLOSC_LIZARD:
+                decompressed = lizard_wrap_decompress((char*)(src + srcoffset), (size_t)cbytes,
+                                                    (char*)(_dest + j * neblock), (size_t)neblock);
+                break;
+#endif /* HAVE_LIZARD */
+#if defined(HAVE_SNAPPY)
+            case BLOSC_SNAPPY:
+                decompressed = snappy_wrap_decompress((char*)(src + srcoffset), (size_t)cbytes,
+                                                    (char*)(_dest + j * neblock), (size_t)neblock);
+                break;
+#endif /* HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+            case BLOSC_ZLIB:
+                decompressed = zlib_wrap_decompress((char*)(src + srcoffset), (size_t)cbytes,
+                                                  (char*)(_dest + j * neblock), (size_t)neblock);
+                break;
+#endif /* HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+            case BLOSC_ZSTD:
+                decompressed = zstd_wrap_decompress((char*)(src + srcoffset), (size_t)cbytes,
+                                                  (char*)(_dest + j * neblock), (size_t)neblock);
+                break;
+#endif /* HAVE_ZSTD */
+            default:
+                blosc_compcode_to_compname(compformat, &compname);
+                fprintf(stderr, "Blosc has not been compiled with '%s' ", compname);
+                fprintf(stderr, "decompression support. Please use one having it.");
+                return -5;    /* signals no decompression support */
+        }
+        
+        if (decompressed != neblock) {
+            return -1;  /* should always be equal to neblock */
+        }
+        
+        srcoffset += cbytes;
+        ntbytes += neblock;
+    }
+}

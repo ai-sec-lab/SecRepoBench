@@ -1,0 +1,881 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+void process_ndpi_collected_info(struct ndpi_workflow * workflow, struct ndpi_flow_info *flow_info) {
+  u_int i, is_quic = 0;
+  char out[128], *s;
+  
+  if(!flow_info->ndpi_flow) return;
+
+  flow_info->info_type = INFO_INVALID;
+
+  s = ndpi_get_flow_risk_info(flow_info->ndpi_flow, out, sizeof(out), 0 /* text */);
+
+  if(s != NULL)
+    flow_info->risk_str = ndpi_strdup(s);  
+  
+  flow_info->confidence = flow_info->ndpi_flow->confidence;
+
+  ndpi_snprintf(flow_info->host_server_name, sizeof(flow_info->host_server_name), "%s",
+	   flow_info->ndpi_flow->host_server_name);
+
+  ndpi_snprintf(flow_info->flow_extra_info, sizeof(flow_info->flow_extra_info), "%s",
+	   flow_info->ndpi_flow->flow_extra_info);
+
+  flow_info->risk = flow_info->ndpi_flow->risk;
+
+  if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_DHCP)) {
+    if(flow_info->ndpi_flow->protos.dhcp.fingerprint[0] != '\0')
+      flow_info->dhcp_fingerprint = ndpi_strdup(flow_info->ndpi_flow->protos.dhcp.fingerprint);
+    if(flow_info->ndpi_flow->protos.dhcp.class_ident[0] != '\0')
+      flow_info->dhcp_class_ident = ndpi_strdup(flow_info->ndpi_flow->protos.dhcp.class_ident);
+  } else if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_BITTORRENT) &&
+            !is_ndpi_proto(flow_info, NDPI_PROTOCOL_TLS)) {
+    u_int j;
+
+    if(flow_info->ndpi_flow->protos.bittorrent.hash[0] != '\0') {
+      flow_info->bittorent_hash = ndpi_malloc(sizeof(flow_info->ndpi_flow->protos.bittorrent.hash) * 2 + 1);
+      for(i=0, j = 0; i < sizeof(flow_info->ndpi_flow->protos.bittorrent.hash); i++) {
+        sprintf(&flow_info->bittorent_hash[j], "%02x",
+	        flow_info->ndpi_flow->protos.bittorrent.hash[i]);
+
+        j += 2;
+      }
+      flow_info->bittorent_hash[j] = '\0';
+    }
+  }
+  /* DNS */
+  else if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_DNS)) {
+    if(flow_info->ndpi_flow->protos.dns.rsp_type == 0x1)
+    {
+      flow_info->info_type = INFO_GENERIC;
+      inet_ntop(AF_INET, &flow_info->ndpi_flow->protos.dns.rsp_addr.ipv4, flow_info->info, sizeof(flow_info->info));
+    } else {
+      flow_info->info_type = INFO_GENERIC;
+      inet_ntop(AF_INET6, &flow_info->ndpi_flow->protos.dns.rsp_addr.ipv6, flow_info->info, sizeof(flow_info->info));
+
+      /* For consistency across platforms replace :0: with :: */
+      ndpi_patchIPv6Address(flow_info->info);
+    }
+  }
+  /* MDNS */
+  else if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_MDNS)) {
+    flow_info->info_type = INFO_GENERIC;
+    ndpi_snprintf(flow_info->info, sizeof(flow_info->info), "%s", flow_info->ndpi_flow->host_server_name);
+  }
+  /* UBNTAC2 */
+  else if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_UBNTAC2)) {
+    flow_info->info_type = INFO_GENERIC;
+    ndpi_snprintf(flow_info->info, sizeof(flow_info->info), "%s", flow_info->ndpi_flow->protos.ubntac2.version);
+  }
+  /* FTP */
+  else if((is_ndpi_proto(flow_info, NDPI_PROTOCOL_FTP_CONTROL))
+	  || /* IMAP */ is_ndpi_proto(flow_info, NDPI_PROTOCOL_MAIL_IMAP)
+	  || /* POP */  is_ndpi_proto(flow_info, NDPI_PROTOCOL_MAIL_POP)
+	  || /* SMTP */ is_ndpi_proto(flow_info, NDPI_PROTOCOL_MAIL_SMTP)) {
+    flow_info->info_type = INFO_FTP_IMAP_POP_SMTP;
+    ndpi_snprintf(flow_info->ftp_imap_pop_smtp.username,
+                  sizeof(flow_info->ftp_imap_pop_smtp.username),
+                  "%s", flow_info->ndpi_flow->l4.tcp.ftp_imap_pop_smtp.username);
+    ndpi_snprintf(flow_info->ftp_imap_pop_smtp.password,
+                  sizeof(flow_info->ftp_imap_pop_smtp.password),
+                  "%s", flow_info->ndpi_flow->l4.tcp.ftp_imap_pop_smtp.password);
+    flow_info->ftp_imap_pop_smtp.auth_failed =
+      flow_info->ndpi_flow->l4.tcp.ftp_imap_pop_smtp.auth_failed;
+  }
+  /* KERBEROS */
+  else if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_KERBEROS)) {
+    flow_info->info_type = INFO_KERBEROS;
+    ndpi_snprintf(flow_info->kerberos.domain,
+                  sizeof(flow_info->kerberos.domain),
+                  "%s", flow_info->ndpi_flow->protos.kerberos.domain);
+    ndpi_snprintf(flow_info->kerberos.hostname,
+                  sizeof(flow_info->kerberos.hostname),
+                  "%s", flow_info->ndpi_flow->protos.kerberos.hostname);
+    ndpi_snprintf(flow_info->kerberos.username,
+                  sizeof(flow_info->kerberos.username),
+                  "%s", flow_info->ndpi_flow->protos.kerberos.username);
+  }
+  /* HTTP */
+  else if((flow_info->detected_protocol.master_protocol == NDPI_PROTOCOL_HTTP)
+	  || is_ndpi_proto(flow_info, NDPI_PROTOCOL_HTTP)) {
+    if(flow_info->ndpi_flow->http.url != NULL) {
+      ndpi_snprintf(flow_info->http.url, sizeof(flow_info->http.url), "%s", flow_info->ndpi_flow->http.url);
+      flow_info->http.response_status_code = flow_info->ndpi_flow->http.response_status_code;
+      ndpi_snprintf(flow_info->http.content_type, sizeof(flow_info->http.content_type), "%s", flow_info->ndpi_flow->http.content_type ? flow_info->ndpi_flow->http.content_type : "");
+      ndpi_snprintf(flow_info->http.request_content_type, sizeof(flow_info->http.request_content_type), "%s", flow_info->ndpi_flow->http.request_content_type ? flow_info->ndpi_flow->http.request_content_type : "");
+    }
+  } else if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_TELNET)) {
+    if(flow_info->ndpi_flow->protos.telnet.username[0] != '\0')
+      flow_info->telnet.username = ndpi_strdup(flow_info->ndpi_flow->protos.telnet.username);
+    if(flow_info->ndpi_flow->protos.telnet.password[0] != '\0')
+      flow_info->telnet.password = ndpi_strdup(flow_info->ndpi_flow->protos.telnet.password);
+  } else 
+  // Check if the flow corresponds to the SSH protocol.
+  // If so, copy SSH-related information, such as client and server signatures,
+  // and client/server hash data to the flow structure.
+  // 
+  // Check if the flow corresponds to the TLS protocol or related protocols.
+  // If the protocol matches, update the flow structure with relevant TLS/QUIC information.
+  // This includes SSL version, server names, certificate validity dates, and JA3 fingerprints.
+  // Extract and store SSL/TLS version, server names, and certificate information.
+  // Copy various TLS/QUIC attributes, including ALPN and fingerprint data, to the flow.
+  // 
+  // If ALPN and supported versions are present, store them and set the appropriate info type.
+  // Optionally, reset and update the payload length distribution based on TLS block lengths.
+  // <MASK>
+
+  ndpi_snprintf(flow_info->http.user_agent,
+                sizeof(flow_info->http.user_agent),
+                "%s", (flow_info->ndpi_flow->http.user_agent ? flow_info->ndpi_flow->http.user_agent : ""));
+
+  if(flow_info->detection_completed && (!flow_info->check_extra_packets)) {
+    if(is_ndpi_proto(flow_info, NDPI_PROTOCOL_UNKNOWN)) {
+      if(workflow->__flow_giveup_callback != NULL)
+	workflow->__flow_giveup_callback(workflow, flow_info, workflow->__flow_giveup_udata);
+    } else {
+      if(workflow->__flow_detected_callback != NULL)
+	workflow->__flow_detected_callback(workflow, flow_info, workflow->__flow_detected_udata);
+    }
+
+    ndpi_free_flow_info_half(flow_info);
+  }
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// example/ndpiReader.c
+void extcap_config() {
+  int argidx = 0;
+#if 0
+  struct ndpi_proto_sorter *protos;
+  u_int ndpi_num_supported_protocols;
+  int i;
+  ndpi_proto_defaults_t *proto_defaults;
+#endif
+
+  ndpi_info_mod = ndpi_init_detection_module(ndpi_no_prefs);
+#if 0
+  ndpi_num_supported_protocols = ndpi_get_ndpi_num_supported_protocols(ndpi_info_mod);
+  proto_defaults = ndpi_get_proto_defaults(ndpi_info_mod);
+#endif
+
+  /* -i <interface> */
+  printf("arg {number=%d}{call=-i}{display=Capture Interface}{type=string}{group=Live Capture}"
+         "{tooltip=The interface name}\n", argidx++);
+
+  printf("arg {number=%d}{call=-i}{display=Pcap File to Analyze}{type=fileselect}{mustexist=true}{group=Pcap}"
+         "{tooltip=The pcap file to analyze (if the interface is unspecified)}\n", argidx++);
+
+#if 0
+  /* Removed as it breaks! extcap */
+  protos = (struct ndpi_proto_sorter*)ndpi_malloc(sizeof(struct ndpi_proto_sorter) * ndpi_num_supported_protocols);
+  if(!protos) exit(0);
+
+  printf("arg {number=%d}{call=--ndpi-proto-filter}{display=nDPI Protocol Filter}{type=selector}{group=Filter}"
+         "{tooltip=nDPI Protocol to be filtered}\n", argidx);
+
+  printf("value {arg=%d}{value=%d}{display=%s}{default=true}\n", argidx, 0, "No nDPI filtering");
+
+  for(i=0; i<(int) ndpi_num_supported_protocols; i++) {
+    protos[i].id = i;
+    ndpi_snprintf(protos[i].name, sizeof(protos[i].name), "%s", proto_defaults[i].protoName);
+  }
+
+  qsort(protos, ndpi_num_supported_protocols, sizeof(struct ndpi_proto_sorter), cmpProto);
+
+  for(i=0; i<(int)ndpi_num_supported_protocols; i++)
+    printf("value {arg=%d}{value=%d}{display=%s (%d)}{default=false}{enabled=true}\n", argidx, protos[i].id,
+           protos[i].name, protos[i].id);
+
+  ndpi_free(protos);
+#endif
+
+  ndpi_exit_detection_module(ndpi_info_mod);
+
+  extcap_exit = 1;
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_utils.c
+int ndpi_flow2json(struct ndpi_detection_module_struct *ndpi_struct,
+		   struct ndpi_flow_struct *flow,
+		   u_int8_t ip_version,
+		   u_int8_t l4_protocol,
+		   u_int32_t src_v4, u_int32_t dst_v4,
+		   struct ndpi_in6_addr *src_v6, struct ndpi_in6_addr *dst_v6,
+		   u_int16_t src_port, u_int16_t dst_port,
+		   ndpi_protocol l7_protocol,
+		   ndpi_serializer *serializer) {
+  char src_name[32], dst_name[32];
+
+  if(ndpi_init_serializer(serializer, ndpi_serialization_format_json) == -1)
+    return(-1);
+
+  if(ip_version == 4) {
+    inet_ntop(AF_INET, &src_v4, src_name, sizeof(src_name));
+    inet_ntop(AF_INET, &dst_v4, dst_name, sizeof(dst_name));
+  } else {
+    inet_ntop(AF_INET6, src_v6, src_name, sizeof(src_name));
+    inet_ntop(AF_INET6, dst_v6, dst_name, sizeof(dst_name));
+    /* For consistency across platforms replace :0: with :: */
+    ndpi_patchIPv6Address(src_name), ndpi_patchIPv6Address(dst_name);
+  }
+
+  ndpi_serialize_string_string(serializer, "src_ip", src_name);
+  ndpi_serialize_string_string(serializer, "dest_ip", dst_name);
+  if(src_port) ndpi_serialize_string_uint32(serializer, "src_port", src_port);
+  if(dst_port) ndpi_serialize_string_uint32(serializer, "dst_port", dst_port);
+
+  switch(l4_protocol) {
+  case IPPROTO_TCP:
+    ndpi_serialize_string_string(serializer, "proto", "TCP");
+    break;
+
+  case IPPROTO_UDP:
+    ndpi_serialize_string_string(serializer, "proto", "UDP");
+    break;
+
+  case IPPROTO_ICMP:
+    ndpi_serialize_string_string(serializer, "proto", "ICMP");
+    break;
+
+  default:
+    ndpi_serialize_string_uint32(serializer, "proto", l4_protocol);
+    break;
+  }
+
+  return(ndpi_dpi2json(ndpi_struct, flow, l7_protocol, serializer));
+}
+
+// the below code fragment can be found in:
+// example/ndpiSimpleIntegration.c
+static void run_pcap_loop(struct nDPI_reader_thread const * const reader_thread)
+{
+  if (reader_thread->workflow != NULL &&
+      reader_thread->workflow->pcap_handle != NULL) {
+
+    if (pcap_loop(reader_thread->workflow->pcap_handle, -1,
+		  &ndpi_process_packet, (uint8_t *)reader_thread) == PCAP_ERROR) {
+
+      fprintf(stderr, "Error while reading pcap file: '%s'\n",
+	      pcap_geterr(reader_thread->workflow->pcap_handle));
+      __sync_fetch_and_add(&reader_thread->workflow->error_or_eof, 1);
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// example/ndpiReader.c
+static void parseOptions(int argc, char **argv) {
+  int option_idx = 0;
+  int opt;
+#ifndef USE_DPDK
+  char *__pcap_file = NULL;
+  int thread_id, do_capture = 0;
+#ifdef linux
+  char *bind_mask = NULL;
+  u_int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+#endif
+
+#ifdef USE_DPDK
+  {
+    int ret = rte_eal_init(argc, argv);
+
+    if(ret < 0)
+      rte_exit(EXIT_FAILURE, "Error with EAL initialization\n");
+
+    argc -= ret, argv += ret;
+  }
+#endif
+
+  while((opt = getopt_long(argc, argv, "a:b:e:c:C:dDf:g:i:Ij:k:K:S:hHp:pP:l:r:s:tu:v:V:n:Jrp:x:w:zq0123:456:7:89:m:T:U:",
+                           longopts, &option_idx)) != EOF) {
+#ifdef DEBUG_TRACE
+    if(trace) fprintf(trace, " #### Handling option -%c [%s] #### \n", opt, optarg ? optarg : "");
+#endif
+
+    switch (opt) {
+    case 'a':
+      ndpi_generate_options(atoi(optarg));
+      break;
+
+    case 'b':
+      if((num_bin_clusters = atoi(optarg)) > 32)
+        num_bin_clusters = 32;
+      break;
+
+    case 'd':
+      enable_protocol_guess = 0;
+      break;
+
+    case 'D':
+      enable_doh_dot_detection = 1;
+      break;
+
+    case 'e':
+      human_readeable_string_len = atoi(optarg);
+      break;
+
+    case 'i':
+    case '3':
+      _pcap_file[0] = optarg;
+      break;
+
+    case 'I':
+      ignore_vlanid = 1;
+      break;
+
+    case 'j':
+      _maliciousJA3Path = optarg;
+      break;
+
+    case 'S':
+      _maliciousSHA1Path = optarg;
+      break;
+
+    case 'm':
+      pcap_analysis_duration = atol(optarg);
+      break;
+
+    case 'f':
+    case '6':
+      bpfFilter = optarg;
+      break;
+
+#ifndef USE_DPDK
+#ifdef linux
+    case 'g':
+      bind_mask = optarg;
+      break;
+#endif
+#endif
+
+    case 'l':
+      num_loops = atoi(optarg);
+      break;
+
+    case 'n':
+      num_threads = atoi(optarg);
+      break;
+
+    case 'p':
+      _protoFilePath = optarg;
+      break;
+
+    case 'c':
+      _customCategoryFilePath = optarg;
+      break;
+
+    case 'C':
+      errno = 0;
+      if((csv_fp = fopen(optarg, "w")) == NULL)
+      {
+        printf("Unable to write on CSV file %s: %s\n", optarg, strerror(errno));
+        exit(1);
+      }
+      break;
+
+    case 'r':
+      _riskyDomainFilePath = optarg;
+      break;
+
+    case 's':
+      capture_for = atoi(optarg);
+      capture_until = capture_for + time(NULL);
+      break;
+
+    case 't':
+      decode_tunnels = 1;
+      break;
+
+    case 'v':
+      verbose = atoi(optarg);
+      break;
+
+    case 'V':
+      nDPI_LogLevel  = atoi(optarg);
+      if(nDPI_LogLevel < NDPI_LOG_ERROR) nDPI_LogLevel = NDPI_LOG_ERROR;
+      if(nDPI_LogLevel > NDPI_LOG_DEBUG_EXTRA) {
+        nDPI_LogLevel = NDPI_LOG_DEBUG_EXTRA;
+        ndpi_free(_debug_protocols);
+        _debug_protocols = ndpi_strdup("all");
+      }
+      break;
+
+    case 'u':
+      ndpi_free(_debug_protocols);
+      _debug_protocols = ndpi_strdup(optarg);
+      break;
+
+    case 'h':
+      help(0);
+      break;
+
+    case 'H':
+      help(1);
+      break;
+
+    case 'F':
+      enable_flow_stats = 1;
+      break;
+
+    case 'P':
+      {
+        int _min_pattern_len, _max_pattern_len,
+          _max_num_packets_per_flow, _max_packet_payload_dissection,
+          _max_num_reported_top_payloads;
+
+        enable_payload_analyzer = 1;
+        if(sscanf(optarg, "%d:%d:%d:%d:%d", &_min_pattern_len, &_max_pattern_len,
+                  &_max_num_packets_per_flow,
+                  &_max_packet_payload_dissection,
+                  &_max_num_reported_top_payloads) == 5) {
+          min_pattern_len = _min_pattern_len, max_pattern_len = _max_pattern_len;
+          max_num_packets_per_flow = _max_num_packets_per_flow, max_packet_payload_dissection = _max_packet_payload_dissection;
+          max_num_reported_top_payloads = _max_num_reported_top_payloads;
+          if(min_pattern_len > max_pattern_len) min_pattern_len = max_pattern_len;
+          if(min_pattern_len < 2)               min_pattern_len = 2;
+          if(max_pattern_len > 16)              max_pattern_len = 16;
+          if(max_num_packets_per_flow == 0)     max_num_packets_per_flow = 1;
+          if(max_packet_payload_dissection < 4) max_packet_payload_dissection = 4;
+          if(max_num_reported_top_payloads == 0) max_num_reported_top_payloads = 1;
+        } else {
+          printf("Invalid -P format. Ignored\n");
+          help(0);
+        }
+      }
+      break;
+
+    case 'k':
+      errno = 0;
+      if((serialization_fp = fopen(optarg, "w")) == NULL)
+      {
+        printf("Unable to write on serialization file %s: %s\n", optarg, strerror(errno));
+        exit(1);
+      }
+      break;
+
+    case 'K':
+      if (strcasecmp(optarg, "tlv") == 0 && strlen(optarg) == 3)
+      {
+        serialization_format = ndpi_serialization_format_tlv;
+      } else if (strcasecmp(optarg, "csv") == 0 && strlen(optarg) == 3)
+      {
+        serialization_format = ndpi_serialization_format_csv;
+      } else if (strcasecmp(optarg, "json") == 0 && strlen(optarg) == 4)
+      {
+        serialization_format = ndpi_serialization_format_json;
+      } else {
+        printf("Unknown serialization format. Valid values are: tlv,csv,json\n");
+        exit(1);
+      }
+      break;
+
+    case 'w':
+      results_path = ndpi_strdup(optarg);
+      if((results_file = fopen(results_path, "w")) == NULL) {
+        printf("Unable to write in file %s: quitting\n", results_path);
+        exit(1);
+      }
+      break;
+
+    case 'q':
+      quiet_mode = 1;
+      nDPI_LogLevel = 0;
+      break;
+
+      /* Extcap */
+    case '0':
+      extcap_interfaces();
+      break;
+
+    case '1':
+      printf("extcap {version=%s}\n", ndpi_revision());
+      break;
+
+    case '2':
+      extcap_dlts();
+      break;
+
+    case '4':
+      extcap_config();
+      break;
+
+#ifndef USE_DPDK
+    case '5':
+      do_capture = 1;
+      break;
+#endif
+
+    case '7':
+      extcap_capture_fifo = ndpi_strdup(optarg);
+      break;
+
+    case '9':
+      extcap_packet_filter = ndpi_get_proto_by_name(ndpi_info_mod, optarg);
+      if(extcap_packet_filter == NDPI_PROTOCOL_UNKNOWN) extcap_packet_filter = atoi(optarg);
+      break;
+
+    case 'T':
+      max_num_tcp_dissected_pkts = atoi(optarg);
+      if(max_num_tcp_dissected_pkts < 3) max_num_tcp_dissected_pkts = 3;
+      break;
+
+    case 'x':
+      domain_to_check = optarg;
+      break;
+
+    case 'U':
+      max_num_udp_dissected_pkts = atoi(optarg);
+      if(max_num_udp_dissected_pkts < 3) max_num_udp_dissected_pkts = 3;
+      break;
+
+    case 'z':
+      enable_ja3_plus = 1;
+      break;
+
+    default:
+#ifdef DEBUG_TRACE
+      if(trace) fprintf(trace, " #### Unknown option -%c: skipping it #### \n", opt);
+#endif
+
+      help(0);
+      break;
+    }
+  }
+
+  if ((serialization_fp == NULL && serialization_format != ndpi_serialization_format_unknown) ||
+      (serialization_fp != NULL && serialization_format == ndpi_serialization_format_unknown))
+  {
+    printf("Serializing detection results to a file requires command line arguments -k AND -K\n");
+    exit(1);
+  }
+
+  if(extcap_exit)
+    exit(0);
+
+  if(csv_fp)
+    printCSVHeader();
+
+#ifndef USE_DPDK
+  if(do_capture) {
+    quiet_mode = 1;
+    extcap_capture();
+  }
+
+  if(!domain_to_check) {
+    if(_pcap_file[0] == NULL)
+      help(0);
+
+    if(strchr(_pcap_file[0], ',')) { /* multiple ingress interfaces */
+      num_threads = 0;               /* setting number of threads = number of interfaces */
+      __pcap_file = strtok(_pcap_file[0], ",");
+      while(__pcap_file != NULL && num_threads < MAX_NUM_READER_THREADS) {
+        _pcap_file[num_threads++] = __pcap_file;
+        __pcap_file = strtok(NULL, ",");
+      }
+    } else {
+      if(num_threads > MAX_NUM_READER_THREADS) num_threads = MAX_NUM_READER_THREADS;
+      for(thread_id = 1; thread_id < num_threads; thread_id++)
+        _pcap_file[thread_id] = _pcap_file[0];
+    }
+  }
+
+#ifdef linux
+#ifndef USE_DPDK
+  for(thread_id = 0; thread_id < num_threads; thread_id++)
+    core_affinity[thread_id] = -1;
+
+  if(num_cores > 1 && bind_mask != NULL) {
+    char *core_id = strtok(bind_mask, ":");
+    thread_id = 0;
+
+    while(core_id != NULL && thread_id < num_threads) {
+      core_affinity[thread_id++] = atoi(core_id) % num_cores;
+      core_id = strtok(NULL, ":");
+    }
+  }
+#endif
+#endif
+#endif
+}
+
+// the below code fragment can be found in:
+// example/ndpiReader.c
+static void printResults(u_int64_t processing_time_usec, u_int64_t setup_time_usec) {
+  u_int32_t i;
+  u_int32_t avg_pkt_size = 0;
+  int thread_id;
+  char buf[32];
+  long long unsigned int breed_stats[NUM_BREEDS] = { 0 };
+
+  memset(&cumulative_stats, 0, sizeof(cumulative_stats));
+
+  for(thread_id = 0; thread_id < num_threads; thread_id++) {
+    if((ndpi_thread_info[thread_id].workflow->stats.total_wire_bytes == 0)
+       && (ndpi_thread_info[thread_id].workflow->stats.raw_packet_count == 0))
+      continue;
+
+    for(i=0; i<NUM_ROOTS; i++) {
+      ndpi_twalk(ndpi_thread_info[thread_id].workflow->ndpi_flows_root[i],
+                 node_proto_guess_walker, &thread_id);
+      if(verbose == 3 || stats_flag) ndpi_twalk(ndpi_thread_info[thread_id].workflow->ndpi_flows_root[i],
+						port_stats_walker, &thread_id);
+    }
+
+    /* Stats aggregation */
+    cumulative_stats.guessed_flow_protocols += ndpi_thread_info[thread_id].workflow->stats.guessed_flow_protocols;
+    cumulative_stats.raw_packet_count += ndpi_thread_info[thread_id].workflow->stats.raw_packet_count;
+    cumulative_stats.ip_packet_count += ndpi_thread_info[thread_id].workflow->stats.ip_packet_count;
+    cumulative_stats.total_wire_bytes += ndpi_thread_info[thread_id].workflow->stats.total_wire_bytes;
+    cumulative_stats.total_ip_bytes += ndpi_thread_info[thread_id].workflow->stats.total_ip_bytes;
+    cumulative_stats.total_discarded_bytes += ndpi_thread_info[thread_id].workflow->stats.total_discarded_bytes;
+
+    for(i = 0; i < ndpi_get_num_supported_protocols(ndpi_thread_info[0].workflow->ndpi_struct); i++) {
+      cumulative_stats.protocol_counter[i] += ndpi_thread_info[thread_id].workflow->stats.protocol_counter[i];
+      cumulative_stats.protocol_counter_bytes[i] += ndpi_thread_info[thread_id].workflow->stats.protocol_counter_bytes[i];
+      cumulative_stats.protocol_flows[i] += ndpi_thread_info[thread_id].workflow->stats.protocol_flows[i];
+    }
+
+    cumulative_stats.ndpi_flow_count += ndpi_thread_info[thread_id].workflow->stats.ndpi_flow_count;
+    cumulative_stats.flow_count[0] += ndpi_thread_info[thread_id].workflow->stats.flow_count[0];
+    cumulative_stats.flow_count[1] += ndpi_thread_info[thread_id].workflow->stats.flow_count[1];
+    cumulative_stats.flow_count[2] += ndpi_thread_info[thread_id].workflow->stats.flow_count[2];
+    cumulative_stats.tcp_count   += ndpi_thread_info[thread_id].workflow->stats.tcp_count;
+    cumulative_stats.udp_count   += ndpi_thread_info[thread_id].workflow->stats.udp_count;
+    cumulative_stats.mpls_count  += ndpi_thread_info[thread_id].workflow->stats.mpls_count;
+    cumulative_stats.pppoe_count += ndpi_thread_info[thread_id].workflow->stats.pppoe_count;
+    cumulative_stats.vlan_count  += ndpi_thread_info[thread_id].workflow->stats.vlan_count;
+    cumulative_stats.fragmented_count += ndpi_thread_info[thread_id].workflow->stats.fragmented_count;
+    for(i = 0; i < sizeof(cumulative_stats.packet_len)/sizeof(cumulative_stats.packet_len[0]); i++)
+      cumulative_stats.packet_len[i] += ndpi_thread_info[thread_id].workflow->stats.packet_len[i];
+    cumulative_stats.max_packet_len += ndpi_thread_info[thread_id].workflow->stats.max_packet_len;
+
+    cumulative_stats.dpi_packet_count[0] += ndpi_thread_info[thread_id].workflow->stats.dpi_packet_count[0];
+    cumulative_stats.dpi_packet_count[1] += ndpi_thread_info[thread_id].workflow->stats.dpi_packet_count[1];
+    cumulative_stats.dpi_packet_count[2] += ndpi_thread_info[thread_id].workflow->stats.dpi_packet_count[2];
+
+    for(i = 0; i < sizeof(cumulative_stats.flow_confidence)/sizeof(cumulative_stats.flow_confidence[0]); i++)
+      cumulative_stats.flow_confidence[i] += ndpi_thread_info[thread_id].workflow->stats.flow_confidence[i];
+  }
+
+  if(cumulative_stats.total_wire_bytes == 0)
+    goto free_stats;
+
+  if(!quiet_mode) {
+    printf("\nnDPI Memory statistics:\n");
+    printf("\tnDPI Memory (once):      %-13s\n", formatBytes(ndpi_get_ndpi_detection_module_size(), buf, sizeof(buf)));
+    printf("\tFlow Memory (per flow):  %-13s\n", formatBytes( ndpi_detection_get_sizeof_ndpi_flow_struct(), buf, sizeof(buf)));
+    printf("\tActual Memory:           %-13s\n", formatBytes(current_ndpi_memory, buf, sizeof(buf)));
+    printf("\tPeak Memory:             %-13s\n", formatBytes(max_ndpi_memory, buf, sizeof(buf)));
+    printf("\tSetup Time:              %lu msec\n", (unsigned long)(setup_time_usec/1000));
+    printf("\tPacket Processing Time:  %lu msec\n", (unsigned long)(processing_time_usec/1000));
+
+    printf("\nTraffic statistics:\n");
+    printf("\tEthernet bytes:        %-13llu (includes ethernet CRC/IFC/trailer)\n",
+           (long long unsigned int)cumulative_stats.total_wire_bytes);
+    printf("\tDiscarded bytes:       %-13llu\n",
+           (long long unsigned int)cumulative_stats.total_discarded_bytes);
+    printf("\tIP packets:            %-13llu of %llu packets total\n",
+           (long long unsigned int)cumulative_stats.ip_packet_count,
+           (long long unsigned int)cumulative_stats.raw_packet_count);
+    /* In order to prevent Floating point exception in case of no traffic*/
+    if(cumulative_stats.total_ip_bytes && cumulative_stats.raw_packet_count)
+    {
+      avg_pkt_size = (unsigned int)(cumulative_stats.total_ip_bytes/cumulative_stats.raw_packet_count);
+    }
+    printf("\tIP bytes:              %-13llu (avg pkt size %u bytes)\n",
+           (long long unsigned int)cumulative_stats.total_ip_bytes,avg_pkt_size);
+    printf("\tUnique flows:          %-13u\n", cumulative_stats.ndpi_flow_count);
+    printf("\tTCP Packets:           %-13lu\n", (unsigned long)cumulative_stats.tcp_count);
+    printf("\tUDP Packets:           %-13lu\n", (unsigned long)cumulative_stats.udp_count);
+    printf("\tVLAN Packets:          %-13lu\n", (unsigned long)cumulative_stats.vlan_count);
+    printf("\tMPLS Packets:          %-13lu\n", (unsigned long)cumulative_stats.mpls_count);
+    printf("\tPPPoE Packets:         %-13lu\n", (unsigned long)cumulative_stats.pppoe_count);
+    printf("\tFragmented Packets:    %-13lu\n", (unsigned long)cumulative_stats.fragmented_count);
+    printf("\tMax Packet size:       %-13u\n",   cumulative_stats.max_packet_len);
+    printf("\tPacket Len < 64:       %-13lu\n", (unsigned long)cumulative_stats.packet_len[0]);
+    printf("\tPacket Len 64-128:     %-13lu\n", (unsigned long)cumulative_stats.packet_len[1]);
+    printf("\tPacket Len 128-256:    %-13lu\n", (unsigned long)cumulative_stats.packet_len[2]);
+    printf("\tPacket Len 256-1024:   %-13lu\n", (unsigned long)cumulative_stats.packet_len[3]);
+    printf("\tPacket Len 1024-1500:  %-13lu\n", (unsigned long)cumulative_stats.packet_len[4]);
+    printf("\tPacket Len > 1500:     %-13lu\n", (unsigned long)cumulative_stats.packet_len[5]);
+
+	if(processing_time_usec > 0) {
+	  char buf[32], buf1[32], when[64];
+	  float t = (float)(cumulative_stats.ip_packet_count*1000000)/(float)processing_time_usec;
+	  float b = (float)(cumulative_stats.total_wire_bytes * 8 *1000000)/(float)processing_time_usec;
+	  float traffic_duration;
+	  struct tm result;
+
+	if(live_capture) traffic_duration = processing_time_usec;
+	else traffic_duration = ((u_int64_t)pcap_end.tv_sec*1000000 + pcap_end.tv_usec) - ((u_int64_t)pcap_start.tv_sec*1000000 + pcap_start.tv_usec);
+
+	printf("\tnDPI throughput:       %s pps / %s/sec\n", formatPackets(t, buf), formatTraffic(b, 1, buf1));
+	if(traffic_duration != 0) {
+	  t = (float)(cumulative_stats.ip_packet_count*1000000)/(float)traffic_duration;
+	  b = (float)(cumulative_stats.total_wire_bytes * 8 *1000000)/(float)traffic_duration;
+	} else {
+	  t = 0;
+	  b = 0;
+	}
+#ifdef WIN32
+	/* localtime() on Windows is thread-safe */
+	time_t tv_sec = pcap_start.tv_sec;
+	struct tm * tm_ptr = localtime(&tv_sec);
+	result = *tm_ptr;
+#else
+	localtime_r(&pcap_start.tv_sec, &result);
+#endif
+	strftime(when, sizeof(when), "%d/%b/%Y %H:%M:%S", &result);
+	printf("\tAnalysis begin:        %s\n", when);
+#ifdef WIN32
+	/* localtime() on Windows is thread-safe */
+	tv_sec = pcap_end.tv_sec;
+	tm_ptr = localtime(&tv_sec);
+	result = *tm_ptr;
+#else
+	localtime_r(&pcap_end.tv_sec, &result);
+#endif
+	strftime(when, sizeof(when), "%d/%b/%Y %H:%M:%S", &result);
+	printf("\tAnalysis end:          %s\n", when);
+	printf("\tTraffic throughput:    %s pps / %s/sec\n", formatPackets(t, buf), formatTraffic(b, 1, buf1));
+	printf("\tTraffic duration:      %.3f sec\n", traffic_duration/1000000);
+      }
+
+      if(enable_protocol_guess)
+	printf("\tGuessed flow protos:   %-13u\n", cumulative_stats.guessed_flow_protocols);
+
+      if(cumulative_stats.flow_count[0])
+	printf("\tDPI Packets (TCP):     %-13llu (%.2f pkts/flow)\n",
+	       (long long unsigned int)cumulative_stats.dpi_packet_count[0],
+	       cumulative_stats.dpi_packet_count[0] / (float)cumulative_stats.flow_count[0]);
+      if(cumulative_stats.flow_count[1])
+	printf("\tDPI Packets (UDP):     %-13llu (%.2f pkts/flow)\n",
+	       (long long unsigned int)cumulative_stats.dpi_packet_count[1],
+	       cumulative_stats.dpi_packet_count[1] / (float)cumulative_stats.flow_count[1]);
+      if(cumulative_stats.flow_count[2])
+	printf("\tDPI Packets (other):   %-13llu (%.2f pkts/flow)\n",
+	       (long long unsigned int)cumulative_stats.dpi_packet_count[2],
+	       cumulative_stats.dpi_packet_count[2] / (float)cumulative_stats.flow_count[2]);
+
+      for(i = 0; i < sizeof(cumulative_stats.flow_confidence)/sizeof(cumulative_stats.flow_confidence[0]); i++) {
+	if(cumulative_stats.flow_confidence[i] != 0)
+	  printf("\tConfidence: %-10s %-13llu (flows)\n", ndpi_confidence_get_name(i),
+		 (long long unsigned int)cumulative_stats.flow_confidence[i]);
+      }
+    }
+
+    if(results_file) {
+      if(enable_protocol_guess)
+	fprintf(results_file, "Guessed flow protos:\t%u\n\n", cumulative_stats.guessed_flow_protocols);
+
+      if(cumulative_stats.flow_count[0])
+	fprintf(results_file, "DPI Packets (TCP):\t%llu\t(%.2f pkts/flow)\n",
+		(long long unsigned int)cumulative_stats.dpi_packet_count[0],
+		cumulative_stats.dpi_packet_count[0] / (float)cumulative_stats.flow_count[0]);
+      if(cumulative_stats.flow_count[1])
+	fprintf(results_file, "DPI Packets (UDP):\t%llu\t(%.2f pkts/flow)\n",
+		(long long unsigned int)cumulative_stats.dpi_packet_count[1],
+		cumulative_stats.dpi_packet_count[1] / (float)cumulative_stats.flow_count[1]);
+      if(cumulative_stats.flow_count[2])
+	fprintf(results_file, "DPI Packets (other):\t%llu\t(%.2f pkts/flow)\n",
+		(long long unsigned int)cumulative_stats.dpi_packet_count[2],
+		cumulative_stats.dpi_packet_count[2] / (float)cumulative_stats.flow_count[2]);
+
+      for(i = 0; i < sizeof(cumulative_stats.flow_confidence)/sizeof(cumulative_stats.flow_confidence[0]); i++) {
+	if(cumulative_stats.flow_confidence[i] != 0)
+	  fprintf(results_file, "Confidence %-17s: %llu (flows)\n",
+		  ndpi_confidence_get_name(i),
+		  (long long unsigned int)cumulative_stats.flow_confidence[i]);
+      }
+
+      fprintf(results_file, "\n");
+  }
+
+  if(!quiet_mode) printf("\n\nDetected protocols:\n");
+  for(i = 0; i <= ndpi_get_num_supported_protocols(ndpi_thread_info[0].workflow->ndpi_struct); i++) {
+    ndpi_protocol_breed_t breed = ndpi_get_proto_breed(ndpi_thread_info[0].workflow->ndpi_struct, i);
+
+    if(cumulative_stats.protocol_counter[i] > 0) {
+      breed_stats[breed] += (long long unsigned int)cumulative_stats.protocol_counter_bytes[i];
+
+      if(results_file)
+	fprintf(results_file, "%s\t%llu\t%llu\t%u\n",
+		ndpi_get_proto_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
+		(long long unsigned int)cumulative_stats.protocol_counter[i],
+		(long long unsigned int)cumulative_stats.protocol_counter_bytes[i],
+		cumulative_stats.protocol_flows[i]);
+
+      if(!quiet_mode) {
+	printf("\t%-20s packets: %-13llu bytes: %-13llu "
+	       "flows: %-13u\n",
+	       ndpi_get_proto_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
+	       (long long unsigned int)cumulative_stats.protocol_counter[i],
+	       (long long unsigned int)cumulative_stats.protocol_counter_bytes[i],
+	       cumulative_stats.protocol_flows[i]);
+      }
+    }
+  }
+
+  if(!quiet_mode) {
+    printf("\n\nProtocol statistics:\n");
+
+    for(i=0; i < NUM_BREEDS; i++) {
+      if(breed_stats[i] > 0) {
+	printf("\t%-20s %13llu bytes\n",
+	       ndpi_get_proto_breed_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
+	       breed_stats[i]);
+      }
+    }
+  }
+
+  printRiskStats();
+  printFlowsStats();
+
+  if(stats_flag || verbose == 3) {
+    HASH_SORT(srcStats, port_stats_sort);
+    HASH_SORT(dstStats, port_stats_sort);
+  }
+
+  if(verbose == 3) {
+    printf("\n\nSource Ports Stats:\n");
+    printPortStats(srcStats);
+
+    printf("\nDestination Ports Stats:\n");
+    printPortStats(dstStats);
+  }
+
+ free_stats:
+  if(scannerHosts) {
+    deleteScanners(scannerHosts);
+    scannerHosts = NULL;
+  }
+
+  if(receivers) {
+    deleteReceivers(receivers);
+    receivers = NULL;
+  }
+
+  if(topReceivers) {
+    deleteReceivers(topReceivers);
+    topReceivers = NULL;
+  }
+
+  if(srcStats) {
+    deletePortsStats(srcStats);
+    srcStats = NULL;
+  }
+
+  if(dstStats) {
+    deletePortsStats(dstStats);
+    dstStats = NULL;
+  }
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

@@ -1,0 +1,66 @@
+int get_coffset(blosc2_frame_s* frame, int32_t headerlength, int64_t cbytes, int32_t nchunk, int64_t *offset) {
+  // Retrieve the (compressed) offsets chunk.
+  int32_t coffsets_cbytes = 0;
+  uint8_t *coffsets = get_coffsets(frame, headerlength, cbytes, &coffsets_cbytes);
+  if (coffsets == NULL) {
+    BLOSC_TRACE_ERROR("Cannot get the offsets chunk from the frame.");
+    return BLOSC2_ERROR_READ_BUFFER;
+  }
+
+  // If no offset chunk was written, that generally means 0 or 1 chunk in the frame.
+  // If nchunk=0, set *offset=0; otherwise return error.
+  if (coffsets_cbytes == 0) {
+    if (nchunk != 0) {
+      BLOSC_TRACE_ERROR("No offset array in frame, cannot retrieve chunk %d.", nchunk);
+      return BLOSC2_ERROR_INVALID_PARAM;
+    }
+    *offset = 0;
+    return 0;
+  }
+
+  // Check the compressed offsets chunk header to determine its uncompressed size.
+  size_t offsets_nbytes, offsets_chunk_cbytes, offsets_blocksize;
+  int rc = blosc_cbuffer_sizes(coffsets, &offsets_nbytes, &offsets_chunk_cbytes, &offsets_blocksize);
+  if (rc < 0) {
+    BLOSC_TRACE_ERROR("Cannot retrieve offsets chunk sizes via blosc_cbuffer_sizes.");
+    return BLOSC2_ERROR_DATA;
+  }
+
+  // Offsets must be a multiple of 8 bytes (int64_t).
+  if (offsets_nbytes % sizeof(int64_t) != 0) {
+    BLOSC_TRACE_ERROR("Corrupted offsets chunk (not multiple of 8 bytes).");
+    return BLOSC2_ERROR_DATA;
+  }
+
+  // Check that nchunk is within the range of available offsets.
+  int n_offsets = (int)(offsets_nbytes / sizeof(int64_t));
+  if (nchunk >= n_offsets) {
+    BLOSC_TRACE_ERROR("Requested chunk %d is out of range (total offsets: %d).", nchunk, n_offsets);
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+
+  // Decompress the entire offsets array so that we can retrieve the one we need.
+  int64_t *offsets_buf = (int64_t *)malloc(offsets_nbytes);
+  if (!offsets_buf) {
+    BLOSC_TRACE_ERROR("Cannot allocate memory for offsets buffer.");
+    return BLOSC2_ERROR_MEMORY_ALLOC;
+  }
+
+  blosc2_dparams dparams = BLOSC2_DPARAMS_DEFAULTS;
+  blosc2_context *dctx = blosc2_create_dctx(dparams);
+  int32_t nbytes_decomp = blosc2_decompress_ctx(dctx, coffsets, coffsets_cbytes, offsets_buf, offsets_nbytes);
+  blosc2_free_ctx(dctx);
+
+  if (nbytes_decomp < 0 || nbytes_decomp != (int32_t)offsets_nbytes) {
+    BLOSC_TRACE_ERROR("Error decompressing offsets; nbytes_decomp=%d, offsets_nbytes=%zu.",
+                      nbytes_decomp, offsets_nbytes);
+    free(offsets_buf);
+    return (nbytes_decomp < 0) ? nbytes_decomp : BLOSC2_ERROR_DATA;
+  }
+
+  // Return the requested offset (could be a special negative value if sign bit is set).
+  *offset = offsets_buf[nchunk];
+  free(offsets_buf);
+
+  return 0;
+}

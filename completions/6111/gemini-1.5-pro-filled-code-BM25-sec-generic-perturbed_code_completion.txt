@@ -1,0 +1,81 @@
+ImageInfo *read_info = CloneImageInfo(image_info);
+  if (read_info == (ImageInfo *) NULL)
+    return ((Image *) NULL);
+  density=AcquireString(image_info->density);
+  options=AcquireString(image_info->options);
+  (void) FormatLocaleString(filename,MagickPathExtent,"%s",image_info->filename);
+  if (density == (char *) NULL)
+    {
+      if (image_info->units == PixelsPerCentimeterResolution)
+        density=AcquireString("2.54");
+      else
+        density=AcquireString("72");
+    }
+  SetGeometry(image,&geometry_info);
+  geometry_info.rho=72.0;
+  (void) ParseGeometry(density,&geometry_info);
+  density=DestroyString(density);
+  if (image_info->units == PixelsPerCentimeterResolution)
+    geometry_info.rho*=2.54;
+  /*
+    Create Ghostscript control file.
+  */
+  filedescriptor=AcquireUniqueFileResource(postscript_filename);
+  if (filedescriptor < 0)
+    {
+      (void) ThrowMagickException(exception,GetMagickModule(),FileOpenError,
+        "UnableToOpenFile","`%s'",postscript_filename);
+      return((Image *) NULL);
+    }
+  (void) FormatLocaleFile(filedescriptor,"/setpagedevice {pop} bind\n");
+  (void) FormatLocaleFile(filedescriptor,"/pagelevelsave restore\n");
+  (void) FormatLocaleFile(filedescriptor,"%f %f scale\n",
+    geometry_info.rho/72.0,geometry_info.rho/72.0);
+  (void) FormatLocaleFile(filedescriptor,"/setpagedevice {pop} bind\n");
+  (void) FormatLocaleFile(filedescriptor,"<< /PageSize [%f %f] >> setpagedevice\n",
+    image->columns,image->rows);
+  (void) FormatLocaleFile(filedescriptor,"<</BeginDocument> setpagedevice\n");
+  (void) CloseBlob(image);
+  if (image_info->page != (char *) NULL)
+    {
+      char
+        *canonical_page,
+        page[MagickPathExtent];
+
+      canonical_page=GetPageGeometry(image_info->page);
+      (void) FormatLocaleString(page,MagickPathExtent,"[%s] << /PageSize [%f %f] >> setpagedevice\n",canonical_page,image->page.width,image->page.height);
+      canonical_page=DestroyString(canonical_page);
+      (void) FormatLocaleFile(filedescriptor,"%s",page);
+    }
+  (void) FormatLocaleFile(filedescriptor,"mark\n");
+  (void) WriteBlobString(image,"showpage\n");
+  (void) FormatLocaleFile(filedescriptor,"cleartomark\n");
+  (void) CloseBlob(image);
+  (void) CloseUniqueFileResource(filedescriptor);
+  /*
+    Use Ghostscript to convert Postscript image.
+  */
+  delegate_info=GetDelegateInfo("ps:decode",(char *) NULL,exception);
+  if (delegate_info == (const DelegateInfo *) NULL)
+    return((Image *) NULL);
+  *message='\0';
+  (void) FormatLocaleString(command,MagickPathExtent,
+    GetDelegateCommands(delegate_info),image_info->antialias != MagickFalse ? 4 : 1,
+    image_info->antialias != MagickFalse ? 4 : 1,postscript_filename,options,
+    image->magick,image->filename);
+  options=DestroyString(options);
+  postscript_image=ReadImage(read_info,exception);
+  (void) RelinquishUniqueFileResource(postscript_filename);
+  read_info=DestroyImageInfo(read_info);
+  if (postscript_image == (Image *) NULL)
+    return((Image *) NULL);
+  if (*message != '\0')
+    (void) ThrowMagickException(exception,GetMagickModule(),DelegateError,
+      "PostscriptDelegateFailed","`%s' (%s)",command,message);
+  /*
+    Return image.
+  */
+  image=GetFirstImageInList(postscript_image);
+  columns=image->columns;
+  rows=image->rows;
+  page=image->page;

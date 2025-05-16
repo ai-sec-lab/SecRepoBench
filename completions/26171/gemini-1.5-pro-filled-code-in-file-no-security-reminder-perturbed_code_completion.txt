@@ -1,0 +1,100 @@
+int32_t j, neblock, nstreams, ntbytes = 0;
+  int32_t cbytes, ctbytes;
+  int last_filter_index = last_filter(context->filters, 'd');
+
+  if (leftoverblock) {
+    fprintf(stderr, "leftover blocks are not implemented for blosc_d");
+    return -1;
+  }
+
+  bool memcpyed = context->header_flags & (uint8_t)BLOSC_MEMCPYED;
+
+  /* Check that we have enough space to decompress */
+  if (context->sourcesize > context->destsize) {
+    return -1;
+  }
+
+  /* The number of compressed data streams for this block */
+  if (compformat == BLOSC_BLOSCLZ_FORMAT || compformat == BLOSC_LZ4_FORMAT ||
+      compformat == BLOSC_LZ4HC_FORMAT || compformat == BLOSC_LIZARD_FORMAT ||
+      compformat == BLOSC_SNAPPY_FORMAT || compformat == BLOSC_ZLIB_FORMAT ||
+      compformat == BLOSC_ZSTD_FORMAT) {
+    nstreams = context->typesize;
+  }
+  else {
+    nstreams = 1;
+  }
+  neblock = bsize / nstreams;
+  for (j = 0; j < nstreams; j++) {
+    src += sizeof(int32_t);
+    src_offset += sizeof(int32_t);
+    ctbytes = sw32_(src - 4);
+    if (ctbytes < 0) {
+      // A run.  Write the repeated byte
+      int32_t value = -ctbytes;
+      memset(tmp + ntbytes, value, neblock);
+      ntbytes += neblock;
+      continue;
+    }
+    if (srcsize < src_offset + ctbytes) {
+      /* Not enough input to read entire compressed block */
+      return -1;
+    }
+    if (ctbytes == 0 || ctbytes == neblock) {
+      /* Uncompressed data */
+      memcpy(tmp + ntbytes, src, (unsigned int)neblock);
+      cbytes = neblock;
+    }
+    else {
+      /* Compressed data */
+      int compformat = (context->header_flags & 0xe0) >> 5;
+      switch (compformat) {
+        case BLOSC_BLOSCLZ_FORMAT:
+          cbytes = blosclz_decompress(src, ctbytes, tmp + ntbytes, neblock);
+          break;
+#if defined(HAVE_LZ4)
+        case BLOSC_LZ4_FORMAT:
+        case BLOSC_LZ4HC_FORMAT:
+          cbytes = lz4_wrap_decompress((char*)src, (size_t)ctbytes,
+            (char*)tmp + ntbytes, (size_t)neblock);
+          break;
+#endif /* HAVE_LZ4 */
+#if defined(HAVE_LIZARD)
+        case BLOSC_LIZARD_FORMAT:
+          cbytes = lizard_wrap_decompress((char*)src, (size_t)ctbytes,
+            (char*)tmp + ntbytes, (size_t)neblock);
+          break;
+#endif /* HAVE_LIZARD */
+#if defined(HAVE_SNAPPY)
+        case BLOSC_SNAPPY_FORMAT:
+          cbytes = snappy_wrap_decompress((char*)src, (size_t)ctbytes,
+            (char*)tmp + ntbytes, (size_t)neblock);
+          break;
+#endif /* HAVE_SNAPPY */
+#if defined(HAVE_ZLIB)
+        case BLOSC_ZLIB_FORMAT:
+          cbytes = zlib_wrap_decompress((char*)src, (size_t)ctbytes,
+            (char*)tmp + ntbytes, (size_t)neblock);
+          break;
+#endif /* HAVE_ZLIB */
+#if defined(HAVE_ZSTD)
+        case BLOSC_ZSTD_FORMAT:
+          cbytes = zstd_wrap_decompress(thread_context,
+            (char*)src, (size_t)ctbytes,
+            (char*)tmp + ntbytes, (size_t)neblock);
+          break;
+#endif /* HAVE_ZSTD */
+        default:
+          fprintf(stderr,
+            "Decompression format not supported or not compiled in\n");
+          return -7;
+      }
+    }
+    if (cbytes <= 0) {
+      /* decompression failure */
+      return -3;
+    }
+    src += ctbytes;
+    src_offset += ctbytes;
+    ntbytes += cbytes;
+  }

@@ -1,0 +1,72 @@
+rv = EXR_ERR_UNKNOWN;
+    if (nCompressed < 20)
+    {
+        /* need at least 20 bytes for the table header */
+        if (nRawSize != 0) return EXR_ERR_CORRUPT_CHUNK;
+        return EXR_ERR_SUCCESS;
+    }
+
+    /* ----------------------------------------------------------------- */
+    /*  Read header information                                          */
+    /* ----------------------------------------------------------------- */
+    im     = readUInt (compressed);
+    iM     = readUInt (compressed + 4);
+    /* uint32_t tableLength = */ (void) readUInt (compressed + 8);
+    nBits  = readUInt (compressed + 12);
+
+    if (im >= HUF_ENCSIZE || iM >= HUF_ENCSIZE)
+        return EXR_ERR_CORRUPT_CHUNK;
+
+    ptr    = compressed + 20;
+    nBytes = ((uint64_t) nBits + 7) / 8;
+
+    if ((ptr - compressed) + nBytes > nCompressed)
+        return EXR_ERR_CORRUPT_CHUNK;
+
+    /* ----------------------------------------------------------------- */
+    /*  Decide whether we can use the fast decoder                        */
+    /* ----------------------------------------------------------------- */
+#if defined (EXR_FAST_HUF_DECODER)
+    if (FastHufDecoder_enabled () && nBits > 128)
+    {
+        FastHufDecoder fhd (ptr,                                         /* bitstream   */
+                            (int) (nCompressed - (ptr - compressed)),    /* avail bytes */
+                            im,
+                            iM,
+                            iM);
+        fhd.decode ((unsigned char*) ptr, nBits, raw, (int) nRawSize);
+        return EXR_ERR_SUCCESS;
+    }
+#endif
+
+    /* ----------------------------------------------------------------- */
+    /*  Slow/standard decoder path                                        */
+    /* ----------------------------------------------------------------- */
+    {
+        uint64_t* freq;
+        HufDec*   hdec;
+
+        if (sparebytes != internal_exr_huf_decompress_spare_bytes ())
+            return EXR_ERR_INVALID_ARGUMENT;
+
+        freq = (uint64_t*) spare;
+        hdec = (HufDec*) (freq + HUF_ENCSIZE);
+
+        hufClearDecTable (hdec);
+
+        rv = hufUnpackEncTable (
+            &ptr,
+            nCompressed - (ptr - compressed),
+            im,
+            iM,
+            freq);
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        if (nBits > 8 * (nCompressed - (ptr - compressed)))
+            return EXR_ERR_CORRUPT_CHUNK;
+
+        hufBuildDecTable (freq, im, iM, hdec);
+        rv = hufDecode (freq, hdec, ptr, nBits, iM, (int) nRawSize, raw);
+        hufFreeDecTable (hdec);
+        return rv;
+    }

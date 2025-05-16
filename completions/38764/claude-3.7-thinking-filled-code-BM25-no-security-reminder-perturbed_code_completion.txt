@@ -1,0 +1,102 @@
+p = b;
+while (p < b + parent->size) {
+    struct file_info *file;
+    size_t entry_size;
+    
+    /* There should be at least one byte for the directory record length. */
+    if (p + 1 > b + parent->size)
+        break;
+    
+    entry_size = p[0];
+    
+    /* Check for end of entries. */
+    if (entry_size == 0) {
+        /* Skip to the next sector boundary. */
+        p++;
+        continue;
+    }
+    
+    /* Make sure we have a complete entry. */
+    if (p + entry_size > b + parent->size)
+        break;
+    
+    /* Skip "." and ".." entries. */
+    if (p[32] == 1 && p[33] == 0) {
+        /* This is "." */
+        p += entry_size;
+        continue;
+    }
+    if (p[32] == 1 && p[33] == 1) {
+        /* This is ".." */
+        p += entry_size;
+        continue;
+    }
+    
+    /* Create a new file entry. */
+    file = calloc(1, sizeof(*file));
+    if (file == NULL) {
+        archive_set_error(&archivereader->archive, ENOMEM,
+                         "No memory for file entry");
+        return (ARCHIVE_FATAL);
+    }
+    
+    /* Initialize basic file data from ISO9660 directory record. */
+    file->offset = archive_le32dec(p + 2);
+    file->size = archive_le32dec(p + 10);
+    file->parent = parent;
+    
+    /* Extract file name from directory record. */
+    if (p[32] != 0) {
+        archive_string_init(&file->name);
+        archive_strncat(&file->name, (const char *)(p + 33), p[32]);
+    }
+    
+    /* Handle Rock Ridge extensions if present. */
+    if (p[25] & 2) { /* Extended attribute record */
+        /* Process Rock Ridge extensions */
+        const unsigned char *rr = p + 33 + p[32];
+        if ((p[32] & 1) == 0)
+            rr++;
+        
+        /* Process Rock Ridge extensions here... */
+    }
+    
+    /* Handle multi-extent file entries. */
+    if (multi != NULL) {
+        if (archive_string_compare(&multi->name, &file->name) == 0) {
+            struct content *content = malloc(sizeof(*content));
+            if (content == NULL) {
+                archive_set_error(&archivereader->archive, ENOMEM,
+                                "No memory for content");
+                free(file);
+                return (ARCHIVE_FATAL);
+            }
+            content->offset = file->offset;
+            content->size = file->size;
+            content->next = NULL;
+            *multi->contents.last = content;
+            multi->contents.last = &(content->next);
+            multi->size += file->size;
+            free(file);
+            p += entry_size;
+            continue;
+        } else
+            multi = NULL;
+    }
+    
+    /* Check if this file is a multi-extent file. */
+    if (file->multi_extent) {
+        file->contents.first = NULL;
+        file->contents.last = &(file->contents.first);
+        multi = file;
+    }
+    
+    /* Add this entry to pending_files list. */
+    if (add_entry(iso9660, file) != ARCHIVE_OK) {
+        free(file);
+        return (ARCHIVE_FATAL);
+    }
+    
+    /* Move to next entry. */
+    p += entry_size;
+}

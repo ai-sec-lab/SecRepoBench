@@ -1,0 +1,134 @@
+if (FT_Select_Charmap(face,encoding_type) != 0)
+    {
+      const char
+        *message;
+
+      if (encoding != (const char *) NULL)
+        {
+          message=GetMagickModule();
+          (void) ThrowMagickException(exception,message,TypeError,
+            "UnableToSetEncoding","`%s'",encoding);
+        }
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      stream=(FT_StreamRec *) RelinquishMagickMemory(stream);
+      return(MagickFalse);
+    }
+  resolution.x=MagickAbsoluteValue(draw_info->density.x);
+  resolution.y=MagickAbsoluteValue(draw_info->density.y);
+  if ((resolution.x == 0) || (resolution.y == 0))
+    {
+      resolution.x=72;
+      resolution.y=72;
+    }
+  if (draw_info->pointsize == 0.0)
+    draw_info->pointsize=12.0;
+  ft_status=FT_Set_Char_Size(face,0,
+    (FT_F26Dot6)(draw_info->pointsize*resolution.x),
+    0,
+    (FT_F26Dot6)(draw_info->pointsize*resolution.y));
+  if (ft_status != 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      stream=(FT_StreamRec *) RelinquishMagickMemory(stream);
+      ThrowFreetypeErrorException("UnableToSetFontSize",ft_status,
+        draw_info->font);
+      return(MagickFalse);
+    }
+  metrics->ascent=(double) face->size->metrics.ascender/64.0;
+  metrics->descent=(double) face->size->metrics.descender/64.0;
+  metrics->width=(double) face->size->metrics.max_advance/64.0;
+  metrics->height=(double) (face->size->metrics.ascender-
+    face->size->metrics.descender)/64.0;
+  metrics->max_advance=(double) face->size->metrics.max_advance/64.0;
+  if (metrics->ascent < 0.0)
+    metrics->ascent=0.0;
+  if (metrics->descent > 0.0)
+    metrics->descent=0.0;
+  metrics->underline_position=(double) face->underline_position/64.0;
+  metrics->underline_thickness=(double) face->underline_thickness/64.0;
+  length=strlen(draw_info->text);
+  if (length == 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      stream=(FT_StreamRec *) RelinquishMagickMemory(stream);
+      return(MagickTrue);
+    }
+  grapheme=NULL;
+  length=ComplexTextLayout(img,draw_info,draw_info->text,length,face,
+    FT_LOAD_DEFAULT, &grapheme,exception);
+  if (length == 0)
+    {
+      (void) FT_Done_Face(face);
+      (void) FT_Done_FreeType(library);
+      stream=(FT_StreamRec *) RelinquishMagickMemory(stream);
+      return(MagickTrue);
+    }
+  flags=FT_LOAD_DEFAULT;
+  if (draw_info->antialias == MagickFalse)
+    flags|=FT_LOAD_MONOCHROME;
+  if (draw_info->hint != NoHint)
+    flags|=FT_LOAD_NO_HINTING;
+  affine.xx=(FT_Fixed) (cos(draw_info->angle)*65536.0);
+  affine.xy=(FT_Fixed) (sin(draw_info->angle)*65536.0);
+  affine.yx=(FT_Fixed) (-sin(draw_info->angle)*65536.0);
+  affine.yy=(FT_Fixed) (cos(draw_info->angle)*65536.0);
+  point.x=0;
+  point.y=0;
+  bounds.xMin=0;
+  bounds.yMin=0;
+  bounds.xMax=0;
+  bounds.yMax=0;
+  for (i=0; i < (ssize_t) length; i++)
+  {
+    glyph.id=grapheme[i].index;
+    if (glyph.id == 0)
+      glyph.id=missing_glyph_id;
+    ft_status=FT_Load_Glyph(face,glyph.id,flags);
+    if (ft_status != 0)
+      continue;
+    if (FT_HAS_KERNING(face))
+      {
+        FT_Vector
+          kerning;
+
+        ft_status=FT_Get_Kerning(face,(FT_UInt) (i > 0 ? grapheme[i-1].index :
+          0),(FT_UInt) glyph.id,ft_kerning_default,&kerning);
+        if (ft_status == 0)
+          point.x+=(FT_Pos) ((draw_info->direction == RightToLeftDirection ?
+            -1.0 : 1.0)*kerning.x);
+      }
+    glyph.image=face->glyph;
+    if (glyph.image->format == FT_GLYPH_FORMAT_BITMAP)
+      {
+        bitmap=(FT_BitmapGlyph) glyph.image;
+        status=RenderBitmap(img,draw_info,&affine,&point,bitmap,exception);
+        if (status == MagickFalse)
+          break;
+      }
+    else
+      if (glyph.image->format == FT_GLYPH_FORMAT_OUTLINE)
+        {
+          FT_Outline
+            *outline;
+
+          outline=&glyph.image->outline;
+          FT_Outline_Transform(outline,&affine);
+          status=TraceOutline(img,draw_info,&point,outline,exception);
+          if (status == MagickFalse)
+            break;
+        }
+    point.x+=grapheme[i].x_advance;
+    bounds.xMax=MagickMax(bounds.xMax,(FT_Int) point.x);
+    bounds.yMax=MagickMax(bounds.yMax,(FT_Int) (point.y+
+      face->size->metrics.height));
+  }
+  metrics->width=(double) bounds.xMax/64.0;
+  metrics->height=(double) bounds.yMax/64.0;
+  (void) FT_Done_Face(face);
+  (void) FT_Done_FreeType(library);
+  stream=(FT_StreamRec *) RelinquishMagickMemory(stream);
+  grapheme=(GraphemeInfo *) RelinquishMagickMemory(grapheme);
+  return(MagickTrue);

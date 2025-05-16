@@ -1,0 +1,77 @@
+{
+    u_int32_t end = packet->payload_packet_len;
+    const u_int8_t *payload = packet->payload;
+    u_int8_t found_double_crlf = 0;
+    
+    for(a = 0; a < end; a++) {
+      /* Check for line break */
+      if(payload[a] == '\n') {
+        u_int16_t line_len = (u_int16_t)((&payload[a]) - packet->line[packet->parsed_lines].ptr);
+
+        /* Account for '\r' if preceding '\n' */
+        if(a > 0 && payload[a - 1] == '\r') {
+          line_len--;
+        }
+        
+        packet->line[packet->parsed_lines].len = line_len;
+
+        /* Mark empty line if length is zero */
+        if(line_len == 0 && !packet->empty_line_position_set) {
+          packet->empty_line_position_set = 1;
+          /* If we see consecutive "\r\n\r\n", set flag and store subsequent bytes if desired */
+          if((a + 1 < end) && (a > 1 && payload[a - 2] == '\n')) {
+            found_double_crlf = 1;
+            /* Example of extracting subsequent bytes:
+             * memcpy(dataflow->initial_binary_bytes, &payload[a + 1], end - (a + 1));
+             * dataflow->initial_binary_len = (end - (a + 1));
+             */
+          }
+        }
+
+        /* Parse the line if needed (HTTP status codes, headers, etc.). For example: */
+        if(packet->parsed_lines == 0 && line_len > 4) {
+          /* Check if this is an HTTP response line (e.g. "HTTP/1.1 200 OK"). */
+          if(!strncasecmp((char*)packet->line[packet->parsed_lines].ptr, "HTTP/", 5)) {
+            packet->http_response.ptr = packet->line[packet->parsed_lines].ptr;
+            packet->http_response.len = line_len;
+            /* More detailed parsing of status code can be done here. */
+          }
+        } else {
+          /* Check for known headers (e.g. "Server:", "Host:", "Content-Type:", etc.). */
+          char *line_ptr = (char*)packet->line[packet->parsed_lines].ptr;
+          if(line_len > 7 && !strncasecmp(line_ptr, "Server:", 7)) {
+            packet->server_line.ptr = (u_int8_t*)&line_ptr[7];
+            packet->server_line.len = line_len - 7;
+            packet->http_num_headers++;
+          } else if(line_len > 5 && !strncasecmp(line_ptr, "Host:", 5)) {
+            packet->host_line.ptr = (u_int8_t*)&line_ptr[5];
+            packet->host_line.len = line_len - 5;
+            packet->http_num_headers++;
+          } else if(line_len > 13 && !strncasecmp(line_ptr, "Content-Type:", 13)) {
+            packet->content_line.ptr = (u_int8_t*)&line_ptr[13];
+            packet->content_line.len = line_len - 13;
+            packet->http_num_headers++;
+          }
+          /* Add checks for more headers as needed */
+        }
+
+        /* Prepare for the next line if we haven't hit our limit and haven't finished parsing */
+        if(packet->parsed_lines < NDPI_MAX_PARSE_LINES_PER_PACKET - 1) {
+          packet->parsed_lines++;
+          if(a + 1 < end) {
+            packet->line[packet->parsed_lines].ptr = &payload[a + 1];
+            packet->line[packet->parsed_lines].len = 0;
+          } else {
+            break; /* No more data to parse */
+          }
+        } else {
+          break;
+        }
+      }
+
+      /* Optional early exit if we've already found "\r\n\r\n" */
+      if(found_double_crlf) {
+        break;
+      }
+    }
+  }

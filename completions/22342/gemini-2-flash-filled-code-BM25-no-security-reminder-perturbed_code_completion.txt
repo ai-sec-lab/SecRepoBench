@@ -1,0 +1,75 @@
+{
+    /* TPKT */
+    if(packet->payload_len > 4) {
+      if((packet->payload[0] == 0x03) &&
+	 (packet->payload[1] == 0x00)) {
+	u_int16_t tpkt_length = (packet->payload[2] << 8) | packet->payload[3];
+
+	if(tpkt_length <= packet->payload_len) {
+	  NDPI_LOG_DBG(ndpi_struct, "found tpkt, checking h323 vs rdp\n");
+
+	  /*
+	    H.323 starts with 0x30 0x82, RDP with 0x30 0x81
+	    or 0x30 0x82.
+	    So we need to check the 5th byte to distinguish
+	    between the two protocols.
+	  */
+	  if((packet->payload[4] == 0x30) &&
+	     (packet->payload[5] == 0x82)) {
+	    NDPI_LOG_DBG(ndpi_struct, "found h323 over tpkt\n");
+	    stream->h323.h323_valid_packets++;
+	    if((packet->payload_len == 1500) &&
+	       (packet->payload[6] == 0x02) &&
+	       (packet->payload[7] == 0x01) &&
+	       (packet->payload[8] == 0x01)) {
+	      NDPI_LOG_DBG(ndpi_struct, "found h323 broadcast\n");
+	      stream->h323.h323_broadcast = 1;
+	    }
+	    ndpi_set_detected_protocol(ndpi_struct, stream, NDPI_PROTOCOL_H323, NDPI_PROTOCOL_UNKNOWN);
+	    return;
+	  } else
+	    NDPI_LOG_DBG(ndpi_struct, "tpkt but not h323\n");
+	}
+      }
+    }
+  } else if(packet->udp != NULL) {
+    sport = ntohs(packet->udp->source);
+    dport = ntohs(packet->udp->dest);
+
+    if((packet->payload_len >= 8) &&
+       ((dport == 1719) || (sport == 1719))) {
+      /*
+	H.323 RAS uses UDP port 1719.
+	The message starts with a message type
+	followed by a request sequence number.
+	The message type is encoded as an integer
+	(0..10) and the request sequence number
+	is encoded as an integer (0..65535).
+	Both integers are encoded as a
+	four-byte big-endian number.
+      */
+      if((packet->payload[0] == 0x00) &&
+	 (packet->payload[1] == 0x00) &&
+	 (packet->payload[2] == 0x00) &&
+	 (packet->payload[3] <= 0x0a)) {
+	NDPI_LOG_DBG(ndpi_struct, "found h323 ras\n");
+	ndpi_set_detected_protocol(ndpi_struct, stream, NDPI_PROTOCOL_H323, NDPI_PROTOCOL_UNKNOWN);
+	return;
+      }
+    } else if((packet->payload_len == 1500) &&
+	      (packet->payload[0] == 0x30) &&
+	      (packet->payload[1] == 0x82) &&
+	      (packet->payload[2] == 0x04) &&
+	      (packet->payload[3] == 0x74) &&
+	      (packet->payload[4] == 0x02) &&
+	      (packet->payload[5] == 0x01) &&
+	      (packet->payload[6] == 0x01)) {
+      NDPI_LOG_DBG(ndpi_struct, "found h323 broadcast\n");
+      stream->h323.h323_broadcast = 1;
+      ndpi_set_detected_protocol(ndpi_struct, stream, NDPI_PROTOCOL_H323, NDPI_PROTOCOL_UNKNOWN);
+      return;
+    }
+  }
+
+  NDPI_LOG_DBG(ndpi_struct, "exclude h323\n");
+  NDPI_ADD_PROTOCOL_TO_BITMASK(stream->exclude_protocol_bitmask, NDPI_PROTOCOL_H323);

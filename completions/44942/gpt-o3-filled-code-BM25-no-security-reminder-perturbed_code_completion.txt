@@ -1,0 +1,54 @@
+/* ------------------------------------------------------------ */
+  /* Build a “fake” IPv4 header that will be passed to the common */
+  /* get_ndpi_flow_info() routine together with the real IPv6     */
+  /* header.                                                      */
+  /* ------------------------------------------------------------ */
+
+  memset(&iph, 0, sizeof(iph));
+
+  /* Copy (part of) the IPv6 addresses so that the IPv4 header looks
+   * consistent.  The real addresses are still available through the
+   * original ipv6_header pointer that we pass further below.      */
+  memcpy(&iph.saddr, &ipv6_header->ip6_src, sizeof(iph.saddr));
+  memcpy(&iph.daddr, &ipv6_header->ip6_dst, sizeof(iph.daddr));
+
+  /* IPv6 “payload_len” does *not* include the length of the IPv6
+   * fixed header (40 bytes).                                      */
+  ip_len  = (u_int16_t)ntohs(ipv6_header->payload_len) +
+            (u_int16_t)sizeof(struct ndpi_ipv6hdr);
+  iph.tot_len = htons(ip_len);
+
+  /* ------------------------------------------------------------------
+   * Locate the first byte of the layer-4 header and discover the real
+   * upper-layer protocol, skipping all the IPv6 extension headers that
+   * might be present.
+   * ------------------------------------------------------------------ */
+  l4proto = ipv6_header->ip6_nxt;             /* First “Next Header”     */
+  l4ptr   = ((const u_int8_t *)ipv6_header) + sizeof(struct ndpi_ipv6hdr);
+
+  while(1) {
+    /* Hop-by-Hop(0), Routing(43), Dest-Opts(60) – generic format      */
+    if((l4proto == 0) || (l4proto == 43) || (l4proto == 60)) {
+      /* length = (Hdr Ext Len + 1) * 8                                */
+      if((l4ptr + 2) > (((const u_int8_t *)ipv6_header) + ipsize))
+        break;
+
+      u_int32_t ext_len = (u_int32_t)((l4ptr[1] + 1) * 8);
+      l4proto = l4ptr[0];
+      l4ptr  += ext_len;
+      continue;
+    }
+
+    /* Fragment header (44) – fixed 8-byte length                      */
+    if(l4proto == 44) {
+      if((l4ptr + 8) > (((const u_int8_t *)ipv6_header) + ipsize))
+        break;
+
+      l4proto = l4ptr[0];
+      l4ptr  += 8;
+      continue;
+    }
+
+    /* No more known extension headers                                 */
+    break;
+  }

@@ -1,0 +1,216 @@
+// read and dispatch elements until we've either decoded all channels or hit the end
+        switch (tag)
+        {
+            case 0: // ID_SCE (single-channel element)
+            {
+                // read element instance tag
+                elementInstanceTag = BitBufferReadSmall(bits, 4);
+
+                // make sure we don't exceed the channel count
+                RequireAction(channelIndex + 1 <= p->mNumChannels, status = kALAC_ParamError; goto Exit;);
+
+                // read 12 bits of unused header
+                unusedHeader = BitBufferRead(bits, 12);
+
+                // read 4 bits to determine partial frame and compressed/escape flag
+                headerByte = BitBufferReadSmall(bits, 4);
+                partialFrame = (headerByte >> 3) & 0x01;
+                escapeFlag   = (headerByte & 0x01);
+                bytesShifted = (headerByte >> 1) & 0x03;
+
+                // if partialFrame set, read the actual number of samples from bitstream
+                if (partialFrame)
+                {
+                    val = BitBufferRead(bits, 32);
+                    RequireAction(val <= numSamples, status = kALAC_ParamError; goto Exit;);
+                    *outNumSamples = (uint32_t)val;
+                }
+
+                // handle compressed or uncompressed single-channel data
+                if (escapeFlag)
+                {
+                    // uncompressed (escape) path
+                    // read raw samples directly from bitstream
+                    status = DecodeMonoRaw(bits, sampleBuffer, channelIndex, *outNumSamples, p->mBitDepth, p->mNumChannels);
+                }
+                else
+                {
+                    // compressed path
+                    // read predictor parameters
+                    mixBits        = (uint8_t)BitBufferRead(bits, 8);
+                    mixResiduals   = (int8_t)BitBufferRead(bits, 8);
+
+                    modeU          = (uint8_t)BitBufferRead(bits, 8);
+                    denShiftU      = modeU & 0x0F;
+                    modeU         >>= 4;
+
+                    pbFactorU      = (uint16_t)BitBufferRead(bits, 8);
+                    numU           = (uint8_t)(pbFactorU & 0x1F);
+                    pbFactorU    >>= 5;
+
+                    // read coefficients
+                    RequireAction(numU <= 32, status = kALAC_ParamError; goto Exit;);
+                    for (i = 0; i < numU; i++)
+                        coefsU[i] = (int16_t)BitBufferRead(bits, 16);
+
+                    // if shift is active, read shifted bytes from bitstream
+                    if (bytesShifted != 0)
+                    {
+                        uint32_t bitShift = bytesShifted * 8;
+                        for (i = 0; i < *outNumSamples; i++)
+                        {
+                            // ensure we stay in range of the buffer
+                            RequireAction(bits->cur < bits->end, status = kALAC_ParamError; goto Exit;);
+                            // discard or keep for potential reassembly if needed
+                            BitBufferRead(bits, bitShift * 1); 
+                        }
+                    }
+
+                    // decompress the samples via dyn_decomp and restore predictor
+                    status = DecodeMonoCompressed(p, bits, sampleBuffer, channelIndex, *outNumSamples,
+                                                  coefsU, numU, pbFactorU, denShiftU, bytesShifted);
+                }
+
+                RequireNoErr(status, goto Exit;);
+                channelIndex++;
+                break;
+            }
+
+            case 1: // ID_CPE (channel-pair element)
+            {
+                // read element instance tag
+                elementInstanceTag = BitBufferReadSmall(bits, 4);
+
+                // make sure we don't exceed the channel count
+                RequireAction(channelIndex + 2 <= p->mNumChannels, status = kALAC_ParamError; goto Exit;);
+
+                // read 12 bits of unused header
+                unusedHeader = BitBufferRead(bits, 12);
+
+                // read 4 bits to determine partial frame and compressed/escape flag
+                headerByte = BitBufferReadSmall(bits, 4);
+                partialFrame = (headerByte >> 3) & 0x01;
+                escapeFlag   = (headerByte & 0x01);
+                bytesShifted = (headerByte >> 1) & 0x03;
+
+                // if partialFrame set, read the actual number of samples from bitstream
+                if (partialFrame)
+                {
+                    val = BitBufferRead(bits, 32);
+                    RequireAction(val <= numSamples, status = kALAC_ParamError; goto Exit;);
+                    *outNumSamples = (uint32_t)val;
+                }
+
+                // handle compressed or uncompressed stereo data
+                if (escapeFlag)
+                {
+                    // uncompressed (escape) path
+                    // read raw samples directly from bitstream
+                    status = DecodeStereoRaw(bits, sampleBuffer, channelIndex, *outNumSamples, p->mBitDepth, p->mNumChannels);
+                }
+                else
+                {
+                    // compressed path
+                    // read stereo parameters
+                    mixBits        = (uint8_t)BitBufferRead(bits, 8);
+                    mixResiduals   = (int8_t)BitBufferRead(bits, 8);
+
+                    // read left channel predictor parameters
+                    modeU          = (uint8_t)BitBufferRead(bits, 8);
+                    denShiftU      = modeU & 0x0F;
+                    modeU         >>= 4;
+
+                    pbFactorU      = (uint16_t)BitBufferRead(bits, 8);
+                    numU           = (uint8_t)(pbFactorU & 0x1F);
+                    pbFactorU    >>= 5;
+
+                    RequireAction(numU <= 32, status = kALAC_ParamError; goto Exit;);
+                    for (i = 0; i < numU; i++)
+                        coefsU[i] = (int16_t)BitBufferRead(bits, 16);
+
+                    // read right channel predictor parameters
+                    modeV          = (uint8_t)BitBufferRead(bits, 8);
+                    denShiftV      = modeV & 0x0F;
+                    modeV         >>= 4;
+
+                    pbFactorV      = (uint16_t)BitBufferRead(bits, 8);
+                    numV           = (uint8_t)(pbFactorV & 0x1F);
+                    pbFactorV    >>= 5;
+
+                    RequireAction(numV <= 32, status = kALAC_ParamError; goto Exit;);
+                    for (i = 0; i < numV; i++)
+                        coefsV[i] = (int16_t)BitBufferRead(bits, 16);
+
+                    // if shift is active, read shifted bytes
+                    if (bytesShifted != 0)
+                    {
+                        uint32_t bitShift = bytesShifted * 8;
+                        for (i = 0; i < (*outNumSamples * 2); i++)
+                        {
+                            RequireAction(bits->cur < bits->end, status = kALAC_ParamError; goto Exit;);
+                            BitBufferRead(bits, bitShift);
+                        }
+                    }
+
+                    // decompress the samples and restore for left channel
+                    status = DecodeStereoCompressed(p, bits, sampleBuffer, channelIndex, *outNumSamples,
+                                                    coefsU, numU, pbFactorU, denShiftU,
+                                                    coefsV, numV, pbFactorV, denShiftV,
+                                                    mixBits, mixResiduals, bytesShifted);
+                }
+
+                RequireNoErr(status, goto Exit;);
+                channelIndex += 2;
+                break;
+            }
+
+            case 3: // ID_LFE (low-frequency effects channel)
+            {
+                // read element instance tag
+                elementInstanceTag = BitBufferReadSmall(bits, 4);
+                RequireAction(channelIndex + 1 <= p->mNumChannels, status = kALAC_ParamError; goto Exit;);
+
+                // similar to single-channel decode, can reuse same routine
+                unusedHeader = BitBufferRead(bits, 12);
+                headerByte   = BitBufferReadSmall(bits, 4);
+                partialFrame = (headerByte >> 3) & 0x01;
+                escapeFlag   = (headerByte & 0x01);
+                bytesShifted = (headerByte >> 1) & 0x03;
+
+                if (partialFrame)
+                {
+                    val = BitBufferRead(bits, 32);
+                    RequireAction(val <= numSamples, status = kALAC_ParamError; goto Exit;);
+                    *outNumSamples = (uint32_t)val;
+                }
+
+                if (escapeFlag)
+                    status = DecodeMonoRaw(bits, sampleBuffer, channelIndex, *outNumSamples, p->mBitDepth, p->mNumChannels);
+                else
+                    status = DecodeMonoCompressed(p, bits, sampleBuffer, channelIndex, *outNumSamples,
+                                                  coefsU, 0, 0, 0, bytesShifted);
+
+                RequireNoErr(status, goto Exit;);
+                channelIndex++;
+                break;
+            }
+
+            case 7: // ID_END (end of frame)
+            {
+                goto NoMoreChannels;
+            }
+
+            default:
+            {
+                // for any unrecognized element, read 4-bit instance tag and skip or ignore
+                elementInstanceTag = BitBufferReadSmall(bits, 4);
+
+                // handle fill or unknown data until next byte boundary
+                BitBufferByteAlign(bits, false);
+                break;
+            }
+        }
+
+        // break out of loop if we've processed all channels
+        if (channelIndex >= numChannels)
+            goto NoMoreChannels;

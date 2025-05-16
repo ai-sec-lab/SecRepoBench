@@ -1,0 +1,1380 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+FORCE_INLINE int Lizard_decompress_LIZv1(
+                 Lizard_dstream_t* ctx,
+                 BYTE* const dest,
+                 int outputSize,         /* this value is the max size of Output Buffer. */
+
+                 int partialDecoding,    /* full, partial */
+                 int targetOutputSize,   /* only used if partialDecoding==partial */
+                 int dict,               /* noDict, withPrefix64k, usingExtDict */
+                 const BYTE* const lowPrefix,  /* == dest if dict == noDict */
+                 const BYTE* const dictStart,  /* only if dict==usingExtDict */
+                 const size_t dictSize,         /* note : = 0 if noDict */
+                 int compressionLevel
+                 )
+{
+    /* Local Variables */
+    int inputSize = (int)(ctx->flagsEnd - ctx->flagsPtr);
+    const BYTE* const blockBase = ctx->flagsPtr;
+    const BYTE* const iend = ctx->literalsEnd;
+
+    BYTE* output_ptr = dest;
+    BYTE* const oend = output_ptr + outputSize;
+    BYTE* cpy = NULL;
+    BYTE* oexit = output_ptr + targetOutputSize;
+    const BYTE* const lowLimit = lowPrefix - dictSize;
+    const BYTE* const dictEnd = (const BYTE*)dictStart + dictSize;
+
+    const int checkOffset = (dictSize < (int)(LIZARD_DICT_SIZE));
+
+    intptr_t last_off = ctx->last_off;
+    intptr_t length = 0;
+    (void)compressionLevel;
+
+    /* Special cases */
+    if (unlikely(outputSize==0)) return ((inputSize==1) && (*ctx->flagsPtr==0)) ? 0 : -1;  /* Empty output buffer */
+
+    /* Main Loop : decode sequences */
+    while (ctx->flagsPtr < ctx->flagsEnd) {
+        unsigned token;
+        const BYTE* match;
+    //    intptr_t litLength;
+
+        if ((partialDecoding) && (output_ptr >= oexit)) return (int) (output_ptr-dest); 
+
+        /* get literal length */
+        token = *ctx->flagsPtr++;
+
+        if (token >= 32)
+        {
+            if ((length=(token & MAX_SHORT_LITLEN)) == MAX_SHORT_LITLEN) {
+                // Extract the length of the literals from the token.
+                // If the extracted length indicates it is a special case, read the actual literal length from the input stream.
+                // Adjust the length by adding a predefined constant to account for the special case.
+                // Move the pointer in the input stream to account for the bytes read.
+                // <MASK>
+            }
+
+            /* copy literals */
+            cpy = output_ptr + length;
+            if (unlikely(cpy > oend - WILDCOPYLENGTH || ctx->literalsPtr > iend - WILDCOPYLENGTH)) { LIZARD_LOG_DECOMPRESS_LIZv1("offset outside buffers\n"); goto _output_error; }   /* Error : offset outside buffers */
+    #if 1
+            Lizard_wildCopy16(output_ptr, ctx->literalsPtr, cpy);
+            output_ptr = cpy;
+            ctx->literalsPtr += length; 
+    #else
+            Lizard_copy8(output_ptr, ctx->literalsPtr);
+            Lizard_copy8(output_ptr+8, ctx->literalsPtr+8);
+            if (length > 16)
+                Lizard_wildCopy16(output_ptr + 16, ctx->literalsPtr + 16, cpy);
+            output_ptr = cpy;
+            ctx->literalsPtr += length; 
+    #endif
+
+            /* get offset */
+            if (unlikely(ctx->offset16Ptr > ctx->offset16End - 2)) { LIZARD_LOG_DECOMPRESS_LIZv1("(ctx->offset16Ptr > ctx->offset16End\n"); goto _output_error; }
+#if 1
+            { /* branchless */
+                intptr_t new_off = MEM_readLE16(ctx->offset16Ptr);
+                uintptr_t not_repCode = (uintptr_t)(token >> ML_RUN_BITS) - 1;
+                last_off ^= not_repCode & (last_off ^ -new_off);
+                ctx->offset16Ptr = (BYTE*)((uintptr_t)ctx->offset16Ptr + (not_repCode & 2));
+            }
+#else
+            if ((token >> ML_RUN_BITS_LIZv1) == 0)
+            {
+                last_off = -(intptr_t)MEM_readLE16(ctx->offset16Ptr); 
+                ctx->offset16Ptr += 2;
+            }
+#endif
+
+            /* get matchlength */
+            length = (token >> RUN_BITS_LIZv1) & MAX_SHORT_MATCHLEN;
+            if (length == MAX_SHORT_MATCHLEN) {
+                if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("6"); goto _output_error; } 
+                length = *ctx->literalsPtr;
+                if unlikely(length >= 254) {
+                    if (length == 254) {
+                        length = MEM_readLE16(ctx->literalsPtr+1);
+                        ctx->literalsPtr += 2;
+                    } else {
+                        length = MEM_readLE24(ctx->literalsPtr+1);
+                        ctx->literalsPtr += 3;
+                    }
+                }
+                length += MAX_SHORT_MATCHLEN;
+                ctx->literalsPtr++;
+                if (unlikely((size_t)(output_ptr+length)<(size_t)(output_ptr))) { LIZARD_LOG_DECOMPRESS_LIZv1("7"); goto _output_error; }  /* overflow detection */
+            }
+
+            DECOMPLOG_CODEWORDS_LIZv1("T32+ literal=%u match=%u offset=%d ipos=%d opos=%d\n", (U32)litLength, (U32)length, (int)-last_off, (U32)(ctx->flagsPtr-blockBase), (U32)(output_ptr-dest));
+        }
+        else
+        if (token < LIZARD_LAST_LONG_OFF)
+        {
+            if (unlikely(ctx->offset24Ptr > ctx->offset24End - 3)) { LIZARD_LOG_DECOMPRESS_LIZv1("8"); goto _output_error; } 
+            length = token + MM_LONGOFF;
+            last_off = -(intptr_t)MEM_readLE24(ctx->offset24Ptr); 
+            ctx->offset24Ptr += 3;
+            DECOMPLOG_CODEWORDS_LIZv1("T0-30 literal=%u match=%u offset=%d\n", 0, (U32)length, (int)-last_off);
+        }
+        else 
+        { 
+            if (unlikely(ctx->literalsPtr > iend - 1)) { LIZARD_LOG_DECOMPRESS_LIZv1("9"); goto _output_error; } 
+            length = *ctx->literalsPtr;
+            if unlikely(length >= 254) {
+                if (length == 254) {
+                    length = MEM_readLE16(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 2;
+                } else {
+                    length = MEM_readLE24(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 3;
+                }
+            }
+            ctx->literalsPtr++;
+            length += LIZARD_LAST_LONG_OFF + MM_LONGOFF;
+
+            if (unlikely(ctx->offset24Ptr > ctx->offset24End - 3)) { LIZARD_LOG_DECOMPRESS_LIZv1("10"); goto _output_error; } 
+            last_off = -(intptr_t)MEM_readLE24(ctx->offset24Ptr); 
+            ctx->offset24Ptr += 3;
+        }
+
+
+        match = output_ptr + last_off;
+        if ((checkOffset) && ((unlikely((uintptr_t)(-last_off) > (uintptr_t)output_ptr) || (match < lowLimit)))) { LIZARD_LOG_DECOMPRESS_LIZv1("lowPrefix[%p]-dictSize[%d]=lowLimit[%p] match[%p]=op[%p]-last_off[%d]\n", lowPrefix, (int)dictSize, lowLimit, match, output_ptr, (int)last_off); goto _output_error; }  /* Error : offset outside buffers */
+
+        /* check external dictionary */
+        if ((dict==usingExtDict) && (match < lowPrefix)) {
+            if (unlikely(output_ptr + length > oend - WILDCOPYLENGTH)) { LIZARD_LOG_DECOMPRESS_LIZv1("12"); goto _output_error; }  /* doesn't respect parsing restriction */
+
+            if (length <= (intptr_t)(lowPrefix - match)) {
+                /* match can be copied as a single segment from external dictionary */
+                memmove(output_ptr, dictEnd - (lowPrefix-match), length);
+                output_ptr += length;
+            } else {
+                /* match encompass external dictionary and current block */
+                size_t const copySize = (size_t)(lowPrefix-match);
+                size_t const restSize = length - copySize;
+                memcpy(output_ptr, dictEnd - copySize, copySize);
+                output_ptr += copySize;
+                if (restSize > (size_t)(output_ptr-lowPrefix)) {  /* overlap copy */
+                    BYTE* const endOfMatch = output_ptr + restSize;
+                    const BYTE* copyFrom = lowPrefix;
+                    while (output_ptr < endOfMatch) *output_ptr++ = *copyFrom++;
+                } else {
+                    memcpy(output_ptr, lowPrefix, restSize);
+                    output_ptr += restSize;
+            }   }
+            continue;
+        }
+
+        /* copy match within block */
+        cpy = output_ptr + length;
+        if (unlikely(cpy > oend - WILDCOPYLENGTH)) { LIZARD_LOG_DECOMPRESS_LIZv1("13match=%p lowLimit=%p\n", match, lowLimit); goto _output_error; }   /* Error : offset outside buffers */
+        Lizard_copy8(output_ptr, match);
+        Lizard_copy8(output_ptr+8, match+8);
+        if (length > 16)
+            Lizard_wildCopy16(output_ptr + 16, match + 16, cpy);
+        output_ptr = cpy;
+    }
+
+    /* last literals */
+    length = ctx->literalsEnd - ctx->literalsPtr;
+    cpy = output_ptr + length;
+    if ((ctx->literalsPtr+length != iend) || (cpy > oend)) { LIZARD_LOG_DECOMPRESS_LIZv1("14"); goto _output_error; }   /* Error : input must be consumed */
+    memcpy(output_ptr, ctx->literalsPtr, length);
+    ctx->literalsPtr += length;
+    output_ptr += length;
+
+    /* end of decoding */
+    ctx->last_off = last_off;
+    return (int) (output_ptr-dest);     /* Nb of output bytes decoded */
+
+    /* Overflow error detected */
+_output_error:
+    LIZARD_LOG_DECOMPRESS_LIZv1("_output_error=%d ctx->flagsPtr=%p blockBase=%p\n", (int) (-(ctx->flagsPtr-blockBase))-1, ctx->flagsPtr, blockBase);
+    LIZARD_LOG_DECOMPRESS_LIZv1("cpy=%p oend=%p ctx->literalsPtr+length[%d]=%p iend=%p\n", cpy, oend, (int)length, ctx->literalsPtr+length, iend);
+    return (int) (-(ctx->flagsPtr-blockBase))-1;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// internal-complibs/lizard-1.0/lizard_decompress_lz4.h
+FORCE_INLINE int Lizard_decompress_LZ4(
+                 Lizard_dstream_t* ctx,
+                 BYTE* const dest,
+                 int outputSize,         /* this value is the max size of Output Buffer. */
+
+                 int partialDecoding,    /* full, partial */
+                 int targetOutputSize,   /* only used if partialDecoding==partial */
+                 int dict,               /* noDict, withPrefix64k, usingExtDict */
+                 const BYTE* const lowPrefix,  /* == dest if dict == noDict */
+                 const BYTE* const dictStart,  /* only if dict==usingExtDict */
+                 const size_t dictSize,         /* note : = 0 if noDict */
+                 int compressionLevel
+                 )
+{
+    /* Local Variables */
+    int inputSize = (int)(ctx->flagsEnd - ctx->flagsPtr);
+    const BYTE* const blockBase = ctx->flagsPtr;
+    const BYTE* const iend = ctx->literalsEnd;
+    BYTE* op = dest;
+    BYTE* const oend = op + outputSize;
+    BYTE* cpy = NULL;
+    BYTE* oexit = op + targetOutputSize;
+    const BYTE* const lowLimit = lowPrefix - dictSize;
+    const BYTE* const dictEnd = (const BYTE*)dictStart + dictSize;
+
+    const int checkOffset = (dictSize < (int)(LIZARD_DICT_SIZE));
+
+    intptr_t length = 0;
+    (void)compressionLevel;
+
+    /* Special cases */
+    if (unlikely(outputSize==0)) return ((inputSize==1) && (*ctx->flagsPtr==0)) ? 0 : -1;  /* Empty output buffer */
+
+    /* Main Loop : decode sequences */
+    while (ctx->flagsPtr < ctx->flagsEnd) {
+        unsigned token;
+        const BYTE* match;
+        size_t offset;
+
+        /* get literal length */
+        token = *ctx->flagsPtr++;
+        if ((length=(token & RUN_MASK_LZ4)) == RUN_MASK_LZ4) {
+            if (unlikely(ctx->literalsPtr > iend - 5)) { LIZARD_LOG_DECOMPRESS_LZ4("0"); goto _output_error; } 
+            length = *ctx->literalsPtr;
+            if unlikely(length >= 254) {
+                if (length == 254) {
+                    length = MEM_readLE16(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 2;
+                } else {
+                    length = MEM_readLE24(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 3;
+                }
+            }
+            length += RUN_MASK_LZ4;
+            ctx->literalsPtr++;
+            if (unlikely((size_t)(op+length)<(size_t)(op))) { LIZARD_LOG_DECOMPRESS_LZ4("1"); goto _output_error; }  /* overflow detection */
+            if (unlikely((size_t)(ctx->literalsPtr+length)<(size_t)(ctx->literalsPtr))) { LIZARD_LOG_DECOMPRESS_LZ4("2"); goto _output_error; }   /* overflow detection */
+        }
+
+        /* copy literals */
+        cpy = op + length;
+        if (unlikely(cpy > oend - WILDCOPYLENGTH || ctx->literalsPtr + length > iend - (2 + WILDCOPYLENGTH))) { LIZARD_LOG_DECOMPRESS_LZ4("offset outside buffers\n"); goto _output_error; }   /* Error : offset outside buffers */
+
+#if 1
+        Lizard_wildCopy16(op, ctx->literalsPtr, cpy);
+        op = cpy;
+        ctx->literalsPtr += length; 
+#else
+        Lizard_copy8(op, ctx->literalsPtr);
+        Lizard_copy8(op+8, ctx->literalsPtr+8);
+        if (length > 16)
+            Lizard_wildCopy16(op + 16, ctx->literalsPtr + 16, cpy);
+        op = cpy;
+        ctx->literalsPtr += length; 
+#endif
+        if ((partialDecoding) && (op >= oexit)) return (int) (op-dest);
+
+        /* get offset */
+        offset = MEM_readLE16(ctx->literalsPtr); 
+        ctx->literalsPtr += 2;
+
+        match = op - offset;
+        if ((checkOffset) && (unlikely(match < lowLimit))) { LIZARD_LOG_DECOMPRESS_LZ4("lowPrefix[%p]-dictSize[%d]=lowLimit[%p] match[%p]=op[%p]-offset[%d]\n", lowPrefix, (int)dictSize, lowLimit, match, op, (int)offset); goto _output_error; }  /* Error : offset outside buffers */
+
+        /* get matchlength */
+        length = token >> RUN_BITS_LZ4;
+        if (length == ML_MASK_LZ4) {
+            if (unlikely(ctx->literalsPtr > iend - 5)) { LIZARD_LOG_DECOMPRESS_LZ4("4"); goto _output_error; } 
+            length = *ctx->literalsPtr;
+            if unlikely(length >= 254) {
+                if (length == 254) {
+                    length = MEM_readLE16(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 2;
+                } else {
+                    length = MEM_readLE24(ctx->literalsPtr+1);
+                    ctx->literalsPtr += 3;
+                }
+            }
+            length += ML_MASK_LZ4;
+            ctx->literalsPtr++;
+            if (unlikely((size_t)(op+length)<(size_t)(op))) { LIZARD_LOG_DECOMPRESS_LZ4("5"); goto _output_error; }  /* overflow detection */
+        }
+
+// the below code fragment can be found in:
+// internal-complibs/lizard-1.0/lizard_decompress.c
+FORCE_INLINE int Lizard_decompress_generic(
+                 const char* source,
+                 char* const dest,
+                 int inputSize,
+                 int outputSize,         /* this value is the max size of Output Buffer. */
+                 int partialDecoding,    /* full, partial */
+                 int targetOutputSize,   /* only used if partialDecoding==partial */
+                 int dict,               /* noDict, withPrefix64k, usingExtDict */
+                 const BYTE* const lowPrefix,  /* == dest if dict == noDict */
+                 const BYTE* const dictStart,  /* only if dict==usingExtDict */
+                 const size_t dictSize         /* note : = 0 if noDict */
+                 )
+{
+    /* Local Variables */
+    const BYTE* ip = (const BYTE*) source, *istart = (const BYTE*) source;
+    const BYTE* const iend = ip + inputSize;
+    BYTE* op = (BYTE*) dest;
+    BYTE* const oend = op + outputSize;
+    BYTE* oexit = op + targetOutputSize;
+    Lizard_parameters params;
+    Lizard_dstream_t ctx;
+    BYTE* decompFlagsBase, *decompOff24Base, *decompOff16Base, *decompLiteralsBase = NULL;
+    int res, compressionLevel;
+
+    if (inputSize < 1) { LIZARD_LOG_DECOMPRESS("inputSize=%d outputSize=%d targetOutputSize=%d partialDecoding=%d\n", inputSize, outputSize, targetOutputSize, partialDecoding); return 0; }
+
+    compressionLevel = *ip++;
+
+    if (compressionLevel < LIZARD_MIN_CLEVEL || compressionLevel > LIZARD_MAX_CLEVEL) {
+        LIZARD_LOG_DECOMPRESS("ERROR Lizard_decompress_generic inputSize=%d compressionLevel=%d\n", inputSize, compressionLevel);
+        return -1;
+    }
+
+    LIZARD_LOG_DECOMPRESS("Lizard_decompress_generic ip=%p inputSize=%d targetOutputSize=%d dest=%p outputSize=%d cLevel=%d dict=%d dictSize=%d dictStart=%p partialDecoding=%d\n", ip, inputSize, targetOutputSize, dest, outputSize, compressionLevel, dict, (int)dictSize, dictStart, partialDecoding);
+
+    decompLiteralsBase = (BYTE*)malloc(4*LIZARD_HUF_BLOCK_SIZE);
+    if (!decompLiteralsBase) return -1;
+    decompFlagsBase = decompLiteralsBase + LIZARD_HUF_BLOCK_SIZE;
+    decompOff24Base = decompFlagsBase + LIZARD_HUF_BLOCK_SIZE;
+    decompOff16Base = decompOff24Base + LIZARD_HUF_BLOCK_SIZE;
+
+#ifdef LIZARD_STATS
+    init_stats();
+#endif
+    (void)istart;
+
+    while (ip < iend)
+    {
+        res = *ip++;
+        if (res == LIZARD_FLAG_UNCOMPRESSED) /* uncompressed */
+        {
+            uint32_t length;
+            if (ip > iend - 3) { LIZARD_LOG_DECOMPRESS("UNCOMPRESSED  ip[%p] > iend[%p] - 3\n", ip, iend); goto _output_error; }
+            length = MEM_readLE24(ip);
+            ip += 3;
+         //   printf("%d: total=%d block=%d UNCOMPRESSED op=%p oexit=%p oend=%p\n", (int)(op-(BYTE*)dest) ,(int)(ip-istart), length, op, oexit, oend);
+            if (ip + length > iend || op + length > oend) { LIZARD_LOG_DECOMPRESS("UNCOMPRESSED  ip[%p]+length[%d] > iend[%p]\n", ip, length, iend); goto _output_error; }
+            memcpy(op, ip, length);
+            op += length;
+            ip += length;
+            if ((partialDecoding) && (op >= oexit)) break;
+#ifdef LIZARD_STATS
+            uncompr_stream[LIZARD_STREAM_UNCOMPRESSED] += length;
+#endif
+            continue;
+        }
+        
+        if (res&LIZARD_FLAG_LEN) {
+            LIZARD_LOG_DECOMPRESS("res=%d\n", res); goto _output_error;
+        }
+
+        if (ip > iend - 5*3) goto _output_error;
+        ctx.lenPtr = (const BYTE*)ip + 3;
+        ctx.lenEnd = ctx.lenPtr + MEM_readLE24(ip);
+        if (ctx.lenEnd < ctx.lenPtr || (ctx.lenEnd > iend - 3)) goto _output_error;
+#ifdef LIZARD_STATS
+        uncompr_stream[LIZARD_STREAM_LEN] += ctx.lenEnd-ctx.lenPtr + 3;
+#endif
+        ip = ctx.lenEnd;
+
+        {   size_t streamLen;
+#ifdef LIZARD_USE_LOGS
+            const BYTE* ipos;
+            size_t comprFlagsLen, comprLiteralsLen, total;
+#endif
+            streamLen = Lizard_readStream(res&LIZARD_FLAG_OFFSET16, &ip, iend, decompOff16Base, decompOff16Base + LIZARD_HUF_BLOCK_SIZE, &ctx.offset16Ptr, &ctx.offset16End, LIZARD_STREAM_OFFSET16);
+            if (streamLen == 0) goto _output_error;
+
+            streamLen = Lizard_readStream(res&LIZARD_FLAG_OFFSET24, &ip, iend, decompOff24Base, decompOff24Base + LIZARD_HUF_BLOCK_SIZE, &ctx.offset24Ptr, &ctx.offset24End, LIZARD_STREAM_OFFSET24);
+            if (streamLen == 0) goto _output_error;
+
+#ifdef LIZARD_USE_LOGS
+            ipos = ip;
+            streamLen = Lizard_readStream(res&LIZARD_FLAG_FLAGS, &ip, iend, decompFlagsBase, decompFlagsBase + LIZARD_HUF_BLOCK_SIZE, &ctx.flagsPtr, &ctx.flagsEnd, LIZARD_STREAM_FLAGS);
+            if (streamLen == 0) goto _output_error;
+            streamLen = (size_t)(ctx.flagsEnd-ctx.flagsPtr);
+            comprFlagsLen = ((size_t)(ip - ipos) + 3 >= streamLen) ? 0 : (size_t)(ip - ipos);
+            ipos = ip;
+#else
+            streamLen = Lizard_readStream(res&LIZARD_FLAG_FLAGS, &ip, iend, decompFlagsBase, decompFlagsBase + LIZARD_HUF_BLOCK_SIZE, &ctx.flagsPtr, &ctx.flagsEnd, LIZARD_STREAM_FLAGS);
+            if (streamLen == 0) goto _output_error;
+#endif
+
+            streamLen = Lizard_readStream(res&LIZARD_FLAG_LITERALS, &ip, iend, decompLiteralsBase, decompLiteralsBase + LIZARD_HUF_BLOCK_SIZE, &ctx.literalsPtr, &ctx.literalsEnd, LIZARD_STREAM_LITERALS);
+            if (streamLen == 0) goto _output_error;
+#ifdef LIZARD_USE_LOGS
+            streamLen = (size_t)(ctx.literalsEnd-ctx.literalsPtr);
+            comprLiteralsLen = ((size_t)(ip - ipos) + 3 >= streamLen) ? 0 : (size_t)(ip - ipos);
+            total = (size_t)(ip-(ctx.lenEnd-1));
+#endif
+
+            if (ip > iend) goto _output_error;
+
+            LIZARD_LOG_DECOMPRESS("%d: total=%d block=%d flagsLen=%d(HUF=%d) literalsLen=%d(HUF=%d) offset16Len=%d offset24Len=%d lengthsLen=%d \n", (int)(op-(BYTE*)dest) ,(int)(ip-istart), (int)total, 
+                        (int)(ctx.flagsEnd-ctx.flagsPtr), (int)comprFlagsLen, (int)(ctx.literalsEnd-ctx.literalsPtr), (int)comprLiteralsLen, 
+                        (int)(ctx.offset16End-ctx.offset16Ptr), (int)(ctx.offset24End-ctx.offset24Ptr), (int)(ctx.lenEnd-ctx.lenPtr));
+        }
+
+        ctx.last_off = -LIZARD_INIT_LAST_OFFSET;
+        params = Lizard_defaultParameters[compressionLevel - LIZARD_MIN_CLEVEL];
+        if (params.decompressType == Lizard_coderwords_LZ4)
+            res = Lizard_decompress_LZ4(&ctx, op, outputSize, partialDecoding, targetOutputSize, dict, lowPrefix, dictStart, dictSize, compressionLevel);
+        else 
+#ifdef USE_LZ4_ONLY
+            res = Lizard_decompress_LZ4(&ctx, op, outputSize, partialDecoding, targetOutputSize, dict, lowPrefix, dictStart, dictSize, compressionLevel);
+#else
+            res = Lizard_decompress_LIZv1(&ctx, op, outputSize, partialDecoding, targetOutputSize, dict, lowPrefix, dictStart, dictSize, compressionLevel);
+#endif        
+        LIZARD_LOG_DECOMPRESS("Lizard_decompress_generic res=%d inputSize=%d\n", res, (int)(ctx.literalsEnd-ctx.lenEnd));
+
+        if (res <= 0) { free(decompLiteralsBase); return res; }
+        
+        op += res;
+        outputSize -= res;
+        if ((partialDecoding) && (op >= oexit)) break;
+    }
+
+#ifdef LIZARD_STATS
+    print_stats();
+#endif
+
+    LIZARD_LOG_DECOMPRESS("Lizard_decompress_generic total=%d\n", (int)(op-(BYTE*)dest));
+    free(decompLiteralsBase);
+    return (int)(op-(BYTE*)dest);
+
+_output_error:
+    LIZARD_LOG_DECOMPRESS("Lizard_decompress_generic ERROR ip=%p iend=%p\n", ip, iend);
+    free(decompLiteralsBase);
+    return -1;
+}
+
+// the below code fragment can be found in:
+// internal-complibs/lizard-1.0/lizard_parser_fastbig.h
+FORCE_INLINE int Lizard_compress_fastBig(
+        Lizard_stream_t* const ctx,
+        const BYTE* ip,
+        const BYTE* const iend)
+{
+    const U32 acceleration = 1;
+    const BYTE* base = ctx->base;
+    const U32 dictLimit = ctx->dictLimit;
+    const BYTE* const lowPrefixPtr = base + dictLimit;
+    const BYTE* const dictBase = ctx->dictBase;
+    const BYTE* const dictEnd = dictBase + dictLimit;
+    const BYTE* const mflimit = iend - MFLIMIT;
+    const BYTE* const matchlimit = iend - LASTLITERALS;
+    const BYTE* anchor = ip;
+
+    size_t forwardH, matchIndex;
+    const int hashLog = ctx->params.hashLog;
+    const U32 maxDistance = (1 << ctx->params.windowLog) - 1;
+    const U32 lowLimit = (ctx->lowLimit + maxDistance >= (U32)(ip - base)) ? ctx->lowLimit : (U32)(ip - base) - maxDistance;
+
+    /* Init conditions */
+    if ((U32)(iend-ip) > (U32)LIZARD_MAX_INPUT_SIZE) goto _output_error;   /* Unsupported inputSize, too large (or negative) */
+
+    if ((U32)(iend-ip) < Lizard_minLength) goto _last_literals;                  /* Input too small, no compression (all literals) */
+
+    /* First Byte */
+    Lizard_putPositionHLog(ip, ctx->hashTable, base, hashLog);
+    ip++; forwardH = Lizard_hashPositionHLog(ip, hashLog);
+
+    /* Main Loop */
+    for ( ; ; ) {
+        const BYTE* match;
+        size_t matchLength;
+
+        /* Find a match */
+        {   const BYTE* forwardIp = ip;
+            unsigned step = 1;
+            unsigned searchMatchNb = acceleration << Lizard_skipTrigger;
+            while (1) {
+                size_t const h = forwardH;
+                ip = forwardIp;
+                forwardIp += step;
+                step = (searchMatchNb++ >> Lizard_skipTrigger);
+
+                if (unlikely(forwardIp > mflimit)) goto _last_literals;
+
+                matchIndex = Lizard_getPositionOnHashHLog(h, ctx->hashTable);
+                forwardH = Lizard_hashPositionHLog(forwardIp, hashLog);
+                Lizard_putPositionOnHashHLog(ip, h, ctx->hashTable, base);
+
+                if ((matchIndex < lowLimit) || (matchIndex >= (U32)(ip - base)) || (base + matchIndex + maxDistance < ip)) continue;
+
+                if (matchIndex >= dictLimit) {
+                    match = base + matchIndex;
+                    if ((U32)(ip - match) >= LIZARD_FAST_MIN_OFFSET)
+                    if (MEM_read32(match) == MEM_read32(ip))
+                    {
+                        int back = 0;
+                        matchLength = Lizard_count(ip+MINMATCH, match+MINMATCH, matchlimit);
+
+                        while ((ip+back > anchor) && (match+back > lowPrefixPtr) && (ip[back-1] == match[back-1])) back--;
+                        matchLength -= back;
+                        if ((matchLength >= LIZARD_FASTBIG_LONGOFF_MM) || ((U32)(ip - match) < LIZARD_MAX_16BIT_OFFSET))
+                        {
+                            ip += back;
+                            match += back;
+                            break;
+                        }
+                    }
+                } else {
+                    match = dictBase + matchIndex;
+                    if ((U32)(ip - (base + matchIndex)) >= LIZARD_FAST_MIN_OFFSET)
+                    if ((U32)((dictLimit-1) - matchIndex) >= 3)  /* intentional overflow */
+                    if (MEM_read32(match) == MEM_read32(ip)) {
+                        const U32 newLowLimit = (lowLimit + maxDistance >= (U32)(ip-base)) ? lowLimit : (U32)(ip - base) - maxDistance;
+                        int back = 0;
+                        matchLength = Lizard_count_2segments(ip+MINMATCH, match+MINMATCH, matchlimit, dictEnd, lowPrefixPtr);
+
+                        while ((ip+back > anchor) && (matchIndex+back > newLowLimit) && (ip[back-1] == match[back-1])) back--;
+                        matchLength -= back;
+                        match = base + matchIndex + back;
+                        if ((matchLength >= LIZARD_FASTBIG_LONGOFF_MM) || ((U32)(ip - match) < LIZARD_MAX_16BIT_OFFSET))
+                        {
+                            ip += back;
+                            break;
+                        }
+                    }
+                }
+            } // while (1)
+        }
+
+_next_match:
+        if (Lizard_encodeSequence_LIZv1(ctx, &ip, &anchor, matchLength+MINMATCH, match)) goto _output_error;
+        
+        /* Test end of chunk */
+        if (ip > mflimit) break;
+
+        /* Fill table */
+        Lizard_putPositionHLog(ip-2, ctx->hashTable, base, hashLog);
+
+        /* Test next position */
+        matchIndex = Lizard_getPositionHLog(ip, ctx->hashTable, hashLog);
+        Lizard_putPositionHLog(ip, ctx->hashTable, base, hashLog);
+        if ((matchIndex >= lowLimit) && (matchIndex < (U32)(ip - base)) && (base + matchIndex + maxDistance >= ip))
+        {
+            if (matchIndex >= dictLimit) {
+                match = base + matchIndex;
+                if ((U32)(ip - match) >= LIZARD_FAST_MIN_OFFSET)
+                if (MEM_read32(match) == MEM_read32(ip))
+                {
+                    matchLength = Lizard_count(ip+MINMATCH, match+MINMATCH, matchlimit);
+                    if ((matchLength >= LIZARD_FASTBIG_LONGOFF_MM) || ((U32)(ip - match) < LIZARD_MAX_16BIT_OFFSET))
+                        goto _next_match;
+                }
+            } else {
+                match = dictBase + matchIndex;
+                if ((U32)(ip - (base + matchIndex)) >= LIZARD_FAST_MIN_OFFSET)
+                if ((U32)((dictLimit-1) - matchIndex) >= 3)  /* intentional overflow */
+                if (MEM_read32(match) == MEM_read32(ip)) {
+                    matchLength = Lizard_count_2segments(ip+MINMATCH, match+MINMATCH, matchlimit, dictEnd, lowPrefixPtr);
+                    match = base + matchIndex;
+                    if ((matchLength >= LIZARD_FASTBIG_LONGOFF_MM) || ((U32)(ip - match) < LIZARD_MAX_16BIT_OFFSET))
+                        goto _next_match;
+                }
+            }
+        }
+
+        /* Prepare next loop */
+        forwardH = Lizard_hashPositionHLog(++ip, hashLog);
+    }
+
+_last_literals:
+    /* Encode Last Literals */
+    ip = iend;
+    if (Lizard_encodeLastLiterals_LIZv1(ctx, &ip, &anchor)) goto _output_error;
+
+    /* End */
+    return 1;
+_output_error:
+    return 0;
+}
+
+// the below code fragment can be found in:
+// internal-complibs/lz4-1.9.1/lz4.c
+LZ4_FORCE_INLINE int
+LZ4_decompress_generic(
+                 const char* const src,
+                 char* const dst,
+                 int srcSize,
+                 int outputSize,         /* If endOnInput==endOnInputSize, this value is `dstCapacity` */
+
+                 endCondition_directive endOnInput,   /* endOnOutputSize, endOnInputSize */
+                 earlyEnd_directive partialDecoding,  /* full, partial */
+                 dict_directive dict,                 /* noDict, withPrefix64k, usingExtDict */
+                 const BYTE* const lowPrefix,  /* always <= dst, == dst when no prefix */
+                 const BYTE* const dictStart,  /* only if dict==usingExtDict */
+                 const size_t dictSize         /* note : = 0 if noDict */
+                 )
+{
+    if (src == NULL) return -1;
+
+    {   const BYTE* ip = (const BYTE*) src;
+        const BYTE* const iend = ip + srcSize;
+
+        BYTE* op = (BYTE*) dst;
+        BYTE* const oend = op + outputSize;
+        BYTE* cpy;
+
+        const BYTE* const dictEnd = (dictStart == NULL) ? NULL : dictStart + dictSize;
+
+        const int safeDecode = (endOnInput==endOnInputSize);
+        const int checkOffset = ((safeDecode) && (dictSize < (int)(64 KB)));
+
+
+        /* Set up the "end" pointers for the shortcut. */
+        const BYTE* const shortiend = iend - (endOnInput ? 14 : 8) /*maxLL*/ - 2 /*offset*/;
+        const BYTE* const shortoend = oend - (endOnInput ? 14 : 8) /*maxLL*/ - 18 /*maxML*/;
+
+        const BYTE* match;
+        size_t offset;
+        unsigned token;
+        size_t length;
+
+
+        DEBUGLOG(5, "LZ4_decompress_generic (srcSize:%i, dstSize:%i)", srcSize, outputSize);
+
+        /* Special cases */
+        assert(lowPrefix <= op);
+        if ((endOnInput) && (unlikely(outputSize==0))) return ((srcSize==1) && (*ip==0)) ? 0 : -1;  /* Empty output buffer */
+        if ((!endOnInput) && (unlikely(outputSize==0))) return (*ip==0 ? 1 : -1);
+        if ((endOnInput) && unlikely(srcSize==0)) return -1;
+
+	/* Currently the fast loop shows a regression on qualcomm arm chips. */
+#if LZ4_FAST_DEC_LOOP
+        if ((oend - op) < FASTLOOP_SAFE_DISTANCE) {
+            DEBUGLOG(6, "skip fast decode loop");
+            goto safe_decode;
+        }
+
+        /* Fast loop : decode sequences as long as output < iend-FASTLOOP_SAFE_DISTANCE */
+        while (1) {
+            /* Main fastloop assertion: We can always wildcopy FASTLOOP_SAFE_DISTANCE */
+            assert(oend - op >= FASTLOOP_SAFE_DISTANCE);
+            if (endOnInput) assert(ip < iend);
+            token = *ip++;
+            length = token >> ML_BITS;  /* literal length */
+
+            assert(!endOnInput || ip <= iend); /* ip < iend before the increment */
+
+            /* decode literal length */
+            if (length == RUN_MASK) {
+                variable_length_error error = ok;
+                length += read_variable_length(&ip, iend-RUN_MASK, endOnInput, endOnInput, &error);
+                if (error == initial_error) goto _output_error;
+                if ((safeDecode) && unlikely((uptrval)(op)+length<(uptrval)(op))) goto _output_error;   /* overflow detection */
+                if ((safeDecode) && unlikely((uptrval)(ip)+length<(uptrval)(ip))) goto _output_error;   /* overflow detection */
+
+                /* copy literals */
+                cpy = op+length;
+                LZ4_STATIC_ASSERT(MFLIMIT >= WILDCOPYLENGTH);
+                if (endOnInput) {  /* LZ4_decompress_safe() */
+                    if ((cpy>oend-32) || (ip+length>iend-32)) goto safe_literal_copy;
+                    LZ4_wildCopy32(op, ip, cpy);
+                } else {   /* LZ4_decompress_fast() */
+                    if (cpy>oend-8) goto safe_literal_copy;
+                    LZ4_wildCopy8(op, ip, cpy); /* LZ4_decompress_fast() cannot copy more than 8 bytes at a time :
+                                                 * it doesn't know input length, and only relies on end-of-block properties */
+                }
+                ip += length; op = cpy;
+            } else {
+                cpy = op+length;
+                if (endOnInput) {  /* LZ4_decompress_safe() */
+                    DEBUGLOG(7, "copy %u bytes in a 16-bytes stripe", (unsigned)length);
+                    /* We don't need to check oend, since we check it once for each loop below */
+                    if (ip > iend-(16 + 1/*max lit + offset + nextToken*/)) goto safe_literal_copy;
+                    /* Literals can only be 14, but hope compilers optimize if we copy by a register size */
+                    memcpy(op, ip, 16);
+                } else {  /* LZ4_decompress_fast() */
+                    /* LZ4_decompress_fast() cannot copy more than 8 bytes at a time :
+                     * it doesn't know input length, and relies on end-of-block properties */
+                    memcpy(op, ip, 8);
+                    if (length > 8) memcpy(op+8, ip+8, 8);
+                }
+                ip += length; op = cpy;
+            }
+
+            /* get offset */
+            offset = LZ4_readLE16(ip); ip+=2;
+            match = op - offset;
+
+            /* get matchlength */
+            length = token & ML_MASK;
+
+            if ((checkOffset) && (unlikely(match + dictSize < lowPrefix))) goto _output_error;   /* Error : offset outside buffers */
+
+            if (length == ML_MASK) {
+              variable_length_error error = ok;
+              length += read_variable_length(&ip, iend - LASTLITERALS + 1, endOnInput, 0, &error);
+              if (error != ok) goto _output_error;
+                if ((safeDecode) && unlikely((uptrval)(op)+length<(uptrval)op)) goto _output_error;   /* overflow detection */
+                length += MINMATCH;
+                if (op + length >= oend - FASTLOOP_SAFE_DISTANCE) {
+                    goto safe_match_copy;
+                }
+            } else {
+                length += MINMATCH;
+                if (op + length >= oend - FASTLOOP_SAFE_DISTANCE) {
+                    goto safe_match_copy;
+                }
+
+                /* Fastpath check: Avoids a branch in LZ4_wildCopy32 if true */
+                if (!(dict == usingExtDict) || (match >= lowPrefix)) {
+                    if (offset >= 8) {
+                        memcpy(op, match, 8);
+                        memcpy(op+8, match+8, 8);
+                        memcpy(op+16, match+16, 2);
+                        op += length;
+                        continue;
+            }   }   }
+
+            /* match starting within external dictionary */
+            if ((dict==usingExtDict) && (match < lowPrefix)) {
+                if (unlikely(op+length > oend-LASTLITERALS)) {
+                    if (partialDecoding) length = MIN(length, (size_t)(oend-op));
+                    else goto _output_error;   /* doesn't respect parsing restriction */
+                }
+
+                if (length <= (size_t)(lowPrefix-match)) {
+                    /* match fits entirely within external dictionary : just copy */
+                    memmove(op, dictEnd - (lowPrefix-match), length);
+                    op += length;
+                } else {
+                    /* match stretches into both external dictionary and current block */
+                    size_t const copySize = (size_t)(lowPrefix - match);
+                    size_t const restSize = length - copySize;
+                    memcpy(op, dictEnd - copySize, copySize);
+                    op += copySize;
+                    if (restSize > (size_t)(op - lowPrefix)) {  /* overlap copy */
+                        BYTE* const endOfMatch = op + restSize;
+                        const BYTE* copyFrom = lowPrefix;
+                        while (op < endOfMatch) *op++ = *copyFrom++;
+                    } else {
+                        memcpy(op, lowPrefix, restSize);
+                        op += restSize;
+                }   }
+                continue;
+            }
+
+            /* copy match within block */
+            cpy = op + length;
+
+            assert((op <= oend) && (oend-op >= 32));
+            if (unlikely(offset<16)) {
+                LZ4_memcpy_using_offset(op, match, cpy, offset);
+            } else {
+                LZ4_wildCopy32(op, match, cpy);
+            }
+
+            op = cpy;   /* wildcopy correction */
+        }
+    safe_decode:
+#endif
+
+        /* Main Loop : decode remaining sequences where output < FASTLOOP_SAFE_DISTANCE */
+        while (1) {
+            token = *ip++;
+            length = token >> ML_BITS;  /* literal length */
+
+            assert(!endOnInput || ip <= iend); /* ip < iend before the increment */
+
+            /* A two-stage shortcut for the most common case:
+             * 1) If the literal length is 0..14, and there is enough space,
+             * enter the shortcut and copy 16 bytes on behalf of the literals
+             * (in the fast mode, only 8 bytes can be safely copied this way).
+             * 2) Further if the match length is 4..18, copy 18 bytes in a similar
+             * manner; but we ensure that there's enough space in the output for
+             * those 18 bytes earlier, upon entering the shortcut (in other words,
+             * there is a combined check for both stages).
+             */
+            if ( (endOnInput ? length != RUN_MASK : length <= 8)
+                /* strictly "less than" on input, to re-enter the loop with at least one byte */
+              && likely((endOnInput ? ip < shortiend : 1) & (op <= shortoend)) ) {
+                /* Copy the literals */
+                memcpy(op, ip, endOnInput ? 16 : 8);
+                op += length; ip += length;
+
+                /* The second stage: prepare for match copying, decode full info.
+                 * If it doesn't work out, the info won't be wasted. */
+                length = token & ML_MASK; /* match length */
+                offset = LZ4_readLE16(ip); ip += 2;
+                match = op - offset;
+                assert(match <= op); /* check overflow */
+
+                /* Do not deal with overlapping matches. */
+                if ( (length != ML_MASK)
+                  && (offset >= 8)
+                  && (dict==withPrefix64k || match >= lowPrefix) ) {
+                    /* Copy the match. */
+                    memcpy(op + 0, match + 0, 8);
+                    memcpy(op + 8, match + 8, 8);
+                    memcpy(op +16, match +16, 2);
+                    op += length + MINMATCH;
+                    /* Both stages worked, load the next token. */
+                    continue;
+                }
+
+                /* The second stage didn't work out, but the info is ready.
+                 * Propel it right to the point of match copying. */
+                goto _copy_match;
+            }
+
+            /* decode literal length */
+            if (length == RUN_MASK) {
+              variable_length_error error = ok;
+              length += read_variable_length(&ip, iend-RUN_MASK, endOnInput, endOnInput, &error);
+              if (error == initial_error) goto _output_error;
+                if ((safeDecode) && unlikely((uptrval)(op)+length<(uptrval)(op))) goto _output_error;   /* overflow detection */
+                if ((safeDecode) && unlikely((uptrval)(ip)+length<(uptrval)(ip))) goto _output_error;   /* overflow detection */
+            }
+
+            /* copy literals */
+            cpy = op+length;
+#if LZ4_FAST_DEC_LOOP
+        safe_literal_copy:
+#endif
+            LZ4_STATIC_ASSERT(MFLIMIT >= WILDCOPYLENGTH);
+            if ( ((endOnInput) && ((cpy>oend-MFLIMIT) || (ip+length>iend-(2+1+LASTLITERALS))) )
+              || ((!endOnInput) && (cpy>oend-WILDCOPYLENGTH)) )
+            {
+                if (partialDecoding) {
+                    if (cpy > oend) { cpy = oend; assert(op<=oend); length = (size_t)(oend-op); }  /* Partial decoding : stop in the middle of literal segment */
+                    if ((endOnInput) && (ip+length > iend)) goto _output_error;   /* Error : read attempt beyond end of input buffer */
+                } else {
+                    if ((!endOnInput) && (cpy != oend)) goto _output_error;       /* Error : block decoding must stop exactly there */
+                    if ((endOnInput) && ((ip+length != iend) || (cpy > oend))) goto _output_error;   /* Error : input must be consumed */
+                }
+                memcpy(op, ip, length);
+                ip += length;
+                op += length;
+                if (!partialDecoding || (cpy == oend)) {
+                    /* Necessarily EOF, due to parsing restrictions */
+                    break;
+                }
+
+            } else {
+                LZ4_wildCopy8(op, ip, cpy);   /* may overwrite up to WILDCOPYLENGTH beyond cpy */
+                ip += length; op = cpy;
+            }
+
+            /* get offset */
+            offset = LZ4_readLE16(ip); ip+=2;
+            match = op - offset;
+
+            /* get matchlength */
+            length = token & ML_MASK;
+
+    _copy_match:
+            if ((checkOffset) && (unlikely(match + dictSize < lowPrefix))) goto _output_error;   /* Error : offset outside buffers */
+            if (!partialDecoding) {
+                assert(oend > op);
+                assert(oend - op >= 4);
+                LZ4_write32(op, 0);   /* silence an msan warning when offset==0; costs <1%; */
+            }   /* note : when partialDecoding, there is no guarantee that at least 4 bytes remain available in output buffer */
+
+            if (length == ML_MASK) {
+              variable_length_error error = ok;
+              length += read_variable_length(&ip, iend - LASTLITERALS + 1, endOnInput, 0, &error);
+              if (error != ok) goto _output_error;
+                if ((safeDecode) && unlikely((uptrval)(op)+length<(uptrval)op)) goto _output_error;   /* overflow detection */
+            }
+            length += MINMATCH;
+
+#if LZ4_FAST_DEC_LOOP
+        safe_match_copy:
+#endif
+            /* match starting within external dictionary */
+            if ((dict==usingExtDict) && (match < lowPrefix)) {
+                if (unlikely(op+length > oend-LASTLITERALS)) {
+                    if (partialDecoding) length = MIN(length, (size_t)(oend-op));
+                    else goto _output_error;   /* doesn't respect parsing restriction */
+                }
+
+                if (length <= (size_t)(lowPrefix-match)) {
+                    /* match fits entirely within external dictionary : just copy */
+                    memmove(op, dictEnd - (lowPrefix-match), length);
+                    op += length;
+                } else {
+                    /* match stretches into both external dictionary and current block */
+                    size_t const copySize = (size_t)(lowPrefix - match);
+                    size_t const restSize = length - copySize;
+                    memcpy(op, dictEnd - copySize, copySize);
+                    op += copySize;
+                    if (restSize > (size_t)(op - lowPrefix)) {  /* overlap copy */
+                        BYTE* const endOfMatch = op + restSize;
+                        const BYTE* copyFrom = lowPrefix;
+                        while (op < endOfMatch) *op++ = *copyFrom++;
+                    } else {
+                        memcpy(op, lowPrefix, restSize);
+                        op += restSize;
+                }   }
+                continue;
+            }
+
+            /* copy match within block */
+            cpy = op + length;
+
+            /* partialDecoding : may end anywhere within the block */
+            assert(op<=oend);
+            if (partialDecoding && (cpy > oend-MATCH_SAFEGUARD_DISTANCE)) {
+                size_t const mlen = MIN(length, (size_t)(oend-op));
+                const BYTE* const matchEnd = match + mlen;
+                BYTE* const copyEnd = op + mlen;
+                if (matchEnd > op) {   /* overlap copy */
+                    while (op < copyEnd) *op++ = *match++;
+                } else {
+                    memcpy(op, match, mlen);
+                }
+                op = copyEnd;
+                if (op==oend) break;
+                continue;
+            }
+
+            if (unlikely(offset<8)) {
+                op[0] = match[0];
+                op[1] = match[1];
+                op[2] = match[2];
+                op[3] = match[3];
+                match += inc32table[offset];
+                memcpy(op+4, match, 4);
+                match -= dec64table[offset];
+            } else {
+                memcpy(op, match, 8);
+                match += 8;
+            }
+            op += 8;
+
+            if (unlikely(cpy > oend-MATCH_SAFEGUARD_DISTANCE)) {
+                BYTE* const oCopyLimit = oend - (WILDCOPYLENGTH-1);
+                if (cpy > oend-LASTLITERALS) goto _output_error;    /* Error : last LASTLITERALS bytes must be literals (uncompressed) */
+                if (op < oCopyLimit) {
+                    LZ4_wildCopy8(op, match, oCopyLimit);
+                    match += oCopyLimit - op;
+                    op = oCopyLimit;
+                }
+                while (op < cpy) *op++ = *match++;
+            } else {
+                memcpy(op, match, 8);
+                if (length > 16) LZ4_wildCopy8(op+8, match+8, cpy);
+            }
+            op = cpy;   /* wildcopy correction */
+        }
+
+        /* end of decoding */
+        if (endOnInput)
+           return (int) (((char*)op)-dst);     /* Nb of output bytes decoded */
+        else
+           return (int) (((const char*)ip)-src);   /* Nb of input bytes read */
+
+        /* Overflow error detected */
+    _output_error:
+        return (int) (-(((const char*)ip)-src))-1;
+    }
+}
+
+// the below code fragment can be found in:
+// internal-complibs/lizard-1.0/lizard_frame.c
+size_t LizardF_decompress(LizardF_decompressionContext_t decompressionContext,
+                       void* dstBuffer, size_t* dstSizePtr,
+                       const void* srcBuffer, size_t* srcSizePtr,
+                       const LizardF_decompressOptions_t* decompressOptionsPtr)
+{
+    LizardF_dctx_t* dctxPtr = (LizardF_dctx_t*)decompressionContext;
+    LizardF_decompressOptions_t optionsNull;
+    const BYTE* const srcStart = (const BYTE*)srcBuffer;
+    const BYTE* const srcEnd = srcStart + *srcSizePtr;
+    const BYTE* srcPtr = srcStart;
+    BYTE* const dstStart = (BYTE*)dstBuffer;
+    BYTE* const dstEnd = dstStart + *dstSizePtr;
+    BYTE* dstPtr = dstStart;
+    const BYTE* selectedIn = NULL;
+    unsigned doAnotherStage = 1;
+    size_t nextSrcSizeHint = 1;
+
+
+    memset(&optionsNull, 0, sizeof(optionsNull));
+    if (decompressOptionsPtr==NULL) decompressOptionsPtr = &optionsNull;
+    *srcSizePtr = 0;
+    *dstSizePtr = 0;
+
+    /* expect to continue decoding src buffer where it left previously */
+    if (dctxPtr->srcExpect != NULL) {
+        if (srcStart != dctxPtr->srcExpect) return (size_t)-LizardF_ERROR_srcPtr_wrong;
+    }
+
+    /* programmed as a state machine */
+
+    while (doAnotherStage) {
+
+        switch(dctxPtr->dStage)
+        {
+
+        case dstage_getHeader:
+            if ((size_t)(srcEnd-srcPtr) >= maxFHSize) {  /* enough to decode - shortcut */
+                LizardF_errorCode_t const hSize = LizardF_decodeHeader(dctxPtr, srcPtr, srcEnd-srcPtr);
+                if (LizardF_isError(hSize)) return hSize;
+                srcPtr += hSize;
+                break;
+            }
+            dctxPtr->tmpInSize = 0;
+            dctxPtr->tmpInTarget = minFHSize;   /* minimum to attempt decode */
+            dctxPtr->dStage = dstage_storeHeader;
+            #ifdef AVOID_FALLTHROUGH_WARNING
+            __attribute__ ((fallthrough));  /* shut-up -Wimplicit-fallthrough warning in GCC */
+            #endif
+
+        case dstage_storeHeader:
+            {   size_t sizeToCopy = dctxPtr->tmpInTarget - dctxPtr->tmpInSize;
+                if (sizeToCopy > (size_t)(srcEnd - srcPtr)) sizeToCopy =  srcEnd - srcPtr;
+                memcpy(dctxPtr->header + dctxPtr->tmpInSize, srcPtr, sizeToCopy);
+                dctxPtr->tmpInSize += sizeToCopy;
+                srcPtr += sizeToCopy;
+                if (dctxPtr->tmpInSize < dctxPtr->tmpInTarget) {
+                    nextSrcSizeHint = (dctxPtr->tmpInTarget - dctxPtr->tmpInSize) + BHSize;   /* rest of header + nextBlockHeader */
+                    doAnotherStage = 0;   /* not enough src data, ask for some more */
+                    break;
+                }
+                {   LizardF_errorCode_t const hSize = LizardF_decodeHeader(dctxPtr, dctxPtr->header, dctxPtr->tmpInTarget);
+                    if (LizardF_isError(hSize)) return hSize;
+                }
+                break;
+            }
+
+        case dstage_getCBlockSize:
+            if ((size_t)(srcEnd - srcPtr) >= BHSize) {
+                selectedIn = srcPtr;
+                srcPtr += BHSize;
+            } else {
+                /* not enough input to read cBlockSize field */
+                dctxPtr->tmpInSize = 0;
+                dctxPtr->dStage = dstage_storeCBlockSize;
+            }
+
+            if (dctxPtr->dStage == dstage_storeCBlockSize)   /* can be skipped */
+        case dstage_storeCBlockSize:
+            {
+                size_t sizeToCopy = BHSize - dctxPtr->tmpInSize;
+                if (sizeToCopy > (size_t)(srcEnd - srcPtr)) sizeToCopy = srcEnd - srcPtr;
+                memcpy(dctxPtr->tmpIn + dctxPtr->tmpInSize, srcPtr, sizeToCopy);
+                srcPtr += sizeToCopy;
+                dctxPtr->tmpInSize += sizeToCopy;
+                if (dctxPtr->tmpInSize < BHSize) {   /* not enough input to get full cBlockSize; wait for more */
+                    nextSrcSizeHint = BHSize - dctxPtr->tmpInSize;
+                    doAnotherStage  = 0;
+                    break;
+                }
+                selectedIn = dctxPtr->tmpIn;
+            }
+
+        /* case dstage_decodeCBlockSize: */   /* no more direct access, to prevent scan-build warning */
+            {   size_t const nextCBlockSize = LizardF_readLE32(selectedIn) & 0x7FFFFFFFU;
+                if (nextCBlockSize==0) {  /* frameEnd signal, no more CBlock */
+                    dctxPtr->dStage = dstage_getSuffix;
+                    break;
+                }
+                if (nextCBlockSize > dctxPtr->maxBlockSize) return (size_t)-LizardF_ERROR_GENERIC;   /* invalid cBlockSize */
+                dctxPtr->tmpInTarget = nextCBlockSize;
+                if (LizardF_readLE32(selectedIn) & LIZARDF_BLOCKUNCOMPRESSED_FLAG) {
+                    dctxPtr->dStage = dstage_copyDirect;
+                    break;
+                }
+                dctxPtr->dStage = dstage_getCBlock;
+                if (dstPtr==dstEnd) {
+                    nextSrcSizeHint = nextCBlockSize + BHSize;
+                    doAnotherStage = 0;
+                }
+                break;
+            }
+
+        case dstage_copyDirect:   /* uncompressed block */
+            {   size_t sizeToCopy = dctxPtr->tmpInTarget;
+                if ((size_t)(srcEnd-srcPtr) < sizeToCopy) sizeToCopy = srcEnd - srcPtr;  /* not enough input to read full block */
+                if ((size_t)(dstEnd-dstPtr) < sizeToCopy) sizeToCopy = dstEnd - dstPtr;
+                memcpy(dstPtr, srcPtr, sizeToCopy);
+                if (dctxPtr->frameInfo.contentChecksumFlag) XXH32_update(&(dctxPtr->xxh), srcPtr, sizeToCopy);
+                if (dctxPtr->frameInfo.contentSize) dctxPtr->frameRemainingSize -= sizeToCopy;
+
+                /* dictionary management */
+                if (dctxPtr->frameInfo.blockMode==LizardF_blockLinked)
+                    LizardF_updateDict(dctxPtr, dstPtr, sizeToCopy, dstStart, 0);
+
+                srcPtr += sizeToCopy;
+                dstPtr += sizeToCopy;
+                if (sizeToCopy == dctxPtr->tmpInTarget) {  /* all copied */
+                    dctxPtr->dStage = dstage_getCBlockSize;
+                    break;
+                }
+                dctxPtr->tmpInTarget -= sizeToCopy;   /* still need to copy more */
+                nextSrcSizeHint = dctxPtr->tmpInTarget + BHSize;
+                doAnotherStage = 0;
+                break;
+            }
+
+        case dstage_getCBlock:   /* entry from dstage_decodeCBlockSize */
+            if ((size_t)(srcEnd-srcPtr) < dctxPtr->tmpInTarget) {
+                dctxPtr->tmpInSize = 0;
+                dctxPtr->dStage = dstage_storeCBlock;
+                break;
+            }
+            selectedIn = srcPtr;
+            srcPtr += dctxPtr->tmpInTarget;
+            dctxPtr->dStage = dstage_decodeCBlock;
+            break;
+
+        case dstage_storeCBlock:
+            {   size_t sizeToCopy = dctxPtr->tmpInTarget - dctxPtr->tmpInSize;
+                if (sizeToCopy > (size_t)(srcEnd-srcPtr)) sizeToCopy = srcEnd-srcPtr;
+                memcpy(dctxPtr->tmpIn + dctxPtr->tmpInSize, srcPtr, sizeToCopy);
+                dctxPtr->tmpInSize += sizeToCopy;
+                srcPtr += sizeToCopy;
+                if (dctxPtr->tmpInSize < dctxPtr->tmpInTarget) { /* need more input */
+                    nextSrcSizeHint = (dctxPtr->tmpInTarget - dctxPtr->tmpInSize) + BHSize;
+                    doAnotherStage=0;
+                    break;
+                }
+                selectedIn = dctxPtr->tmpIn;
+                dctxPtr->dStage = dstage_decodeCBlock;
+                #ifdef AVOID_FALLTHROUGH_WARNING
+                __attribute__ ((fallthrough));  /* shut-up -Wimplicit-fallthrough warning in GCC */
+                #endif
+            }
+
+        case dstage_decodeCBlock:
+            if ((size_t)(dstEnd-dstPtr) < dctxPtr->maxBlockSize)   /* not enough place into dst : decode into tmpOut */
+                dctxPtr->dStage = dstage_decodeCBlock_intoTmp;
+            else
+                dctxPtr->dStage = dstage_decodeCBlock_intoDst;
+            break;
+
+        case dstage_decodeCBlock_intoDst:
+            {   int (*decoder)(const char*, char*, int, int, const char*, int);
+                int decodedSize;
+
+                if (dctxPtr->frameInfo.blockMode == LizardF_blockLinked)
+                    decoder = Lizard_decompress_safe_usingDict;
+                else
+                    decoder = LizardF_decompress_safe;
+
+                decodedSize = decoder((const char*)selectedIn, (char*)dstPtr, (int)dctxPtr->tmpInTarget, (int)dctxPtr->maxBlockSize, (const char*)dctxPtr->dict, (int)dctxPtr->dictSize);
+                if (decodedSize < 0) return (size_t)-LizardF_ERROR_GENERIC;   /* decompression failed */
+                if (dctxPtr->frameInfo.contentChecksumFlag) XXH32_update(&(dctxPtr->xxh), dstPtr, decodedSize);
+                if (dctxPtr->frameInfo.contentSize) dctxPtr->frameRemainingSize -= decodedSize;
+
+                /* dictionary management */
+                if (dctxPtr->frameInfo.blockMode==LizardF_blockLinked)
+                    LizardF_updateDict(dctxPtr, dstPtr, decodedSize, dstStart, 0);
+
+                dstPtr += decodedSize;
+                dctxPtr->dStage = dstage_getCBlockSize;
+                break;
+            }
+
+        case dstage_decodeCBlock_intoTmp:
+            /* not enough place into dst : decode into tmpOut */
+            {   int (*decoder)(const char*, char*, int, int, const char*, int);
+                int decodedSize;
+
+                if (dctxPtr->frameInfo.blockMode == LizardF_blockLinked)
+                    decoder = Lizard_decompress_safe_usingDict;
+                else
+                    decoder = LizardF_decompress_safe;
+
+                /* ensure enough place for tmpOut */
+                if (dctxPtr->frameInfo.blockMode == LizardF_blockLinked) {
+                    if (dctxPtr->dict == dctxPtr->tmpOutBuffer) {
+                        if (dctxPtr->dictSize > 2 * LIZARD_DICT_SIZE) {
+                            memcpy(dctxPtr->tmpOutBuffer, dctxPtr->dict + dctxPtr->dictSize - LIZARD_DICT_SIZE, LIZARD_DICT_SIZE);
+                            dctxPtr->dictSize = LIZARD_DICT_SIZE;
+                        }
+                        dctxPtr->tmpOut = dctxPtr->tmpOutBuffer + dctxPtr->dictSize;
+                    } else {  /* dict not within tmp */
+                        size_t reservedDictSpace = dctxPtr->dictSize;
+                        if (reservedDictSpace > LIZARD_DICT_SIZE) reservedDictSpace = LIZARD_DICT_SIZE;
+                        dctxPtr->tmpOut = dctxPtr->tmpOutBuffer + reservedDictSpace;
+                    }
+                }
+
+                /* Decode */
+                decodedSize = decoder((const char*)selectedIn, (char*)dctxPtr->tmpOut, (int)dctxPtr->tmpInTarget, (int)dctxPtr->maxBlockSize, (const char*)dctxPtr->dict, (int)dctxPtr->dictSize);
+                if (decodedSize < 0) return (size_t)-LizardF_ERROR_decompressionFailed;   /* decompression failed */
+                if (dctxPtr->frameInfo.contentChecksumFlag) XXH32_update(&(dctxPtr->xxh), dctxPtr->tmpOut, decodedSize);
+                if (dctxPtr->frameInfo.contentSize) dctxPtr->frameRemainingSize -= decodedSize;
+                dctxPtr->tmpOutSize = decodedSize;
+                dctxPtr->tmpOutStart = 0;
+                dctxPtr->dStage = dstage_flushOut;
+                break;
+            }
+
+        case dstage_flushOut:  /* flush decoded data from tmpOut to dstBuffer */
+            {   size_t sizeToCopy = dctxPtr->tmpOutSize - dctxPtr->tmpOutStart;
+                if (sizeToCopy > (size_t)(dstEnd-dstPtr)) sizeToCopy = dstEnd-dstPtr;
+                memcpy(dstPtr, dctxPtr->tmpOut + dctxPtr->tmpOutStart, sizeToCopy);
+
+                /* dictionary management */
+                if (dctxPtr->frameInfo.blockMode==LizardF_blockLinked)
+                    LizardF_updateDict(dctxPtr, dstPtr, sizeToCopy, dstStart, 1);
+
+                dctxPtr->tmpOutStart += sizeToCopy;
+                dstPtr += sizeToCopy;
+
+                /* end of flush ? */
+                if (dctxPtr->tmpOutStart == dctxPtr->tmpOutSize) {
+                    dctxPtr->dStage = dstage_getCBlockSize;
+                    break;
+                }
+                nextSrcSizeHint = BHSize;
+                doAnotherStage = 0;   /* still some data to flush */
+                break;
+            }
+
+        case dstage_getSuffix:
+            {   size_t const suffixSize = dctxPtr->frameInfo.contentChecksumFlag * 4;
+                if (dctxPtr->frameRemainingSize) return (size_t)-LizardF_ERROR_frameSize_wrong;   /* incorrect frame size decoded */
+                if (suffixSize == 0) {  /* frame completed */
+                    nextSrcSizeHint = 0;
+                    dctxPtr->dStage = dstage_getHeader;
+                    doAnotherStage = 0;
+                    break;
+                }
+                if ((srcEnd - srcPtr) < 4) {  /* not enough size for entire CRC */
+                    dctxPtr->tmpInSize = 0;
+                    dctxPtr->dStage = dstage_storeSuffix;
+                } else {
+                    selectedIn = srcPtr;
+                    srcPtr += 4;
+                }
+            }
+
+            if (dctxPtr->dStage == dstage_storeSuffix)   /* can be skipped */
+        case dstage_storeSuffix:
+            {
+                size_t sizeToCopy = 4 - dctxPtr->tmpInSize;
+                if (sizeToCopy > (size_t)(srcEnd - srcPtr)) sizeToCopy = srcEnd - srcPtr;
+                memcpy(dctxPtr->tmpIn + dctxPtr->tmpInSize, srcPtr, sizeToCopy);
+                srcPtr += sizeToCopy;
+                dctxPtr->tmpInSize += sizeToCopy;
+                if (dctxPtr->tmpInSize < 4) { /* not enough input to read complete suffix */
+                    nextSrcSizeHint = 4 - dctxPtr->tmpInSize;
+                    doAnotherStage=0;
+                    break;
+                }
+                selectedIn = dctxPtr->tmpIn;
+            }
+
+        /* case dstage_checkSuffix: */   /* no direct call, to avoid scan-build warning */
+            {   U32 const readCRC = LizardF_readLE32(selectedIn);
+                U32 const resultCRC = XXH32_digest(&(dctxPtr->xxh));
+                if (readCRC != resultCRC) return (size_t)-LizardF_ERROR_contentChecksum_invalid;
+                nextSrcSizeHint = 0;
+                dctxPtr->dStage = dstage_getHeader;
+                doAnotherStage = 0;
+                break;
+            }
+
+        case dstage_getSFrameSize:
+            if ((srcEnd - srcPtr) >= 4) {
+                selectedIn = srcPtr;
+                srcPtr += 4;
+            } else {
+                /* not enough input to read cBlockSize field */
+                dctxPtr->tmpInSize = 4;
+                dctxPtr->tmpInTarget = 8;
+                dctxPtr->dStage = dstage_storeSFrameSize;
+            }
+
+            if (dctxPtr->dStage == dstage_storeSFrameSize)
+        case dstage_storeSFrameSize:
+            {
+                size_t sizeToCopy = dctxPtr->tmpInTarget - dctxPtr->tmpInSize;
+                if (sizeToCopy > (size_t)(srcEnd - srcPtr)) sizeToCopy = srcEnd - srcPtr;
+                memcpy(dctxPtr->header + dctxPtr->tmpInSize, srcPtr, sizeToCopy);
+                srcPtr += sizeToCopy;
+                dctxPtr->tmpInSize += sizeToCopy;
+                if (dctxPtr->tmpInSize < dctxPtr->tmpInTarget) { /* not enough input to get full sBlockSize; wait for more */
+                    nextSrcSizeHint = dctxPtr->tmpInTarget - dctxPtr->tmpInSize;
+                    doAnotherStage = 0;
+                    break;
+                }
+                selectedIn = dctxPtr->header + 4;
+            }
+
+        /* case dstage_decodeSFrameSize: */   /* no direct access */
+            {   size_t const SFrameSize = LizardF_readLE32(selectedIn);
+                dctxPtr->frameInfo.contentSize = SFrameSize;
+                dctxPtr->tmpInTarget = SFrameSize;
+                dctxPtr->dStage = dstage_skipSkippable;
+                break;
+            }
+
+        case dstage_skipSkippable:
+            {   size_t skipSize = dctxPtr->tmpInTarget;
+                if (skipSize > (size_t)(srcEnd-srcPtr)) skipSize = srcEnd-srcPtr;
+                srcPtr += skipSize;
+                dctxPtr->tmpInTarget -= skipSize;
+                doAnotherStage = 0;
+                nextSrcSizeHint = dctxPtr->tmpInTarget;
+                if (nextSrcSizeHint) break;
+                dctxPtr->dStage = dstage_getHeader;
+                break;
+            }
+        }
+    }
+
+    /* preserve dictionary within tmp if necessary */
+    if ( (dctxPtr->frameInfo.blockMode==LizardF_blockLinked)
+        &&(dctxPtr->dict != dctxPtr->tmpOutBuffer)
+        &&(!decompressOptionsPtr->stableDst)
+        &&((unsigned)(dctxPtr->dStage-1) < (unsigned)(dstage_getSuffix-1))
+        )
+    {
+        if (dctxPtr->dStage == dstage_flushOut) {
+            size_t preserveSize = dctxPtr->tmpOut - dctxPtr->tmpOutBuffer;
+            size_t copySize = LIZARD_DICT_SIZE - dctxPtr->tmpOutSize;
+            const BYTE* oldDictEnd = dctxPtr->dict + dctxPtr->dictSize - dctxPtr->tmpOutStart;
+            if (dctxPtr->tmpOutSize > LIZARD_DICT_SIZE) copySize = 0;
+            if (copySize > preserveSize) copySize = preserveSize;
+
+            memcpy(dctxPtr->tmpOutBuffer + preserveSize - copySize, oldDictEnd - copySize, copySize);
+
+            dctxPtr->dict = dctxPtr->tmpOutBuffer;
+            dctxPtr->dictSize = preserveSize + dctxPtr->tmpOutStart;
+        } else {
+            size_t newDictSize = dctxPtr->dictSize;
+            const BYTE* oldDictEnd = dctxPtr->dict + dctxPtr->dictSize;
+            if ((newDictSize) > LIZARD_DICT_SIZE) newDictSize = LIZARD_DICT_SIZE;
+
+            memcpy(dctxPtr->tmpOutBuffer, oldDictEnd - newDictSize, newDictSize);
+
+            dctxPtr->dict = dctxPtr->tmpOutBuffer;
+            dctxPtr->dictSize = newDictSize;
+            dctxPtr->tmpOut = dctxPtr->tmpOutBuffer + newDictSize;
+        }
+    }
+
+    /* require function to be called again from position where it stopped */
+    if (srcPtr<srcEnd)
+        dctxPtr->srcExpect = srcPtr;
+    else
+        dctxPtr->srcExpect = NULL;
+
+    *srcSizePtr = (srcPtr - srcStart);
+    *dstSizePtr = (dstPtr - dstStart);
+    return nextSrcSizeHint;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

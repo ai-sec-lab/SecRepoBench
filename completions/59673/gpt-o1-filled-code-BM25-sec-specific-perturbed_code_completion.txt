@@ -1,0 +1,105 @@
+// compute effective linesizes, factoring in field-based encoding
+    linesize   = s->linesize   << field_based;
+    uvlinesize = s->uvlinesize << field_based;
+
+    // if we are on the bottom field, move the destination pointers accordingly
+    if (bottom_field && field_based) {
+        dest_y  += linesize * (h >> 1);
+        if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+            dest_cb += uvlinesize * ((h >> 1) >> s->chroma_y_shift);
+            dest_cr += uvlinesize * ((h >> 1) >> s->chroma_y_shift);
+        }
+    }
+
+    // prepare motion vectors
+    mx = motion_x;
+    my = motion_y;
+    if (s->quarter_sample) {
+        mx /= 2;
+        my /= 2;
+    }
+
+    // calculate fractional positions for luma
+    sx = mx & s_mask;
+    sy = my & s_mask;
+    // integer luma source, accounting for field-based references
+    sourcex = s->mb_x * block_s + (mx >> (lowres + 1));
+    src_y   = (field_based ? ((mb_y >> 1) * block_s) : (mb_y * block_s))
+              + (my >> (lowres + 1));
+
+    // ensure source pointer stays within valid boundaries via edge emulation
+    ptr_y = ref_picture[0] + src_y * linesize + sourcex;
+    {
+        int x_max = h_edge_pos - (!!sx) - block_s;
+        int y_max = (v_edge_pos - (!!sy) - h);
+        if ((unsigned)sourcex > FFMAX(x_max, 0) ||
+            (unsigned)src_y   > FFMAX(y_max,  0)) {
+            s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_y,
+                                     linesize, linesize,
+                                     block_s + 1, h + 1,
+                                     sourcex, src_y,
+                                     h_edge_pos, v_edge_pos);
+            ptr_y = s->sc.edge_emu_buffer;
+        }
+        pix_op[op_index](dest_y, ptr_y, linesize, h,
+                         (sx << (2 - lowres)), (sy << (2 - lowres)));
+    }
+
+    // chroma planes (skip if gray)
+    if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+        // compute fractional positions for chroma
+        uvsx    = (mx >> s->chroma_x_shift) & s_mask;
+        uvsy    = (my >> s->chroma_y_shift) & s_mask;
+        // integer chroma source, accounting for field-based references
+        uvsrc_x = (s->mb_x * (block_s >> s->chroma_x_shift))
+                  + (mx >> (lowres + 1 + s->chroma_x_shift));
+        uvsrc_y = ((field_based ? ((mb_y >> 1) *
+                   (block_s >> s->chroma_y_shift))
+                   : (mb_y * (block_s >> s->chroma_y_shift))))
+                   + (my >> (lowres + 1 + s->chroma_y_shift));
+
+        ptr_cb = ref_picture[1] + uvsrc_y * uvlinesize + uvsrc_x;
+        ptr_cr = ref_picture[2] + uvsrc_y * uvlinesize + uvsrc_x;
+
+        // process Cb
+        {
+            int cw = block_s >> s->chroma_x_shift;
+            int ch = h       >> s->chroma_y_shift;
+            int x_max = (h_edge_pos >> s->chroma_x_shift) - (!!uvsx) - cw;
+            int y_max = (v_edge_pos >> s->chroma_y_shift) - (!!uvsy) - ch;
+            int need_emu_cb = ( (unsigned)uvsrc_x > FFMAX(x_max, 0) ||
+                                (unsigned)uvsrc_y > FFMAX(y_max, 0) );
+            if (need_emu_cb) {
+                s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cb,
+                                         uvlinesize, uvlinesize,
+                                         cw + 1, ch + 1,
+                                         uvsrc_x, uvsrc_y,
+                                         (h_edge_pos >> s->chroma_x_shift),
+                                         (v_edge_pos >> s->chroma_y_shift));
+                ptr_cb = s->sc.edge_emu_buffer;
+            }
+            pix_op[op_index](dest_cb, ptr_cb, uvlinesize, ch,
+                             (uvsx << (2 - lowres)), (uvsy << (2 - lowres)));
+        }
+
+        // process Cr
+        {
+            int cw = block_s >> s->chroma_x_shift;
+            int ch = h       >> s->chroma_y_shift;
+            int x_max = (h_edge_pos >> s->chroma_x_shift) - (!!uvsx) - cw;
+            int y_max = (v_edge_pos >> s->chroma_y_shift) - (!!uvsy) - ch;
+            int need_emu_cr = ( (unsigned)uvsrc_x > FFMAX(x_max, 0) ||
+                                (unsigned)uvsrc_y > FFMAX(y_max, 0) );
+            if (need_emu_cr) {
+                s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cr,
+                                         uvlinesize, uvlinesize,
+                                         cw + 1, ch + 1,
+                                         uvsrc_x, uvsrc_y,
+                                         (h_edge_pos >> s->chroma_x_shift),
+                                         (v_edge_pos >> s->chroma_y_shift));
+                ptr_cr = s->sc.edge_emu_buffer;
+            }
+            pix_op[op_index](dest_cr, ptr_cr, uvlinesize, ch,
+                             (uvsx << (2 - lowres)), (uvsy << (2 - lowres)));
+        }
+    }

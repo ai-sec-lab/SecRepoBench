@@ -1,0 +1,56 @@
+{
+	const unsigned char *p = b;
+	while (step > 0) {
+		/* If there's not enough room for another directory record, break. */
+		if (step < 34) /* Minimum ISO9660 dir record size is 34 */
+			break;
+
+		/* Length of current directory record. */
+		size_t dr_len = p[0];
+		if (dr_len == 0) {
+			/* Skip any remaining bytes in this logical block. */
+			size_t block_off = (size_t)(p - b) % iso9660->logical_block_size;
+			size_t block_rem = iso9660->logical_block_size - block_off;
+			if (block_rem > step)
+				block_rem = step;
+			p += block_rem;
+			step -= block_rem;
+			continue;
+		}
+
+		/* If the record length is invalid or extends beyond the current buffer, stop. */
+		if (dr_len < 34 || dr_len > step)
+			break;
+
+		/* Parse the directory record to get a file_info structure. */
+		struct file_info *child = parse_file_info(archivereader, parent, p, dr_len);
+		if (child == NULL) {
+			/* If parse_file_info fails, bail out. */
+			break;
+		}
+
+		/* Skip '.' or '..' entries. */
+		if (!((child->name.length == 1 && (unsigned char)child->name.s[0] < 2))) {
+			/* Handle multi-extent files. */
+			if (multi != NULL) {
+				/* Link this extent to the previous multi-extent file. */
+				multi->contents.last->next = child->contents.first;
+				multi->contents.last = child->contents.last;
+				multi->size += child->size;
+				if (!child->multi_extent)
+					multi = NULL; /* End of multi-extent sequence. */
+			} else if (child->multi_extent) {
+				/* Start a multi-extent sequence. */
+				multi = child;
+			} else {
+				/* Regular file or directory entry; add to the archive. */
+				if (add_entry(archivereader, iso9660, child) != ARCHIVE_OK) {
+					break;
+				}
+			}
+		}
+
+		p += dr_len;
+		step -= dr_len;
+	}
+}

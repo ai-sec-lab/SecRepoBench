@@ -1,0 +1,56 @@
+if(packet->payload_packet_len < 2) {
+    failed = 1;
+  } else {
+    /* If TCP, optionally skip overhead if needed */
+    if(packet->tcp != NULL) {
+      /* For demonstration, assume no special offset is required */
+    }
+
+    /* Extract operation code */
+    operationcode = ovpn_payload[0];
+
+    /* Additional checks when using UDP */
+    if(packet->udp != NULL) {
+      /* Check first packet for possible handshake indication */
+      if((flow->openvpn_counter == 0)
+         && (packet->payload_packet_len >= 58)
+         && (operationcode == 0x38)) {
+        ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+      }
+      /* Check client reset scenario and store session ID if applicable */
+      else if((flow->openvpn_counter < 2) && (operationcode == 0x40)) {
+        if(packet->payload_packet_len > 2) {
+          alen = ovpn_payload[1];
+          if(alen && (packet->payload_packet_len >= (size_t)(2 + alen))) {
+            memcpy(flow->protos.openvpn.session_id, &ovpn_payload[2], alen);
+            flow->protos.openvpn.session_id_len = alen;
+          } else {
+            failed = 1;
+          }
+        } else {
+          failed = 1;
+        }
+      }
+      /* Check server reset scenario and verify stored session ID */
+      else if((flow->openvpn_counter >= 2) && (operationcode == 0x41)) {
+        alen = flow->protos.openvpn.session_id_len;
+        if(alen && (packet->payload_packet_len >= (size_t)(1 + alen))) {
+          if(memcmp(&ovpn_payload[1], flow->protos.openvpn.session_id, alen) == 0) {
+            ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OPENVPN, NDPI_PROTOCOL_UNKNOWN);
+          } else {
+            failed = 1;
+          }
+        } else {
+          failed = 1;
+        }
+      }
+    }
+  }
+
+  /* Increment OpenVPN counter after checks */
+  flow->openvpn_counter++;
+
+  /* If detection fails, exclude OpenVPN from possible protocols */
+  if(failed) {
+    NDPI_ADD_PROTOCOL_TO_BITMASK(flow->excluded_protocol_bitmask, NDPI_PROTOCOL_OPENVPN);
+  }

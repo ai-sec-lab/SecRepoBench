@@ -1,0 +1,79 @@
+/* jump over the tag (type) and length bytes so that `i`
+		     will point to the beginning of the value once the loop
+		     continues (remember that at the end of this block
+		     `i += len` will be executed). */
+		  i += 2;
+
+		  if(len > 0 && len < sizeof(dNSName)) {
+		    const u_int8_t *ptr = &packet->payload[i];
+		    u_int8_t printable = 1;
+
+		    if(general_name_type == 0x87 /* ipAddress */) {
+		      /* Convert the raw ipAddress into a printable string       */
+		      /* IPv4 = 4 bytes, IPv6 = 16 bytes                         */
+		      char ipbuf[INET6_ADDRSTRLEN];
+
+		      if((len == 4) || (len == 16)) {
+			if(inet_ntop((len == 4) ? AF_INET : AF_INET6,
+				     ptr, ipbuf, sizeof(ipbuf)) != NULL) {
+			  strncpy(dNSName, ipbuf, sizeof(dNSName)-1);
+			  dNSName[sizeof(dNSName)-1] = '\0';
+			} else {
+			  dNSName[0] = '\0';
+			  printable = 0;
+			}
+		      } else {
+			dNSName[0] = '\0';
+			printable = 0;
+		      }
+		    } else {
+		      /* rfc822Name / dNSName are UTF-8 strings                  */
+		      memcpy(dNSName, ptr, len);
+		      dNSName[len]   = '\0';
+		      printable = ndpi_is_printable_string(dNSName, len);
+		    }
+
+		    if(!printable)
+		      ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+
+#ifdef DEBUG_TLS
+		    printf("[TLS] subjectAltName [%s]\n", dNSName);
+#endif
+
+		    /* Check if the certificate matches the requested host name */
+		    if((connection->host_server_name[0] != '\0') &&
+		       (strcasecmp(connection->host_server_name, dNSName) == 0))
+		      matched_name = 1;
+
+		    /* Save the list of names found inside the certificate      */
+		    if(connection->protos.tls_quic.serverNames == NULL) {
+		      connection->protos.tls_quic.serverNames = ndpi_strdup(dNSName);
+		    } else {
+		      size_t old_len = strlen(connection->protos.tls_quic.serverNames);
+		      size_t new_len = old_len + 1 + strlen(dNSName); /* comma + name */
+		      char *tmp = ndpi_malloc(new_len + 1);
+
+		      if(tmp) {
+			memcpy(tmp, connection->protos.tls_quic.serverNames, old_len);
+			tmp[old_len] = ',';
+			strcpy(tmp + old_len + 1, dNSName);
+			ndpi_free(connection->protos.tls_quic.serverNames);
+			connection->protos.tls_quic.serverNames = tmp;
+		      }
+		    }
+
+		    /* Try to recognise a sub-protocol from the certificate name */
+		    if(connection->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+		      u_int32_t val;
+		      if(ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+						 dNSName, strlen(dNSName), &val) == 0) {
+			u_int16_t proto_id = (u_int16_t)val;
+			ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED };
+
+			connection->detected_protocol_stack[0] = proto_id;
+			connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+			connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+			ndpi_check_subprotocol_risk(ndpi_struct, connection, proto_id);
+		      }
+		    }
+		  }

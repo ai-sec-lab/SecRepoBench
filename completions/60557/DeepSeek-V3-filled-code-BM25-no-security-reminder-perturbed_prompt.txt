@@ -1,0 +1,278 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+static ndpi_protocol_category_t ndpi_http_check_content(struct ndpi_detection_module_struct *ndpi_struct,
+							struct ndpi_flow_struct *flow) {
+  struct ndpi_packet_struct *http_packet_struct = &ndpi_struct->packet;
+
+  if(http_packet_struct->content_line.len > 0) {
+    u_int app_len = sizeof("application");
+
+    if(http_packet_struct->content_line.len > app_len) {
+      const char *app     = (const char *)&http_packet_struct->content_line.ptr[app_len];
+      u_int app_len_avail = http_packet_struct->content_line.len-app_len;
+
+      if(strncasecmp(app, "mpeg", app_len_avail) == 0) {
+	flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_STREAMING;
+	return(flow->category);
+      } else {
+	if(app_len_avail > 3) {
+	  const char** cmp_mimes = NULL;
+
+	  switch(app[0]) {
+	  case 'b': cmp_mimes = download_file_mimes_b; break;
+	  case 'o': cmp_mimes = download_file_mimes_o; break;
+	  case 'x': cmp_mimes = download_file_mimes_x; break;
+	  }
+
+	  if(cmp_mimes != NULL) {
+	    u_int8_t i;
+
+	    for(i = 0; cmp_mimes[i] != NULL; i++) {
+	      if(strncasecmp(app, cmp_mimes[i], app_len_avail) == 0) {
+		flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT;
+		NDPI_LOG_INFO(ndpi_struct, "found executable HTTP transfer");
+		break;
+	      }
+	    }
+	  }
+
+	  /* ***************************************** */
+
+	  switch(app[0]) {
+	  case 'e': cmp_mimes = binary_file_mimes_e; break;
+	  case 'j': cmp_mimes = binary_file_mimes_j; break;
+	  case 'v': cmp_mimes = binary_file_mimes_v; break;
+	  case 'x': cmp_mimes = binary_file_mimes_x; break;
+	  }
+
+	  if(cmp_mimes != NULL) {
+	    u_int8_t i;
+
+	    for(i = 0; cmp_mimes[i] != NULL; i++) {
+	      if(strncasecmp(app, cmp_mimes[i], app_len_avail) == 0) {
+		char str[64];
+
+		snprintf(str, sizeof(str), "Found mime exe %s", cmp_mimes[i]);
+		flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT;
+		ndpi_set_binary_application_transfer(ndpi_struct, flow, str);
+		NDPI_LOG_INFO(ndpi_struct, "Found executable HTTP transfer");
+	      }
+	    }
+	  }
+	}
+      }
+    }
+
+    /* check for attachment */
+    if(http_packet_struct->content_disposition_line.len > 0) {
+      u_int8_t attachment_len = sizeof("attachment; filename");
+
+      if(http_packet_struct->content_disposition_line.len > attachment_len) {
+	u_int8_t filename_len = http_packet_struct->content_disposition_line.len - attachment_len;
+	int i;
+
+	if(http_packet_struct->content_disposition_line.ptr[attachment_len] == '\"') 
+	// Extract the filename from the content disposition line based on its format.
+	// Allocate memory for the filename and copy the appropriate substring from the content disposition line.
+	// Ensure the filename is null-terminated after copying.
+	// <MASK>
+
+	if(filename_len > ATTACHMENT_LEN) {
+	  attachment_len += filename_len-ATTACHMENT_LEN-1;
+
+	  if((attachment_len+ATTACHMENT_LEN) <= http_packet_struct->content_disposition_line.len) {
+	    for(i = 0; binary_file_ext[i] != NULL; i++) {
+	      /* Use memcmp in case content-disposition contains binary data */
+	      if(memcmp(&http_packet_struct->content_disposition_line.ptr[attachment_len],
+			binary_file_ext[i], ATTACHMENT_LEN) == 0) {
+		char str[64];
+
+		snprintf(str, sizeof(str), "Found file extn %s", binary_file_ext[i]);
+		flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT;
+		ndpi_set_binary_application_transfer(ndpi_struct, flow, str);
+		NDPI_LOG_INFO(ndpi_struct, "found executable HTTP transfer");
+		return(flow->category);
+	      }
+	    }
+	  }
+	}
+      }
+    }
+
+    switch(http_packet_struct->content_line.ptr[0]) {
+    case 'a':
+      if(strncasecmp((const char *)http_packet_struct->content_line.ptr, "audio",
+		     ndpi_min(http_packet_struct->content_line.len, 5)) == 0)
+	flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_MEDIA;
+      break;
+
+    case 'v':
+      if(strncasecmp((const char *)http_packet_struct->content_line.ptr, "video",
+		     ndpi_min(http_packet_struct->content_line.len, 5)) == 0)
+	flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_MEDIA;
+      break;
+    }
+  }
+
+  return(flow->category);
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void parse_response_code(struct ndpi_detection_module_struct *ndpi_struct,
+				struct ndpi_flow_struct *flow)
+{
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+  char buf[4];
+  char ec[48];
+
+  if(packet->payload_packet_len >= 12) {
+    /* Set server HTTP response code */
+    strncpy(buf, (char*)&packet->payload[9], 3);
+    buf[3] = '\0';
+
+    flow->http.response_status_code = atoi(buf);
+    NDPI_LOG_DBG2(ndpi_struct, "Response code %d\n", flow->http.response_status_code);
+
+    /* https://en.wikipedia.org/wiki/List_of_HTTP_status_codes */
+    if((flow->http.response_status_code < 100) || (flow->http.response_status_code > 509))
+      flow->http.response_status_code = 0; /* Out of range */
+
+    if(flow->http.response_status_code >= 400) {
+      snprintf(ec, sizeof(ec), "HTTP Error Code %u", flow->http.response_status_code);
+      ndpi_set_risk(ndpi_struct, flow, NDPI_ERROR_CODE_DETECTED, ec);
+
+      if(flow->http.url != NULL) {
+        /* Let's check for Wordpress */
+        char *slash = strchr(flow->http.url, '/');
+
+	if(slash != NULL &&
+           (((flow->http.method == NDPI_HTTP_METHOD_POST) && (strncmp(slash, "/wp-admin/", 10) == 0))
+	    || ((flow->http.method == NDPI_HTTP_METHOD_GET) && (strncmp(slash, "/wp-content/uploads/", 20) == 0))
+	   )) {
+          /* Example of popular exploits https://www.wordfence.com/blog/2022/05/millions-of-attacks-target-tatsu-builder-plugin/ */
+          ndpi_set_risk(ndpi_struct, flow, NDPI_POSSIBLE_EXPLOIT, "Possible Wordpress Exploit");
+	}
+      }
+    }
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static uint8_t non_ctrl(uint8_t c) {
+  return c < 32 ? '.':c;
+}
+
+// the below code fragment can be found in:
+// src/lib/ndpi_main.c
+void ndpi_parse_packet_line_info(struct ndpi_detection_module_struct *ndpi_str, struct ndpi_flow_struct *flow) {
+  u_int32_t a;
+  struct ndpi_packet_struct *packet = &ndpi_str->packet;
+
+  if((packet->payload_packet_len < 3) || (packet->payload == NULL))
+    return;
+
+  if(packet->packet_lines_parsed_complete != 0)
+    return;
+
+  packet->packet_lines_parsed_complete = 1;
+  ndpi_reset_packet_line_info(packet);
+
+  packet->line[packet->parsed_lines].ptr = packet->payload;
+  packet->line[packet->parsed_lines].len = 0;
+
+  for(a = 0; ((a+1) < packet->payload_packet_len) && (packet->parsed_lines < NDPI_MAX_PARSE_LINES_PER_PACKET); a++) {
+    if((packet->payload[a] == 0x0d) && (packet->payload[a+1] == 0x0a)) {
+      /* If end of line char sequence CR+NL "\r\n", process line */
+
+      if(((a + 3) < packet->payload_packet_len)
+	 && (packet->payload[a+2] == 0x0d)
+	 && (packet->payload[a+3] == 0x0a)) {
+	/* \r\n\r\n */
+	int diff; /* No unsigned ! */
+	u_int32_t a1 = a + 4;
+
+	diff = packet->payload_packet_len - a1;
+
+	if(diff > 0) {
+	  diff = ndpi_min((unsigned int)diff, sizeof(flow->initial_binary_bytes));
+	  memcpy(&flow->initial_binary_bytes, &packet->payload[a1], diff);
+	  flow->initial_binary_bytes_len = diff;
+	}
+      }
+
+      packet->line[packet->parsed_lines].len =
+	(u_int16_t)(((size_t) &packet->payload[a]) - ((size_t) packet->line[packet->parsed_lines].ptr));
+
+      ndpi_parse_single_packet_line(ndpi_str, flow);
+
+      if(packet->line[packet->parsed_lines].len == 0) {
+	packet->empty_line_position = a;
+	packet->empty_line_position_set = 1;
+      }
+
+      if(packet->parsed_lines >= (NDPI_MAX_PARSE_LINES_PER_PACKET - 1))
+	return;
+
+      packet->parsed_lines++;
+      packet->line[packet->parsed_lines].ptr = &packet->payload[a + 2];
+      packet->line[packet->parsed_lines].len = 0;
+
+      a++; /* next char in the payload */
+    }
+  }
+
+  if(packet->parsed_lines >= 1) {
+    packet->line[packet->parsed_lines].len =
+      (u_int16_t)(((size_t) &packet->payload[packet->payload_packet_len]) -
+		  ((size_t) packet->line[packet->parsed_lines].ptr));
+
+    ndpi_parse_single_packet_line(ndpi_str, flow);
+    packet->parsed_lines++;
+  }
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/http.c
+static void ndpi_int_http_add_connection(struct ndpi_detection_module_struct *ndpi_struct,
+					 struct ndpi_flow_struct *flow,
+					 u_int16_t master_protocol) {
+#ifdef HTTP_DEBUG
+  printf("=> %s()\n", __FUNCTION__);
+#endif
+
+  /* Update the classification only if we don't already have master + app;
+     for example don't change the protocols if we have already detected a
+     sub-protocol via the (content-matched) subprotocols logic (i.e.
+     MPEGDASH, SOAP, ....) */
+  if(flow->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+    NDPI_LOG_DBG2(ndpi_struct, "Master: %d\n", master_protocol);
+    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_UNKNOWN,
+			       master_protocol, NDPI_CONFIDENCE_DPI);
+  }
+
+  flow->max_extra_packets_to_check = 8;
+  flow->extra_packets_func = ndpi_search_http_tcp_again;
+}
+
+// the below code fragment can be found in:
+// src/lib/protocols/rsh.c
+void init_rsh_dissector(struct ndpi_detection_module_struct * ndpi_struct,
+                        u_int32_t * id)
+{
+  ndpi_set_bitmask_protocol_detection("RSH", ndpi_struct, *id,
+                                      NDPI_PROTOCOL_RSH, ndpi_search_rsh,
+                                      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
+                                      SAVE_DETECTION_BITMASK_AS_UNKNOWN,
+                                      ADD_TO_DETECTION_BITMASK);
+
+  *id += 1;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

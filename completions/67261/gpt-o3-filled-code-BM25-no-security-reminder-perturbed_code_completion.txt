@@ -1,0 +1,98 @@
+/*local working buffer (may be a copy of the incoming one)*/
+	u8  *dst       = NULL;
+	u32  res_size  = buffer_length;
+	u32  offset    = 0;
+	GF_Bool utf16_le = GF_FALSE;
+	GF_Bool utf16_be = GF_FALSE;
+
+	/*----------------------------------------------------------
+	 * Detect and handle BOM – convert UTF-16 to 8-bit ASCII
+	 * (we only need ASCII subset for the few strings checked
+	 * later on). If no conversion is needed we just make sure
+	 * the data is NUL-terminated so that regular C string
+	 * helpers can be used safely.
+	 *---------------------------------------------------------*/
+	if (buffer_length >= 2) {
+		if (data[0] == 0xFF && data[1] == 0xFE) {
+			utf16_le = GF_TRUE;
+			offset   = 2;
+		} else if (data[0] == 0xFE && data[1] == 0xFF) {
+			utf16_be = GF_TRUE;
+			offset   = 2;
+		}
+	}
+	/* UTF-8 BOM */
+	if (!utf16_le && !utf16_be && buffer_length >= 3 &&
+	    data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
+		offset = 3;
+	}
+
+	if (utf16_le || utf16_be) {
+		/* very small ASCII-only UTF-16 → 8bit conversion */
+		u32 char_count = (buffer_length - offset) / 2;
+		dst = (u8 *) gf_malloc(char_count + 1);
+		if (!dst)
+			return NULL;
+
+		for (u32 i = 0; i < char_count; i++) {
+			u16 ch;
+			if (utf16_le)
+				ch =  (u16) (data[offset + 2 * i] | (data[offset + 2 * i + 1] << 8));
+			else
+				ch =  (u16) ((data[offset + 2 * i] << 8) | data[offset + 2 * i + 1]);
+			dst[i] = (ch < 0x80) ? (u8) ch : '?';
+		}
+		dst[char_count] = 0;
+		data      = dst;
+		res_size  = char_count;
+	} else {
+		/* skip BOM if any and make a copy only if we removed bytes */
+		data     += offset;
+		res_size  = buffer_length - offset;
+		if (offset) {
+			dst = (u8 *) gf_malloc(res_size + 1);
+			if (!dst)
+				return NULL;
+			memcpy(dst, data, res_size);
+			dst[res_size] = 0;
+			data = dst;
+		}
+	}
+
+	/*----------------------------------------------------------
+	 * Strip leading white-spaces (space, tab, cr, lf)
+	 *---------------------------------------------------------*/
+	while (res_size &&
+	       (*data == ' '  || *data == '\t' ||
+	        *data == '\n' || *data == '\r')) {
+		data++;
+		res_size--;
+	}
+
+	/* Make sure we still own the memory pointed by data so that we
+	   can safely NUL-terminate it (needed by strncmp).               */
+	if (!dst) {
+		dst = (u8 *) gf_malloc(res_size + 1);
+		if (!dst)
+			return NULL;
+		memcpy(dst, data, res_size);
+		dst[res_size] = 0;
+		data = dst;
+	} else if (data != dst) {
+		/* shift left so that data == dst */
+		memmove(dst, data, res_size);
+		dst[res_size] = 0;
+		data = dst;
+	}
+
+	/*----------------------------------------------------------
+	 * Helper macro to finalize probing
+	 *---------------------------------------------------------*/
+#define PROBE_OK(_score_val, _mime_str)         \
+	do {                                        \
+		if (score)                              \
+			*(score) = (_score_val);            \
+		if (dst)                                \
+			gf_free(dst);                       \
+		return (_mime_str);                     \
+	} while (0)

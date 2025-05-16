@@ -1,0 +1,220 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+ATTRIBUTE_NO_SANITIZE_INTEGER
+static xmlDictEntry *
+xmlDictFindEntry(const xmlDict *dict, const xmlChar *prefix,
+                 const xmlChar *key_name, int len, unsigned hashValue,
+                 int *pfound) {
+    xmlDictEntry *entry;
+    unsigned mask, pos, displ;
+    int found = 0;
+
+    mask = dict->size - 1;
+    pos = hashValue & mask;
+    entry = &dict->table[pos];
+
+    if (entry->hashValue != 0) {
+        /*
+         * Robin hood hashing: abort if the displacement of the entry
+         * is smaller than the displacement of the key we look for.
+         * This also stops at the correct position when inserting.
+         */
+        displ = 0;
+
+        do {
+            if (entry->hashValue == hashValue) {
+                if 
+                // Compare the provided name with the current dictionary entry's name.
+                // If the prefix is NULL, compare the names up to the specified length
+                // and ensure the entry's name is null-terminated at that position.
+                // If a prefix is provided, use a specialized function to compare the qualified names.
+                // If a match is found, set the found flag to true and exit the loop.
+                // <MASK>
+            }
+
+            displ++;
+            pos++;
+            entry++;
+            if ((pos & mask) == 0)
+                entry = dict->table;
+        } while ((entry->hashValue != 0) &&
+                 (((pos - entry->hashValue) & mask) >= displ));
+    }
+
+    *pfound = found;
+    return(entry);
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// hash.c
+static int
+xmlHashGrow(xmlHashTablePtr hash, unsigned size) {
+    const xmlHashEntry *oldentry, *oldend, *end;
+    xmlHashEntry *table;
+    unsigned oldsize, i;
+
+    /* Add 0 to avoid spurious -Wtype-limits warning on 64-bit GCC */
+    if ((size_t) size + 0 > SIZE_MAX / sizeof(table[0]))
+        return(-1);
+    table = xmlMalloc(size * sizeof(table[0]));
+    if (table == NULL)
+        return(-1);
+    memset(table, 0, size * sizeof(table[0]));
+
+    oldsize = hash->size;
+    if (oldsize == 0)
+        goto done;
+
+    oldend = &hash->table[oldsize];
+    end = &table[size];
+
+    /*
+     * Robin Hood sorting order is maintained if we
+     *
+     * - compute hash indices with modulo
+     * - resize by an integer factor
+     * - start to copy from the beginning of a probe sequence
+     */
+    oldentry = hash->table;
+    while (oldentry->hashValue != 0) {
+        if (++oldentry >= oldend)
+            oldentry = hash->table;
+    }
+
+    for (i = 0; i < oldsize; i++) {
+        if (oldentry->hashValue != 0) {
+            xmlHashEntry *entry = &table[oldentry->hashValue & (size - 1)];
+
+            while (entry->hashValue != 0) {
+                if (++entry >= end)
+                    entry = table;
+            }
+            *entry = *oldentry;
+        }
+
+        if (++oldentry >= oldend)
+            oldentry = hash->table;
+    }
+
+    xmlFree(hash->table);
+
+done:
+    hash->table = table;
+    hash->size = size;
+
+    return(0);
+}
+
+// the below code fragment can be found in:
+// dict.c
+const xmlChar *
+xmlDictLookup(xmlDictPtr dict, const xmlChar *name, int len) {
+    const xmlDictEntry *entry;
+
+    entry = xmlDictLookupInternal(dict, NULL, name, len, 1);
+    if (entry == NULL)
+        return(NULL);
+    return(entry->name);
+}
+
+// the below code fragment can be found in:
+// hash.c
+static void
+stubHashScannerFull(void *payload, void *data, const xmlChar *key,
+                    const xmlChar *key2 ATTRIBUTE_UNUSED,
+                    const xmlChar *key3 ATTRIBUTE_UNUSED) {
+    stubData *sdata = (stubData *) data;
+    sdata->scan(payload, sdata->data, key);
+}
+
+// the below code fragment can be found in:
+// hash.c
+void
+xmlHashDefaultDeallocator(void *entry, const xmlChar *key ATTRIBUTE_UNUSED) {
+    xmlFree(entry);
+}
+
+// the below code fragment can be found in:
+// hash.c
+ATTRIBUTE_NO_SANITIZE_INTEGER
+int
+xmlHashRemoveEntry3(xmlHashTablePtr hash, const xmlChar *key,
+                    const xmlChar *key2, const xmlChar *key3,
+                    xmlHashDeallocator dealloc) {
+    xmlHashEntry *entry, *cur, *next;
+    unsigned hashValue, mask, pos, nextpos;
+    int found;
+
+    if ((hash == NULL) || (hash->size == 0) || (key == NULL))
+        return(-1);
+
+    hashValue = xmlHashValue(hash->randomSeed, key, key2, key3, NULL);
+    entry = xmlHashFindEntry(hash, key, key2, key3, hashValue, &found);
+    if (!found)
+        return(-1);
+
+    if ((dealloc != NULL) && (entry->payload != NULL))
+        dealloc(entry->payload, entry->key);
+    if (hash->dict == NULL) {
+        if (entry->key)
+            xmlFree(entry->key);
+        if (entry->key2)
+            xmlFree(entry->key2);
+        if (entry->key3)
+            xmlFree(entry->key3);
+    }
+
+    /*
+     * Find end of probe sequence. Entries at their initial probe
+     * position start a new sequence.
+     */
+    mask = hash->size - 1;
+    pos = entry - hash->table;
+    cur = entry;
+
+    while (1) {
+        nextpos = pos + 1;
+        next = cur + 1;
+        if ((nextpos & mask) == 0)
+            next = hash->table;
+
+        if ((next->hashValue == 0) ||
+            (((next->hashValue - nextpos) & mask) == 0))
+            break;
+
+        cur = next;
+        pos = nextpos;
+    }
+
+    /*
+     * Backward shift
+     */
+    next = entry + 1;
+
+    if (cur < entry) {
+        xmlHashEntry *end = &hash->table[hash->size];
+
+        memmove(entry, next, (char *) end - (char *) next);
+        entry = hash->table;
+        end[-1] = *entry;
+        next = entry + 1;
+    }
+
+    memmove(entry, next, (char *) cur - (char *) entry);
+
+    /*
+     * Update entry
+     */
+    cur->hashValue = 0;
+
+    hash->nbElems--;
+
+    return(0);
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).

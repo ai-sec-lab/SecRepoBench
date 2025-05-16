@@ -1,0 +1,60 @@
+if (payload_len < sizeof(u_int32_t))
+    return 1;
+
+  tuple_count = ntohl(get_u_int32_t(payload, 0));
+  payload += sizeof(u_int32_t);
+  payload_len -= sizeof(u_int32_t);
+
+  if (tuple_count == 0 || tuple_count > payload_len)
+    return 1;
+
+  struct softether_value first_value;
+  struct softether_value second_value;
+  size_t dissected_size;
+  u_int32_t tuple_idx = 0;
+  int hostname_found = 0;
+  int fqdn_found = 0;
+
+  while (tuple_idx < tuple_count && payload_len > 0) {
+    dissected_size = dissect_softether_tuples(payload, payload_len, &first_value, &second_value);
+    
+    if (dissected_size == 0 || dissected_size > payload_len)
+      return 1;
+    
+    // Process the tuple values to extract hostname and FQDN
+    if (first_value.type == SOFTETHER_TYPE_STRING) {
+      // Check for "host_name" identifier
+      if (strncmp((char *)first_value.data, "host_name", first_value.size) == 0) {
+        // Check if the second value is a string
+        if (second_value.type == SOFTETHER_TYPE_STRING) {
+          // Set the hostname in the flow structure
+          if (ndpi_hostname_sni_set(ndpiflow, second_value.data, second_value.size) != NULL) {
+            hostname_found = 1;
+          }
+        }
+      }
+      // Check for "ddns_fqdn" identifier
+      else if (strncmp((char *)first_value.data, "ddns_fqdn", first_value.size) == 0) {
+        // Check if the second value is a string
+        if (second_value.type == SOFTETHER_TYPE_STRING) {
+          // Set the FQDN in the flow structure
+          size_t fqdn_size = ndpi_min(second_value.size, sizeof(ndpiflow->protos.softether.fqdn) - 1);
+          memcpy(ndpiflow->protos.softether.fqdn, second_value.data, fqdn_size);
+          ndpiflow->protos.softether.fqdn[fqdn_size] = '\0';
+          fqdn_found = 1;
+        }
+      }
+    }
+    
+    payload += dissected_size;
+    payload_len -= dissected_size;
+    tuple_idx++;
+    
+    // If we found both hostname and FQDN, we can exit early
+    if (hostname_found && fqdn_found)
+      break;
+  }
+  
+  // Return failure if either hostname or FQDN wasn't found
+  if (!hostname_found || !fqdn_found)
+    return 1;

@@ -1,0 +1,61 @@
+if (nCompressed < 20)
+{
+    if (nRawSize != 0) return EXR_ERR_NOT_ENOUGH_DATA;
+    return EXR_ERR_SUCCESS;
+}
+
+pctxt = decode->context;
+if (!pctxt) return EXR_ERR_INVALID_CONTEXT;
+
+im = readUInt ((const char*) compressed);
+iM = readUInt ((const char*) compressed + 4);
+uint64_t tableLength = readUInt ((const char*) compressed + 8);
+nBits = readUInt ((const char*) compressed + 12);
+
+if (im < 0 || im >= HUF_ENCSIZE || iM < 0 || iM >= HUF_ENCSIZE)
+    return EXR_ERR_INVALID_HUFFMAN_TABLE;
+
+ptr = compressed + 20;
+
+if (ptr + tableLength > compressed + nCompressed)
+    return EXR_ERR_NOT_ENOUGH_DATA;
+
+nBytes = (nBits + 7) / 8;
+
+if (ptr + tableLength + nBytes > compressed + nCompressed)
+    return EXR_ERR_NOT_ENOUGH_DATA;
+
+if (FastHufDecoder::enabled () && nBits > 128)
+{
+    FastHufDecoder fhd (ptr, nCompressed - (ptr - (const uint8_t*) compressed), im, iM, iM);
+
+    fhd.decode ((unsigned char*) ptr + tableLength, nBits, raw, nRawSize);
+    rv = EXR_ERR_SUCCESS;
+}
+else
+{
+    AutoArray<uint64_t, HUF_ENCSIZE> freq;
+    AutoArray<HufDec, HUF_DECSIZE> hdec;
+
+    hufClearDecTable (hdec);
+
+    hufUnpackEncTable (
+        &ptr, nCompressed - (ptr - (const uint8_t*) compressed), im, iM, freq);
+
+    try
+    {
+        if (nBits > 8 * (nCompressed - (ptr - (const uint8_t*) compressed))) 
+            return EXR_ERR_INVALID_NBITS;
+
+        hufBuildDecTable (freq, im, iM, hdec);
+        hufDecode (freq, hdec, ptr, nBits, iM, nRawSize, raw);
+        rv = EXR_ERR_SUCCESS;
+    }
+    catch (...)
+    {
+        hufFreeDecTable (hdec);
+        rv = EXR_ERR_FAIL;
+    }
+
+    hufFreeDecTable (hdec);
+}

@@ -1,0 +1,76 @@
+case 'Z':
+case 'H': {
+    /* Create a block if needed */
+    if (!tm->blk) {
+        if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+            goto err;
+        /* Assign it to our codec's output if needed */
+        if (codec->codec == E_BYTE_ARRAY_STOP) {
+            codec->u.byte_array_stop.content_id = key;
+            codec->out = tm->blk;
+        } else if (codec->codec == E_BYTE_ARRAY_LEN) {
+            codec->u.e_byte_array_len.val_codec->out = tm->blk;
+        }
+    }
+
+    aux += 3; /* move past "TAGtype" */
+    /* Copy the zero-terminated string */
+    while (aux < aux_limit && *aux) {
+        BLOCK_APPEND_CHAR(tm->blk, *aux);
+        aux++;
+    }
+    BLOCK_APPEND_CHAR(tm->blk, 0);
+
+    /* Skip the trailing zero if we haven't gone past aux_limit */
+    if (aux < aux_limit) {
+        aux++;
+    }
+    break;
+}
+
+case 'B': {
+    /* Must have space for "TAGtype" + sub_type + count */
+    if (aux_limit - aux < 3 + 1 + 4)
+        goto err;
+
+    if (!tm->blk) {
+        if (!(tm->blk = cram_new_block(EXTERNAL, key)))
+            goto err;
+        codec->u.e_byte_array_len.val_codec->out = tm->blk;
+    }
+
+    aux += 3; /* move past "TAGtype" */
+    char sub_type = *aux++;
+    int32_t count = le_to_i32((uint8_t *)aux);
+    aux += 4;
+
+    int item_size;
+    switch (sub_type) {
+    case 'c': case 'C': case 'A':
+        item_size = 1;
+        break;
+    case 's': case 'S':
+        item_size = 2;
+        break;
+    case 'i': case 'I': case 'f':
+        item_size = 4;
+        break;
+    default:
+        hts_log_error("Unknown sub-type '%c' for 'B' tag", sub_type);
+        goto err;
+    }
+
+    /* Ensure we have space for all elements */
+    if (aux_limit - aux < (int64_t)count * item_size)
+        goto err;
+
+    /* Write out sub_type, count (LE), and then data */
+    BLOCK_APPEND_CHAR(tm->blk, sub_type);
+    {
+        uint32_t c_le = htole32(count);
+        BLOCK_APPEND(tm->blk, &c_le, 4);
+    }
+    BLOCK_APPEND(tm->blk, aux, (int64_t)count * item_size);
+    aux += (int64_t)count * item_size;
+    break;
+}

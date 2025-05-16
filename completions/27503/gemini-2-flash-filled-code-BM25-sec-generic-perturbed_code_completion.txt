@@ -1,0 +1,267 @@
+switch (tag)
+		{
+			case ID_SCE:	// mono channel
+			{
+				RequireAction ((channelIndex < numChannels), status = kALAC_ParamError ; goto Exit ;) ;
+
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				p->mActiveElements |= (1 << channelIndex) ;
+
+				// read the header byte
+				headerByte = BitBufferReadSmall (bits, 8) ;
+
+				// check for compressed frame
+				if ((headerByte & 0x80) == 0)
+				{
+					// compressed frame
+
+					// read the rest of the header
+					partialFrame	= (headerByte >> 7) & 0x01 ;
+					bytesShifted	= (headerByte >> 5) & 0x03 ;
+					chanBits		= p->mConfig.bitDepth - (bytesShifted * 8) + 1 ;
+
+					if (partialFrame)
+					{
+						*outNumSamples = BitBufferRead (bits, 32) ;
+						RequireAction (*outNumSamples <= numSamples, status = kALAC_ParamError ; goto Exit ;) ;
+					}
+
+					mixBits			= BitBufferReadSmall (bits, 8) ;
+					mixResiduals	= BitBufferReadSmall (bits, 8) ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					modeU			= (unusedHeader >> 4) & 0x0F ;
+					denShiftU		= (unusedHeader >> 0) & 0x0F ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					pbFactorU		= (unusedHeader >> 5) & 0x07 ;
+					numU			= (unusedHeader >> 0) & 0x1F ;
+
+					for (i = 0 ; i < numU ; i++)
+						coefsU [i] = BitBufferRead (bits, 16) ;
+
+					// decompress
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorU * p->mConfig.pb) / 4, p->mConfig.kb, *outNumSamples, numSamples, p->mConfig.maxRun) ;
+					status = dyn_decomp (&agParams, bits, sampleBuffer + channelIndex, *outNumSamples, chanBits, &chanBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// predictor
+					pc_block_inverse (sampleBuffer + channelIndex, sampleBuffer + channelIndex, *outNumSamples, coefsU, numU, chanBits, denShiftU, numChannels) ;
+
+					// matrix
+					if (bytesShifted != 0)
+					{
+						shift = bytesShifted * 8 ;
+						for (i = 0 ; i < *outNumSamples ; i++)
+						{
+							val = BitBufferRead (bits, shift) ;
+							sampleBuffer [channelIndex + (i * numChannels)] = (sampleBuffer [channelIndex + (i * numChannels)] << shift) | val ;
+						}
+					}
+				}
+				else
+				{
+					// uncompressed frame
+					bytesShifted = (headerByte >> 5) & 0x03 ;
+					chanBits = p->mConfig.bitDepth ;
+
+					if ((headerByte & 0x10) != 0)
+					{
+						// partial frame
+						*outNumSamples = BitBufferRead (bits, 32) ;
+						RequireAction (*outNumSamples <= numSamples, status = kALAC_ParamError ; goto Exit ;) ;
+					}
+
+					chanBits = p->mConfig.bitDepth ;
+
+					// just copy the data
+					for (i = 0 ; i < *outNumSamples ; i++)
+					{
+						val = BitBufferRead (bits, chanBits) ;
+						sampleBuffer [channelIndex + (i * numChannels)] = val ;
+					}
+				}
+
+				channelIndex++ ;
+				break ;
+			}
+
+			case ID_CPE:	// channel pair element
+			{
+				RequireAction ((channelIndex + 1) < numChannels, status = kALAC_ParamError ; goto Exit ;) ;
+
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				p->mActiveElements |= (1 << channelIndex) | (1 << (channelIndex + 1)) ;
+
+				// read the header byte
+				headerByte = BitBufferReadSmall (bits, 8) ;
+
+				// check for compressed frame
+				if ((headerByte & 0x80) == 0)
+				{
+					// compressed frame
+
+					// read the rest of the header
+					partialFrame	= (headerByte >> 7) & 0x01 ;
+					bytesShifted	= (headerByte >> 5) & 0x03 ;
+					chanBits		= p->mConfig.bitDepth - (bytesShifted * 8) + 1 ;
+
+					if (partialFrame)
+					{
+						*outNumSamples = BitBufferRead (bits, 32) ;
+						RequireAction (*outNumSamples <= numSamples, status = kALAC_ParamError ; goto Exit ;) ;
+					}
+
+					mixBits			= BitBufferReadSmall (bits, 8) ;
+					mixResiduals	= BitBufferReadSmall (bits, 8) ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					modeU			= (unusedHeader >> 4) & 0x0F ;
+					denShiftU		= (unusedHeader >> 0) & 0x0F ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					pbFactorU		= (unusedHeader >> 5) & 0x07 ;
+					numU			= (unusedHeader >> 0) & 0x1F ;
+
+					for (i = 0 ; i < numU ; i++)
+						coefsU [i] = BitBufferRead (bits, 16) ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					modeV			= (unusedHeader >> 4) & 0x0F ;
+					denShiftV		= (unusedHeader >> 0) & 0x0F ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					pbFactorV		= (unusedHeader >> 5) & 0x07 ;
+					numV			= (unusedHeader >> 0) & 0x1F ;
+
+					for (i = 0 ; i < numV ; i++)
+						coefsV [i] = BitBufferRead (bits, 16) ;
+
+					// decompress channel U
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorU * p->mConfig.pb) / 4, p->mConfig.kb, *outNumSamples, numSamples, p->mConfig.maxRun) ;
+					status = dyn_decomp (&agParams, bits, sampleBuffer + channelIndex, *outNumSamples, chanBits, &chanBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// predictor channel U
+					pc_block_inverse (sampleBuffer + channelIndex, sampleBuffer + channelIndex, *outNumSamples, coefsU, numU, chanBits, denShiftU, numChannels) ;
+
+					// decompress channel V
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorV * p->mConfig.pb) / 4, p->mConfig.kb, *outNumSamples, numSamples, p->mConfig.maxRun) ;
+					status = dyn_decomp (&agParams, bits, sampleBuffer + channelIndex + 1, *outNumSamples, chanBits, &chanBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// predictor channel V
+					pc_block_inverse (sampleBuffer + channelIndex + 1, sampleBuffer + channelIndex + 1, *outNumSamples, coefsV, numV, chanBits, denShiftV, numChannels) ;
+
+					// matrix
+					if (bytesShifted != 0)
+					{
+						shift = bytesShifted * 8 ;
+						for (i = 0 ; i < *outNumSamples ; i++)
+						{
+							bits1 = BitBufferRead (bits, shift) ;
+							bits2 = BitBufferRead (bits, shift) ;
+							sampleBuffer [channelIndex + ((i) * numChannels)]		= (sampleBuffer [channelIndex + ((i) * numChannels)] << shift) | bits1 ;
+							sampleBuffer [channelIndex + 1 + ((i) * numChannels)]	= (sampleBuffer [channelIndex + 1 + ((i) * numChannels)] << shift) | bits2 ;
+						}
+					}
+				}
+				else
+				{
+					// uncompressed frame
+					bytesShifted = (headerByte >> 5) & 0x03 ;
+					chanBits = p->mConfig.bitDepth ;
+
+					if ((headerByte & 0x10) != 0)
+					{
+						// partial frame
+						*outNumSamples = BitBufferRead (bits, 32) ;
+						RequireAction (*outNumSamples <= numSamples, status = kALAC_ParamError ; goto Exit ;) ;
+					}
+
+					chanBits = p->mConfig.bitDepth ;
+
+					// just copy the data
+					for (i = 0 ; i < *outNumSamples ; i++)
+					{
+						bits1 = BitBufferRead (bits, chanBits) ;
+						bits2 = BitBufferRead (bits, chanBits) ;
+						sampleBuffer [channelIndex + ((i) * numChannels)]		= bits1 ;
+						sampleBuffer [channelIndex + 1 + ((i) * numChannels)]	= bits2 ;
+					}
+				}
+
+				channelIndex += 2 ;
+				break ;
+			}
+
+			case ID_LFE:	// LFE channel
+			{
+				RequireAction ((channelIndex < numChannels), status = kALAC_ParamError ; goto Exit ;) ;
+
+				elementInstanceTag = BitBufferReadSmall (bits, 4) ;
+				p->mActiveElements |= (1 << channelIndex) ;
+
+				// read the header byte
+				headerByte = BitBufferReadSmall (bits, 8) ;
+
+				// check for compressed frame
+				if ((headerByte & 0x80) == 0)
+				{
+					// compressed frame
+
+					// read the rest of the header
+					partialFrame	= (headerByte >> 7) & 0x01 ;
+					bytesShifted	= (headerByte >> 5) & 0x03 ;
+					chanBits		= p->mConfig.bitDepth - (bytesShifted * 8) + 1 ;
+
+					if (partialFrame)
+					{
+						*outNumSamples = BitBufferRead (bits, 32) ;
+						RequireAction (*outNumSamples <= numSamples, status = kALAC_ParamError ; goto Exit ;) ;
+					}
+
+					mixBits			= BitBufferReadSmall (bits, 8) ;
+					mixResiduals	= BitBufferReadSmall (bits, 8) ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					modeU			= (unusedHeader >> 4) & 0x0F ;
+					denShiftU		= (unusedHeader >> 0) & 0x0F ;
+
+					unusedHeader	= BitBufferRead (bits, 8) ;
+					pbFactorU		= (unusedHeader >> 5) & 0x07 ;
+					numU			= (unusedHeader >> 0) & 0x1F ;
+
+					for (i = 0 ; i < numU ; i++)
+						coefsU [i] = BitBufferRead (bits, 16) ;
+
+					// decompress
+					set_ag_params (&agParams, p->mConfig.mb, (pbFactorU * p->mConfig.pb) / 4, p->mConfig.kb, *outNumSamples, numSamples, p->mConfig.maxRun) ;
+					status = dyn_decomp (&agParams, bits, sampleBuffer + channelIndex, *outNumSamples, chanBits, &chanBits) ;
+					RequireNoErr (status, goto Exit ;) ;
+
+					// predictor
+					pc_block_inverse (sampleBuffer + channelIndex, sampleBuffer + channelIndex, *outNumSamples, coefsU, numU, chanBits, denShiftU, numChannels) ;
+
+					// matrix
+					if (bytesShifted != 0)
+					{
+						shift = bytesShifted * 8 ;
+						for (i = 0 ; i < *outNumSamples ; i++)
+						{
+							val = BitBufferRead (bits, shift) ;
+							sampleBuffer [channelIndex + (i * numChannels)] = (sampleBuffer [channelIndex + (i * numChannels)] << shift) | val ;
+						}
+					}
+				}
+				else
+				{
+					// uncompressed frame
+					bytesShifted = (headerByte >> 5) & 0x03 ;
+					chanBits = p->mConfig.bitDepth ;
+
+					if ((headerByte & 0x10) != 0)
+					{
+						// partial frame
+						*outNumSamples = BitBufferRead (bits, 32) ;
+						RequireAction (*ou

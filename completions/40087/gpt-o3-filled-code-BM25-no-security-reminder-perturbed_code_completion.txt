@@ -1,0 +1,49 @@
+/* Derive packet protection (pp_cipher) and header protection (hp_cipher)
+   * ciphers from the client_initial_secret. */
+  if(!quic_ciphers_init(&ciphers, client_secret, version)) {
+    NDPI_LOG_DBG(ndpi_struct, "Cannot initialise QUIC ciphers\n");
+    return NULL;
+  }
+
+  /* long header layout (RFC 9000 §17.2):
+   * 1   byte  : first_byte (packet flags & type)
+   * 4   bytes : version
+   * 1   byte  : dcid_len
+   * dcid_len  : destination connection id
+   * 1   byte  : scid_len
+   * scid_len  : source connection id
+   * varint    : token length
+   * token_len : token
+   * varint    : payload length            <-- we need this
+   * n bytes   : packet number             <-- pn_offset points here
+   */
+  pn_offset   = 1 /* first byte */
+              + 4 /* version */
+              + 1 + dest_conn_id_len      /* DCID len byte + DCID */
+              + 1 + src_conn_id_len;      /* SCID len byte + SCID */
+
+  /* read the token length (QUIC varint)                                */
+  token_length = quic_read_varint(packet->payload, pn_offset,
+                                  packet->payload_packet_len, &pn_offset);
+  if(token_length == UINT64_MAX) {
+    NDPI_LOG_DBG(ndpi_struct, "Malformed varint (token_length)\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  /* Skip the token itself                                              */
+  pn_offset += token_length;
+
+  /* read the payload length (QUIC varint)                              */
+  payload_length = quic_read_varint(packet->payload, pn_offset,
+                                    packet->payload_packet_len, &pn_offset);
+  if(payload_length == UINT64_MAX) {
+    NDPI_LOG_DBG(ndpi_struct, "Malformed varint (payload_length)\n");
+    quic_ciphers_reset(&ciphers);
+    return NULL;
+  }
+
+  NDPI_LOG_DBG2(ndpi_struct,
+                "QUIC decrypt: pn_offset=%u  token_len=%" PRIu64
+                "  payload_len=%" PRIu64 "\n",
+                pn_offset, token_length, payload_length);

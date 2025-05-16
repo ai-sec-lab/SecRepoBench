@@ -1,0 +1,98 @@
+int emu = 0;
+
+    /* select reference planes and set up strides depending on field mode */
+    if (field_based) {
+        linesize   = s->linesize   << 1;
+        uvlinesize = s->uvlinesize << 1;
+
+        ptr_y  = ref_picture[0] + field_select * s->linesize;
+        ptr_cb = ref_picture[1] + field_select * s->uvlinesize;
+        ptr_cr = ref_picture[2] + field_select * s->uvlinesize;
+
+        /* adjust destination to the proper field */
+        dest_y  += bottom_field * s->linesize;
+        dest_cb += bottom_field * s->uvlinesize;
+        dest_cr += bottom_field * s->uvlinesize;
+    } else {
+        linesize   = s->linesize;
+        uvlinesize = s->uvlinesize;
+
+        ptr_y  = ref_picture[0];
+        ptr_cb = ref_picture[1];
+        ptr_cr = ref_picture[2];
+    }
+
+    /* ---------------- Luma ---------------- */
+    hpel_motion_lowres(s, dest_y, ptr_y,
+                       field_based, field_select,
+                       s->mb_x * 2 * block_s,
+                       mb_y    * 2 * block_s,
+                       s->width, s->height,
+                       linesize, h_edge_pos, v_edge_pos,
+                       2 * block_s, h,
+                       pix_op, motion_x, motion_y);
+
+#if !CONFIG_GRAY
+#define DO_CHROMA 1
+#else
+#define DO_CHROMA (!(s->avctx->flags & AV_CODEC_FLAG_GRAY))
+#endif
+
+#if DO_CHROMA
+    /* --------------- Chroma ---------------- */
+    mx = motion_x;
+    my = motion_y;
+
+    if (s->quarter_sample) {
+        mx >>= 1;
+        my >>= 1;
+    }
+
+    /* chroma rounding (per H.263 spec) */
+    mx = ff_h263_round_chroma(mx);
+    my = ff_h263_round_chroma(my);
+
+    sx =  mx & s_mask;
+    sy =  my & s_mask;
+
+    uvsrc_x = s->mb_x * block_s + (mx >> (lowres + 1));
+    uvsrc_y =     mb_y * block_s + (my >> (lowres + 1));
+
+    if (field_based)
+        uvsrc_y <<= 1;  /* account for doubled stride in field mode */
+
+    uvsx = (sx << 2) >> lowres;
+    uvsy = (sy << 2) >> lowres;
+
+    /* edge positions for chroma (note the additional >>1) */
+    const int h_edge_pos_uv = s->h_edge_pos >> (lowres + 1);
+    const int v_edge_pos_uv = s->v_edge_pos >> (lowres + 1);
+
+    /* ----- U plane ----- */
+    ptr_cb = ref_picture[1] + field_select * s->uvlinesize +
+             uvsrc_y * uvlinesize + uvsrc_x;
+
+    if ((unsigned)uvsrc_x > FFMAX(h_edge_pos_uv - (!!uvsx) - block_s, 0) ||
+        (unsigned)uvsrc_y > FFMAX(v_edge_pos_uv - (!!uvsy) - block_s, 0)) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cb,
+                                 uvlinesize, uvlinesize,
+                                 9, 9, uvsrc_x, uvsrc_y,
+                                 h_edge_pos_uv, v_edge_pos_uv);
+        ptr_cb = s->sc.edge_emu_buffer;
+        emu = 1;
+    }
+    pix_op[op_index](dest_cb, ptr_cb, uvlinesize, block_s, uvsx, uvsy);
+
+    /* ----- V plane ----- */
+    ptr_cr = ref_picture[2] + field_select * s->uvlinesize +
+             uvsrc_y * uvlinesize + uvsrc_x;
+
+    if (emu) {
+        s->vdsp.emulated_edge_mc(s->sc.edge_emu_buffer, ptr_cr,
+                                 uvlinesize, uvlinesize,
+                                 9, 9, uvsrc_x, uvsrc_y,
+                                 h_edge_pos_uv, v_edge_pos_uv);
+        ptr_cr = s->sc.edge_emu_buffer;
+    }
+    pix_op[op_index](dest_cr, ptr_cr, uvlinesize, block_s, uvsx, uvsy);
+#endif

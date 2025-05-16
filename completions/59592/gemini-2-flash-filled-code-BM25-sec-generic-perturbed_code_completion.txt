@@ -1,0 +1,57 @@
+bool result = false;
+    hb_vector_t<const glyf::SubsetGlyph*> subset_glyphs;
+    if (unlikely (!subset_glyphs.alloc (context->plan->num_output_glyphs, true)))
+      goto cleanup_font;
+
+    for (unsigned int i = 0; i < context->plan->num_output_glyphs; ++i)
+    {
+      unsigned int gid = context->plan->output_to_input[i];
+      const glyf::Glyph *glyph = get_glyph (gid);
+      if (unlikely (!glyph))
+        continue;
+
+      glyf::SubsetGlyph *subset_glyph = glyph->subset (context, i, font);
+      if (unlikely (!subset_glyph))
+        goto cleanup_subset_glyphs;
+
+      subset_glyphs.push (subset_glyph);
+    }
+
+    /* calculate padded offsets */
+    unsigned int offset = 0;
+    bool short_loca = true;
+    for (unsigned int i = 0; i < context->plan->num_output_glyphs; ++i)
+    {
+      glyf::SubsetGlyph *subset_glyph = const_cast<glyf::SubsetGlyph*>(subset_glyphs[i]);
+      if (subset_glyph->empty ())
+      {
+        subset_glyph->loca_offset = offset;
+        continue;
+      }
+
+      unsigned int len = subset_glyph->dest_end - subset_glyph->dest_start;
+      if (unlikely (len > 0x10000))
+        short_loca = false;
+
+      subset_glyph->loca_offset = offset;
+      offset += len;
+      offset = (offset + 3) & ~3; /* align to 4-byte boundary */
+    }
+
+    /* serialize */
+    glyf new_glyf;
+    new_glyf.init (this->unitsPerEm);
+    result = new_glyf.serialize (context->serializer, subset_glyphs.arrayZ, context->plan->num_output_glyphs, short_loca);
+
+  cleanup_subset_glyphs:
+    for (unsigned int i = 0; i < subset_glyphs.length; ++i)
+    {
+      glyf::SubsetGlyph *subset_glyph = const_cast<glyf::SubsetGlyph*>(subset_glyphs[i]);
+      if (subset_glyph)
+        subset_glyph->free_compiled_bytes ();
+    }
+    subset_glyphs.fini ();
+
+  cleanup_font:
+    if (font)
+      hb_font_destroy (font);

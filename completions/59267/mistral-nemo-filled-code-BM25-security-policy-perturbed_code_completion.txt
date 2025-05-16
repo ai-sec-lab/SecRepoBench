@@ -1,0 +1,200 @@
+//
+    // Define pointers for compressed data sections: UNKNOWN, AC, DC, and RLE.
+    //
+
+    uint8_t* compressedUnknownBuf = inPtr + headerSize;
+    uint64_t compressedUnknownSize = 0;
+    if (unknownCompressedSize > 0)
+    {
+        compressedUnknownSize = std::min(unknownCompressedSize, iSize - headerSize);
+    }
+
+    uint8_t* compressedAcBuf = compressedUnknownBuf + compressedUnknownSize;
+    uint64_t compressedAcSize = 0;
+    if (acCompressedSize > 0)
+    {
+        compressedAcSize = std::min(acCompressedSize, iSize - headerSize - compressedUnknownSize);
+    }
+
+    uint8_t* compressedDcBuf = compressedAcBuf + compressedAcSize;
+    uint64_t compressedDcSize = 0;
+    if (dcCompressedBytes > 0)
+    {
+        compressedDcSize = std::min(dcCompressedBytes, iSize - headerSize - compressedUnknownSize - compressedAcSize);
+    }
+
+    uint8_t* compressedRleBuf = compressedDcBuf + compressedDcSize;
+    uint64_t compressedRleSize = 0;
+    if (rleCompressedSize > 0)
+    {
+        compressedRleSize = std::min(rleCompressedSize, iSize - headerSize - compressedUnknownSize - compressedAcSize - compressedDcSize);
+    }
+
+    //
+    // Sanity check that the version is something we expect. Right now,
+    // we can decode version 0, 1, and 2. v1 adds 'end of block' symbols
+    // to the AC RLE. v2 adds channel classification rules at the
+    // start of the data block.
+    //
+
+    if (version > 2) { return EXR_ERR_BAD_CHUNK_LEADER; }
+
+    rv = DwaCompressor_setupChannelData (me);
+
+    //
+    // Uncompress the UNKNOWN data into _planarUncBuffer[UNKNOWN]
+    //
+
+    if (unknownCompressedSize > 0)
+    {
+        if (unknownUncompressedSize > me->_planarUncBufferSize[UNKNOWN])
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+
+        if (EXR_ERR_SUCCESS != exr_uncompress_buffer (
+                                   me->_decode->context,
+                                   compressedUnknownBuf,
+                                   compressedUnknownSize,
+                                   me->_planarUncBuffer[UNKNOWN],
+                                   unknownUncompressedSize,
+                                   NULL))
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+    }
+
+    //
+    // Uncompress the AC data into _packedAcBuffer
+    //
+
+    if (acCompressedSize > 0)
+    {
+        if (!me->_packedAcBuffer ||
+            totalAcUncompressedCount * sizeof (uint16_t) >
+                me->_packedAcBufferSize)
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+
+        //
+        // Don't trust the user to get it right, look in the file.
+        //
+
+        switch (acCompression)
+        {
+            case STATIC_HUFFMAN:
+                rv = internal_huf_decompress (
+                    me->_decode,
+                    compressedAcBuf,
+                    compressedAcSize,
+                    (uint16_t*) me->_packedAcBuffer,
+                    totalAcUncompressedCount,
+                    me->_decode->scratch_buffer_1,
+                    me->_decode->scratch_alloc_size_1);
+                if (rv != EXR_ERR_SUCCESS) { return rv; }
+                break;
+
+            case DEFLATE: {
+                size_t destLen;
+
+                rv = exr_uncompress_buffer (
+                    me->_decode->context,
+                    compressedAcBuf,
+                    compressedAcSize,
+                    me->_packedAcBuffer,
+                    totalAcUncompressedCount * sizeof (uint16_t),
+                    &destLen);
+                if (rv != EXR_ERR_SUCCESS) return rv;
+
+                if (totalAcUncompressedCount * sizeof (uint16_t) != destLen)
+                {
+                    return EXR_ERR_CORRUPT_CHUNK;
+                }
+            }
+            break;
+
+            default: return EXR_ERR_CORRUPT_CHUNK; break;
+        }
+    }
+
+    //
+    // Uncompress the DC data into _packedDcBuffer
+    //
+
+    if (dcCompressedBytes > 0)
+    {
+        size_t destLen;
+        size_t uncompBytes = totalDcUncompressedCount * sizeof (uint16_t);
+        if (uncompBytes > me->_packedDcBufferSize)
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+
+        rv = internal_decode_alloc_buffer (
+            me->_decode,
+            EXR_TRANSCODE_BUFFER_SCRATCH1,
+            &(me->_decode->scratch_buffer_1),
+            &(me->_decode->scratch_alloc_size_1),
+            uncompBytes);
+
+        if (rv != EXR_ERR_SUCCESS) return rv;
+
+        rv = exr_uncompress_buffer (
+            me->_decode->context,
+            compressedDcBuf,
+            compressedDcSize,
+            me->_decode->scratch_buffer_1,
+            uncompBytes,
+            &destLen);
+        if (rv != EXR_ERR_SUCCESS || (uncompBytes != destLen))
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+
+        internal_zip_reconstruct_bytes (
+            me->_packedDcBuffer, me->_decode->scratch_buffer_1, uncompBytes);
+    }
+    else
+    {
+        // if the compressed size is 0, then the uncompressed size must also be zero
+        if (totalDcUncompressedCount != 0) { return EXR_ERR_CORRUPT_CHUNK; }
+    }
+
+    //
+    // Uncompress the RLE data into _rleBuffer, then unRLE the results
+    // into _planarUncBuffer[RLE]
+    //
+
+    if (rleCompressedSize > 0)
+    {
+        size_t dstLen;
+
+        if (rleUncompressedSize > me->_rleBufferSize ||
+            rleCompressedSize > me->_planarUncBufferSize[RLE])
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+
+        if (EXR_ERR_SUCCESS != exr_uncompress_buffer (
+                                   me->_decode->context,
+                                   compressedRleBuf,
+                                   compressedRleSize,
+                                   me->_rleBuffer,
+                                   rleUncompressedSize,
+                                   &dstLen))
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+
+        if (dstLen != rleUncompressedSize) { return EXR_ERR_CORRUPT_CHUNK; }
+
+        if (internal_rle_decompress (
+                me->_planarUncBuffer[RLE],
+                rleCompressedSize,
+                (const uint8_t*) me->_rleBuffer,
+                rleUncompressedSize) != rleCompressedSize)
+        {
+            return EXR_ERR_CORRUPT_CHUNK;
+        }
+    }

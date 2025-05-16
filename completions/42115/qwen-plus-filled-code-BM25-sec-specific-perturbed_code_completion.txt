@@ -1,0 +1,53 @@
+// Initialize variables to ensure they are not used without being set
+memset(dNSName, 0, sizeof(dNSName));
+int rc = extractRDNSequence(packet, i + 2, dNSName, sizeof(dNSName), NULL, NULL, 0, NULL);
+if (rc == -1) {
+    ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_TLS_CERTIFICATE_EXTENSION);
+    break;
+}
+
+// Validate and process the extracted DNS name or IP address
+if (general_name_type == 0x87) { // ipAddress
+    if (inet_ntop(packet->payload[i + 2] == 0x04 ? AF_INET : AF_INET6,
+                  &packet->payload[i + 3], dNSName, sizeof(dNSName)) == NULL) {
+        ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_IP_ADDRESS_IN_CERTIFICATE);
+        break;
+    }
+} else {
+    // Ensure the DNS name is printable and clean it up
+    if (!ndpi_is_printable_string(dNSName, strlen(dNSName))) {
+        ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+        break;
+    }
+}
+
+// Check for a match with the host server name
+if (connection->host_server_name[0] != '\0' && strcmp(dNSName, connection->host_server_name) == 0) {
+    matched_name = 1;
+}
+
+// Update the server names list in the flow structure
+if (connection->protos.tls_quic.server_names == NULL) {
+    connection->protos.tls_quic.server_names = strdup(dNSName);
+} else {
+    char *updated_names = malloc(strlen(connection->protos.tls_quic.server_names) + strlen(dNSName) + 2);
+    if (updated_names == NULL) {
+        ndpi_set_risk(ndpi_struct, connection, NDPI_MEMORY_ALLOCATION_FAILED);
+        break;
+    }
+    strcpy(updated_names, connection->protos.tls_quic.server_names);
+    strcat(updated_names, ",");
+    strcat(updated_names, dNSName);
+    free(connection->protos.tls_quic.server_names);
+    connection->protos.tls_quic.server_names = updated_names;
+}
+
+// Detect subprotocol based on the DNS name
+u_int32_t val;
+if (ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+                            dNSName, strlen(dNSName), &val) == 0) {
+    u_int16_t proto_id = (u_int16_t)val;
+    if (proto_id != NDPI_PROTOCOL_UNKNOWN) {
+        connection->detected_protocol_stack[1] = proto_id;
+    }
+}

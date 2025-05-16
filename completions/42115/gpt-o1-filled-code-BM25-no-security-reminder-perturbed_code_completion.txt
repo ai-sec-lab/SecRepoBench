@@ -1,0 +1,84 @@
+u_int8_t len = packet->payload[i + 1];
+char dNSName[256];
+memset(dNSName, 0, sizeof(dNSName));
+
+/* Parse IP addresses (0x87) or rfc822Name/dNSName (0x81, 0x82) */
+if(general_name_type == 0x87) {
+  /* ipAddress */
+  if(len == 4) {
+    /* IPv4 address */
+    snprintf(dNSName, sizeof(dNSName),
+             "%u.%u.%u.%u",
+             packet->payload[i+2],
+             packet->payload[i+3],
+             packet->payload[i+4],
+             packet->payload[i+5]);
+  } else if(len == 16) {
+    /* IPv6 address */
+    char tmp[64];
+    if(ndpi_inet_ntop6(&packet->payload[i+2], tmp, sizeof(tmp)) < 0) {
+      dNSName[0] = '\0';
+    } else {
+      strncpy(dNSName, tmp, sizeof(dNSName));
+      dNSName[sizeof(dNSName)-1] = '\0';
+    }
+  }
+} else {
+  /* rfc822Name or dNSName */
+  if(len < sizeof(dNSName)) {
+    memcpy(dNSName, &packet->payload[i+2], len);
+    dNSName[len] = '\0';
+  } else {
+    memcpy(dNSName, &packet->payload[i+2], sizeof(dNSName)-1);
+    dNSName[sizeof(dNSName)-1] = '\0';
+  }
+}
+
+/* Ensure string is printable */
+if(dNSName[0] && (ndpi_is_printable_string(dNSName, strlen(dNSName)) == 0))
+  ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+
+/* Check if it matches the SNI */
+if(!matched_name && (connection->host_server_name[0] != '\0') &&
+   (strcasecmp(dNSName, connection->host_server_name) == 0)) {
+  matched_name = 1;
+}
+
+/* Update the server names list */
+if(dNSName[0]) {
+  if(connection->protos.tls_quic.server_names == NULL) {
+    connection->protos.tls_quic.server_names = ndpi_strdup(dNSName);
+  } else {
+    char *tmp;
+    size_t new_size = strlen(connection->protos.tls_quic.server_names) + strlen(dNSName) + 2;
+    tmp = ndpi_malloc(new_size);
+    if(tmp) {
+      snprintf(tmp, new_size, "%s,%s",
+               connection->protos.tls_quic.server_names,
+               dNSName);
+      ndpi_free(connection->protos.tls_quic.server_names);
+      connection->protos.tls_quic.server_names = tmp;
+    }
+  }
+
+  /* Attempt subprotocol detection based on the extracted name */
+  if(connection->detected_protocol_stack[1] == NDPI_PROTOCOL_UNKNOWN) {
+    u_int32_t val;
+    if(ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+			       dNSName, strlen(dNSName), &val) == 0) {
+      u_int16_t proto_id = (u_int16_t)val;
+      ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED };
+
+      connection->detected_protocol_stack[0] = proto_id;
+      connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+      connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+      ndpi_check_subprotocol_risk(ndpi_struct, connection, proto_id);
+
+      /* Cache this for future flows */
+      if(ndpi_struct->tls_cert_cache && packet->iph) {
+        u_int32_t key = packet->iph->saddr + packet->tcp->source;
+        ndpi_lru_add_to_cache(ndpi_struct->tls_cert_cache, key, proto_id);
+      }
+    }
+  }
+}

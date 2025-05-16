@@ -1,0 +1,157 @@
+/*
+      Extremely simple (but sufficient) parser for an internal <!DOCTYPE ... [
+      ... ]> declaration.  The only items we really care about at run–time are
+      general entity declarations of the form
+
+        <!ENTITY name "value">
+
+      (parameter entities and anything else are silently skipped).  The
+      extracted entities are appended to root->entities which is an
+      NULL-terminated list
+
+        { "name;", "value", "next_name;", "next_value", (char *) NULL }
+
+      identical in layout to the predefined entity table used by ImageMagick.
+      The implementation below is *not* a complete DTD parser – it attempts
+      to be permissive and simply walk to the closing ‘>’ whenever an element
+      we do not understand is encountered.  This is adequate for those parts
+      of ImageMagick that rely on the presence of the most common internal
+      entities in SVG / XML files.
+    */
+    while (*xml != '\0')
+    {
+      /* 1.  Skip white-space. */
+      while (isspace((int) ((unsigned char) *xml)) != 0)
+        xml++;
+
+      if (*xml == '\0')
+        break;
+
+      /* 2.  Comment  <!--  ....  -->  */
+      if (strncmp(xml,"<!--",4) == 0)
+        {
+          char *p=strstr(xml+4,"-->");
+          if (p == (char *) NULL)
+            break; /* malformed comment – give up */
+          xml=p+3;
+          continue;
+        }
+
+      /* 3.  Processing instruction <? ... ?>  */
+      if (strncmp(xml,"<?",2) == 0)
+        {
+          char *p=strstr(xml+2,"?>");
+          if (p == (char *) NULL)
+            break;
+          xml=p+2;
+          continue;
+        }
+
+      /* 4.  ENTITY declaration we actually care about. */
+      if (strncmp(xml,"<!ENTITY",8) == 0)
+        {
+          char *p=xml+8;          /* move past <!ENTITY */
+          while (isspace((int) ((unsigned char) *p)) != 0)
+            p++;
+
+          /* parameter entity?  skip it. */
+          if (*p == '%')
+            {
+              char *q=strchr(p,'>');
+              if (q == (char *) NULL)
+                break;
+              xml=q+1;
+              continue;
+            }
+
+          /* entity name */
+          char *name_start=p;
+          while ((*p!='\0') && !isspace((int) ((unsigned char) *p)))
+            p++;
+          if (*p == '\0')
+            break; /* malformed */
+          *p++='\0';
+          (void) TrimWhitespace(name_start); /* defensive – macro trims in-place */
+
+          /* build "name;" string */
+          size_t name_length=strlen(name_start);
+          char *entity_name=(char *) AcquireMagickMemory(name_length+2);
+          if (entity_name == (char *) NULL)
+            {
+              ThrowFatalException(ResourceLimitError,"MemoryAllocationFailed");
+              return(MagickFalse);
+            }
+          (void) CopyMagickMemory(entity_name,name_start,name_length);
+          entity_name[name_length]=';';
+          entity_name[name_length+1]='\0';
+
+          /* skip WS before opening quote */
+          while (isspace((int) ((unsigned char) *p)) != 0)
+            p++;
+
+          if ((*p!='\'') && (*p!='\"'))
+            {
+              /* malformed – abort parsing this entity */
+              entity_name=(char *) RelinquishMagickMemory(entity_name);
+              break;
+            }
+          char quote=*p++;
+          char *value_start=p;
+          while ((*p!='\0') && (*p!=quote))
+            p++;
+          if (*p == '\0')
+            {
+              entity_name=(char *) RelinquishMagickMemory(entity_name);
+              break;
+            }
+          *p++='\0';
+          char *entity_value=ConstantString(value_start);
+
+          /* advance to end of declaration '>' */
+          char *q=strchr(p,'>');
+          if (q == (char *) NULL)
+            {
+              /* clean up and give up */
+              entity_name=(char *) RelinquishMagickMemory(entity_name);
+              entity_value=DestroyString(entity_value);
+              break;
+            }
+          xml=q+1; /* continue after current declaration */
+
+          /* append to root->entities */
+          entities=root->entities;
+          for (index=0; entities[index] != (char *) NULL; index++) ;
+          entities=(char **)
+            ResizeQuantumMemory(entities,(size_t) (index+3),sizeof(*entities));
+          if (entities == (char **) NULL)
+            {
+              ThrowFatalException(ResourceLimitError,"MemoryAllocationFailed");
+              return(MagickFalse);
+            }
+          entities[index]=entity_name;
+          entities[index+1]=entity_value;
+          entities[index+2]=(char *) NULL;
+          root->entities=entities;
+          continue;
+        }
+
+      /* 5.  Any other markup – skip until next '>' */
+      if (*xml == '<')
+        {
+          char *p=strchr(xml,'>');
+          if (p == (char *) NULL)
+            break;
+          xml=p+1;
+          continue;
+        }
+
+      /* 6.  End of internal subset ‘]’ */
+      if (*xml == ']')
+        {
+          xml++; /* eat the ']' */
+          continue;
+        }
+
+      /* 7.  Anything else – just advance one character */
+      xml++;
+    }

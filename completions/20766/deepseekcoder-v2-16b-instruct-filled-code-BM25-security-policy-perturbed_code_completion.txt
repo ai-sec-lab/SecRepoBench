@@ -1,0 +1,51 @@
+if(workflow->prefs.decode_tunnels && (proto == IPPROTO_UDP)) {
+    // Parse the UDP header from the packet using the current IP offset.
+    const struct ndpi_udphdr *udp = (const struct ndpi_udphdr *)&packet[ip_offset];
+    *sport = ntohs(udp->source);
+    *dport = ntohs(udp->dest);
+
+    // Check for GTP-U protocol by comparing ports
+    if (*sport == 2152 || *dport == 2152) {
+      workflow->stats.gtpu_count++;
+      // Verify GTP version and message type
+      u_int8_t gtpu_version = (*dport == 2152) ? (udp->dest >> 8) & 0xFF : (udp->source >> 8) & 0xFF;
+      u_int8_t message_type = (*dport == 2152) ? udp->dest & 0xFF : udp->source & 0xFF;
+
+      if (gtpu_version == 1 && (message_type == 1 || message_type == 2 || message_type == 3)) {
+        // GTP-U is detected, update IP offset to point to the encapsulated IP header
+        ip_offset += sizeof(struct ndpi_udphdr);
+        tunnel_type = ndpi_gtp_tunnel;
+      }
+    }
+
+    // Check for TZSP protocol using ports
+    if (*sport == 17000 || *dport == 17000) {
+      workflow->stats.tzsp_count++;
+      // Verify TZSP version and encapsulated protocol
+      u_int8_t tzsp_version = (*dport == 17000) ? (udp->dest >> 8) & 0xFF : (udp->source >> 8) & 0xFF;
+      u_int8_t encapsulated_proto = (*dport == 17000) ? udp->dest & 0xFF : udp->source & 0xFF;
+
+      // Navigate through its tags until reaching the encapsulated Ethernet frame
+      // This is a simplified example, actual implementation may vary
+      u_int16_t tag_length;
+      u_int8_t *tag = (u_int8_t *)&packet[ip_offset + sizeof(struct ndpi_udphdr)];
+      while ((tag_length = *(u_int16_t *)tag) > 0) {
+        tag += tag_length;
+      }
+      ip_offset += sizeof(struct ndpi_udphdr) + sizeof(u_int16_t) + tag_length;
+      tunnel_type = ndpi_tzsp_tunnel;
+    }
+
+    // Check for CAPWAP protocol using source port
+    if (*sport == 32832 || *dport == 32832) {
+      workflow->stats.capwap_count++;
+      // Verify CAPWAP message type
+      u_int8_t message_type = (*dport == 32832) ? (udp->dest >> 8) & 0xFF : (udp->source >> 8) & 0xFF;
+
+      if (message_type == 1 || message_type == 2 || message_type == 3) {
+        // CAPWAP is detected, update IP offset to point to the encapsulated IP header
+        ip_offset += sizeof(struct ndpi_udphdr);
+        tunnel_type = ndpi_capwap_tunnel;
+      }
+    }
+  }

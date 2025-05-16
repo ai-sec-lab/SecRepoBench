@@ -1,0 +1,76 @@
+else if(extension_id == 43 /* supported_versions */) {
+#ifdef DEBUG_TLS
+        printf("Client TLS [supported_versions: len=%u]\n", extension_len);
+#endif
+        if((offset + extension_offset + extension_len) <= total_len) {
+          u_int16_t sv_off = offset + extension_offset;
+          u_int16_t sv_len = extension_len;
+          u_int16_t idx = 0, out_off = 0;
+          char tmp_out[sizeof(ja3.client.supported_versions)];
+
+          /* Each version is 2 bytes, preceded by a 1-byte or 2-byte length field (depending on TLS version). 
+             For simplicity, assume at least 1 byte length, then read versions. */
+          if(sv_len > 2) {
+            u_int16_t version_list_length = packet->payload[sv_off];
+            sv_off += 1; 
+            sv_len -= 1;
+
+            /* If the length is 1 byte or if it indicates more data than we have, just bound it */
+            if(version_list_length > sv_len) version_list_length = sv_len;
+
+            while((idx+1) < version_list_length) {
+              u_int16_t vers = ntohs(*((u_int16_t*)&packet->payload[sv_off + idx]));
+              int rc = snprintf(&tmp_out[out_off], sizeof(tmp_out) - out_off, "%s%u",
+                                (out_off > 0) ? "-" : "", vers);
+              if(rc <= 0) break;
+              out_off += rc;
+              idx += 2;
+            }
+
+            tmp_out[out_off] = '\0';
+            snprintf(ja3.client.supported_versions, sizeof(ja3.client.supported_versions), "%s", tmp_out);
+
+#ifdef DEBUG_TLS
+            printf("Client TLS [supported_versions parsed: %s]\n", ja3.client.supported_versions);
+#endif
+          }
+        }
+      } else if(extension_id == 65486 /* ESNI */) {
+#ifdef DEBUG_TLS
+        printf("Client TLS [encrypted_sni: len=%u]\n", extension_len);
+#endif
+        if((offset + extension_offset + extension_len) <= total_len) {
+          /* Mark that ESNI is present. The actual ESNI data can be captured if needed. */
+          flow->protos.tls_quic.encrypted_sni.esni = ndpi_strdup("ESNI");
+#ifdef DEBUG_TLS
+          printf("Client TLS [encrypted_sni stored]\n");
+#endif
+        }
+      } else if(extension_id == 65445 /* QUIC transport params */) {
+#ifdef DEBUG_TLS
+        printf("Client TLS [QUIC transport parameters: len=%u]\n", extension_len);
+#endif
+        if((offset + extension_offset + extension_len) <= total_len) {
+          /* Example parsing: search for "user_agent=" inside extension data and invoke http_process_user_agent if found */
+          const u_int8_t *tp = &packet->payload[offset + extension_offset];
+          u_int16_t tp_len = extension_len;
+          const char *ua_marker = "user_agent=";
+          const u_int8_t *ua_start = (const u_int8_t*)ndpi_strnstr((const char*)tp, ua_marker, tp_len);
+
+          if(ua_start) {
+            const u_int8_t *ua_ptr = ua_start + strlen(ua_marker);
+            u_int16_t ua_len = 0;
+            while(((ua_start + ua_len) < (tp + tp_len)) && (ua_ptr[ua_len] != 0) && ndpi_isprint(ua_ptr[ua_len])) {
+              ua_len++;
+            }
+            if(ua_len > 0) {
+              http_process_user_agent(ndpi_struct, flow, ua_ptr, ua_len);
+            }
+          }
+        }
+      }
+      extension_offset += extension_len; /* Move to the next extension */
+
+#ifdef DEBUG_TLS
+      printf("Client TLS [extension_offset/len: %u/%u]\n", extension_offset, extension_len);
+#endif

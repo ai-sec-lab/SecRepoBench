@@ -1,0 +1,55 @@
+u_int8_t *ptr = packet->payload;
+u_int16_t line_len = 0;
+u_int16_t i;
+
+for(i = 0; i < packet->payload_packet_len && packet->parsed_lines < PACKET_MAX_LINES; i++) {
+  if(ptr[i] == '\r') {
+    if((i + 1) < packet->payload_packet_len && ptr[i + 1] == '\n') {
+      /* Line break */
+      line_len = (u_int16_t)(i - line_len);
+      
+      packet->line[packet->parsed_lines].len = line_len;
+      packet->parsed_lines++;
+      
+      if((i + 2) < packet->payload_packet_len && ptr[i + 2] == '\r' && ptr[i + 3] == '\n') {
+        /* Double line break, save binary data */
+        u_int32_t binary_len = packet->payload_packet_len - (i + 4);
+        dataflow->init_binary_bytes = binary_len <= INIT_BINARY_BYTES ? binary_len : INIT_BINARY_BYTES;
+        memcpy(dataflow->initial_binary_bytes, &packet->payload[i + 4], dataflow->init_binary_bytes);
+        i += 2; /* Skip extra \r\n */
+        break;
+      }
+      
+      line_len = i + 2; /* Point to next possible start of line */
+      i++; /* Skip \n */
+    }
+  }
+}
+
+/* Process headers and detect HTTP status code in the first line */
+if(packet->parsed_lines > 0 && packet->line[0].len > 0) {
+  if(strncmp((char *)packet->line[0].ptr, "HTTP/", 5) == 0) {
+    /* Likely an HTTP response status */
+    char status_code_str[4];
+    int status_code;
+    
+    if(sscanf((char *)packet->line[0].ptr, "HTTP/%*d.%*d %3d", &status_code) == 1) {
+      snprintf(status_code_str, sizeof(status_code_str), "%d", status_code);
+      packet->http_status_code_ptr = status_code_str;
+    }
+  }
+
+  /* Identify specific headers */
+  for(i = 0; i < packet->parsed_lines; i++) {
+    if(strncasecmp((char *)packet->line[i].ptr, "Server:", 7) == 0) {
+      packet->server_header_ptr = packet->line[i].ptr + 7;
+      packet->server_header_len = packet->line[i].len - 7;
+    } else if(strncasecmp((char *)packet->line[i].ptr, "Host:", 5) == 0) {
+      packet->host_header_ptr = packet->line[i].ptr + 5;
+      packet->host_header_len = packet->line[i].len - 5;
+    } else if(strncasecmp((char *)packet->line[i].ptr, "Content-Type:", 13) == 0) {
+      packet->content_type_header_ptr = packet->line[i].ptr + 13;
+      packet->content_type_header_len = packet->line[i].len - 13;
+    }
+  }
+}

@@ -1,0 +1,56 @@
+memset(dNSName, 0, sizeof(dNSName));
+{
+  /* Copy the name or IP address safely into dNSName */
+  u_int8_t copy_len = (len < (sizeof(dNSName) - 1)) ? len : (sizeof(dNSName) - 1);
+  memcpy(dNSName, &packet->payload[i + 2], copy_len);
+  dNSName[copy_len] = '\0';
+
+  /* Ensure the extracted data is printable */
+  if(ndpi_is_printable_string(dNSName, copy_len) == 0)
+    ndpi_set_risk(ndpi_struct, connection, NDPI_INVALID_CHARACTERS);
+
+  /* Check if the extracted name matches the SNI from the client (if any) */
+  if((connection->host_server_name[0] != '\0') &&
+     (strcasestr(dNSName, connection->host_server_name) != NULL)) {
+    matched_name = 1;
+  }
+
+  /* Update serverNames list in the flow structure */
+  if(connection->protos.tls_quic.serverNames == NULL) {
+    connection->protos.tls_quic.serverNames = ndpi_strdup(dNSName);
+  } else {
+    char *tmp;
+    size_t old_len = strlen(connection->protos.tls_quic.serverNames);
+    size_t add_len = strlen(dNSName);
+
+    tmp = ndpi_malloc(old_len + add_len + 2);
+    if(tmp != NULL) {
+      snprintf(tmp, old_len + add_len + 2, "%s,%s",
+	       connection->protos.tls_quic.serverNames, dNSName);
+      ndpi_free(connection->protos.tls_quic.serverNames);
+      connection->protos.tls_quic.serverNames = tmp;
+    }
+  }
+
+  /* Attempt subprotocol detection based on the extracted name */
+  {
+    u_int32_t val;
+    int rc = ndpi_match_string_value(ndpi_struct->tls_cert_subject_automa.ac_automa,
+				     dNSName, strlen(dNSName), &val);
+    if(rc == 0) {
+      /* Match found */
+      u_int16_t proto_id = (u_int16_t)val;
+      ndpi_protocol ret = { NDPI_PROTOCOL_TLS, proto_id, NDPI_PROTOCOL_CATEGORY_UNSPECIFIED };
+
+      connection->detected_protocol_stack[0] = proto_id;
+      connection->detected_protocol_stack[1] = NDPI_PROTOCOL_TLS;
+      connection->category = ndpi_get_proto_category(ndpi_struct, ret);
+      ndpi_check_subprotocol_risk(ndpi_struct, connection, proto_id);
+
+      if(ndpi_struct->tls_cert_cache && packet->iph) {
+	u_int32_t key = packet->iph->saddr + packet->tcp->source;
+	ndpi_lru_add_to_cache(ndpi_struct->tls_cert_cache, key, proto_id);
+      }
+    }
+  }
+}

@@ -1,0 +1,46 @@
+/* Attempt to locate a valid 'esds' box in the data buffer and parse it if found */
+            u32 possible_size  = gf_ntohl(*((u32*)&data[index]));
+            u32 possible_type  = gf_ntohl(*((u32*)&data[index+4]));
+
+            /* Check if we have enough room for a box header, a valid box size, and the 'esds' type. */
+            if (possible_size >= 8 && (index + possible_size) <= size && possible_type == GF_ISOM_BOX_TYPE_ESDS)
+            {
+                /* Create a temporary bitstream over this sub-box region (excluding the 8-byte header). */
+                GF_BitStream *sub_bs = gf_bs_new(data + index + 8, possible_size - 8, GF_BITSTREAM_READ);
+                if (!sub_bs) {
+                    continue; /* Not enough memory or invalid sub-box, skip. */
+                }
+                gf_bs_set_cookie(sub_bs, GF_ISOM_BS_COOKIE_NO_LOGS);
+
+                /* If we already have an esd box, remove it from this entry's child list. */
+                if (ptr->esd) {
+                    gf_isom_box_del_parent(&ptr->child_boxes, (GF_Box*)ptr->esd);
+                    ptr->esd = NULL;
+                }
+
+                /* Allocate and parse a new 'esds' box */
+                {
+                    GF_ESDBox *new_esd = (GF_ESDBox *) gf_isom_box_new_parent(NULL, GF_ISOM_BOX_TYPE_ESDS);
+                    if (!new_esd) {
+                        gf_bs_del(sub_bs);
+                        continue;
+                    }
+                    new_esd->size = possible_size - 8;
+                    /* Use gf_isom_box_parse to parse the sub-box content */
+                    e = gf_isom_box_parse((GF_Box *)new_esd, sub_bs);
+                    /* Cleanup the bitstream */
+                    gf_bs_del(sub_bs);
+
+                    if (!e) {
+                        /* Add the successfully parsed esds to our child list and update ptr->esd. */
+                        gf_list_add(ptr->child_boxes, new_esd);
+                        ptr->esd = new_esd;
+                    } else {
+                        /* Parsing failed, discard the new box. */
+                        gf_isom_box_del((GF_Box*)new_esd);
+                    }
+                }
+
+                /* Move past this discovered sub-box to avoid re-parsing. */
+                index += possible_size - 1;
+            }

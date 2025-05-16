@@ -1,0 +1,51 @@
+NDPI_LOG_DBG2(ndpi_struct, "search memcached\n");
+
+  /* By default keep a local counter, this avoids relying on internal
+   * layout details of the flow structure while still allowing us to use
+   * the existing MEMCACHED_MATCH / MEMCACHED_MIN_MATCH logic.            */
+  u_int16_t local_matches = 0;
+  u_int16_t *matches      = &local_matches;
+
+  /* We only expect the protocol on TCP or UDP. If it is something else,
+   * immediately exclude the protocol.                                    */
+  if((packet->tcp == NULL) && (packet->udp == NULL)) {
+    NDPI_EXCLUDE_PROTO(ndpi_struct, stream);
+    return;
+  }
+
+  /*
+   * The shortest memcached textual command is four characters long
+   * (e.g., "get ").  For UDP an 8-byte memcached specific header is
+   * prepended to the textual command, thus the minimum length becomes
+   * 8 + 4 bytes.
+   */
+  if(packet->tcp != NULL) {
+    if(packet->payload_packet_len < 4) {
+      NDPI_EXCLUDE_PROTO(ndpi_struct, stream);
+      return;
+    }
+  } else { /* UDP */
+    if(packet->payload_packet_len < (8 + 4)) {
+      NDPI_EXCLUDE_PROTO(ndpi_struct, stream);
+      return;
+    }
+
+    /*
+     * A memcached UDP request/response starts with an 8-byte header:
+     *  0-1 : Request ID
+     *  2-3 : Sequence number
+     *  4-5 : Total number of datagrams
+     *  6-7 : Reserved/must be zero
+     * Check the reserved bytes; if they are not zero the packet is not a
+     * memcached message.
+     */
+    if(offset[6] || offset[7]) {
+      NDPI_EXCLUDE_PROTO(ndpi_struct, stream);
+      return;
+    }
+
+    /* Skip the 8-byte header so that ‘offset’ points at the textual
+     * command and adjust the recorded payload length accordingly.        */
+    offset += 8;
+    packet->payload_packet_len -= 8;
+  }

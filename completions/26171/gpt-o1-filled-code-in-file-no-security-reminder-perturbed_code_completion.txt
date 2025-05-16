@@ -1,0 +1,117 @@
+/* Compute how many sub-blocks are in this block */
+  int dont_split = (context->header_flags & 0x10) >> 4;
+  bool dict_training = (bool)(context->use_dict && (context->dict_ddict == NULL));
+  int32_t typesize = context->typesize;
+  int32_t nstreams = (!dont_split && !leftoverblock && !dict_training) ? typesize : 1;
+  int32_t neblock = bsize / nstreams;
+  int32_t ntbytes = 0;     /* number of uncompressed bytes in this block */
+  int32_t cbytes;
+  int32_t dbytes;
+  int32_t j;
+  int32_t offset = src_offset;
+
+  /* Decompress each sub-block */
+  for (j = 0; j < nstreams; j++) {
+    /* Make sure we have enough space to read the sub-block size */
+    if ((offset + (int32_t)sizeof(int32_t)) > srcsize) {
+      return -1; /* Not enough input to read cbytes */
+    }
+    cbytes = sw32_((const int32_t*)(src + offset));
+    offset += (int32_t)sizeof(int32_t);
+
+    /* Handle runs (negative cbytes) */
+    if (cbytes < 0) {
+      /* cbytes is actually -repeated_value */
+      uint8_t value = (uint8_t)(-cbytes);
+      if ((j + 1) * neblock > bsize) {
+        /* Sub-block out of bounds */
+        return -1;
+      }
+      memset(tmp + j * neblock, value, (size_t)neblock);
+      ntbytes += neblock;
+      continue;
+    }
+
+    /* If cbytes equals the sub-block size, data is uncompressed */
+    if (cbytes == neblock) {
+      if ((offset + cbytes) > srcsize) {
+        return -1; /* Not enough input to copy data */
+      }
+      memcpy(tmp + j * neblock, src + offset, (size_t)cbytes);
+      offset += cbytes;
+      ntbytes += cbytes;
+      continue;
+    }
+
+    /* cbytes == 0 => something wrong (compression was unsuccessful?) */
+    if (cbytes == 0) {
+      return 0;   /* No data or error block (treat as uncompressible) */
+    }
+
+    /* Otherwise, data is compressed */
+    if ((offset + cbytes) > srcsize) {
+      return -1; /* Not enough input to decompress data */
+    }
+
+    /* Do actual decompression */
+    dbytes = 0;
+    if (context->compcode == BLOSC_BLOSCLZ) {
+      dbytes = blosclz_decompress((const uint8_t*)src + offset, cbytes,
+                                  tmp + j * neblock, (int)neblock);
+    }
+#if defined(HAVE_LZ4)
+    else if (context->compcode == BLOSC_LZ4 || context->compcode == BLOSC_LZ4HC) {
+      dbytes = lz4_wrap_decompress((const char*)src + offset, (size_t)cbytes,
+                                   (char*)tmp + j * neblock, (size_t)neblock);
+    }
+#endif
+#if defined(HAVE_LIZARD)
+    else if (context->compcode == BLOSC_LIZARD) {
+      dbytes = lizard_wrap_decompress((const char*)src + offset, (size_t)cbytes,
+                                      (char*)tmp + j * neblock, (size_t)neblock);
+    }
+#endif
+#if defined(HAVE_SNAPPY)
+    else if (context->compcode == BLOSC_SNAPPY) {
+      dbytes = snappy_wrap_decompress((const char*)src + offset, (size_t)cbytes,
+                                      (char*)tmp + j * neblock, (size_t)neblock);
+    }
+#endif
+#if defined(HAVE_ZLIB)
+    else if (context->compcode == BLOSC_ZLIB) {
+      dbytes = zlib_wrap_decompress((const char*)src + offset, (size_t)cbytes,
+                                    (char*)tmp + j * neblock, (size_t)neblock);
+    }
+#endif
+#if defined(HAVE_ZSTD)
+    else if (context->compcode == BLOSC_ZSTD) {
+      dbytes = zstd_wrap_decompress(thread_context, (const char*)src + offset, (size_t)cbytes,
+                                    (char*)tmp + j * neblock, (size_t)neblock);
+    }
+#endif
+    else {
+      /* Unsupported compression code */
+      return -5;
+    }
+
+    if (dbytes < (int)neblock) {
+      /* A decompression error occurred */
+      return 0;
+    }
+    offset += cbytes;
+    ntbytes += dbytes;
+  }
+
+  /* Now apply the filter pipeline if needed */
+  int last_filter_index = last_filter(filters, 'd');
+  if (last_filter_index < 0) {
+    /* No filters, just copy to destination */
+    memcpy(dest + destinationoffset, tmp, (size_t)bsize);
+  } else {
+    int errcode = pipeline_d(context, bsize, dest, destinationoffset, tmp, tmp2, tmp3,
+                             last_filter_index);
+    if (errcode < 0) {
+      return errcode;
+    }
+  }
+  return bsize;

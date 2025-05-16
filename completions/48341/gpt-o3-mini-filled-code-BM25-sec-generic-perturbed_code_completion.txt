@@ -1,0 +1,100 @@
+case ReadStripMethod:
+{
+  for (y=0; y < (ssize_t) image->rows;)
+  {
+    size_t rows = (y + rows_per_strip > image->rows) ?
+      image->rows - y : rows_per_strip;
+    /* Read each strip for the current set of rows. */
+    for (ssize_t row = 0; row < (ssize_t) rows; row++)
+    {
+      tiff_status = TIFFReadEncodedStrip(tiff, TIFFComputeStrip(tiff, y+row, 0),
+        pixels + row*scanline_size, (tsize_t) scanline_size);
+      if (tiff_status == -1)
+        ThrowTIFFException(CorruptImageError, "UnableToReadImageStrip");
+    }
+    {
+      Quantum *q = QueueAuthenticPixels(image, 0, y, image->columns, rows, exception);
+      if (q == (Quantum *) NULL)
+        break;
+      /* Import the pixels from the buffer into the image. */
+      ImportQuantumPixels(image, NULL, quantum_info, quantum_type, pixels, exception);
+      if (SyncAuthenticPixels(image, exception) == MagickFalse)
+        break;
+    }
+    if (image->previous == (Image *) NULL)
+    {
+      status = SetImageProgress(image, LoadImageTag, y, image->rows);
+      if (status == MagickFalse)
+        break;
+    }
+    y += rows;
+  }
+  break;
+}
+case ReadTileMethod:
+{
+  uint32 tile_width, tile_length;
+  if ((TIFFGetField(tiff, TIFFTAG_TILEWIDTH, &tile_width) != 1) ||
+      (TIFFGetField(tiff, TIFFTAG_TILELENGTH, &tile_length) != 1))
+    ThrowTIFFException(CoderError, "ImageIsNotTiled");
+  for (ssize_t ty = 0; ty < (ssize_t) image->rows; ty += tile_length)
+  {
+    size_t rows = (ty + tile_length > image->rows) ? image->rows - ty : tile_length;
+    for (ssize_t tx = 0; tx < (ssize_t) image->columns; tx += tile_width)
+    {
+      tiff_status = TIFFReadTile(tiff, pixels, tx, ty, 0, 0);
+      if (tiff_status == -1)
+        ThrowTIFFException(CorruptImageError, "UnableToReadImageTile");
+      {
+        Quantum *q = QueueAuthenticPixels(image, tx, ty,
+          (size_t) tile_width, rows, exception);
+        if (q == (Quantum *) NULL)
+          break;
+        ImportQuantumPixels(image, NULL, quantum_info, quantum_type, pixels, exception);
+        if (SyncAuthenticPixels(image, exception) == MagickFalse)
+          break;
+      }
+    }
+    if (image->previous == (Image *) NULL)
+    {
+      status = SetImageProgress(image, LoadImageTag, ty, image->rows);
+      if (status == MagickFalse)
+        break;
+    }
+  }
+  break;
+}
+case ReadGenericMethod:
+default:
+{
+  if (TIFFReadRGBAImage(tiff, image->columns, image->rows,
+        (uint32 *) pixels, 0) == 0)
+    ThrowTIFFException(CoderError, "UnableToConvertImage");
+  for (y = 0; y < (ssize_t) image->rows; y++)
+  {
+    Quantum *q = QueueAuthenticPixels(image, 0, y, image->columns, 1, exception);
+    if (q == (Quantum *) NULL)
+      break;
+    for (ssize_t x = 0; x < (ssize_t) image->columns; x++)
+    {
+      uint32 rgba = ((uint32 *) pixels)[y * image->columns + x];
+      /* Extract and convert RGBA components; the conversion functions
+         should perform proper clamping of the values to Quantum range. */
+      SetPixelRed(image, ScaleCharToQuantum((unsigned char) TIFFGetR(rgba)), q);
+      SetPixelGreen(image, ScaleCharToQuantum((unsigned char) TIFFGetG(rgba)), q);
+      SetPixelBlue(image, ScaleCharToQuantum((unsigned char) TIFFGetB(rgba)), q);
+      if (image->alpha_trait != UndefinedPixelTrait)
+        SetPixelAlpha(image, ScaleCharToQuantum((unsigned char) TIFFGetA(rgba)), q);
+      q += GetPixelChannels(image);
+    }
+    if (SyncAuthenticPixels(image, exception) == MagickFalse)
+      break;
+    if (image->previous == (Image *) NULL)
+    {
+      status = SetImageProgress(image, LoadImageTag, y, image->rows);
+      if (status == MagickFalse)
+        break;
+    }
+  }
+  break;
+}

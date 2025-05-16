@@ -1,0 +1,355 @@
+Below is the content of a C/C++ function where a code block is masked by `// <MASK>`, along with relevant code fragments from other files.
+```
+void* CMSEXPORT cmsReadTag(cmsHPROFILE hProfile, cmsTagSignature tagSignature)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    cmsIOHANDLER* io = Icc ->IOhandler;
+    cmsTagTypeHandler* TypeHandler;
+    cmsTagTypeHandler LocalTypeHandler;
+    cmsTagDescriptor*  TagDescriptor;
+    cmsTagTypeSignature BaseType;
+    cmsUInt32Number Offset, TagSize;
+    cmsUInt32Number ElemCount;
+    int n;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return NULL;
+
+    n = _cmsSearchTag(Icc, tagSignature, TRUE);
+    if (n < 0) goto Error;               // Not found, return NULL
+
+
+    // If the element is already in memory, return the pointer
+    if (Icc -> TagPtrs[n]) {
+
+        if (Icc->TagTypeHandlers[n] == NULL) goto Error;
+
+        // Sanity check
+        BaseType = Icc->TagTypeHandlers[n]->Signature;
+        if (BaseType == 0) goto Error;
+
+        TagDescriptor = _cmsGetTagDescriptor(Icc->ContextID, tagSignature);
+        if (TagDescriptor == NULL) goto Error;
+
+        if (!IsTypeSupported(TagDescriptor, BaseType)) goto Error;
+
+        if (Icc ->TagSaveAsRaw[n]) goto Error;  // We don't support read raw tags as cooked
+
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return Icc -> TagPtrs[n];
+    }
+
+    // We need to read it. Get the offset and size to the file
+    Offset    = Icc -> TagOffsets[n];
+    TagSize   = Icc -> TagSizes[n];
+
+    // Seek to the tag's location in the IO handler.
+    // Check if the tag is supported.
+    // If the type is unsupported, exit. 
+    // Change the tag size to account for the tag's base type header.
+    // <MASK>
+
+    // Get type handler
+    TypeHandler = _cmsGetTagTypeHandler(Icc ->ContextID, BaseType);
+    if (TypeHandler == NULL) goto Error;
+    LocalTypeHandler = *TypeHandler;
+
+
+    // Read the tag
+    Icc -> TagTypeHandlers[n] = TypeHandler;
+
+    LocalTypeHandler.ContextID = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+    Icc -> TagPtrs[n] = LocalTypeHandler.ReadPtr(&LocalTypeHandler, io, &ElemCount, TagSize);
+
+    // The tag type is supported, but something wrong happened and we cannot read the tag.
+    // let know the user about this (although it is just a warning)
+    if (Icc -> TagPtrs[n] == NULL) {
+
+        char String[5];
+
+        _cmsTagSignature2String(String, tagSignature);
+        cmsSignalError(Icc ->ContextID, cmsERROR_CORRUPTION_DETECTED, "Corrupted tag '%s'", String);
+        goto Error;
+    }
+
+    // This is a weird error that may be a symptom of something more serious, the number of
+    // stored item is actually less than the number of required elements.
+    if (ElemCount < TagDescriptor ->ElemCount) {
+
+        char String[5];
+
+        _cmsTagSignature2String(String, tagSignature);
+        cmsSignalError(Icc ->ContextID, cmsERROR_CORRUPTION_DETECTED, "'%s' Inconsistent number of items: expected %d, got %d",
+            String, TagDescriptor ->ElemCount, ElemCount);
+    }
+
+
+    // Return the data
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return Icc -> TagPtrs[n];
+
+
+    // Return error and unlock tha data
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return NULL;
+}
+```
+
+```
+// Here are some relevant code fragments from other files of the repo:
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsBool CMSEXPORT cmsWriteRawTag(cmsHPROFILE hProfile, cmsTagSignature sig, const void* data, cmsUInt32Number Size)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    if (!_cmsNewTag(Icc, sig, &i)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+         return FALSE;
+    }
+
+    // Mark the tag as being written as RAW
+    Icc ->TagSaveAsRaw[i] = TRUE;
+    Icc ->TagNames[i]     = sig;
+    Icc ->TagLinked[i]    = (cmsTagSignature) 0;
+
+    // Keep a copy of the block
+    Icc ->TagPtrs[i]  = _cmsDupMem(Icc ->ContextID, data, Size);
+    Icc ->TagSizes[i] = Size;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+
+    if (Icc->TagPtrs[i] == NULL) {           
+           Icc->TagNames[i] = (cmsTagSignature) 0;
+           return FALSE;
+    }
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsInt32Number CMSEXPORT cmsReadRawTag(cmsHPROFILE hProfile, cmsTagSignature sig, void* data, cmsUInt32Number BufferSize)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    void *Object;
+    int i;
+    cmsIOHANDLER* MemIO;
+    cmsTagTypeHandler* TypeHandler = NULL;
+    cmsTagTypeHandler LocalTypeHandler;
+    cmsTagDescriptor* TagDescriptor = NULL;
+    cmsUInt32Number rc;
+    cmsUInt32Number Offset, TagSize;
+
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    // Search for given tag in ICC profile directory
+    i = _cmsSearchTag(Icc, sig, TRUE);
+    if (i < 0) goto Error;                 // Not found, 
+
+    // It is already read?
+    if (Icc -> TagPtrs[i] == NULL) {
+
+        // No yet, get original position
+        Offset   = Icc ->TagOffsets[i];
+        TagSize  = Icc ->TagSizes[i];
+
+        // read the data directly, don't keep copy
+        if (data != NULL) {
+
+            if (BufferSize < TagSize)
+                TagSize = BufferSize;
+
+            if (!Icc ->IOhandler ->Seek(Icc ->IOhandler, Offset)) goto Error;
+            if (!Icc ->IOhandler ->Read(Icc ->IOhandler, data, 1, TagSize)) goto Error;
+
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return TagSize;
+        }
+
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return Icc ->TagSizes[i];
+    }
+
+    // The data has been already read, or written. But wait!, maybe the user choosed to save as
+    // raw data. In this case, return the raw data directly
+    if (Icc ->TagSaveAsRaw[i]) {
+
+        if (data != NULL)  {
+
+            TagSize  = Icc ->TagSizes[i];
+            if (BufferSize < TagSize)
+                TagSize = BufferSize;
+
+            memmove(data, Icc ->TagPtrs[i], TagSize);
+
+            _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+            return TagSize;
+        }
+
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return Icc ->TagSizes[i];
+    }
+
+    // Already readed, or previously set by cmsWriteTag(). We need to serialize that
+    // data to raw in order to maintain consistency.
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    Object = cmsReadTag(hProfile, sig);
+    if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return 0;
+
+    if (Object == NULL) goto Error;
+
+    // Now we need to serialize to a memory block: just use a memory iohandler
+
+    if (data == NULL) {
+        MemIO = cmsOpenIOhandlerFromNULL(cmsGetProfileContextID(hProfile));
+    } else{
+        MemIO = cmsOpenIOhandlerFromMem(cmsGetProfileContextID(hProfile), data, BufferSize, "w");
+    }
+    if (MemIO == NULL) goto Error;
+
+    // Obtain type handling for the tag
+    TypeHandler = Icc ->TagTypeHandlers[i];
+    TagDescriptor = _cmsGetTagDescriptor(Icc-> ContextID, sig);
+    if (TagDescriptor == NULL) {
+        cmsCloseIOhandler(MemIO);
+        goto Error;
+    }
+    
+    if (TypeHandler == NULL) goto Error;
+
+    // Serialize
+    LocalTypeHandler = *TypeHandler;
+    LocalTypeHandler.ContextID  = Icc ->ContextID;
+    LocalTypeHandler.ICCVersion = Icc ->Version;
+
+    if (!_cmsWriteTypeBase(MemIO, TypeHandler ->Signature)) {
+        cmsCloseIOhandler(MemIO);
+        goto Error;
+    }
+
+    if (!LocalTypeHandler.WritePtr(&LocalTypeHandler, MemIO, Object, TagDescriptor ->ElemCount)) {
+        cmsCloseIOhandler(MemIO);
+        goto Error;
+    }
+
+    // Get Size and close
+    rc = MemIO ->Tell(MemIO);
+    cmsCloseIOhandler(MemIO);      // Ignore return code this time
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return rc;
+
+Error:
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return 0;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+static
+cmsBool SetLinks( _cmsICCPROFILE* Icc)
+{
+    cmsUInt32Number i;
+
+    for (i=0; i < Icc -> TagCount; i++) {
+
+        cmsTagSignature lnk = Icc ->TagLinked[i];
+        if (lnk != (cmsTagSignature) 0) {
+
+            int j = _cmsSearchTag(Icc, lnk, FALSE);
+            if (j >= 0) {
+
+                Icc ->TagOffsets[i] = Icc ->TagOffsets[j];
+                Icc ->TagSizes[i]   = Icc ->TagSizes[j];
+            }
+
+        }
+    }
+
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+static
+cmsBool IsTypeSupported(cmsTagDescriptor* TagDescriptor, cmsTagTypeSignature Type)
+{
+    cmsUInt32Number i, nMaxTypes;
+
+    nMaxTypes = TagDescriptor->nSupportedTypes;
+    if (nMaxTypes >= MAX_TYPES_IN_LCMS_PLUGIN)
+        nMaxTypes = MAX_TYPES_IN_LCMS_PLUGIN;
+
+    for (i=0; i < nMaxTypes; i++) {
+        if (Type == TagDescriptor ->SupportedTypes[i]) return TRUE;
+    }
+
+    return FALSE;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+static
+cmsBool _cmsNewTag(_cmsICCPROFILE* Icc, cmsTagSignature sig, int* NewPos)
+{
+    int i;
+
+    // Search for the tag
+    i = _cmsSearchTag(Icc, sig, FALSE);
+    if (i >= 0) {
+
+        // Already exists? delete it
+        _cmsDeleteTagByPos(Icc, i);
+        *NewPos = i;
+    }
+    else  {
+
+        // No, make a new one
+
+        if (Icc -> TagCount >= MAX_TABLE_TAG) {
+            cmsSignalError(Icc ->ContextID, cmsERROR_RANGE, "Too many tags (%d)", MAX_TABLE_TAG);
+            return FALSE;
+        }
+
+        *NewPos = Icc ->TagCount;
+        Icc -> TagCount++;
+    }
+
+    return TRUE;
+}
+
+// the below code fragment can be found in:
+// src/cmsio0.c
+cmsBool CMSEXPORT cmsLinkTag(cmsHPROFILE hProfile, cmsTagSignature sig, cmsTagSignature dest)
+{
+    _cmsICCPROFILE* Icc = (_cmsICCPROFILE*) hProfile;
+    int i;
+
+     if (!_cmsLockMutex(Icc->ContextID, Icc ->UsrMutex)) return FALSE;
+
+    if (!_cmsNewTag(Icc, sig, &i)) {
+        _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+        return FALSE;
+    }
+
+    // Keep necessary information
+    Icc ->TagSaveAsRaw[i] = FALSE;
+    Icc ->TagNames[i]     = sig;
+    Icc ->TagLinked[i]    = dest;
+
+    Icc ->TagPtrs[i]    = NULL;
+    Icc ->TagSizes[i]   = 0;
+    Icc ->TagOffsets[i] = 0;
+
+    _cmsUnlockMutex(Icc->ContextID, Icc ->UsrMutex);
+    return TRUE;
+}
+```
+
+Create a code snippet to fill in the masked region. Please wrap your answer in a code block (triple backquotes).
