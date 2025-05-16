@@ -39,4 +39,4 @@ python run_eval.py \
   [--rerun]
 ```
 
-📁 *Evaluation results are saved in the `eval_report/` directory.*
+📁 *Evaluation results are saved in the `eval_results/` directory.*

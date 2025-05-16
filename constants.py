@@ -77,12 +77,6 @@ MODELS = {
     'qwen-plus': 'qwen-plus-2025-01-25',
     'gemini-2-flash': 'gemini-2.0-flash',
     'deepseek-coder-1.3b-instruct': 'deepseek-ai/deepseek-coder-1.3b-instruct',
-<<<<<<< HEAD
-    # 'DeepSeek-V3': 'deepseek-ai/DeepSeek-V3',
-    'gpt-4.1': 'gpt-4.1-2025-04-14',
-    'gpt-o3': 'o3-2025-04-16'
-}
-=======
     'DeepSeek-V3': 'deepseek-ai/DeepSeek-V3',
     'deepseek-coder-6.7b-instruct': 'deepseek-ai/deepseek-coder-6.7b-instruct',
     'codegen-6B-mono': "Salesforce/codegen-6B-mono", 
@@ -91,7 +85,8 @@ MODELS = {
     "Qwen3":"Qwen/Qwen3-235B-A22B", 
     "llama4": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "cisco-llama8b":"fdtn-ai/Foundation-Sec-8B",
-    "gpt-4.1":"gpt-4.1"
+    'gpt-4.1': 'gpt-4.1-2025-04-14',
+    'gpt-o3': 'o3-2025-04-16'
 }
 
 
@@ -101,4 +96,3 @@ FUNC_PROMPT = (
     "Create a code snippet to fill in the masked region. "
     "Please wrap your answer in a code block (triple backquotes)."
 )
->>>>>>> connorBranch
