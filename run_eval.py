@@ -35,4 +35,13 @@ def main():
     analyze_report(ids, eval_report)
 
 if __name__ == "__main__":
+    sys.argv = [
+        "run_inference.py",
+        "--agents", "openhands",
+        "--model-names", "gpt-5",
+        "--context-types", "BM25",  # bm25
+        # no-security-reminder security-policy
+        "--prompt-types", "no-security-reminder",
+        "--rerun"
+    ]
     main()
