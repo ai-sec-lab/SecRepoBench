@@ -114,13 +114,6 @@ class OpenhandsRunner:
         return repo.git.diff(f"{base_sha}..{head_sha}")
 
     def run(self, system_prompt, repo_folder, changed_file):
-
-        log_dir = Path(os.path.join(
-            self.log_dir, self.model_name, self.prompt_type, str(id)))
-        if log_dir.exists():
-            shutil.rmtree(log_dir)
-        log_dir.mkdir(parents=True)
-
         repo_base = self.init(repo_folder)
 
         replaced_file_path = f"/descriptions/mask_desc_perturbed"
@@ -141,7 +134,7 @@ class OpenhandsRunner:
         conversation = Conversation(
             agent=self.agent_config,
             workspace=os.path.abspath(repo_folder),
-            persistence_dir=log_dir
+            persistence_dir=self.log_dir
         )
 
         conversation.send_message(prompt)
@@ -150,13 +143,12 @@ class OpenhandsRunner:
         max_retries = 3
         retry_count = 0
         while retry_count < max_retries:
-            with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
-                success, result = self.run_with_timeout(
-                    conversation.run, 600)  # 600 secs timeout
-                if success or result != "Timeout occurred":
-                    break
-                retry_count += 1
-                time.sleep(1)
+            success, result = self.run_with_timeout(
+                conversation.run, 600)  # 600 secs timeout
+            if success or result != "Timeout occurred":
+                break
+            retry_count += 1
+            time.sleep(1)
 
         if success:
             conversation.close()

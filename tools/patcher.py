@@ -3,6 +3,7 @@ import asyncio
 import os
 import json
 import openai
+import shutil
 import anthropic
 import torch
 import requests
@@ -233,6 +234,8 @@ class AgentEvaler(BaseEvaler):
         if self.agent == "aider":
             install_cmd = "  uv pip install aider-chat==0.86.1\n"
         else:
+            if os.path.exists(f"{self.log_dir}/{id}"):
+                shutil.rmtree(f"{self.log_dir}/{id}")
             install_cmd = (
                 "  if [ -x /rust/bin/rustup ]; then\n"
                 "    /rust/bin/rustup self uninstall -y || true\n"
@@ -242,7 +245,7 @@ class AgentEvaler(BaseEvaler):
                 "  [ -r /root/.cargo ] && . /root/.cargo/env || true \n"
                 "  git clone https://github.com/OpenHands/software-agent-sdk.git\n"
                 "  cd software-agent-sdk\n"
-                "  git checkout a3c2dbe1\n"
+                "  git checkout a612c0a685fa96bc725085ac81c59492d4a88974\n"
                 "  cd ..\n"
                 "  uv pip install gitPython\n"
                 "  uv pip install -e ./software-agent-sdk/openhands-sdk\n"

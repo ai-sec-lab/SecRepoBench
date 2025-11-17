@@ -158,13 +158,12 @@ class AiderRunner:
         max_retries = 3
         retry_count = 0
         while retry_count < max_retries:
-            with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
-                success, result = self.run_with_timeout(
-                    coder.run, 600, prompt)  # 600 secs timeout
-                if success or result != "Timeout occurred":
-                    break
-                retry_count += 1
-                time.sleep(1)  # Brief pause between retries
+            success, result = self.run_with_timeout(
+                coder.run, 600, prompt)  # 600 secs timeout
+            if success or result != "Timeout occurred":
+                break
+            retry_count += 1
+            time.sleep(1)  # Brief pause between retries
 
         if success:
             with open(changed_file) as f:

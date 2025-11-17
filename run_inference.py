@@ -73,6 +73,7 @@ def process_id(id, agent, model_name, context_type, prompt_type, mode, rerun):
 def run_inference(agent, model_name, context_type, prompt_type, mode, rerun, max_workers):
     with open('assets/ids.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
+        ids = ["2242"]
 
     if not rerun:
         print('Using cache where possible')
@@ -138,7 +139,7 @@ if __name__ == "__main__":
     sys.argv = [
         "run_inference.py",
         "--agents", "openhands",
-        "--model-names", "gpt-5",
+        "--model-names", "o3",
         "--context-types", "BM25",  # bm25
         # no-security-reminder security-policy
         "--prompt-types", "no-security-reminder",
