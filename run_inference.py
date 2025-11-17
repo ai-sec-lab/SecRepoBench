@@ -73,7 +73,6 @@ def process_id(id, agent, model_name, context_type, prompt_type, mode, rerun):
 def run_inference(agent, model_name, context_type, prompt_type, mode, rerun, max_workers):
     with open('assets/ids.txt', 'r') as f:
         ids = f.read().splitlines()[1:]
-        ids = ["2242"]
 
     if not rerun:
         print('Using cache where possible')
@@ -122,7 +121,7 @@ def main():
                         help="With the rerun flag, it will run inference for a task even if it is in the cache. Otherwise, it will not.")
     args = parser.parse_args()
 
-    max_workers = 10  # Adjust based on API limits
+    max_workers = 5  # Adjust based on API limits
     for agent in args.agents:
         for model_name in args.model_names:
             for context_type in args.context_types:
@@ -136,13 +135,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.argv = [
-        "run_inference.py",
-        "--agents", "openhands",
-        "--model-names", "o3",
-        "--context-types", "BM25",  # bm25
-        # no-security-reminder security-policy
-        "--prompt-types", "no-security-reminder",
-        "--rerun"
-    ]
     main()

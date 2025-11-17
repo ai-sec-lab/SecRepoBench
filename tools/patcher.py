@@ -266,13 +266,13 @@ class AgentEvaler(BaseEvaler):
             "#!/bin/bash\n"
             "docker run --rm --init "
             f"--name {container_id} "
-            "--cpus=2 "
+            "--cpus=8 "
             f"{env_flags} "
             f"{volume_flags} "
             f"n132/arvo:{id}-fix /bin/sh -c \"\n"
-            # limit num processes to 2 by changing nproc behavior
+            # limit num processes to 8 by changing nproc behavior
             "  echo '#!/bin/sh' > /tmp/nproc\n"
-            "  echo 'echo 2' >> /tmp/nproc\n"
+            "  echo 'echo 8' >> /tmp/nproc\n"
             "  chmod +x /tmp/nproc\n"
             "  export PATH=/tmp:$PATH\n"
             # revert to fixing commit and stash changes as necessary

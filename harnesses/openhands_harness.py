@@ -144,7 +144,7 @@ class OpenhandsRunner:
         retry_count = 0
         while retry_count < max_retries:
             success, result = self.run_with_timeout(
-                conversation.run, 600)  # 600 secs timeout
+                conversation.run, 1200)  # 1200 secs timeout
             if success or result != "Timeout occurred":
                 break
             retry_count += 1
@@ -159,7 +159,13 @@ class OpenhandsRunner:
             diff = self.diff_between(repo_base, mask_id, "HEAD")
             return diff, content
         else:
-            raise Exception("Patching unsuccessful!")
+            with open(changed_file_path) as f:
+                content = f.read()
+            diff = self.diff_between(repo_base, mask_id, "HEAD")
+            if not diff:
+                with open(f"{self.log_dir}error.txt", "w") as f:
+                    f.write("Patching unsuccessful!")
+            return diff, content
 
 
 def main():

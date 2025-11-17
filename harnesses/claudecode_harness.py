@@ -146,7 +146,7 @@ class ClaudeCodeRunner:
             success, result = False, None
             while retry_count < max_retries:
                 # 600 secs timeout
-                success, result = await self.run_async_with_timeout(client.query, 600, prompt)
+                success, result = await self.run_async_with_timeout(client.query, 1200, prompt)
                 if success or result != "Timeout occurred":
                     break
                 retry_count += 1
