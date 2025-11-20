@@ -66,6 +66,8 @@ Upzip metadata that would be used during inference or evalutaion:
 gunzip -k report.json.gz sample_metadata.json.gz
 ```
 
+These two files contain necessary metadata required for both inference and evaluation.
+
 ## 🚀 Running Inference
 
 To run inference using SecRepoBench:
