@@ -19,26 +19,11 @@ from assets.cwe_map import *
 from itertools import chain
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
+from tools.utils import get_c_cpp_file
 
 
 # automatically find & load the nearest .env file
 load_dotenv(find_dotenv())
-
-
-def get_c_cpp_file(base_path: str):
-    c_path = base_path + '.c'
-    cpp_path = base_path + '.cpp'
-    if os.path.exists(c_path):
-        path = c_path
-    elif os.path.exists(cpp_path):
-        path = cpp_path
-    else:
-        print(
-            f'This file does not exist with a c or cpp extension: {base_path}')
-        return
-    with open(path, 'r') as f:
-        content = f.read()
-    return content
 
 
 safety_settings = [
@@ -85,7 +70,7 @@ def get_cwe_info(id):
     return cwe_id, cwe_desc
 
 
-class BaseEvaler(ABC):
+class BasePatcher(ABC):
     def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
         self.model_name = MODELS[model_name]
 
@@ -186,7 +171,7 @@ class BaseEvaler(ABC):
             json.dump(self.responses_cache, f)
 
 
-class AgentEvaler(BaseEvaler):
+class AgentPatcher(BasePatcher):
     def __init__(self, agent: str, model_name: str, context_type: str, prompt_type: str, mode: str):
         super().__init__(model_name, context_type, prompt_type, mode)
         self.agent = agent
@@ -219,7 +204,6 @@ class AgentEvaler(BaseEvaler):
         sample_metadata = json.load(open('sample_metadata.json', "r"))
         project_name = sample_metadata[id]["project_name"]
         changed_file = sample_metadata[id]["changed_file"]
-        fixing_commit = sample_metadata[id]["fixing_commit"]
 
         container_id = f"{id}_{self.agent}_{self.model_name}_{self.context_type}_{self.prompt_type}_{self.mode}"
 
@@ -231,36 +215,21 @@ class AgentEvaler(BaseEvaler):
         }
         env_flags = " ".join(
             [f'-e {key}="{value}"' for key, value in env_vars.items()])
-        if self.agent == "aider":
-            install_cmd = "  uv pip install aider-chat==0.86.1\n"
-        else:
-            if os.path.exists(f"{self.log_dir}/{id}"):
-                shutil.rmtree(f"{self.log_dir}/{id}")
-            install_cmd = (
-                "  if [ -x /rust/bin/rustup ]; then\n"
-                "    /rust/bin/rustup self uninstall -y || true\n"
-                "  fi\n"
-                "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y\n"
-                "  [ -r /rust/env ] && . /rust/env || true \n"
-                "  [ -r /root/.cargo ] && . /root/.cargo/env || true \n"
-                "  git clone https://github.com/OpenHands/software-agent-sdk.git\n"
-                "  cd software-agent-sdk\n"
-                "  git checkout a612c0a685fa96bc725085ac81c59492d4a88974\n"
-                "  cd ..\n"
-                "  uv pip install gitPython\n"
-                "  uv pip install -e ./software-agent-sdk/openhands-sdk\n"
-                "  uv pip install -e ./software-agent-sdk/openhands-tools\n"
-            )
+        if os.path.exists(f"{self.log_dir}/{id}"):
+            shutil.rmtree(f"{self.log_dir}/{id}")
+        
+        os.makedirs(f"./diff/{id}", exist_ok=True)
 
         volumes = [
-            f"{base_dir}/assets/constants.py:/workdir/constants.py",
-            f"{base_dir}/descriptions/{id}:/descriptions",
             f"{base_dir}/harnesses:/harnesses",
+            f"{base_dir}/assets/constants.py:/workdir/constants.py",
             f"{base_dir}/diff/{id}:/diff",
             f"{base_dir}/completions/{id}:/completions",
             f"{base_dir}/{self.log_dir}/{id}:/.{self.agent}",
         ]
         volume_flags = " ".join([f"-v {vol}" for vol in volumes])
+        
+        install_cmd = AGENT_INSTALL_COMMANDS[self.agent]
 
         content = (
             "#!/bin/bash\n"
@@ -269,31 +238,16 @@ class AgentEvaler(BaseEvaler):
             "--cpus=8 "
             f"{env_flags} "
             f"{volume_flags} "
-            f"n132/arvo:{id}-fix /bin/sh -c \"\n"
+            f"secrepobench:{id} /bin/sh -c \"\n"
             # limit num processes to 8 by changing nproc behavior
             "  echo '#!/bin/sh' > /tmp/nproc\n"
             "  echo 'echo 8' >> /tmp/nproc\n"
             "  chmod +x /tmp/nproc\n"
             "  export PATH=/tmp:$PATH\n"
-            # revert to fixing commit and stash changes as necessary
-            f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
-            "  git -C \\$GIT_DIR config --global user.email \\\"anonymous@email.com\\\"\n"
-            "  if [ -n \\\"\\$(git -C \\$GIT_DIR status --porcelain)\\\" ]; then\n"
-            "    git -C \\$GIT_DIR stash save --include-untracked \\\"Saving my changes\\\"\n"
-            "    CHANGES_STASHED=true\n"
-            "  else\n"
-            "    CHANGES_STASHED=false\n"
-            "  fi\n"
-            f"  git -C \\$GIT_DIR checkout {fixing_commit}\n"
-            "  if [ \\\"\\$CHANGES_STASHED\\\" = true ]; then\n"
-            "    git -C \\$GIT_DIR stash apply\n"
-            "  fi\n"
-            # copy aider harness
+            # install agent dependencies
             "  cp -r /harnesses/* /workdir\n"
+            f"  GIT_DIR=\\$(find /src -type d -iname '{project_name}' | head -n 1)\n"
             "  cd /workdir\n"
-            # install dependencies
-            "  apt install -y curl\n"
-            "  curl -LsSf https://astral.sh/uv/install.sh | sh \n"
             "  . /root/.local/bin/env\n"
             "  uv python install 3.12\n"
             "  uv venv --python 3.12\n"
@@ -318,21 +272,22 @@ class AgentEvaler(BaseEvaler):
         subprocess.run(['docker', 'rm', '-f', container_id],
                        stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
-        
-class ClaudeCodeEvaler(BaseEvaler):
+
+
+class ClaudeCodePatcher(BasePatcher):
     def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
         super().__init__(model_name, context_type, prompt_type, mode)
         self.cache_file = f"cache/claudecode-{model_name}-{self.context_type}-{self.prompt_type}-{self.mode}.json"
         self.base_cache_file = f"cache/claudecode-{model_name}-{self.context_type}.json"
         self.model_name_alias = model_name
         self.client = ClaudeCodeRunner(self.model_name, prompt_type)
-        
-    def get_response(self, id: str, mode:str, rerun: bool) -> str:
+
+    def get_response(self, id: str, mode: str, rerun: bool) -> str:
         prompt = ""
         system_prompt = self._get_system_prompt(id)
 
         if not rerun and os.path.exists(f'./diff/{id}/claudecode-{self.model_name_alias}-filled-code-{self.context_type}-{self.prompt_type}-{mode}.diff') and os.path.exists(f'./completions/{id}/claudecode-{self.model_name_alias}-filled-code-{self.context_type}-{self.prompt_type}-{mode}_code_completion.txt'):
-            print(f'Using cache for {id}') 
+            print(f'Using cache for {id}')
             with open(f'./completions/{id}/claudecode-{self.model_name_alias}-filled-code-{self.context_type}-{self.prompt_type}-{mode}_code_completion.txt') as f:
                 response = f.read()
                 return response, prompt, system_prompt
@@ -348,7 +303,7 @@ class ClaudeCodeEvaler(BaseEvaler):
         return response, prompt, system_prompt
 
 
-class APIEvaler(BaseEvaler):
+class APIPatcher(BasePatcher):
     def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
         super().__init__(model_name, context_type, prompt_type, mode)
         self.client = self._initialize_client()
@@ -660,7 +615,7 @@ class APIEvaler(BaseEvaler):
         return self.postprocess(response), prompt, system_prompt
 
 
-class ChatEvaler(BaseEvaler):
+class ChatPatcher(BasePatcher):
     def __init__(self, model_name: str, context_type: str, prompt_type: str, mode: str):
         super().__init__(model_name, context_type, prompt_type, mode)
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -769,7 +724,7 @@ class ChatEvaler(BaseEvaler):
         return self.postprocess(response), prompt, system_prompt
 
 
-class CosecEvaler(BaseEvaler):
+class CosecPatcher(BasePatcher):
     def __init__(self, model_name: str, final_model_path: str, context_type: str, prompt_type: str, mode: str, args):
         super().__init__(model_name, context_type, prompt_type, mode)
         self.args = args  # Save the command-line arguments

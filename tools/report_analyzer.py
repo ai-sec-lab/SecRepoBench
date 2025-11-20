@@ -196,12 +196,3 @@ def analyze_report(ids, eval_report_path):
     grouped_results_path = Path(save_path) / "grouped_results.csv"
     grouped_results.to_csv(grouped_results_path)
 
-
-if __name__ == "__main__":
-    # evaluate all ids in ids.txt
-    with open('assets/ids.txt', 'r') as f:
-        ids = f.read().splitlines()[1:]
-
-    eval_report_path = "report_eval_DeepSeek-R1-Distill-Qwen-32B.json"
-
-    analyze_report(ids, eval_report_path)

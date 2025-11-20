@@ -29,22 +29,6 @@ MODEL_MAPPINGS = {
 }
 
 
-def get_c_cpp_file(base_path: str):
-    c_path = base_path + '.c'
-    cpp_path = base_path + '.cpp'
-    if os.path.exists(c_path):
-        path = c_path
-    elif os.path.exists(cpp_path):
-        path = cpp_path
-    else:
-        print(
-            f'This file does not exist with a c or cpp extension: {base_path}')
-        return
-    with open(path, 'r') as f:
-        content = f.read()
-    return content
-
-
 class AiderRunner:
     def __init__(self, model_name, prompt_type):
         self.log_dir = f"/.aider/"
@@ -113,12 +97,9 @@ class AiderRunner:
             repo.git.add(file)
         else:
             repo.git.add(A=True)
-        staged = repo.git.diff("--cached", "--name-only").strip()
-        if not staged:
-            return None
         msg = f"Auto-commit on {time.strftime('%Y-%m-%d %H:%M:%S')}"
-        new_commit = repo.index.commit(msg)
-        return new_commit.hexsha
+        repo.git.commit("--allow-empty", "-m", msg)
+        return repo.head.commit.hexsha
 
     @staticmethod
     def diff_between(repo: Repo, base_sha: str, head_sha: str):
@@ -133,13 +114,9 @@ class AiderRunner:
             os.path.join(self.log_dir, 'aider-analytics-log.jsonl'))
         os.environ['AIDER_AUTO_CONFIRM'] = "1"
         os.environ['AIDER_DISABLE_PLAYWRIGHT'] = "true"
-
-        repo_base = self.init(repo_folder)
-
-        replaced_file_path = f"/descriptions/mask_desc_perturbed"
-        file_content = get_c_cpp_file(replaced_file_path)
+        
+        repo_base = Repo(repo_folder)
         changed_file_path = f"{repo_folder}/{changed_file}"
-        Path(changed_file_path).write_text(file_content)
 
         mask_id = self.commit(repo_base)
 
@@ -159,7 +136,7 @@ class AiderRunner:
         retry_count = 0
         while retry_count < max_retries:
             success, result = self.run_with_timeout(
-                coder.run, 1200, prompt)  # 600 secs timeout
+                coder.run, 1200, prompt)  # 1200 secs timeout
             if success or result != "Timeout occurred":
                 break
             retry_count += 1

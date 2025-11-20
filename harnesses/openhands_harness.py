@@ -20,22 +20,6 @@ MODEL_MAPPINGS = {
 }
 
 
-def get_c_cpp_file(base_path: str):
-    c_path = base_path + '.c'
-    cpp_path = base_path + '.cpp'
-    if os.path.exists(c_path):
-        path = c_path
-    elif os.path.exists(cpp_path):
-        path = cpp_path
-    else:
-        print(
-            f'This file does not exist with a c or cpp extension: {base_path}')
-        return
-    with open(path, 'r') as f:
-        content = f.read()
-    return content
-
-
 class OpenhandsRunner:
     def __init__(self, model_name, prompt_type):
         self.log_dir = f"/.openhands/"
@@ -102,24 +86,17 @@ class OpenhandsRunner:
             repo.git.add(file)
         else:
             repo.git.add(A=True)
-        staged = repo.git.diff("--cached", "--name-only").strip()
-        if not staged:
-            return None
         msg = f"Auto-commit on {time.strftime('%Y-%m-%d %H:%M:%S')}"
-        new_commit = repo.index.commit(msg)
-        return new_commit.hexsha
+        repo.git.commit("--allow-empty", "-m", msg)
+        return repo.head.commit.hexsha
 
     @staticmethod
     def diff_between(repo: Repo, base_sha: str, head_sha: str):
         return repo.git.diff(f"{base_sha}..{head_sha}")
 
     def run(self, system_prompt, repo_folder, changed_file):
-        repo_base = self.init(repo_folder)
-
-        replaced_file_path = f"/descriptions/mask_desc_perturbed"
-        file_content = get_c_cpp_file(replaced_file_path)
+        repo_base = Repo(repo_folder)
         changed_file_path = f"{repo_folder}/{changed_file}"
-        Path(changed_file_path).write_text(file_content)
 
         mask_id = self.commit(repo_base)
 
@@ -184,8 +161,10 @@ def main():
     diff, response = client.run(
         args.system_prompt, args.repo_folder, args.changed_file)
 
-    Path(f'/diff/openhands-{args.model_alias}-filled-code-{args.context_type}-{args.prompt_type}-{args.mode}.diff').write_text(diff)
-    Path(f'/completions/openhands-{args.model_alias}-filled-code-{args.context_type}-{args.prompt_type}-{args.mode}_code_completion.txt').write_text(response)
+    Path(
+        f'/diff/openhands-{args.model_alias}-filled-code-{args.context_type}-{args.prompt_type}-{args.mode}.diff').write_text(diff)
+    Path(
+        f'/completions/openhands-{args.model_alias}-filled-code-{args.context_type}-{args.prompt_type}-{args.mode}_code_completion.txt').write_text(response)
 
 
 if __name__ == "__main__":

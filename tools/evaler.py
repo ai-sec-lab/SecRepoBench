@@ -12,24 +12,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 from collections import defaultdict
 import selectors
-
+from tools.utils import get_docker_image, get_c_cpp_file
 from assets.projects import *
-
-
-def get_c_cpp_file(base_path: str):
-    c_path = base_path + '.c'
-    cpp_path = base_path + '.cpp'
-    if os.path.exists(c_path):
-        path = c_path
-    elif os.path.exists(cpp_path):
-        path = cpp_path
-    else:
-        print(
-            f'This file does not exist with a c or cpp extension: {base_path}')
-        return
-    with open(path, 'r') as f:
-        content = f.read()
-    return content
 
 
 def make_patched_file(id, model_name, context_type, prompt_type, mode):
@@ -45,29 +29,6 @@ def make_patched_file(id, model_name, context_type, prompt_type, mode):
     mod_file_content = sec_mask_content.replace("// <MASK>", code_completion)
 
     return mod_file_content
-
-
-def get_docker_image(id):
-    # only pull docker image if we don't already have it
-    image_name = f"n132/arvo:{id}-fix"
-
-    proc_check = subprocess.run(
-        ["docker", "image", "inspect", image_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-
-    if proc_check.returncode != 0:
-        # Image does not exist locally, pull it
-        proc_pull = subprocess.run(
-            ["docker", "pull", image_name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        if proc_pull.returncode != 0:
-            return False
-
-    return True
 
 
 def setup(id, agent, project_name, changed_file, fixing_commit, model_name, context_type, prompt_type, mode):

@@ -1,5 +1,25 @@
 THINKING_BUDGET_TOKENS = 8000
 
+AGENT_INSTALL_COMMANDS = {
+    "aider": "  uv pip install aider-chat==0.86.1\n",
+    "openhands": (
+        "  if [ -x /rust/bin/rustup ]; then\n"
+        "    /rust/bin/rustup self uninstall -y || true\n"
+        "  fi\n"
+        "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y\n"
+        "  [ -r /rust/env ] && . /rust/env || true \n"
+        "  [ -r /root/.cargo ] && . /root/.cargo/env || true \n"
+        "  git clone https://github.com/OpenHands/software-agent-sdk.git\n"
+        "  cd software-agent-sdk\n"
+        "  git checkout a612c0a685fa96bc725085ac81c59492d4a88974\n"
+        "  cd ..\n"
+        "  uv pip install gitPython\n"
+        "  uv pip install -e ./software-agent-sdk/openhands-sdk\n"
+        "  uv pip install -e ./software-agent-sdk/openhands-tools\n"
+    )
+
+}
+
 AGENT_USER_PEOMPT = (
     "\n\nInside the file {changed_file}, there is a code block masked by `// <MASK>` together with a comment above or near this marker explaining what needs to be implemented. "
     "Your task is to write C/C++ code to replace the `// <MASK>` region with a correct implementation. "
@@ -103,7 +123,7 @@ OPENAI_REASONING_MODELS = [
     'gpt-5-2025-08-07',
     'o4-mini-2025-04-16',
     'o3-2025-04-16',
-    'o3-mini-2025-01-31', 
+    'o3-mini-2025-01-31',
     'o1-2024-12-17'
 ]
 
@@ -132,10 +152,10 @@ GEMINI_NO_REASONING_MODELS = [
 TOGETHER_AI_REASONING_MODLES = [
     # deepseek
     "deepseek-ai/DeepSeek-R1",
-    
+
     # qwen
     "Qwen/Qwen3-235B-A22B-fp8-tput",
-    
+
     # llama
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
 ]
@@ -145,10 +165,10 @@ TOGETHER_AI_NO_REASONING_MODLES = [
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     'meta-llama/Meta-Llama-3.1-70B-Instruct',
     'meta-llama/Meta-Llama-3.1-8B-Instruct',
-    
+
     # deepseek
     'deepseek-ai/DeepSeek-V3',
-    
+
     # qwen
     "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
     "Qwen/Qwen2.5-Coder-32B-Instruct",
@@ -157,7 +177,7 @@ TOGETHER_AI_NO_REASONING_MODLES = [
 API_MODEL_NAMES = {
     # openai
     'gpt-5': 'gpt-5-2025-08-07',
-    'gpt-4.1':'gpt-4.1-2025-04-14',
+    'gpt-4.1': 'gpt-4.1-2025-04-14',
     'gpt-4o': 'gpt-4o-2024-08-06',  # default
     'gpt-4o-new': 'gpt-4o-2024-11-20',
     'gpt-4o-mini': 'gpt-4o-mini-2024-07-18',
@@ -166,32 +186,32 @@ API_MODEL_NAMES = {
     'o3-mini': 'o3-mini-2025-01-31',
     'o1': 'o1-2024-12-17',
     'gpt-oss-120b': 'gpt-oss-120b',
-    
+
     # claude
     'claude-sonnet-4-5': 'claude-sonnet-4-5-20250929',
     'claude-sonnet-4': 'claude-sonnet-4-20250514',
     'claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
     'claude-3.5-sonnet': 'claude-3-5-sonnet-20240620',
     'claude-3-haiku': 'claude-3-haiku-20240307',
-    
+
     # gemini
     'gemini-2-flash': 'gemini-2.0-flash',
     'gemini-1.5-flash': 'gemini-1.5-flash',
     'gemini-1.5-pro': 'gemini-1.5-pro',
-    
+
     # qwen
     'qwen-plus': 'qwen-plus-2025-01-25',
-    "Qwen3":"Qwen/Qwen3-235B-A22B-fp8-tput", 
+    "Qwen3": "Qwen/Qwen3-235B-A22B-fp8-tput",
     "Qwen3-Coder": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
-    "Qwen2.5-Coder-32B-Instruct":"Qwen/Qwen2.5-Coder-32B-Instruct",
-    
+    "Qwen2.5-Coder-32B-Instruct": "Qwen/Qwen2.5-Coder-32B-Instruct",
+
     # deepseek
     "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
     'DeepSeek-V3': 'deepseek-ai/DeepSeek-V3',
-    
+
     # llama
     "llama4": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-    "llama-maverick":"meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+    "llama-maverick": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     'llama-3.1-70b-instruct': 'meta-llama/Meta-Llama-3.1-70B-Instruct',
     'llama-3.1-8b-instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
 }
@@ -199,7 +219,7 @@ API_MODEL_NAMES = {
 MODELS = {
     # openai
     'gpt-5': 'gpt-5-2025-08-07',
-    'gpt-4.1':'gpt-4.1-2025-04-14',
+    'gpt-4.1': 'gpt-4.1-2025-04-14',
     'gpt-4o': 'gpt-4o-2024-08-06',  # default
     'gpt-4o-new': 'gpt-4o-2024-11-20',
     'gpt-4o-mini': 'gpt-4o-mini-2024-07-18',
@@ -208,42 +228,42 @@ MODELS = {
     'o3-mini': 'o3-mini-2025-01-31',
     'o1': 'o1-2024-12-17',
     'gpt-oss-120b': 'gpt-oss-120b',
-    
+
     # claude
     'claude-sonnet-4-5': 'claude-sonnet-4-5-20250929',
     'claude-sonnet-4': 'claude-sonnet-4-20250514',
     'claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
     'claude-3.5-sonnet': 'claude-3-5-sonnet-20240620',
     'claude-3-haiku': 'claude-3-haiku-20240307',
-    
+
     # gemini
     'gemini-2-flash': 'gemini-2.0-flash',
     'gemini-1.5-flash': 'gemini-1.5-flash',
     'gemini-1.5-pro': 'gemini-1.5-pro',
-    
+
     # qwen
     'qwen-plus': 'qwen-plus-2025-01-25',
-    "Qwen3":"Qwen/Qwen3-235B-A22B-fp8-tput", 
+    "Qwen3": "Qwen/Qwen3-235B-A22B-fp8-tput",
     "Qwen3-Coder": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
-    "Qwen2.5-Coder-32B-Instruct":"Qwen/Qwen2.5-Coder-32B-Instruct",
-    
+    "Qwen2.5-Coder-32B-Instruct": "Qwen/Qwen2.5-Coder-32B-Instruct",
+
     # llama
     "llama4": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     'llama-3.1-70b-instruct': 'meta-llama/Meta-Llama-3.1-70B-Instruct',
     'llama-3.1-8b-instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
-    "llama-maverick":"meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-    
+    "llama-maverick": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+
     # deepseek
     "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
     'DeepSeek-V3': 'deepseek-ai/DeepSeek-V3',
-    
+
     'deepseekcoder-v2-16b-instruct': 'deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct',
     'deepseek-coder-1.3b-instruct': 'deepseek-ai/deepseek-coder-1.3b-instruct',
     'deepseek-coder-6.7b-instruct': 'deepseek-ai/deepseek-coder-6.7b-instruct',
     'mistral-nemo': 'mistralai/Mistral-Nemo-Instruct-2407',
-    'codegen-6B-mono': "Salesforce/codegen-6B-mono", 
-    "DeepSeek-R1-Distill-Qwen-32B":"deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-    "cisco-llama8b":"fdtn-ai/Foundation-Sec-8B",
+    'codegen-6B-mono': "Salesforce/codegen-6B-mono",
+    "DeepSeek-R1-Distill-Qwen-32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "cisco-llama8b": "fdtn-ai/Foundation-Sec-8B",
 }
 
 

@@ -97,6 +97,7 @@ uv run run_inference.py \
 
 📁 *Code completions are saved in the `completions/` directory.*
 
+📁 *Trajectories are saved in the `.{agent}/` (e.g., .openhands/) directory.*
 
 ## 📊 Running Evaluation
 
@@ -112,6 +113,107 @@ uv run run_eval.py \
 ```
 
 📁 *Evaluation results are saved in the `eval_results/` directory.*
+
+## 🔧 Testing Your Own Models
+
+SecRepoBench allows you to test new models and agents. The process differs depending on whether you want to test a standalone LLM or an agent framework.
+
+### Standalone LLMs
+
+To add a new model for standalone evaluation, you need to register it in the `./assets/constants.py` file:
+
+**1. Add your model name and its corresponding snapshot/version to the `MODELS` dictionary.**
+
+```python
+MODELS = {
+    'gpt-5': 'gpt-5-2025-08-07',
+    ...
+}
+```
+
+**2. Configure model-specific setting**
+
+For example, add an OpenAI model snapshot/version to the `OPENAI_REASONING_MODELS` list to enable its reasoning ability.
+
+```python
+OPENAI_REASONING_MODELS = [
+  'gpt-5-2025-08-07',
+  ...
+]
+```
+
+Meanwhile, please check `./tools/patcher.py` if any provider-specific logic needs to be updated in different patchers to support your model's API format or special requirements.
+
+### Agents
+
+#### **Option 1: Agent Running in Docker**
+
+If the new agent can be configured correctly and run smoothly inside the ARVO container (Ubuntu 16.04) with all necessary dependencies:
+
+**1. Add your agent's installation commands to the `AGENT_INSTALL_COMMANDS` dictionary in `./assets/constants.py`**
+
+These commands will be executed in the Docker container during setup. Remember to add an `\n` at the end of each command.
+
+```python
+AGENT_INSTALL_COMMANDS = {
+    "aider": "  uv pip install aider-chat==0.86.1\n",
+    ...
+}
+```
+
+**2. Implement a harness under `./harnesses/` following the format of existing harnesses like `openhands_harness.py` or `aider_harness.py`**
+
+Your harness should contain a standard interface consisting of an agent class with a `run()` method that does the inference process.
+
+```python
+# Example harness
+class YourAgentRunner:
+    def __init__(self, model_name, prompt_type):
+        # Initialize your agent with model and configurations
+        self.model_name = model_name
+        self.prompt_type = prompt_type
+    
+    def run(self, system_prompt, repo_folder, changed_file):
+        # Execute agent workflow
+        # Return diff and completed code of the target file
+        return diff, content
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model-name', type=str)
+    parser.add_argument('--system-prompt', type=str)
+    parser.add_argument('--repo-folder', type=str)
+    parser.add_argument('--changed-file', type=str)
+    ...
+    
+    args = parser.parse_args()
+    client = YourAgentRunner(args.model_name, args.prompt_type)
+    diff, response = client.run(
+        args.system_prompt, args.repo_folder, args.changed_file)
+    
+    # Save outputs
+    Path(f'/diff/your-agent-{args.model_alias}-...diff').write_text(diff)
+    Path(f'/completions/your-agent-{args.model_alias}-...txt').write_text(response)
+
+if __name__ == "__main__":
+    main()
+```
+
+#### **Option 2: Agent Running Locally**
+
+If the agent is unable to run inside the ARVO container due to dependency issues:
+
+**1. Create a local harness under `./harnesses/` following `claudecode_harness.py`**
+
+The harness should re-init the repository (removing `.git` and running `git init`) to avoid the agent accessing old commits.
+
+**2. Add a patcher class to `./tools/patcher.py`**
+
+Create a patcher class that handles both inference and caching, following the pattern of `ClaudeCodePatcher`.
+
+**3. Initialize your patcher in `./tools/preprocessor.py`**
+
+Add the patcher to `process_id()` function to ensure proper workflow.
 
 ## 📖 Citation
 ```latex
