@@ -263,11 +263,18 @@ class AgentPatcher(BasePatcher):
 
         with open(f"./completions/{bash_dir}", "w") as f:
             f.write(content)
+            
+        output_dir = f"./inference_data/{id}/inference_{self.agent}_{self.model_alias}_filled_code_{self.context_type}_{self.prompt_type}_{self.mode}"
+        os.makedirs(output_dir, exist_ok=True)
 
-        subprocess.run(['/bin/bash', f"./completions/{bash_dir}"],
-                       check=True,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+        stdout_path = os.path.join(output_dir, "stdout.txt")
+        stderr_path = os.path.join(output_dir, "stderr.txt")
+
+        with open(stdout_path, 'w') as stdout_file, open(stderr_path, 'w') as stderr_file:
+            subprocess.run(['/bin/bash', f"./completions/{bash_dir}"],
+                        check=True,
+                        stdout=stdout_file,
+                        stderr=stderr_file)
 
         subprocess.run(['docker', 'rm', '-f', container_id],
                        stdout=subprocess.DEVNULL,

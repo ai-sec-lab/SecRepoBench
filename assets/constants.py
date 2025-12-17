@@ -16,8 +16,17 @@ AGENT_INSTALL_COMMANDS = {
         "  uv pip install gitPython\n"
         "  uv pip install -e ./software-agent-sdk/openhands-sdk\n"
         "  uv pip install -e ./software-agent-sdk/openhands-tools\n"
+    ),
+    "codex": (
+        "  curl -L \\\"https://github.com/openai/codex/releases/download/rust-v0.64.0/codex-x86_64-unknown-linux-musl.tar.gz\\\" -o codex.tar.gz\n"
+        "  tar -xzf codex.tar.gz\n"
+        "  mv codex-x86_64-unknown-linux-musl codex\n"
+        "  mv ./codex /usr/local/bin/codex\n"
+        "  chmod +x /usr/local/bin/codex\n"
+        "  uv pip install gitPython\n"
+        "  mkdir -p ~/.codex\n"
+        "  cp /harnesses/codex_config/config.toml ~/.codex/config.toml\n"
     )
-
 }
 
 AGENT_USER_PEOMPT = (
@@ -128,7 +137,8 @@ OPENAI_REASONING_MODELS = [
 ]
 
 OPENAI_RESPONSE_MODELS = [
-    'gpt-oss-120b'
+    'gpt-oss-120b',
+    'gpt-5.1-codex-max'
 ]
 
 CLAUDE_NO_REASONING_MODELS = [
@@ -186,6 +196,7 @@ API_MODEL_NAMES = {
     'o3-mini': 'o3-mini-2025-01-31',
     'o1': 'o1-2024-12-17',
     'gpt-oss-120b': 'gpt-oss-120b',
+    'gpt-5.1-codex-max': 'gpt-5.1-codex-max',
 
     # claude
     'claude-sonnet-4-5': 'claude-sonnet-4-5-20250929',
@@ -228,6 +239,7 @@ MODELS = {
     'o3-mini': 'o3-mini-2025-01-31',
     'o1': 'o1-2024-12-17',
     'gpt-oss-120b': 'gpt-oss-120b',
+    'gpt-5.1-codex-max': 'gpt-5.1-codex-max',
 
     # claude
     'claude-sonnet-4-5': 'claude-sonnet-4-5-20250929',
