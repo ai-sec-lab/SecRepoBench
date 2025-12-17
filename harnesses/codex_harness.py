@@ -10,18 +10,6 @@ from pathlib import Path
 from constants import *
 
 
-# Aider has its own configure file, need to map the exact same model name
-MODEL_MAPPINGS = {
-    'gpt-4.1-2025-04-14': 'gpt-4.1',
-    'gpt-4o-mini-2024-07-18': 'gpt-4o-mini',
-    'o4-mini-2025-04-16': 'o4-mini',
-    'o3-2025-04-16': 'o3',
-    'o3-mini-2025-01-31': 'o3-mini',
-    'o1-2024-12-17': 'o1',
-    'gpt-oss-120b': 'openai/gpt-oss-120b'
-}
-
-
 class CodexRunner:
     def __init__(self, model_name, prompt_type):
         self.log_dir = f"/.codex/"
@@ -30,30 +18,6 @@ class CodexRunner:
         
         # Codex only works with OpenAI models
         self.model_name = model_name
-        
-    @staticmethod
-    def run_with_timeout(func, timeout, *args, **kwargs):
-        result = [None]
-        exception = [None]
-        completed = [False]
-
-        def worker():
-            try:
-                result[0] = func(*args, **kwargs)
-                completed[0] = True
-            except Exception as e:
-                exception[0] = e
-
-        thread = threading.Thread(target=worker)
-        thread.daemon = True
-        thread.start()
-        thread.join(timeout)
-
-        if not completed[0]:
-            return False, "Timeout occurred"
-        if exception[0]:
-            return False, str(exception[0])
-        return True, result[0]
 
     @staticmethod
     def init(repo_dir):
