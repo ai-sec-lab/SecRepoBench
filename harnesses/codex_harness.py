@@ -61,7 +61,7 @@ class CodexRunner:
             "codex",
             "--ask-for-approval", "never",
             "exec",
-            "--model", "gpt-5.1-codex-max",
+            "--model", self.model_name,
             "--config", 'model_reasoning_effort="medium"',
             "--cd", repo_folder,
             "--sandbox", "workspace-write",
