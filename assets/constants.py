@@ -26,6 +26,16 @@ AGENT_INSTALL_COMMANDS = {
         "  uv pip install gitPython\n"
         "  mkdir -p ~/.codex\n"
         "  cp /harnesses/codex_config/config.toml ~/.codex/config.toml\n"
+    ),
+    "codex_review": (
+        "  curl -L \\\"https://github.com/openai/codex/releases/download/rust-v0.64.0/codex-x86_64-unknown-linux-musl.tar.gz\\\" -o codex.tar.gz\n"
+        "  tar -xzf codex.tar.gz\n"
+        "  mv codex-x86_64-unknown-linux-musl codex\n"
+        "  mv ./codex /usr/local/bin/codex\n"
+        "  chmod +x /usr/local/bin/codex\n"
+        "  uv pip install gitPython\n"
+        "  mkdir -p ~/.codex\n"
+        "  cp /harnesses/codex_config/config.toml ~/.codex/config.toml\n"
     )
 }
 
