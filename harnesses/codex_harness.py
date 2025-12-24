@@ -20,12 +20,6 @@ class CodexRunner:
         self.model_name = model_name
 
     @staticmethod
-    def init(repo_dir):
-        shutil.rmtree(f"{repo_dir}/.git")
-        repo = Repo.init(repo_dir)
-        return repo
-
-    @staticmethod
     def commit(repo: Repo, file=None):
         if file:
             repo.git.add(file)

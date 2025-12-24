@@ -24,12 +24,6 @@ class CodexRunner:
         self.model_name = model_name
 
     @staticmethod
-    def init(repo_dir):
-        shutil.rmtree(f"{repo_dir}/.git")
-        repo = Repo.init(repo_dir)
-        return repo
-
-    @staticmethod
     def commit(repo: Repo, file=None):
         if file:
             repo.git.add(file)
@@ -160,8 +154,8 @@ class CodexRunner:
 
         if not result_resume.returncode:
             # copy trajs
-            sessions_dir = os.path.join(home, ".codex", "sessions")
-            dst_dir = os.path.join("/.codex")
+            sessions_dir = os.path.join(home, ".codex_review", "sessions")
+            dst_dir = os.path.join("/.codex_review")
             result = subprocess.run(
                 ["find", sessions_dir, "-type", "f",
                     "-name", "rollout*.jsonl", "-print0"],
