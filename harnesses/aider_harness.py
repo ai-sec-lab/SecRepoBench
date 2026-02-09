@@ -97,7 +97,17 @@ class AiderRunner:
 
     @staticmethod
     def diff_between(repo: Repo, base_sha: str, head_sha: str):
-        return repo.git.diff(f"{base_sha}..{head_sha}")
+        cmd = [
+            "git", "diff", base_sha, head_sha,
+        ]
+
+        patch_text = repo.git.execute(
+            cmd,
+            stdout_as_string=True,
+            strip_newline_in_stdout=False,
+        )
+
+        return patch_text
 
     def run(self, system_prompt, repo_folder, changed_file):
         self.io.chat_history_file = Path(

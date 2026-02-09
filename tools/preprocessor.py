@@ -1,3 +1,4 @@
+import traceback
 from tools.patcher import APIPatcher, ChatPatcher, AgentPatcher, ClaudeCodePatcher
 from tqdm import tqdm
 from pathlib import Path
@@ -59,6 +60,7 @@ def inference(ids, agent, model_name, context_type, prompt_type, mode, rerun, ma
                 _ = future.result()
             except Exception as e:
                 print(f'Error processing {futures[future]}: {e}')
+                traceback.print_exc() 
 
 
 def run_inferences(ids, agents, model_names, prompt_types, context_types, rerun, modes, num_workers):

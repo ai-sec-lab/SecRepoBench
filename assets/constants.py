@@ -169,6 +169,10 @@ GEMINI_NO_REASONING_MODELS = [
     'gemini-1.5-pro',
 ]
 
+GEMINI_REASONING_MODELS = [
+    'gemini-3-pro-preview'
+]
+
 TOGETHER_AI_REASONING_MODLES = [
     # deepseek
     "deepseek-ai/DeepSeek-R1",
@@ -216,6 +220,7 @@ API_MODEL_NAMES = {
     'claude-3-haiku': 'claude-3-haiku-20240307',
 
     # gemini
+    'gemini-3-pro': 'gemini-3-pro-preview',
     'gemini-2-flash': 'gemini-2.0-flash',
     'gemini-1.5-flash': 'gemini-1.5-flash',
     'gemini-1.5-pro': 'gemini-1.5-pro',
@@ -259,6 +264,7 @@ MODELS = {
     'claude-3-haiku': 'claude-3-haiku-20240307',
 
     # gemini
+    'gemini-3-pro': 'gemini-3-pro-preview',
     'gemini-2-flash': 'gemini-2.0-flash',
     'gemini-1.5-flash': 'gemini-1.5-flash',
     'gemini-1.5-pro': 'gemini-1.5-pro',

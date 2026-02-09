@@ -17,6 +17,7 @@ MODEL_MAPPINGS = {
     'gpt-4.1-2025-04-14': 'gpt-4.1',
     'o4-mini-2025-04-16': 'o4-mini',
     'o3-2025-04-16': 'o3',
+    'gemini-3-pro-preview': 'gemini/gemini-3-pro-preview',
 }
 
 
@@ -25,6 +26,8 @@ class OpenhandsRunner:
         self.log_dir = f"/.openhands/"
         self.prompt_type = prompt_type
         os.makedirs(self.log_dir, exist_ok=True)
+        
+        reasoning_effort = "medium"
 
         if model_name in MODEL_MAPPINGS:
             self.model_name = MODEL_MAPPINGS[model_name]
@@ -35,13 +38,17 @@ class OpenhandsRunner:
             key = os.environ["OPENAI_API_KEY"]
         elif model_name in CLAUDE_NO_REASONING_MODELS or model_name in CLAUDE_REASONING_MODELS:
             key = os.environ["ANTHROPIC_API_KEY"]
+        elif model_name in GEMINI_NO_REASONING_MODELS or model_name in GEMINI_REASONING_MODELS:
+            key = os.environ["GEMINI_API_KEY"]
+            reasoning_effort = "high"  # Gemini use high reasoning effort by default
         else:
             raise Exception("Model not supported!")
         os.environ["LLM_API_KEY"] = key
 
+
         self.llm_config = LLM(
             model=self.model_name,
-            reasoning_effort="medium",
+            reasoning_effort=reasoning_effort,
             extended_thinking_budget=8000,
         )
 
@@ -86,7 +93,17 @@ class OpenhandsRunner:
 
     @staticmethod
     def diff_between(repo: Repo, base_sha: str, head_sha: str):
-        return repo.git.diff(f"{base_sha}..{head_sha}")
+        cmd = [
+            "git", "diff", base_sha, head_sha,
+        ]
+
+        patch_text = repo.git.execute(
+            cmd,
+            stdout_as_string=True,
+            strip_newline_in_stdout=False,
+        )
+
+        return patch_text
 
     def run(self, system_prompt, repo_folder, changed_file):
         repo_base = Repo(repo_folder)

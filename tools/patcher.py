@@ -209,9 +209,10 @@ class AgentPatcher(BasePatcher):
 
         uid = os.getuid()
         env_vars = {
-            "MAKEFLAGS": "-j2",
+            "MAKEFLAGS": "-j8",
             "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
-            "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY")
+            "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY"),
+            "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
         }
         env_flags = " ".join(
             [f'-e {key}="{value}"' for key, value in env_vars.items()])
