@@ -63,10 +63,10 @@ export TOGETHER_API_KEY=<YOUR_API_KEY>
 Upzip metadata that would be used during inference or evalutaion:
 
 ```bash
-gunzip -k report.json.gz sample_metadata.json.gz
+gunzip -k report.json.gz
 ```
 
-These two files contain necessary metadata required for all benchmark tasks.
+This file contain necessary evaluation metadata required for all benchmark tasks.
 
 ## 🚀 Running Inference
 
@@ -219,10 +219,11 @@ Add the patcher to `process_id()` function to ensure proper workflow.
 
 ## 📖 Citation
 ```latex
-@article{shen2025secrepobench,
-  title={SecRepoBench: Benchmarking Code Agents for Secure Code Completion in Real-World Repositories},
-  author={Shen, Chihao and Dilgren, Connor and Chiniya, Purva and Griffith, Luke and Ding, Yu and Chen, Yizheng},
-  journal={arXiv preprint arXiv:2504.21205},
-  year={2025}
+@inproceedings{shen2026secrepobench,
+  author    = {Shen, Chihao and Dilgren, Connor and Chiniya, Purva and Griffith, Luke and Ding, Yu and Chen, Yizheng},
+  title     = {SecRepoBench: Benchmarking Code Agents for Secure Code Completion in Real-World Repositories},
+  booktitle = {Proceedings of the 3rd International Workshop on Large Language Models For Code},
+  year      = {2026},
+  doi       = {10.1145/3786181.3788703}
 }
 ```
