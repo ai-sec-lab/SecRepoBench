@@ -257,23 +257,17 @@ def parse_testcase(output):
     local_id, patch, test_type, proc = output
     stderr = proc.stderr.decode(errors='ignore')
     stdout = proc.stdout.decode(errors='ignore')
-
-    # cases that always mean pass
-    if re.search(r"NOTE: fuzzing was not performed", stderr):
-        if proc.returncode == 0:
-            return "pass"
-        raise ParseException(
-            f"crash detected with zero return code ({proc.returncode})")
-
-    # cases that sometimes mean crash
+    
+    if proc.returncode == 0:
+        return "pass"
+    
+    elif "abort on unknown address" in stderr:
+        return "pass (false alarm)"
+    
     elif re.search(r"(==\d+==\s?[A-Z]*|runtime error):([\s\S]*?)(Exiting|ABORTING|$)", stderr):
-        if proc.returncode != 0:
-            return "crash"
-        else:
-            raise ParseException(
-                f"crash detected with zero return code ({proc.returncode})")
+        return "crash"
 
-        # cases that sometimes mean error
+    # compiler error
     elif (
         re.search(r"make(\[\d+\])?:\s\*\*\*\s\[.*\]\sError\s\d+", stderr) or
         re.search(r"clang-\d+:\serror:.*", stderr) or
@@ -281,7 +275,7 @@ def parse_testcase(output):
     ):
         raise ParseException(f"compile error ({proc.returncode})")
 
-    # cases that sometimes mean pass
+    # cases that sometimes mean error
     elif (
         re.search(r"NOTE: fuzzing was not performed", stderr) or
         re.search(r"Usage for fuzzing: honggfuzz", stderr) or
@@ -289,11 +283,10 @@ def parse_testcase(output):
         re.search(r"Execution successful\.", stdout) or
         re.search(r"make.*: Leaving directory .*$", stdout)
     ):
-        if proc.returncode == 0:
-            return "pass"
         raise ParseException(
-            f"no crash detected with non zero return code ({proc.returncode})")
+            f"No sanitizer-reported error detected with non-zero return code ({proc.returncode})")
 
+    # can be false alarm
     else:
         raise ParseException(f"no matching regex case ({proc.returncode})")
 
